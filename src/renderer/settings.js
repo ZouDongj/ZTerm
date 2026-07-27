@@ -202,10 +202,11 @@ function loadSettingsIntoForm() {
     // Appearance
     const fontEl = document.getElementById('set-font');
     if (fontEl) {
-        // Try to match current font to an option, or keep as-is
-        const currentFont = config.fontFamily || '';
-        const match = [...fontEl.options].find(o => o.value === currentFont);
-        if (match) fontEl.value = currentFont;
+        // Extract the first font name from CSS font-family string for display
+        const fullFamily = config.fontFamily || '';
+        const firstFont = _firstFontName(fullFamily);
+        const match = [...fontEl.options].find(o => o.value === firstFont);
+        if (match) fontEl.value = firstFont;
     }
     const fontSizeEl = document.getElementById('set-font-size');
     if (fontSizeEl && config.fontSize) fontSizeEl.value = config.fontSize;

@@ -179,6 +179,17 @@ function _normalizeFontFamily(fontFamily, fallbackFont) {
     return parts.join(',');
 }
 
+// Extract the first font name from a CSS font-family string for display
+function _firstFontName(fontFamily) {
+    if (!fontFamily) return '';
+    const first = fontFamily.split(',')[0].trim();
+    if ((first.startsWith('"') && first.endsWith('"')) ||
+        (first.startsWith("'") && first.endsWith("'"))) {
+        return first.slice(1, -1);
+    }
+    return first;
+}
+
 function _clampFontWeight(v, dflt) {
     const n = parseInt(v, 10);
     if (!Number.isFinite(n)) return parseInt(dflt, 10);
