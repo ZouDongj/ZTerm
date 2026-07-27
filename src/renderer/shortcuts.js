@@ -9,7 +9,12 @@ function _comboFromEvent(e) {
     if (e.ctrlKey || e.metaKey) parts.push('Ctrl');
     if (e.altKey) parts.push('Alt');
     if (e.shiftKey) parts.push('Shift');
+    // e.code 比 e.key 更可靠——不受键盘布局、Alt 键系统拦截、输入法等影响
     let key = e.key;
+    if (!key || key === 'Dead' || key === 'Unidentified') {
+        const m = e.code && e.code.match(/^(?:Key|Digit)(\w)$/);
+        key = m ? m[1] : (e.code || '');
+    }
     if (key === ' ') key = 'Space';
     else if (key.length === 1) key = key.toUpperCase();
     parts.push(key);
