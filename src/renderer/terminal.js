@@ -61,7 +61,7 @@ function _buildTerminalOptions() {
         cursorStyle: c.cursor || 'bar',
         fontSize: c.fontSize || 13.5,
         fontFamily: fontFamily,
-        fontWeight: _clampFontWeight(c.fontWeight, '400'),
+        fontWeight: _clampFontWeight(c.fontWeight, '450'),
         fontWeightBold: _clampFontWeight(c.fontWeightBold, '700'),
         lineHeight: c.lineHeight || 1.6,
         scrollback: c.scrollback || 10000,

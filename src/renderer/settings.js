@@ -625,6 +625,6 @@ function loadSettings() {
             return;
         }
     } catch(e) {}
-    _settingsConfig = { cursor: 'bar', scrollback: 10000, bell: 'off', cursorBlink: true, autoCopy: true, rightClickPaste: true, fontFamily: '"JetBrains Mono","Cascadia Code",Consolas,monospace', fontSize: 13.5, lineHeight: 1.6, accentColor: '#61afef', theme: 'dark', animations: true, showStatusDot: true, restoreLocalContent: false, smartCopy: true, osc52: true, richTextCopy: false };
+    _settingsConfig = { cursor: 'bar', scrollback: 10000, bell: 'off', cursorBlink: true, autoCopy: true, rightClickPaste: true, fontFamily: '"JetBrains Mono","Cascadia Code",Consolas,monospace', fontSize: 14, lineHeight: 1.6, fontWeight: '450', fontWeightBold: '700', accentColor: '#61afef', theme: 'dark', animations: true, showStatusDot: true, restoreLocalContent: false, smartCopy: true, osc52: true, richTextCopy: false };
 }
 

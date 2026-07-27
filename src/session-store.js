@@ -27,7 +27,9 @@ const DEFAULT_CONFIG = {
     lastTabs: [],
     appearance: {
         fontFamily: '"JetBrains Mono","Cascadia Code",Consolas,monospace',
-        fontSize: 13.5,
+        fontSize: 14,
+        fontWeight: '450',
+        fontWeightBold: '700',
         theme: 'campbell',
     }
 };

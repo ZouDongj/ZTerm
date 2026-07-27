@@ -112,29 +112,17 @@
       </div>
       <div class="settings-body">
         <div class="settings-sidebar" id="settings-sidebar">
-          <div class="settings-sidebar-item active" onclick="switchSettingsTab(this,'ssh')">SSH 连接</div>
-          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'terminal')">终端</div>
-          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'highlight')">高亮</div>
+          <div class="settings-sidebar-item active" onclick="switchSettingsTab(this,'terminal')">终端</div>
           <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'appearance')">外观</div>
+          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'ssh')">SSH 配置管理</div>
+          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'highlight')">高亮</div>
           <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'quickcommands')">快捷命令</div>
           <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'keys')">快捷键</div>
           <div class="settings-sidebar-item" style="margin-top:auto" onclick="switchSettingsTab(this,'about')">关于</div>
         </div>
         <div class="settings-content" id="settings-content">
-          <!-- SSH page -->
-          <div class="settings-page active" data-page="ssh">
-            <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:4px">
-              <div><h2>SSH 连接</h2><p class="desc">管理远程服务器连接。密码使用 Windows DPAPI 加密存储。</p></div>
-              <div style="display:flex;gap:6px;flex-shrink:0">
-                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="collapseAllGroups()">折叠全部</button>
-                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="expandAllGroups()">展开全部</button>
-                <button class="btn-primary" style="font-size:11px;padding:5px 14px" onclick="openSSHEdit(true)">+ 添加连接</button>
-              </div>
-            </div>
-            <div id="settings-ssh-list"></div>
-          </div>
           <!-- Terminal page -->
-          <div class="settings-page" data-page="terminal">
+          <div class="settings-page active" data-page="terminal">
             <h2>终端</h2><p class="desc">调整终端行为和外观。</p>
 
             <div class="settings-section">启动</div>
@@ -270,38 +258,6 @@
               </div>
             </div>
           </div>
-          <!-- Highlight page -->
-          <div class="settings-page" data-page="highlight">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-              <div><h2>高亮</h2><p class="desc">自定义终端输出高亮规则。</p></div>
-              <div style="display:flex;gap:6px;flex-shrink:0">
-                <button class="btn-primary" style="font-size:11px;padding:5px 12px" onclick="openHighlightEdit(true)">+ 添加规则</button>
-              </div>
-            </div>
-
-            <div class="settings-card" style="margin-bottom:16px">
-              <div class="settings-row">
-                <div class="settings-card-label">
-                  <div class="settings-card-title">启用高亮</div>
-                  <div class="settings-card-desc">高亮总开关</div>
-                </div>
-                <div class="settings-card-control">
-                  <div class="toggle-switch" id="toggle-highlight" onclick="toggleHighlightEnabled()"></div>
-                </div>
-              </div>
-              <div class="settings-row">
-                <div class="settings-card-label">
-                  <div class="settings-card-title">在备用屏幕中禁用高亮</div>
-                  <div class="settings-card-desc">例如：vi/vim、htop</div>
-                </div>
-                <div class="settings-card-control">
-                  <div class="toggle-switch" id="toggle-highlight-alt" onclick="toggleHighlightAlternate()"></div>
-                </div>
-              </div>
-            </div>
-
-            <div id="highlight-rules-list"></div>
-          </div>
           <!-- Appearance page -->
           <div class="settings-page" data-page="appearance">
             <h2>外观</h2><p class="desc">自定义界面主题和颜色。</p>
@@ -436,6 +392,50 @@
                 <div class="toggle-switch on" id="toggle-statusdot" onclick="toggleSwitch(this);saveAppearance()"></div>
               </div>
             </div>
+          </div>
+          <!-- SSH page -->
+          <div class="settings-page" data-page="ssh">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:4px">
+              <div><h2>SSH 配置管理</h2><p class="desc">管理远程服务器连接。密码使用 Windows DPAPI 加密存储。</p></div>
+              <div style="display:flex;gap:6px;flex-shrink:0">
+                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="collapseAllGroups()">折叠全部</button>
+                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="expandAllGroups()">展开全部</button>
+                <button class="btn-primary" style="font-size:11px;padding:5px 14px" onclick="openSSHEdit(true)">+ 添加连接</button>
+              </div>
+            </div>
+            <div id="settings-ssh-list"></div>
+          </div>
+          <!-- Highlight page -->
+          <div class="settings-page" data-page="highlight">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div><h2>高亮</h2><p class="desc">自定义终端输出高亮规则。</p></div>
+              <div style="display:flex;gap:6px;flex-shrink:0">
+                <button class="btn-primary" style="font-size:11px;padding:5px 12px" onclick="openHighlightEdit(true)">+ 添加规则</button>
+              </div>
+            </div>
+
+            <div class="settings-card" style="margin-bottom:16px">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">启用高亮</div>
+                  <div class="settings-card-desc">高亮总开关</div>
+                </div>
+                <div class="settings-card-control">
+                  <div class="toggle-switch" id="toggle-highlight" onclick="toggleHighlightEnabled()"></div>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">在备用屏幕中禁用高亮</div>
+                  <div class="settings-card-desc">例如：vi/vim、htop</div>
+                </div>
+                <div class="settings-card-control">
+                  <div class="toggle-switch" id="toggle-highlight-alt" onclick="toggleHighlightAlternate()"></div>
+                </div>
+              </div>
+            </div>
+
+            <div id="highlight-rules-list"></div>
           </div>
           <!-- Quick Commands page -->
           <div class="settings-page" data-page="quickcommands">
