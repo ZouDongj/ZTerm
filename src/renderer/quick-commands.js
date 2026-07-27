@@ -201,6 +201,65 @@ function deleteQC(id) {
     });
 }
 
+// QC 分组下拉（照抄 SSH 配置的分组 combo）
+function initQCGroupCombo() {
+    const input = document.getElementById('qc-edit-group');
+    const menu = document.getElementById('qc-group-menu');
+    const groups = [...new Set(_qcCommands.map(c => c.group).filter(Boolean))];
+    let activeIdx = -1;
+
+    function renderOptions(filter) {
+        const q = (filter || '').toLowerCase();
+        const matched = groups.filter(g => g.toLowerCase().includes(q));
+        menu.innerHTML = '';
+        matched.forEach((g, i) => {
+            const div = document.createElement('div');
+            div.className = 'dd-option';
+            div.textContent = g;
+            div.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                input.value = g;
+                menu.classList.remove('open');
+            });
+            menu.appendChild(div);
+        });
+        if (q && !groups.some(g => g.toLowerCase() === q)) {
+            const div = document.createElement('div');
+            div.className = 'dd-option create';
+            div.textContent = '创建分组 "' + filter + '"';
+            div.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                menu.classList.remove('open');
+            });
+            menu.appendChild(div);
+        }
+        if (matched.length > 0 || q) menu.classList.add('open');
+        else menu.classList.remove('open');
+        activeIdx = -1;
+    }
+
+    input.addEventListener('focus', () => renderOptions(input.value));
+    input.addEventListener('input', () => renderOptions(input.value));
+    input.addEventListener('blur', () => setTimeout(() => menu.classList.remove('open'), 150));
+    input.addEventListener('keydown', (e) => {
+        const items = [...menu.querySelectorAll('.dd-option')];
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            activeIdx = Math.min(activeIdx + 1, items.length - 1);
+            items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            activeIdx = Math.max(activeIdx - 1, 0);
+            items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+        } else if (e.key === 'Enter' && activeIdx >= 0) {
+            e.preventDefault();
+            items[activeIdx].click();
+        } else if (e.key === 'Escape') {
+            menu.classList.remove('open');
+        }
+    });
+}
+
 function openQCEdit(isNew, id) {
     _editingQCId = isNew ? null : id;
     document.getElementById('qc-edit-title').textContent = isNew ? '添加命令' : '编辑命令';
@@ -216,7 +275,8 @@ function openQCEdit(isNew, id) {
         }
     }
     openOverlay('overlay-qc-edit');
-    setTimeout(() => document.getElementById('qc-edit-name').focus(), 50);
+    initQCGroupCombo();
+    setTimeout(() => document.getElementById('qc-edit-name').focus(), 100);
 }
 
 function closeQCEdit() {
