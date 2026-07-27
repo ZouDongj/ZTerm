@@ -860,8 +860,10 @@ ipcMain.handle('show-save-dialog', async (event, options) => {
 
 Menu.setApplicationMenu(null);
 
-// 数据目录：统一使用 %APPDATA%/ZTerm/，不受覆盖安装影响
-sessionStore.init();
+// 数据目录：打包版默认放安装目录/data，dev 默认 %APPDATA%/ZTerm（锚点）
+sessionStore.init({
+    defaultDataDir: app.isPackaged ? path.join(path.dirname(app.getPath('exe')), 'data') : undefined,
+});
 // 配置损坏时通知 renderer 弹 toast
 sessionStore.setCorruptedCallback(() => {
     safeSend('config-corrupted');

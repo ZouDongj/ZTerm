@@ -58,6 +58,15 @@ function init(opts) {
     } catch(e) {}
     configPath = path.join(dataDir, 'config.json');
     ensureDir();
+    // 覆盖安装后便携目录可能被清空，从锚点镜像恢复
+    if (dataDir !== ANCHOR_DIR && !fs.existsSync(configPath) && fs.existsSync(ANCHOR_CONFIG)) {
+        try {
+            const mirror = JSON.parse(fs.readFileSync(ANCHOR_CONFIG, 'utf-8'));
+            if (!mirror.dataDir) {
+                fs.writeFileSync(configPath, JSON.stringify(mirror, null, 2), 'utf-8');
+            }
+        } catch(e) {}
+    }
 }
 
 function getDataDirInfo() {
@@ -181,6 +190,16 @@ function _writeConfigToDisk(config) {
         // 杀软/索引器瞬时锁文件、磁盘满等--记录日志，下次保存时再试
         console.error('Failed to save config:', e.message);
         try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch(e2) {}
+    }
+    // 镜像写入锚点目录：覆盖安装/安装目录被清空后用于恢复
+    if (dataDir !== ANCHOR_DIR) {
+        try {
+            const anchorTmp = ANCHOR_CONFIG + '.tmp';
+            const mirror = { ...config }; delete mirror.dataDir;
+            fs.mkdirSync(ANCHOR_DIR, { recursive: true });
+            fs.writeFileSync(anchorTmp, JSON.stringify(mirror, null, 2), 'utf-8');
+            fs.renameSync(anchorTmp, ANCHOR_CONFIG);
+        } catch(e) {}
     }
 }
 
