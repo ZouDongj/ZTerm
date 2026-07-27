@@ -645,7 +645,9 @@ function _sftpTransferOf(tabId) {
 
 function _homeDir(tabId) {
     const ssh = sshConnections[tabId];
-    return ssh && ssh.username ? '/home/' + ssh.username : '/';
+    if (!ssh || !ssh.username) return '/';
+    if (ssh.username === 'root') return '/root';
+    return '/home/' + ssh.username;
 }
 
 function _sftpTypeToIsDir(type) {
