@@ -29,9 +29,10 @@ body{display:flex;justify-content:center;align-items:center;min-height:100vh;fon
 .tab.drag-over-left{box-shadow:inset 2px 0 0 0 rgba(var(--accent-rgb),0.6)}
 .tab.drag-over-right{box-shadow:inset -2px 0 0 0 rgba(var(--accent-rgb),0.6)}
 .tab-rename-input{background:rgba(var(--accent-rgb),0.08);border:1px solid rgba(var(--accent-rgb),0.25);border-radius:6px;padding:2px 6px;color:#abb2bf;font-size:13px;font-family:inherit;outline:none;width:100px}
-.tab-context-menu{position:fixed;background:#282c34;border:1px solid rgba(var(--accent-rgb),0.08);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,0.4);z-index:200;overflow:hidden;min-width:140px}
-.tab-context-item{padding:8px 14px;font-size:12px;color:#abb2bf;cursor:pointer;transition:background 0.1s}
+.tab-context-menu{position:fixed;background:#282c34;border:1px solid rgba(var(--accent-rgb),0.08);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,0.4);z-index:200;overflow:hidden;min-width:180px;padding:4px 0}
+.tab-context-item{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:8px 14px;font-size:12px;color:#abb2bf;cursor:pointer;transition:background 0.1s}
 .tab-context-item:hover{background:rgba(var(--accent-rgb),0.08)}
+.tab-context-shortcut{font-size:10px;font-family:'JetBrains Mono',monospace;color:rgba(171,178,191,0.45);background:rgba(255,255,255,0.04);padding:2px 7px;border-radius:4px;flex-shrink:0}
 .tab.bell-flash{animation:bellFlash 0.6s ease-in-out 3}
 @keyframes bellFlash{0%,100%{background:rgba(255,183,77,0)}50%{background:rgba(255,183,77,0.25)}}
 /* Legacy global drop zone — kept for single-terminal drag */
@@ -269,13 +270,15 @@ body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 .menu-backdrop.open{display:block}
 /* Suppress hover on tabbar buttons while menu is open */
 body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none!important;color:rgba(171,178,191,0.45)!important}
-.menu-popup{position:fixed;background:#282c34;border:1px solid rgba(var(--accent-rgb),0.08);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,0.4);z-index:300;overflow:hidden;min-width:180px;opacity:0;pointer-events:none;transform:translateY(-8px);transition:opacity 0.22s cubic-bezier(0.05,0.7,0.1,1),transform 0.22s cubic-bezier(0.05,0.7,0.1,1);user-select:none}
+.menu-popup{position:fixed;background:#282c34;border:1px solid rgba(var(--accent-rgb),0.08);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,0.4);z-index:300;min-width:220px;padding:6px;opacity:0;pointer-events:none;transform:translateY(-8px);transition:opacity 0.22s cubic-bezier(0.05,0.7,0.1,1),transform 0.22s cubic-bezier(0.05,0.7,0.1,1);user-select:none}
 .menu-popup.open{opacity:1;pointer-events:auto;transform:translateY(0)}
-.menu-item{display:flex;align-items:center;gap:10px;padding:10px 14px;font-size:13px;color:rgba(171,178,191,0.7);cursor:pointer;transition:all 0.12s;font-weight:450;user-select:none}
-.menu-item:hover{background:rgba(var(--accent-rgb),0.08);color:#abb2bf}
+.menu-item{display:flex;align-items:center;gap:12px;padding:8px 12px;font-size:13px;color:rgba(171,178,191,0.78);cursor:pointer;border-radius:8px;transition:background 0.12s,color 0.12s;user-select:none}
+.menu-item:hover{background:rgba(var(--accent-rgb),0.1);color:#abb2bf}
 .menu-item.disabled{opacity:0.35;pointer-events:none;cursor:default}
-.menu-item.disabled:hover{background:none;color:rgba(171,178,191,0.7)}
-.menu-item span{font-size:14px;width:20px;text-align:center;flex-shrink:0}
+.menu-item.disabled:hover{background:none;color:rgba(171,178,191,0.78)}
+.menu-icon{font-size:15px;width:18px;text-align:center;flex-shrink:0;line-height:1}
+.menu-label{flex:1;min-width:0;white-space:nowrap;font-weight:450}
+.menu-shortcut{font-size:11px;font-family:'JetBrains Mono',monospace;color:rgba(171,178,191,0.5);background:rgba(255,255,255,0.04);padding:2px 7px;border-radius:5px;flex-shrink:0;line-height:1.4}
 
 /* ── Overlay system ── */
 .overlay{position:fixed;inset:0;z-index:30;display:none;align-items:center;justify-content:center;background:rgba(20,18,24,0.62);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}

@@ -63,9 +63,14 @@ const SHORTCUT_ACTIONS = {
     },
     closePane: () => {
         const tab = TabManager.getActive();
-        if (tab && tab.splitRoot) {
+        if (!tab || tab.type === 'settings') return;
+        if (tab.splitRoot) {
             const focused = getAllPanes(tab).find(p => p.focused);
             if (focused) TabManager._closePane(tab.id, focused.id);
+        } else if (!document.querySelector('.overlay.open')) {
+            // 不在分屏（单 terminal 或刚从分屏退出只剩 1 个 pane 后）：等同 Ctrl+W 关闭当前 tab
+            // 与 tabby 行为一致
+            TabManager.closeTab(tab.id);
         }
     },
     nextTab: () => { if (!document.querySelector('.overlay.open')) _cycleTab(1); },
@@ -204,6 +209,8 @@ function startShortcutCapture(actionId, btn) {
             }
         }
         renderShortcutsList();
+        // 顶栏菜单的快捷键提示要立即跟随用户最新绑定
+        if (typeof updateMenuShortcuts === 'function') updateMenuShortcuts();
     };
     document.addEventListener('keydown', onKey, true);
 }
@@ -212,12 +219,14 @@ function resetShortcut(actionId) {
     if (_settingsConfig.shortcuts) delete _settingsConfig.shortcuts[actionId];
     persistShortcuts();
     renderShortcutsList();
+    if (typeof updateMenuShortcuts === 'function') updateMenuShortcuts();
 }
 
 function resetAllShortcuts() {
     _settingsConfig.shortcuts = {};
     persistShortcuts();
     renderShortcutsList();
+    if (typeof updateMenuShortcuts === 'function') updateMenuShortcuts();
 }
 
 function persistShortcuts() {

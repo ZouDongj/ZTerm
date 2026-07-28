@@ -14,10 +14,10 @@
   <!-- Menu popup -->
   <div class="menu-backdrop" id="menu-backdrop" onclick="closeMenuPopup()"></div>
   <div class="menu-popup" id="menu-popup">
-    <div class="menu-item" onclick="closeMenuPopup();openQC()"><span>⌘</span> 快捷命令</div>
-    <div class="menu-item" data-action="sftp" onclick="closeMenuPopup();openSFTPFromMenu()"><span>📁</span> SFTP 文件传输</div>
-    <div class="menu-item" onclick="closeMenuPopup();openPalette()"><span>⌘</span> 命令面板 <span style="margin-left:auto;opacity:0.4;font-size:10px">Ctrl+P</span></div>
-    <div class="menu-item" onclick="closeMenuPopup();openSettings()"><span>⚙</span> 设置</div>
+    <div class="menu-item" onclick="closeMenuPopup();openQC()"><span class="menu-icon">⌘</span><span class="menu-label">快捷命令</span><span class="menu-shortcut" data-action="quickCommands"></span></div>
+    <div class="menu-item" data-action="sftp" onclick="closeMenuPopup();openSFTPFromMenu()"><span class="menu-icon">📁</span><span class="menu-label">SFTP 文件传输</span><span class="menu-shortcut" data-action="sftp"></span></div>
+    <div class="menu-item" onclick="closeMenuPopup();openPalette()"><span class="menu-icon">⌘</span><span class="menu-label">命令面板</span><span class="menu-shortcut" data-action="commandPalette"></span></div>
+    <div class="menu-item" onclick="closeMenuPopup();openSettings()"><span class="menu-icon">⚙</span><span class="menu-label">设置</span><span class="menu-shortcut" data-action="openSettings"></span></div>
   </div>
 
   <!-- SFTP Overlay -->

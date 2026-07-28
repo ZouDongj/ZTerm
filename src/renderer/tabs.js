@@ -1375,22 +1375,26 @@ const TabManager = {
         menu.className = 'tab-context-menu';
         const tab = this.tabs.find(t => t.id === tabId);
         if (!tab) return;
+        // 快捷键从 _getShortcutBindings() 查当前绑定：用户改过要跟随
+        const bindings = _getShortcutBindings();
         const items = [
-            { label: '重命名', action: () => this.startRenameTab(tabId) },
-            { label: '克隆标签页', action: () => this.cloneTab(tabId) },
-            { label: '关闭', action: () => this.closeTab(tabId) },
-            { label: '关闭其他标签页', action: () => this.closeOtherTabs(tabId) },
+            { label: '重命名', actionId: 'renameTab', action: () => this.startRenameTab(tabId) },
+            { label: '克隆标签页', actionId: 'cloneTab', action: () => this.cloneTab(tabId) },
+            { label: '关闭', actionId: 'closeTab', action: () => this.closeTab(tabId) },
+            { label: '关闭其他标签页', actionId: null, action: () => this.closeOtherTabs(tabId) },
         ];
         items.forEach(item => {
             const el = document.createElement('div');
             el.className = 'tab-context-item';
-            el.textContent = item.label;
+            const combo = item.actionId ? (bindings[item.actionId] || '') : '';
+            el.innerHTML = `<span>${escHtml(item.label)}</span>` + (combo ? `<span class="tab-context-shortcut">${escHtml(_comboDisplay(combo))}</span>` : '');
             el.onclick = () => { this._hideTabContextMenu(); item.action(); };
             menu.appendChild(el);
         });
         document.body.appendChild(menu);
-        const x = Math.min(e.clientX, window.innerWidth - 160);
-        const y = Math.min(e.clientY, window.innerHeight - items.length * 32 - 8);
+        // 宽度跟随快捷键提示扩展（180 起 + shortcut text 宽度余量）
+        const x = Math.min(e.clientX, window.innerWidth - 220);
+        const y = Math.min(e.clientY, window.innerHeight - items.length * 34 - 12);
         menu.style.left = x + 'px';
         menu.style.top = y + 'px';
         setTimeout(() => document.addEventListener('click', this._hideTabContextMenuBound = () => this._hideTabContextMenu(), { once: true }), 0);

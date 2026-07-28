@@ -1,4 +1,16 @@
 // ZTerm - 会话选择器 + SSH 管理 + 菜单弹窗（拆自 renderer.html，纯代码搬运，未改逻辑）
+
+// 动态填充顶栏"⋮"菜单的快捷键文本：必须用 _getShortcutBindings() 拿当前绑定，
+// 否则用户改过快捷键后菜单显示跟实际不一致
+function updateMenuShortcuts() {
+    const bindings = _getShortcutBindings();
+    document.querySelectorAll('.menu-shortcut[data-action]').forEach(el => {
+        const actionId = el.getAttribute('data-action');
+        const combo = bindings[actionId] || '';
+        el.textContent = combo ? _comboDisplay(combo) : '';
+    });
+}
+
 function toggleMenuPopup() {
     const popup = document.getElementById('menu-popup');
     const backdrop = document.getElementById('menu-backdrop');
