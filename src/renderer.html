@@ -631,6 +631,15 @@
             </div>
           </div>
         </div>
+        <div class="form-row">
+          <div class="form-group" style="grid-column:1/-1;flex-direction:row;align-items:center;gap:8px">
+            <div class="toggle-switch on" id="ssh-edit-clearonconnect" onclick="this.classList.toggle('on')"></div>
+            <div>
+              <div style="font-size:12.5px;color:#abb2bf">连接时清空终端</div>
+              <div style="font-size:11px;color:rgba(171,178,191,0.35)">关闭后，强制或断开重连时保留之前的终端内容</div>
+            </div>
+          </div>
+        </div>
       </div>
       <!-- 登录脚本 tab -->
       <div id="ssh-tab-scripts" class="ssh-tab-panel" style="flex-direction:column;gap:8px">

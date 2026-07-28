@@ -324,6 +324,7 @@ function openSSHEdit(isNew, profileId) {
     document.getElementById('ssh-edit-group').value = '';
     document.getElementById('ssh-edit-auth').selectedIndex = 0;
     document.getElementById('ssh-edit-followcwd').classList.remove('on');
+    document.getElementById('ssh-edit-clearonconnect').classList.add('on');
     updateAuthFields();
 
     // Reset to connection tab
@@ -343,6 +344,7 @@ function openSSHEdit(isNew, profileId) {
             document.getElementById('ssh-edit-keypath').value = p.privateKeyPath || '';
             document.getElementById('ssh-edit-group').value = p.group || '';
             document.getElementById('ssh-edit-followcwd').classList.toggle('on', !!p.followCwd);
+            document.getElementById('ssh-edit-clearonconnect').classList.toggle('on', p.clearOnConnect !== false);
             if (p.authType === 'key') {
                 document.getElementById('ssh-edit-auth').value = '密钥';
             }
@@ -530,6 +532,7 @@ function saveSSHEdit() {
     const authType = document.getElementById('ssh-edit-auth').value === '密钥' ? 'key' : 'password';
     const privateKeyPath = document.getElementById('ssh-edit-keypath').value.trim();
     const followCwd = document.getElementById('ssh-edit-followcwd').classList.contains('on');
+    const clearOnConnect = document.getElementById('ssh-edit-clearonconnect').classList.contains('on');
 
     if (!name || !host) {
         showToast('名称和主机地址不能为空', true);
@@ -543,7 +546,7 @@ function saveSSHEdit() {
             name, group, host, port, username, authType,
             encryptedPassword: encryptedPassword || '',
             privateKeyPath: authType === 'key' ? privateKeyPath : '',
-            note, followCwd,
+            note, followCwd, clearOnConnect,
             loginScripts: collectLoginScripts(),
         };
 

@@ -2,6 +2,88 @@
 const russh = require('russh');
 const { LoginScriptProcessor } = require('./login-script');
 
+// ── followCwd rc 包装方案（零键入注入）──
+// 上传 rc 文件后以它为启动 rc 直接拉起 shell（bash --rcfile / zsh ZDOTDIR），
+// 终端里不敲任何命令 → history 完全无污染。失败时回退到键入注入。
+
+// 开一个临时 exec channel 执行命令并收集输出
+async function _execAndRead(auth, cmd, timeoutMs = 4000) {
+    const ch = await auth.activateChannel(await auth.openSessionChannel());
+    let out = '';
+    try {
+        ch.data$.subscribe(d => { out += Buffer.from(d).toString(); });
+        await ch.requestExec(cmd);
+        await Promise.race([
+            new Promise(res => { ch.eof$.subscribe(() => res()); ch.closed$.subscribe(() => res()); }),
+            new Promise(res => setTimeout(res, timeoutMs)),
+        ]);
+        // closed$ 可能先于 data$ 触发，留 200ms 宽限让数据事件投递完，避免读到空串
+        await new Promise(res => setTimeout(res, 200));
+    } finally {
+        try { ch.close(); } catch(e) {}
+    }
+    return out.trim();
+}
+
+// 探测默认 shell：直接读 /etc/passwd 里该用户的登录 shell（确定性，不走 exec channel）
+async function _detectShell(auth, sftp, username, onDebug) {
+    try {
+        const f = await sftp.open('/etc/passwd', russh.OPEN_READ);
+        let data = '';
+        while (true) {
+            const chunk = await f.read(65536);
+            if (chunk.length === 0) break;
+            data += Buffer.from(chunk).toString();
+            if (data.length > 262144) break;
+        }
+        await f.shutdown();
+        const line = data.split('\n').find(l => l.startsWith(username + ':'));
+        const shell = line ? line.split(':').pop().trim() : '';
+        if (/bash/.test(shell)) return 'bash';
+        if (/zsh/.test(shell)) return 'zsh';
+        return shell;
+    } catch(e) {
+        return '';
+    }
+}
+
+async function _sftpWrite(sftp, path, content) {
+    const f = await sftp.open(path, russh.OPEN_WRITE | russh.OPEN_CREATE);
+    await f.writeAll(new Uint8Array(Buffer.from(content, 'utf-8')));
+    await f.shutdown();
+}
+
+// 探测默认 shell，上传 rc 文件，返回包装启动命令；无法使用时返回 null（走键入注入回退）
+async function _prepareCwdWrapper(auth, sftp, username, onDebug) {
+    const shellKind = await _detectShell(auth, sftp, username, onDebug);
+    const stamp = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    const cwdFn = '_zt_cwd() { printf \'\\033]7;file://%s%s\\033\\\\\' "$HOSTNAME" "$PWD"; }\n';
+    if (shellKind === 'bash') {
+        const rcPath = '/tmp/.zterm-rc-' + stamp;
+        // 登录 bash 不读 --rcfile（本地已验证），用非登录 -i + 手动 source 登录链。
+        // 不手动 source /etc/profile：RHEL 系 /etc/profile 和 /etc/bashrc 都会跑 profile.d，
+        // 手动 source 会导致横幅双刷；profile 链路自身已覆盖环境初始化
+        await _sftpWrite(sftp, rcPath,
+            '{ [ -f ~/.bash_profile ] && . ~/.bash_profile; } || { [ -f ~/.bash_login ] && . ~/.bash_login; } || { [ -f ~/.profile ] && . ~/.profile; }\n'
+            + cwdFn
+            + 'PROMPT_COMMAND="_zt_cwd;${PROMPT_COMMAND}"\n'
+            + 'rm -f ' + rcPath + '\n');
+        return 'exec bash --rcfile ' + rcPath + ' -i';
+    }
+    if (shellKind === 'zsh') {
+        const dir = '/tmp/.zterm-zdot-' + stamp;
+        try { await sftp.createDirectory(dir); } catch(e) {}
+        await _sftpWrite(sftp, dir + '/.zshrc',
+            '[ -f ~/.zshrc ] && . ~/.zshrc\n'
+            + cwdFn
+            + 'precmd_functions+=(_zt_cwd)\n'
+            + 'rm -rf ' + dir + '\n');
+        await _sftpWrite(sftp, dir + '/.zprofile', '[ -f ~/.zprofile ] && . ~/.zprofile\n');
+        return 'exec env ZDOTDIR=' + dir + ' zsh -il';
+    }
+    return null;
+}
+
 /**
  * Create an SSH connection and shell session using russh.
  * @param {Object} config - { host, port, username, password?, privateKey?, passphrase?, followCwd?, cols?, rows? }
@@ -106,21 +188,8 @@ function createSSHConnection(config, callbacks) {
                 }
             });
 
-            // 4. Open shell channel
-            const cols = config.cols || 80;
-            const rows = config.rows || 24;
-            const ch = await auth.activateChannel(await auth.openSessionChannel());
-            await ch.requestPTY('xterm-256color', { columns: cols, rows, pixWidth: 0, pixHeight: 0 });
-            await ch.requestShell();
-
-            if (settled) { try { await ch.close(); } catch(e) {} return; }
-            settled = true;
-
-            // 5. Login script processor
-            const processor = config.loginScripts && config.loginScripts.length > 0
-                ? new LoginScriptProcessor(config.loginScripts) : null;
-
-            // 6. SFTP subsystems — separate channels for panel ops and file transfers
+            // 4. SFTP subsystems — separate channels for panel ops and file transfers
+            //    （提前打开：followCwd 的 rc 包装方案要用 SFTP 上传）
             let sftp = null, sftpTransfer = null;
             try {
                 sftp = await auth.activateSFTP(await auth.openSessionChannel());
@@ -129,11 +198,34 @@ function createSSHConnection(config, callbacks) {
                 sftpTransfer = await auth.activateSFTP(await auth.openSessionChannel());
             } catch(e) {}
 
-            // 6. OSC 7 injection + cwd tracking (only when followCwd is enabled)
-            //    Inject a PROMPT_COMMAND that outputs OSC 7 sequences on every prompt.
-            //    Filter the injection echo so the user sees a clean first prompt.
+            // 5. followCwd：优先 rc 包装方案（零键入注入），失败回退键入注入
             const followCwd = config.followCwd === true;
-            let _injectState = followCwd ? 'waiting' : 'normal'; // skip injection if disabled
+            let execCmd = null;
+            if (followCwd && sftp) {
+                // 清理前几版注入残留（异步触发，不阻塞连接主流程）
+                _execAndRead(auth, "sed -i -E '/_zt_cwd|_zt_hio|ZTERM_INJECTED|hist_ignore_space|HIST_IGNORE_SPACE|set [+-]o history|fc -p|fc -P|\\.zterm-|zterm-cwd|zterm-rc|zterm-zdot/d' ~/.bash_history ~/.zsh_history 2>/dev/null; true", 6000)
+                    .catch(() => {});
+                try { execCmd = await _prepareCwdWrapper(auth, sftp, config.username, onDebug); } catch(e) { try { onDebug('cwd-wrapper error: ' + e.message); } catch(e2) {} }
+            }
+
+            // 6. Open shell channel
+            const cols = config.cols || 80;
+            const rows = config.rows || 24;
+            const ch = await auth.activateChannel(await auth.openSessionChannel());
+            await ch.requestPTY('xterm-256color', { columns: cols, rows, pixWidth: 0, pixHeight: 0 });
+            if (execCmd) await ch.requestExec(execCmd);
+            else await ch.requestShell();
+
+            if (settled) { try { await ch.close(); } catch(e) {} return; }
+            settled = true;
+
+            // 7. Login script processor
+            const processor = config.loginScripts && config.loginScripts.length > 0
+                ? new LoginScriptProcessor(config.loginScripts) : null;
+
+            // 8. OSC 7 injection + cwd tracking (only when followCwd is enabled)
+            //    rc 包装方案无需抑制注入回显；回退的键入注入需要 stty -echo + ZTERM_INJECTED 标记过滤
+            let _injectState = (followCwd && !execCmd) ? 'waiting' : 'normal';
             let _injectBuf = '';
             let cwd = null;
             let _sshConn = null;
@@ -217,18 +309,23 @@ function createSSHConnection(config, callbacks) {
             };
             _sshConn = sshConn;
 
-            // Inject OSC 7 script with stty -echo to suppress all echo
-            const injectScript = 'stty -echo\n'
-                + '_zt_cwd() { printf \'\\033]7;file://%s%s\\033\\\\\' "$HOSTNAME" "$PWD"; }\n'
-                + 'if [ -n "$ZSH_VERSION" ]; then\n'
-                + '  precmd_functions+=(_zt_cwd)\n'
-                + 'else\n'
-                + '  PROMPT_COMMAND="_zt_cwd;${PROMPT_COMMAND}"\n'
-                + 'fi\n'
-                + 'stty echo\n'
-                + 'echo ZTERM_INJECTED\n';
-            if (followCwd) {
-                try { ch.write(new Uint8Array(Buffer.from(injectScript, 'utf-8'))); } catch(e) {}
+            // 键入注入（rc 包装不可用时的回退）：
+            // bash 首行 set +o history、zsh 首行 HIST_IGNORE_SPACE + 载荷行前导空格，
+            // 最多泄漏一行无害的 if 行
+            if (followCwd && !execCmd) {
+                const scriptBody = '_zt_cwd() { printf \'\\033]7;file://%s%s\\033\\\\\' "$HOSTNAME" "$PWD"; }\n'
+                    + 'if [ -n "$ZSH_VERSION" ]; then\n'
+                    + '  precmd_functions+=(_zt_cwd)\n'
+                    + 'else\n'
+                    + '  PROMPT_COMMAND="_zt_cwd;${PROMPT_COMMAND}"\n'
+                    + 'fi\n';
+                const injectLine = 'if [ -n "$ZSH_VERSION" ]; then _zt_hio=${options[hist_ignore_space]:-off}; setopt HIST_IGNORE_SPACE 2>/dev/null; else set +o history 2>/dev/null; fi\n'
+                    + ' stty -echo\n'
+                    + ' ' + scriptBody.replace(/\n/g, '\n ').trimEnd() + '\n'
+                    + ' stty echo\n'
+                    + ' echo ZTERM_INJECTED\n'
+                    + ' if [ -n "$ZSH_VERSION" ]; then [ "$_zt_hio" = off ] && unsetopt HIST_IGNORE_SPACE 2>/dev/null; unset _zt_hio; else set -o history 2>/dev/null; fi\n';
+                try { ch.write(new Uint8Array(Buffer.from(injectLine, 'utf-8'))); } catch(e) {}
             }
 
             // Execute unconditional login scripts (empty expect) before onReady

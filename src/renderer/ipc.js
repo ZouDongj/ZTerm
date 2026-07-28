@@ -85,7 +85,8 @@ ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId }) => {
             const pane = findPane(tab, rendererId) || getAllPanes(tab).find(p => p.requestId === rendererId);
             if (pane) {
                 pane.tabId = tabId;
-                wireTerminalToPane(tab, pane);
+                // 保留模式（clearOnConnect=false）下终端已存在：不重建，否则保留的内容被替换成空终端
+                if (!pane.term) wireTerminalToPane(tab, pane);
                 if (pane.term) {
                     pane.term.write('\x1b[33mConnecting to ' + (pane._sshHost || tab.host || pane.name || tab.name) + '...\x1b[0m\r\n');
                 }
@@ -157,25 +158,20 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
             if (!TabManager.tabs.includes(tab)) return; // 重试时 tab 可能已关闭
             if (pane) {
                 if (pane.tabId) ipcRenderer.send('ssh-disconnect', { tabId: pane.tabId });
-                if (pane.term) { try { pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
+                // 保留模式（clearOnConnect=false）不销毁终端，内容接在后面
+                if (_clearOnConnect(tab, pane) && pane.term) { try { pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
                 pane.tabId = null;
                 setTimeout(() => {
                     if (!TabManager.tabs.includes(tab)) return;
-                    ipcRenderer.send('ssh-connect', {
-                        profile: { host: pane._sshHost || tab.host, port: pane._sshPort || tab.port, username: pane._sshUser || tab.user, credentialId: pane._sshCredId || tab._credId, loginScripts: typeof _getLoginScripts === 'function' ? _getLoginScripts(tab, pane) : [] },
-                        rendererId: pane.requestId,
-                    });
+                    _sshConnectWithCredentials(tab, pane, pane.requestId);
                 }, 500);
             } else {
                 if (tab.tabId) ipcRenderer.send('ssh-disconnect', { tabId: tab.tabId });
-                if (tab.term) { try { tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
+                if (_clearOnConnect(tab, null) && tab.term) { try { tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
                 tab.tabId = null;
                 setTimeout(() => {
                     if (!TabManager.tabs.includes(tab)) return;
-                    ipcRenderer.send('ssh-connect', {
-                        profile: { host: tab.host, port: tab.port, username: tab.user, credentialId: tab._credId, loginScripts: typeof _getLoginScripts === 'function' ? _getLoginScripts(tab) : [] },
-                        rendererId: tab.id,
-                    });
+                    _sshConnectWithCredentials(tab, null, tab.id);
                 }, 500);
             }
         }, 2000);

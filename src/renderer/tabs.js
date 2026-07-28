@@ -9,6 +9,14 @@ function _getLoginScripts(tab, pane) {
     return (profile && profile.loginScripts) || [];
 }
 
+// 查询 SSH profile 的 clearOnConnect（默认 true：重连清空终端；false：保留之前内容）
+function _clearOnConnect(tab, pane) {
+    const profileId = (pane && pane._sshProfileId) || tab.sshProfileId;
+    if (!profileId) return true;
+    const profile = (TabManager.sshProfiles || []).find(p => p.id === profileId);
+    return !profile || profile.clearOnConnect !== false;
+}
+
 // SSH 连接（含凭据兜底）：主进程重启后 credentialId 句柄全部失效，
 // 没有有效凭据时从 SSH profile 重新注册（明文不经过 renderer）
 function _sshConnectWithCredentials(tab, pane, rendererId) {
@@ -287,9 +295,14 @@ const TabManager = {
         }
 
         if (tab.tabId) ipcRenderer.send('ssh-disconnect', { tabId: tab.tabId });
-        if (tab.term) { try { tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
-        const wrap = document.getElementById('wrap_' + id);
-        if (wrap) wrap.remove();
+        if (_clearOnConnect(tab, null)) {
+            if (tab.term) { try { tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
+            const wrap = document.getElementById('wrap_' + id);
+            if (wrap) wrap.remove();
+        } else if (tab.term) {
+            // 保留内容：写入分隔线，新输出接在旧内容后面
+            tab.term.write('\r\n\x1b[2m─────── 重新连接中… ───────\x1b[0m\r\n');
+        }
         tab.tabId = null;
         tab.connected = false;
         this.render();
@@ -306,9 +319,14 @@ const TabManager = {
         const pane = findPane(tab, paneId);
         if (!pane) return;
         if (pane.tabId) ipcRenderer.send('ssh-disconnect', { tabId: pane.tabId });
-        if (pane.term) { try { pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
-        const body = document.getElementById('pane-body_' + pane.id);
-        if (body) body.innerHTML = '';
+        if (_clearOnConnect(tab, pane)) {
+            if (pane.term) { try { pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
+            const body = document.getElementById('pane-body_' + pane.id);
+            if (body) body.innerHTML = '';
+        } else if (pane.term) {
+            // 保留内容：写入分隔线，新输出接在旧内容后面
+            pane.term.write('\r\n\x1b[2m─────── 重新连接中… ───────\x1b[0m\r\n');
+        }
         pane.tabId = null;
         tab.connected = false;
         this.render();

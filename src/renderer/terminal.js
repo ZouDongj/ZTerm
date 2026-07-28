@@ -154,19 +154,21 @@ function wireTerminal(tab, tabId) {
         if (TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300) return;
         clearTimeout(_resizeDebounce);
         _resizeDebounce = setTimeout(() => {
-            ipcRenderer.send('pty-resize', { tabId, cols, rows });
+            // 动态读取 tab.tabId：重连后后端 tabId 会变化，闭包捕获旧值会发到死连接
+            if (tab.tabId) ipcRenderer.send('pty-resize', { tabId: tab.tabId, cols, rows });
         }, 150);
     });
 
     // Fallback resize after 1s — covers slow-starting shells that missed the initial resize
     setTimeout(() => {
-        if (tab.term && tab.term.cols && tab.term.rows) {
-            ipcRenderer.send('pty-resize', { tabId, cols: tab.term.cols, rows: tab.term.rows });
+        if (tab.term && tab.term.cols && tab.term.rows && tab.tabId) {
+            ipcRenderer.send('pty-resize', { tabId: tab.tabId, cols: tab.term.cols, rows: tab.term.rows });
         }
     }, 1000);
 
     term.onData(data => {
-        _sendPaneInput(tab, { tabId }, data);
+        // 动态读取 tab.tabId（重连保留内容模式下，终端复用但后端 tabId 已更新）
+        _sendPaneInput(tab, { tabId: tab.tabId }, data);
     });
     _bindSyncExitOnClick(tab, term.element);
 
@@ -210,7 +212,7 @@ function wireTerminal(tab, tabId) {
         if (_settingsConfig.rightClickPaste === false) return;
         try {
             const text = require('electron').clipboard.readText();
-            if (text) _sendPaneInput(tab, { tabId }, text);
+            if (text) _sendPaneInput(tab, { tabId: tab.tabId }, text);
         } catch(e) {}
     });
 
