@@ -66,7 +66,7 @@ function _buildTerminalOptions() {
         lineHeight: c.lineHeight || 1.6,
         scrollback: c.scrollback || 10000,
         minimumContrastRatio: c.minimumContrastRatio || 4,
-        drawBoldTextInBrightColors: true,
+        drawBoldTextInBrightColors: false,
         theme: getTerminalTheme(),
         allowProposedApi: true,
         customGlyphs: true,

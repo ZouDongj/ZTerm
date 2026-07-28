@@ -176,6 +176,8 @@ body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 .settings-card-desc{font-size:12px;color:rgba(171,178,191,0.4);line-height:16px;margin-top:2px;margin-right:24px}
 .settings-card-control{flex-shrink:0;min-width:248px;display:flex;justify-content:flex-end}
 .settings-card-control select,.settings-card-control input{width:100%;max-width:248px;background:rgba(var(--accent-rgb),0.06);border:1.5px solid transparent;border-radius:8px;padding:8px 12px;color:#abb2bf;font-size:12.5px;font-family:'Roboto Flex',sans-serif;outline:none}
+.settings-card-control input[type=number]::-webkit-outer-spin-button,.settings-card-control input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.settings-card-control input[type=number]{-moz-appearance:textfield}
 .settings-card-control select:focus,.settings-card-control input:focus{background:rgba(var(--accent-rgb),0.1);border-color:rgba(var(--accent-rgb),0.25)}
 
 /* Responsive: stack cards on narrow windows */

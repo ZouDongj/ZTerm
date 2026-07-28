@@ -195,20 +195,10 @@
               <div class="settings-row">
                 <div class="settings-card-label">
                   <div class="settings-card-title">最小对比度</div>
-                  <div class="settings-card-desc">文本与背景的最低对比度，增大可使暗色文字更亮</div>
+                  <div class="settings-card-desc">文本与背景的最低对比度，1=关闭，4=默认，7=AAA，最大 21。支持小数如 4.5</div>
                 </div>
                 <div class="settings-card-control">
-                  <select class="styled-select" id="set-contrast" onchange="saveTerminal()">
-                    <option value="1">1 — 关闭</option>
-                    <option value="2">2</option>
-                    <option value="3">3</option>
-                    <option value="4" selected>4 — 默认</option>
-                    <option value="5">5</option>
-                    <option value="7">7</option>
-                    <option value="10">10</option>
-                    <option value="15">15</option>
-                    <option value="21">21 — 最大</option>
-                  </select>
+                  <input type="number" id="set-contrast" value="4" min="1" max="21" step="0.5" onchange="saveTerminal()" style="width:80px">
                 </div>
               </div>
             </div>
