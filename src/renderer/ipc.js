@@ -120,6 +120,8 @@ ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
                 TabManager.render();
                 TabManager.updateStatus();
                 showToast('SSH 已连接: ' + _sshDisplayName(tab, pane));
+                // 连接就绪后补一次尺寸结算：connecting 阶段发出的 resize 会被主进程丢弃（连接未注册）
+                _scheduleSettleResize(tab);
                 return;
             }
         } else if (tab.tabId === tabId || tab.id === rendererId) {

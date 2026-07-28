@@ -27,7 +27,10 @@ function _scheduleSettleResize(tab) {
         if (tab.splitRoot) {
             getAllPanes(tab).forEach(p => {
                 if (p.term && p.fitAddon) {
-                    _fitWithScroll(p.term, p.fitAddon, document.getElementById('pane-body_' + p.id));
+                    const body = document.getElementById('pane-body_' + p.id);
+                    // 0 尺寸（隐藏 tab 的 pane）不 fit 也不发——否则会把初始 80x24 错误地下发给后端
+                    if (!body || body.clientWidth === 0 || body.clientHeight === 0) return;
+                    _fitWithScroll(p.term, p.fitAddon, body);
                     if (p.tabId && p.term.cols && p.term.rows) {
                         ipcRenderer.send('pty-resize', { tabId: p.tabId, cols: p.term.cols, rows: p.term.rows });
                     }
@@ -285,6 +288,12 @@ function wireTerminalToPane(tab, pane) {
             return;
         }
         _fitWithScroll(pane.term, fitAddon, bodyEl);
+        // 初始 fit 后显式直发最终尺寸：首次 fit 的 onResize 可能落在 _layoutTime 抑制窗口被丢弃，
+        // 之后的 fit 尺寸未变 onResize 不再触发，会导致后端永远停留在 80x24（nvim 界面混乱）
+        const suppressed = TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300;
+        if (pane.tabId && pane.term.cols && pane.term.rows && !suppressed) {
+            ipcRenderer.send('pty-resize', { tabId: pane.tabId, cols: pane.term.cols, rows: pane.term.rows });
+        }
     }
 
     // 等 CSS 过渡完成（200ms）后再初始 fit，避免拿到中间态尺寸
@@ -392,6 +401,8 @@ function wireTerminalToPane(tab, pane) {
     if (TabManager.activeId === tab.id && pane.focused) {
         setTimeout(() => term.focus(), 150);
     }
+    // 接线完成后再挂一次尺寸结算兜底（覆盖 onResize 被抑制/未变的场景）
+    if (tab.splitRoot) _scheduleSettleResize(tab);
 }
 
 // ── Terminal search ──

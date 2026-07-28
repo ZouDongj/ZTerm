@@ -282,7 +282,7 @@ const TabManager = {
 
         if (tab.splitRoot) {
             const focused = getAllPanes(tab).find(p => p.focused);
-            if (focused) this._reconnectPane(tab, focused);
+            if (focused) this._reconnectPane(tab.id, focused.id);
             return;
         }
 
@@ -300,7 +300,11 @@ const TabManager = {
         }, 500);
     },
 
-    _reconnectPane(tab, pane) {
+    _reconnectPane(tabId, paneId) {
+        const tab = this.tabs.find(t => t.id === tabId);
+        if (!tab) return;
+        const pane = findPane(tab, paneId);
+        if (!pane) return;
         if (pane.tabId) ipcRenderer.send('ssh-disconnect', { tabId: pane.tabId });
         if (pane.term) { try { pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
         const body = document.getElementById('pane-body_' + pane.id);
@@ -1488,7 +1492,9 @@ const TabManager = {
         if (panes.length <= 1) {
             tab.name = panes[0]?.name || tab.name;
         } else {
-            tab.name = panes.map(p => p.name || '').join(' | ');
+            // Tabby updateTitle 语义：pane 名拼接前去重（同一连接/终端的多个 pane 只显示一次）
+            const names = panes.map(p => p.name || '').filter(n => n);
+            tab.name = [...new Set(names)].join(' | ');
         }
         // pane 变动后立即存盘，不等 15s 定时器
         if (typeof saveConfig === 'function') saveConfig();
