@@ -59,7 +59,14 @@ const SHORTCUT_ACTIONS = {
     quickCommands: () => openQC(),
     openSettings: () => openSettings(),
     closeTab: () => {
-        if (!document.querySelector('.overlay.open')) TabManager.closeTab(TabManager.activeId);
+        const tab = TabManager.getActive();
+        if (!tab || tab.type === 'settings') return;
+        if (TabManager.tabs.length <= 1) {
+            // 至少保留一个标签页（ZTerm 不能全空）
+            showToast('至少保留一个标签页');
+            return;
+        }
+        if (!document.querySelector('.overlay.open')) TabManager.closeTab(tab.id);
     },
     closePane: () => {
         const tab = TabManager.getActive();

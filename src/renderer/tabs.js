@@ -260,28 +260,46 @@ const TabManager = {
         if (tab.type === 'settings') {
             document.getElementById('settings-pane')?.classList.remove('active');
         }
-        this.tabs.splice(idx, 1);
-        // 释放主进程内存中的明文凭据（如果有）。克隆出的 tab 不拥有凭据所有权，不撤
-        if (tab._credId && !tab._cloneCred) ipcRenderer.send('revoke-credential', { credId: tab._credId });
-        if (tab.splitRoot) {
-            getAllPanes(tab).forEach(p => {
-                if (p.tabId) { ipcRenderer.send('pty-destroy', { tabId: p.tabId }); delete ptyBuffers[p.tabId]; }
-                if (p.term) try { p.term.dispose(); } catch(e) {}
-            });
-            const split = document.getElementById('split_' + id);
-            if (split) split.remove();
-            tab.splitRoot = null; // 防止残留引用被后续代码误判为仍存活
-        } else {
-            const el = document.getElementById('wrap_' + id);
-            if (el) el.remove();
-            if (tab.tabId) { ipcRenderer.send('pty-destroy', { tabId: tab.tabId }); delete ptyBuffers[tab.tabId]; }
-            if (tab.term) try { tab.term.dispose(); } catch(e) {}
-        }
+        // 关闭动画：tab 元素缩小淡出（200ms cubic-bezier 0.05,0.7,0.1,1，与 panel/pane 同曲线）
+        const tabEl = document.querySelector(`.tab[data-tab="${id}"]`);
+        if (tabEl) tabEl.classList.add('tab-exit');
+        // 算 next tab：必须在 splice 之前算（splice 后 idx 位置会被原 idx+1 占据）
+        // 优先取右侧 (idx+1)，关的是最后一个则取左侧 (idx-1)
+        let next = null;
         if (wasActive) {
-            const next = this.tabs[Math.min(idx, this.tabs.length - 1)];
-            if (next) this.switchTo(next.id);
+            if (idx + 1 < this.tabs.length) {
+                next = this.tabs[idx + 1];
+            } else {
+                next = this.tabs[idx - 1];
+            }
         }
-        this.render();
+        // 立即切到 next（老 wrap 立即 hide，next wrap 立即 show）
+        if (next) this.switchTo(next.id);
+        const doRemove = () => {
+            this.tabs.splice(idx, 1);
+            // 释放主进程内存中的明文凭据（如果有）。克隆出的 tab 不拥有凭据所有权，不撤
+            if (tab._credId && !tab._cloneCred) ipcRenderer.send('revoke-credential', { credId: tab._credId });
+            if (tab.splitRoot) {
+                getAllPanes(tab).forEach(p => {
+                    if (p.tabId) { ipcRenderer.send('pty-destroy', { tabId: p.tabId }); delete ptyBuffers[p.tabId]; }
+                    if (p.term) try { p.term.dispose(); } catch(e) {}
+                });
+                const split = document.getElementById('split_' + id);
+                if (split) split.remove();
+                tab.splitRoot = null; // 防止残留引用被后续代码误判为仍存活
+            } else {
+                const el = document.getElementById('wrap_' + id);
+                if (el) el.remove();
+                if (tab.tabId) { ipcRenderer.send('pty-destroy', { tabId: tab.tabId }); delete ptyBuffers[tab.tabId]; }
+                if (tab.term) try { tab.term.dispose(); } catch(e) {}
+            }
+            this.render();
+        };
+        if (tabEl) {
+            setTimeout(doRemove, 200);
+        } else {
+            doRemove();
+        }
     },
 
     reconnectTab(id) {

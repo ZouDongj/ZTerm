@@ -34,6 +34,8 @@ body{display:flex;justify-content:center;align-items:center;min-height:100vh;fon
 .tab-context-item:hover{background:rgba(var(--accent-rgb),0.08)}
 .tab-context-shortcut{font-size:10px;font-family:'JetBrains Mono',monospace;color:rgba(171,178,191,0.45);background:rgba(255,255,255,0.04);padding:2px 7px;border-radius:4px;flex-shrink:0}
 .tab.bell-flash{animation:bellFlash 0.6s ease-in-out 3}
+/* 关闭动画：tab 元素从 180px 缩小到 0 + 淡出 + 间距归零（其他 tab 平滑填充） */
+.tab.tab-exit{max-width:0;padding-left:0;padding-right:0;margin-left:-2px;margin-right:0;opacity:0;overflow:hidden;pointer-events:none}
 @keyframes bellFlash{0%,100%{background:rgba(255,183,77,0)}50%{background:rgba(255,183,77,0.25)}}
 /* Legacy global drop zone — kept for single-terminal drag */
 .drop-zone{position:absolute;inset:0;z-index:20;pointer-events:none;display:none}
