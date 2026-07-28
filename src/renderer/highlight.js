@@ -3,7 +3,12 @@
 let _highlightRules = [];
 let _highlightSettings = { highlightEnabled: true, highlightAlternateDisable: true };
 let _editingHLId = null;
-let _hlAlternate = false;
+// 按 backend tabId 隔离备用屏幕状态：之前用全局 boolean 会导致一个 tab 进了 vim 暂停所有 tab 的高亮
+const _hlAlternate = new Set();
+
+function clearAlternateScreen(tabId) {
+    if (tabId != null) _hlAlternate.delete(tabId);
+}
 
 function loadHighlightRules() {
     ipcRenderer.once('highlight-rules', (event, { rules, settings }) => {
@@ -154,13 +159,15 @@ function saveHighlightEdit() {
 }
 
 // ── Highlight application (pty-output interception) ──
-function applyHighlight(data) {
+function applyHighlight(data, tabId) {
     if (!_highlightSettings.highlightEnabled || _highlightRules.length === 0) return data;
     // Check alternate screen (vim/htop) — simplified check for alternate screen enter/exit sequences
     if (_highlightSettings.highlightAlternateDisable) {
-        if (data.includes('\x1b[?1049h') || data.includes('\x1b[?47h')) _hlAlternate = true;
-        if (data.includes('\x1b[?1049l') || data.includes('\x1b[?47l')) _hlAlternate = false;
-        if (_hlAlternate) return data;
+        if (tabId != null) {
+            if (data.includes('\x1b[?1049h') || data.includes('\x1b[?47h')) _hlAlternate.add(tabId);
+            if (data.includes('\x1b[?1049l') || data.includes('\x1b[?47l')) _hlAlternate.delete(tabId);
+            if (_hlAlternate.has(tabId)) return data;
+        }
     }
     const enabledRules = _highlightRules.filter(r => r.enabled);
     if (enabledRules.length === 0) return data;

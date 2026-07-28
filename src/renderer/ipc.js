@@ -17,7 +17,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
             if (pane) {
                 if (!tab._contentBuffer) tab._contentBuffer = [];
                 if (pane.term) {
-                    pane.term.write(applyHighlight(data));
+                    pane.term.write(applyHighlight(data, tabId));
                 } else {
                     let _b = ptyBuffers[tabId] || ''; _b += data; if (_b.length > 1048576) _b = _b.slice(-524288); ptyBuffers[tabId] = _b;
                 }
@@ -43,7 +43,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
                     tab.term.write(ptyBuffers[tabId]);
                     delete ptyBuffers[tabId];
                 }
-                tab.term.write(applyHighlight(data));
+                tab.term.write(applyHighlight(data, tabId));
             } else {
                 let _b = ptyBuffers[tabId] || ''; _b += data; if (_b.length > 1048576) _b = _b.slice(-524288); ptyBuffers[tabId] = _b;
             }
@@ -206,6 +206,7 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
 
 // ── IPC: SSH disconnected ──
 ipcRenderer.on('ssh-disconnected', (event, { tabId, rendererId }) => {
+    clearAlternateScreen(tabId);
     if (TabManager._closedTabIds.has(tabId)) {
         TabManager._closedTabIds.delete(tabId);
         return;
@@ -233,6 +234,7 @@ ipcRenderer.on('ssh-disconnected', (event, { tabId, rendererId }) => {
 
 // ── IPC: PTY exit ──
 ipcRenderer.on('pty-exit', (event, { tabId }) => {
+    clearAlternateScreen(tabId);
     if (TabManager._closedTabIds.has(tabId)) {
         TabManager._closedTabIds.delete(tabId);
         return;
