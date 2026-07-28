@@ -170,6 +170,8 @@ function loadSettingsIntoForm() {
     if (bellEl) bellEl.value = config.bell || 'off';
     const blinkEl = document.getElementById('set-blink');
     if (blinkEl) blinkEl.value = config.cursorBlink !== false ? 'on' : 'off';
+    const contrastEl = document.getElementById('set-contrast');
+    if (contrastEl && config.minimumContrastRatio) contrastEl.value = config.minimumContrastRatio;
     // Local shell defaults（选项来自自动探测的 profiles）
     const dsEl = document.getElementById('set-default-shell');
     if (dsEl) {
@@ -219,7 +221,7 @@ function loadSettingsIntoForm() {
     const fallbackEl = document.getElementById('set-fallback-font');
     if (fallbackEl && config.fallbackFont) fallbackEl.value = config.fallbackFont;
     const schemeEl = document.getElementById('set-terminal-scheme');
-    if (schemeEl && config.terminalScheme) schemeEl.value = config.terminalScheme;
+    if (schemeEl) populateTerminalSchemeSelect(schemeEl, config.terminalScheme || 'onedark');
     const accentInput = document.getElementById('set-accent');
     if (accentInput && config.accentColor) {
         accentInput.value = config.accentColor;
@@ -568,7 +570,8 @@ function saveTerminal() {
         .filter(p => { const el = document.getElementById('toggle-shell-' + p.id); return el && !el.classList.contains('on'); })
         .map(p => p.id);
 
-    const config = { cursor, scrollback, bell, cursorBlink, autoCopy, rightClickPaste, richTextCopy, smartCopy, osc52, restoreLocalContent, defaultShell, startupDir, hiddenProfiles };
+    const minimumContrastRatio = parseInt(document.getElementById('set-contrast')?.value) || 4;
+    const config = { cursor, scrollback, bell, cursorBlink, minimumContrastRatio, autoCopy, rightClickPaste, richTextCopy, smartCopy, osc52, restoreLocalContent, defaultShell, startupDir, hiddenProfiles };
     _settingsConfig = { ..._settingsConfig, ...config };
     persistSettings();
 
@@ -577,6 +580,17 @@ function saveTerminal() {
             t.term.options.cursorBlink = cursorBlink;
             t.term.options.cursorStyle = cursor;
             t.term.options.scrollback = scrollback;
+            t.term.options.minimumContrastRatio = minimumContrastRatio;
+        }
+        if (t.splitRoot) {
+            getAllPanes(t).forEach(p => {
+                if (p.term) {
+                    p.term.options.cursorBlink = cursorBlink;
+                    p.term.options.cursorStyle = cursor;
+                    p.term.options.scrollback = scrollback;
+                    p.term.options.minimumContrastRatio = minimumContrastRatio;
+                }
+            });
         }
     });
 }
@@ -610,6 +624,7 @@ function persistSettings() {
         defaultShell: config.defaultShell,
         startupDir: config.startupDir,
         hiddenProfiles: config.hiddenProfiles,
+        minimumContrastRatio: config.minimumContrastRatio,
     });
 }
 

@@ -30,7 +30,7 @@ const DEFAULT_CONFIG = {
         fontSize: 14,
         fontWeight: '450',
         fontWeightBold: '700',
-        theme: 'campbell',
+        theme: 'onedark',
     }
 };
 

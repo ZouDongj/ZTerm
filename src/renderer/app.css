@@ -491,3 +491,4 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 /* Confirm dialog */
 .btn-danger{background:rgba(242,184,181,0.18);border:1px solid rgba(242,184,181,0.18);color:#eed2d0;padding:8px 20px;border-radius:20px;font-size:13px;cursor:pointer;transition:all 0.15s;font-family:inherit}
 .btn-danger:hover{background:rgba(242,184,181,0.28);border-color:rgba(242,184,181,0.28);color:#fef0ef}
+

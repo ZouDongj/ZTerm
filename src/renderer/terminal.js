@@ -65,6 +65,8 @@ function _buildTerminalOptions() {
         fontWeightBold: _clampFontWeight(c.fontWeightBold, '700'),
         lineHeight: c.lineHeight || 1.6,
         scrollback: c.scrollback || 10000,
+        minimumContrastRatio: c.minimumContrastRatio || 4,
+        drawBoldTextInBrightColors: true,
         theme: getTerminalTheme(),
         allowProposedApi: true,
         customGlyphs: true,

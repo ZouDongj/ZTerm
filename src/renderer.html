@@ -190,6 +190,29 @@
               </div>
             </div>
 
+            <div class="settings-section">对比度</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">最小对比度</div>
+                  <div class="settings-card-desc">文本与背景的最低对比度，增大可使暗色文字更亮</div>
+                </div>
+                <div class="settings-card-control">
+                  <select class="styled-select" id="set-contrast" onchange="saveTerminal()">
+                    <option value="1">1 — 关闭</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4" selected>4 — 默认</option>
+                    <option value="5">5</option>
+                    <option value="7">7</option>
+                    <option value="10">10</option>
+                    <option value="15">15</option>
+                    <option value="21">21 — 最大</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
             <div class="settings-section">Bell 通知</div>
             <div class="settings-card">
               <div class="settings-row">
@@ -283,18 +306,6 @@
                 </div>
                 <div class="settings-card-control">
                   <select class="styled-select" id="set-terminal-scheme" onchange="saveAppearance()">
-                    <option value="onedark" selected>One Dark Pro</option>
-                    <option value="snazzy">Snazzy</option>
-                    <option value="tokyonight">Tokyo Night</option>
-                    <option value="catppuccin">Catppuccin Mocha</option>
-                    <option value="gruvbox">Gruvbox Dark</option>
-                    <option value="nord">Nord</option>
-                    <option value="monokai">Monokai</option>
-                    <option value="ayu">Ayu Dark</option>
-                    <option value="kanagawa">Kanagawa Wave</option>
-                    <option value="dracula">Dracula</option>
-                    <option value="solarized">Solarized Dark</option>
-                    <option value="campbell">Campbell</option>
                   </select>
                 </div>
               </div>
