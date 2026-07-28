@@ -9,6 +9,44 @@ function _getLoginScripts(tab, pane) {
     return (profile && profile.loginScripts) || [];
 }
 
+// SSH 连接（含凭据兜底）：主进程重启后 credentialId 句柄全部失效，
+// 没有有效凭据时从 SSH profile 重新注册（明文不经过 renderer）
+function _sshConnectWithCredentials(tab, pane, rendererId) {
+    const isPane = !!pane;
+    const host = isPane ? (pane._sshHost || tab.host) : tab.host;
+    const port = isPane ? (pane._sshPort || tab.port) : tab.port;
+    const user = isPane ? (pane._sshUser || tab.user) : tab.user;
+    const credId = isPane ? (pane._sshCredId || tab._credId) : tab._credId;
+    const pId = isPane ? (pane._sshProfileId || tab.sshProfileId) : tab.sshProfileId;
+    let followCwd = false;
+    if (pId) {
+        const p = (TabManager.sshProfiles || []).find(x => x.id === pId);
+        if (p) followCwd = !!p.followCwd;
+    }
+    const send = (cid) => {
+        ipcRenderer.send('ssh-connect', {
+            profile: { host, port, username: user, credentialId: cid || null, followCwd, loginScripts: _getLoginScripts(tab, pane) },
+            rendererId,
+        });
+    };
+    if (credId) { send(credId); return; }
+    const prof = pId ? (TabManager.sshProfiles || []).find(x => x.id === pId) : null;
+    if (prof && (prof.encryptedPassword || prof.privateKeyPath)) {
+        ipcRenderer.invoke('register-credential', {
+            encryptedPassword: prof.encryptedPassword || '',
+            privateKeyPath: prof.privateKeyPath || '',
+        }).then(({ credId: newCredId }) => {
+            if (newCredId) {
+                if (isPane) pane._sshCredId = newCredId;
+                else tab._credId = newCredId;
+            }
+            send(newCredId);
+        }).catch(() => send(null));
+    } else {
+        send(null);
+    }
+}
+
 // ── Tab Manager ──
 const TabManager = {
     tabs: [],
@@ -184,13 +222,13 @@ const TabManager = {
             loadSettingsIntoForm();
         } else if (tab && tab.splitRoot) {
             const split = document.getElementById('split_' + id);
-            if (split) { split.style.display = 'flex'; this._layoutSplit(tab); }
+            if (split) { split.style.display = 'flex'; this._layoutTime = Date.now(); this._layoutSplit(tab); }
             const focused = getAllPanes(tab).find(p => p.focused);
             if (focused && focused.term) {
                 if (focused.fitAddon) setTimeout(() => {
                     _fitWithScroll(focused.term, focused.fitAddon, document.getElementById('pane-body_' + focused.id));
-                }, 10);
-                setTimeout(() => focused.term.focus(), 100);
+                }, 250);
+                setTimeout(() => focused.term.focus(), 250);
             }
         } else {
             const el = document.getElementById('wrap_' + id);
@@ -258,15 +296,7 @@ const TabManager = {
         this.updateStatus();
         setTimeout(() => {
             if (!this.tabs.find(t => t.id === id)) return;
-            let followCwd = false;
-            if (tab.sshProfileId) {
-                const p = (TabManager.sshProfiles || []).find(x => x.id === tab.sshProfileId);
-                if (p) followCwd = !!p.followCwd;
-            }
-            ipcRenderer.send('ssh-connect', {
-                profile: { host: tab.host, port: tab.port, username: tab.user, credentialId: tab._credId, followCwd, loginScripts: _getLoginScripts(tab) },
-                rendererId: id,
-            });
+            _sshConnectWithCredentials(tab, null, id);
         }, 500);
     },
 
@@ -281,15 +311,7 @@ const TabManager = {
         this.updateStatus();
         setTimeout(() => {
             if (!this.tabs.find(t => t.id === tab.id)) return;
-            let followCwd = false;
-            if (tab.sshProfileId) {
-                const p = (TabManager.sshProfiles || []).find(x => x.id === tab.sshProfileId);
-                if (p) followCwd = !!p.followCwd;
-            }
-            ipcRenderer.send('ssh-connect', {
-                profile: { host: pane._sshHost || tab.host, port: pane._sshPort || tab.port, username: pane._sshUser || tab.user, credentialId: pane._sshCredId || tab._credId, followCwd, loginScripts: _getLoginScripts(tab, pane) },
-                rendererId: pane.requestId,
-            });
+            _sshConnectWithCredentials(tab, pane, pane.requestId);
         }, 500);
     },
 
@@ -419,18 +441,36 @@ const TabManager = {
         const host = pane._sshHost || tab.host;
         const port = pane._sshPort || tab.port;
         const user = pane._sshUser || tab.user;
-        const credId = pane._sshCredId || tab._credId;
+        let credId = pane._sshCredId || tab._credId;
         if (pane.type === 'ssh' && host) {
-            // Look up followCwd from SSH profile
-            let followCwd = false;
-            if (tab.sshProfileId) {
-                const p = (TabManager.sshProfiles || []).find(x => x.id === tab.sshProfileId);
-                if (p) followCwd = !!p.followCwd;
+            const doConnect = (cid) => {
+                let followCwd = false;
+                const pId = pane._sshProfileId || tab.sshProfileId;
+                if (pId) {
+                    const p = (TabManager.sshProfiles || []).find(x => x.id === pId);
+                    if (p) followCwd = !!p.followCwd;
+                }
+                ipcRenderer.send('ssh-connect', {
+                    profile: { host, port, username: user, credentialId: cid || null, followCwd, loginScripts: _getLoginScripts(tab, pane) },
+                    rendererId: pane.requestId,
+                });
+            };
+            // 没有凭据时从 SSH profile 重新注册
+            if (!credId) {
+                const pId = pane._sshProfileId || tab.sshProfileId;
+                const prof = pId ? (TabManager.sshProfiles || []).find(x => x.id === pId) : null;
+                if (prof && (prof.encryptedPassword || prof.privateKeyPath)) {
+                    ipcRenderer.invoke('register-credential', {
+                        encryptedPassword: prof.encryptedPassword || '',
+                        privateKeyPath: prof.privateKeyPath || '',
+                    }).then(({ credId: newCredId }) => {
+                        if (newCredId) pane._sshCredId = newCredId;
+                        doConnect(newCredId);
+                    }).catch(() => doConnect(null));
+                    return;
+                }
             }
-            ipcRenderer.send('ssh-connect', {
-                profile: { host, port, username: user, credentialId: credId, followCwd, loginScripts: _getLoginScripts(tab, pane) },
-                rendererId: pane.requestId,
-            });
+            doConnect(credId);
         } else {
             ipcRenderer.send('pty-create', { shell: pane._command || tab.command || 'powershell.exe', args: pane._args || tab.args || [], cwd: _settingsConfig.startupDir || undefined, requestId: pane.requestId });
         }
@@ -490,6 +530,7 @@ const TabManager = {
         newPane.focused = true;
         this._maximizedPaneId = null;
         tab._newPaneId = newPane.id;
+        this._layoutTime = Date.now();
         this._renderSplit(tab);
         this._spawnBackendForPane(newPane, tab);
         this._updateTabName(tab);
@@ -590,6 +631,7 @@ const TabManager = {
                 body._resizeObserver = obs;
             }
         });
+        this._layoutTime = Date.now();
         this._layoutSplit(tab);
         // Enter animation for newly created pane
         if (tab._newPaneId) {
@@ -603,11 +645,11 @@ const TabManager = {
                 }));
             }
         }
-        requestAnimationFrame(() => requestAnimationFrame(() => {
+        setTimeout(() => {
             allPanes.forEach(p => {
                 if (p.term && p.fitAddon) _fitWithScroll(p.term, p.fitAddon, document.getElementById('pane-body_' + p.id));
             });
-        }));
+        }, 250);
     },
 
     _layoutSplit(tab) {
@@ -644,6 +686,8 @@ const TabManager = {
             return;
         }
         this._addSpanners(tab, tab.splitRoot);
+        // 动画结束后的尺寸结算（onResize 抑制窗口会丢掉动画末的最终尺寸，否则 nvim 等 TUI 界面混乱）
+        _scheduleSettleResize(tab);
     },
 
     _layoutInternal(tab, container, x, y, w, h) {

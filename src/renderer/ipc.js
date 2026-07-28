@@ -87,7 +87,7 @@ ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId }) => {
                 pane.tabId = tabId;
                 wireTerminalToPane(tab, pane);
                 if (pane.term) {
-                    pane.term.write('\x1b[33mConnecting to ' + (pane._sshHost || tab.host || tab.name) + '...\x1b[0m\r\n');
+                    pane.term.write('\x1b[33mConnecting to ' + (pane._sshHost || tab.host || pane.name || tab.name) + '...\x1b[0m\r\n');
                 }
                 return;
             }
@@ -101,6 +101,13 @@ ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId }) => {
 });
 
 // ── IPC: SSH connected ──
+// SSH 展示名：优先 SSH 配置名，不用动态拼接的 tab 名（分屏命名会拼成 "A | B"）
+function _sshDisplayName(tab, pane) {
+    const pId = (pane && pane._sshProfileId) || tab.sshProfileId;
+    const prof = pId ? (TabManager.sshProfiles || []).find(x => x.id === pId) : null;
+    return (prof && prof.name) || (pane && pane.name) || tab.host || tab.name;
+}
+
 ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
     for (const tab of TabManager.tabs) {
         if (tab.splitRoot) {
@@ -112,7 +119,7 @@ ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
                 _updatePaneDot(pane, true);
                 TabManager.render();
                 TabManager.updateStatus();
-                showToast('SSH 已连接: ' + tab.name);
+                showToast('SSH 已连接: ' + _sshDisplayName(tab, pane));
                 return;
             }
         } else if (tab.tabId === tabId || tab.id === rendererId) {
@@ -121,7 +128,7 @@ ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
             if (tab.term) tab.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
             TabManager.render();
             TabManager.updateStatus();
-            showToast('SSH 已连接: ' + tab.name);
+            showToast('SSH 已连接: ' + _sshDisplayName(tab, null));
             return;
         }
     }

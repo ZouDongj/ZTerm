@@ -18,6 +18,30 @@ function _fitWithScroll(term, fitAddon, parentEl) {
     }
 }
 
+// 布局动画（200ms）结束后的尺寸结算：
+// onResize 在 _layoutTime 后 300ms 内会被抑制（terminal.js 内两处），动画结束的最终尺寸会落在
+// 抑制窗口里被丢弃，导致后端停留旧尺寸（分屏后 nvim 界面混乱）。这里在 320ms 后统一重 fit 并显式上报。
+function _scheduleSettleResize(tab) {
+    clearTimeout(tab._resizeSettleTimer);
+    tab._resizeSettleTimer = setTimeout(() => {
+        if (tab.splitRoot) {
+            getAllPanes(tab).forEach(p => {
+                if (p.term && p.fitAddon) {
+                    _fitWithScroll(p.term, p.fitAddon, document.getElementById('pane-body_' + p.id));
+                    if (p.tabId && p.term.cols && p.term.rows) {
+                        ipcRenderer.send('pty-resize', { tabId: p.tabId, cols: p.term.cols, rows: p.term.rows });
+                    }
+                }
+            });
+        } else if (tab.term && tab.fitAddon) {
+            _fitWithScroll(tab.term, tab.fitAddon, tab.term.element ? tab.term.element.parentElement : null);
+            if (tab.tabId && tab.term.cols && tab.term.rows) {
+                ipcRenderer.send('pty-resize', { tabId: tab.tabId, cols: tab.term.cols, rows: tab.term.rows });
+            }
+        }
+    }, 320);
+}
+
 // ── Resize observer helper for single-terminal wraps ──
 function setupWrapResizeObserver(wrap, tab) {
     if (!wrap || !tab.term || !tab.fitAddon) return;
@@ -124,10 +148,11 @@ function wireTerminal(tab, tabId) {
     let _resizeDebounce = null;
     term.onResize(({ cols, rows }) => {
         if (TabManager._maximizing) return;
+        if (TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300) return;
         clearTimeout(_resizeDebounce);
         _resizeDebounce = setTimeout(() => {
             ipcRenderer.send('pty-resize', { tabId, cols, rows });
-        }, 100);
+        }, 150);
     });
 
     // Fallback resize after 1s — covers slow-starting shells that missed the initial resize
@@ -262,7 +287,8 @@ function wireTerminalToPane(tab, pane) {
         _fitWithScroll(pane.term, fitAddon, bodyEl);
     }
 
-    setTimeout(() => applyFit(), 100);
+    // 等 CSS 过渡完成（200ms）后再初始 fit，避免拿到中间态尺寸
+    setTimeout(() => applyFit(), 300);
 
     // Disconnect any previous ResizeObserver on this body to avoid double-fit
     if (bodyEl._resizeObserver) { bodyEl._resizeObserver.disconnect(); }
@@ -281,10 +307,12 @@ function wireTerminalToPane(tab, pane) {
     let _resizeDebounce = null;
     term.onResize(({ cols, rows }) => {
         if (TabManager._maximizing) return;
+        // 分屏布局动画期间（200ms）的中间尺寸不发，等动画稳定后再发
+        if (TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300) return;
         clearTimeout(_resizeDebounce);
         _resizeDebounce = setTimeout(() => {
             ipcRenderer.send('pty-resize', { tabId: pane.tabId, cols, rows });
-        }, 100);
+        }, 150);
     });
 
     term.onData(data => {
