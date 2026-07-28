@@ -513,8 +513,9 @@ function saveAppearance() {
     const animations = getToggle('toggle-animations');
     const showStatusDot = getToggle('toggle-statusdot');
     const terminalScheme = document.getElementById('set-terminal-scheme')?.value || 'onedark';
+    const minimumContrastRatio = parseFloat(document.getElementById('set-contrast')?.value) || 4;
 
-    const config = { fontFamily, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, terminalScheme, theme: 'dark' };
+    const config = { fontFamily, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, terminalScheme, minimumContrastRatio, theme: 'dark' };
     _settingsConfig = { ..._settingsConfig, ...config };
     persistSettings();
 
@@ -538,6 +539,7 @@ function saveAppearance() {
             t.term.options.lineHeight = lineHeight;
             t.term.options.fontWeight = fontWeight;
             t.term.options.fontWeightBold = fontWeightBold;
+            t.term.options.minimumContrastRatio = minimumContrastRatio;
         }
         if (t.splitRoot) {
             getAllPanes(t).forEach(p => {
@@ -547,6 +549,7 @@ function saveAppearance() {
                     p.term.options.lineHeight = lineHeight;
                     p.term.options.fontWeight = fontWeight;
                     p.term.options.fontWeightBold = fontWeightBold;
+                    p.term.options.minimumContrastRatio = minimumContrastRatio;
                 }
             });
         }
@@ -570,8 +573,7 @@ function saveTerminal() {
         .filter(p => { const el = document.getElementById('toggle-shell-' + p.id); return el && !el.classList.contains('on'); })
         .map(p => p.id);
 
-    const minimumContrastRatio = parseInt(document.getElementById('set-contrast')?.value) || 4;
-    const config = { cursor, scrollback, bell, cursorBlink, minimumContrastRatio, autoCopy, rightClickPaste, richTextCopy, smartCopy, osc52, restoreLocalContent, defaultShell, startupDir, hiddenProfiles };
+    const config = { cursor, scrollback, bell, cursorBlink, autoCopy, rightClickPaste, richTextCopy, smartCopy, osc52, restoreLocalContent, defaultShell, startupDir, hiddenProfiles };
     _settingsConfig = { ..._settingsConfig, ...config };
     persistSettings();
 
@@ -580,7 +582,6 @@ function saveTerminal() {
             t.term.options.cursorBlink = cursorBlink;
             t.term.options.cursorStyle = cursor;
             t.term.options.scrollback = scrollback;
-            t.term.options.minimumContrastRatio = minimumContrastRatio;
         }
         if (t.splitRoot) {
             getAllPanes(t).forEach(p => {
@@ -588,7 +589,6 @@ function saveTerminal() {
                     p.term.options.cursorBlink = cursorBlink;
                     p.term.options.cursorStyle = cursor;
                     p.term.options.scrollback = scrollback;
-                    p.term.options.minimumContrastRatio = minimumContrastRatio;
                 }
             });
         }
@@ -609,6 +609,7 @@ function persistSettings() {
         theme: 'dark',
         animations: config.animations,
         showStatusDot: config.showStatusDot,
+        minimumContrastRatio: config.minimumContrastRatio,
     });
     ipcRenderer.send('save-terminal-settings', {
         cursor: config.cursor,
@@ -624,7 +625,6 @@ function persistSettings() {
         defaultShell: config.defaultShell,
         startupDir: config.startupDir,
         hiddenProfiles: config.hiddenProfiles,
-        minimumContrastRatio: config.minimumContrastRatio,
     });
 }
 
