@@ -721,7 +721,7 @@ const TabManager = {
                 el.style.display = '';
             }
         });
-        this._layoutInternal(tab, tab.splitRoot, 0, 0, 100, 100);
+        this._layoutInternal(tab, tab.splitRoot, 0, 0, 100, 100, rootEl);
         rootEl.querySelectorAll('.split-spanner').forEach(s => s.remove());
         if (maximizedPane) {
             const maxEl = rootEl.querySelector('.split-pane[data-pane="' + maximizedPane.id + '"]');
@@ -741,7 +741,7 @@ const TabManager = {
         _scheduleSettleResize(tab);
     },
 
-    _layoutInternal(tab, container, x, y, w, h) {
+    _layoutInternal(tab, container, x, y, w, h, rootEl) {
         container._x = x;
         container._y = y;
         container._w = w;
@@ -760,9 +760,10 @@ const TabManager = {
             const childW = isV ? w : sizes[i];
             const childH = isV ? sizes[i] : h;
             if (child.orientation) {
-                this._layoutInternal(tab, child, childX, childY, childW, childH);
+                this._layoutInternal(tab, child, childX, childY, childW, childH, rootEl);
             } else {
-                const el = document.getElementById('split_' + tab.id)?.querySelector('.split-pane[data-pane="' + child.id + '"]');
+                // 用外层传入的 rootEl，避免每个 leaf 都 getElementById + querySelector
+                const el = rootEl ? rootEl.querySelector('.split-pane[data-pane="' + child.id + '"]') : null;
                 if (el) {
                     if (tab._maximizedPaneId && tab._maximizedPaneId === child.id) {
                         el.style.left = '0.5%';
@@ -1547,8 +1548,16 @@ const TabManager = {
             const names = panes.map(p => p.name || '').filter(n => n);
             tab.name = [...new Set(names)].join(' | ');
         }
-        // pane 变动后立即存盘，不等 15s 定时器
-        if (typeof saveConfig === 'function') saveConfig();
+        // 合并写盘：拖动 / 拆建 pane 等连续触发场景下，idle 内只写一次（不再每次同步 IPC 阻塞渲染）
+        if (typeof requestIdleCallback !== 'undefined') {
+            if (this._saveConfigIdleHandle) cancelIdleCallback(this._saveConfigIdleHandle);
+            this._saveConfigIdleHandle = requestIdleCallback(() => {
+                this._saveConfigIdleHandle = null;
+                if (typeof saveConfig === 'function') saveConfig();
+            });
+        } else if (typeof saveConfig === 'function') {
+            saveConfig();
+        }
     },
 
     _deserializeSplitTree(saved, tab) {
