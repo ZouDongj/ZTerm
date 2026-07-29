@@ -305,7 +305,7 @@ const TabManager = {
             if (tab._credId && !tab._cloneCred) ipcRenderer.send('revoke-credential', { credId: tab._credId });
             if (tab.splitRoot) {
                 getAllPanes(tab).forEach(p => {
-                    if (p.tabId) { ipcRenderer.send('pty-destroy', { tabId: p.tabId }); delete ptyBuffers[p.tabId]; }
+                    if (p.tabId) { this._closedTabIds.add(p.tabId); ipcRenderer.send('pty-destroy', { tabId: p.tabId }); delete ptyBuffers[p.tabId]; }
                     if (p.term) try { p.term.dispose(); } catch(e) {}
                 });
                 const split = document.getElementById('split_' + id);
@@ -314,7 +314,7 @@ const TabManager = {
             } else {
                 const el = document.getElementById('wrap_' + id);
                 if (el) el.remove();
-                if (tab.tabId) { ipcRenderer.send('pty-destroy', { tabId: tab.tabId }); delete ptyBuffers[tab.tabId]; }
+                if (tab.tabId) { this._closedTabIds.add(tab.tabId); ipcRenderer.send('pty-destroy', { tabId: tab.tabId }); delete ptyBuffers[tab.tabId]; }
                 if (tab.term) try { tab.term.dispose(); } catch(e) {}
             }
             this.render();
@@ -341,9 +341,12 @@ const TabManager = {
             if (tab.term) { try { tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
             const wrap = document.getElementById('wrap_' + id);
             if (wrap) wrap.remove();
+            // 显式释放 ptyBuffers（旧 tabId 永远不会再被新连接复用，否则累积 1MB+）
+            if (tab.tabId) delete ptyBuffers[tab.tabId];
         } else if (tab.term) {
-            // 保留内容：写入分隔线，新输出接在旧内容后面
+            // 保留内容：写入分隔线 + 滚到底部让用户看到提示
             tab.term.write('\r\n\x1b[2m─────── 重新连接中… ───────\x1b[0m\r\n');
+            try { tab.term.scrollToBottom(); } catch(e) {}
         }
         tab.tabId = null;
         tab.connected = false;
@@ -365,9 +368,12 @@ const TabManager = {
             if (pane.term) { try { pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
             const body = document.getElementById('pane-body_' + pane.id);
             if (body) body.innerHTML = '';
+            // 显式释放 ptyBuffers
+            if (pane.tabId) delete ptyBuffers[pane.tabId];
         } else if (pane.term) {
-            // 保留内容：写入分隔线，新输出接在旧内容后面
+            // 保留内容：写入分隔线 + 滚到底部
             pane.term.write('\r\n\x1b[2m─────── 重新连接中… ───────\x1b[0m\r\n');
+            try { pane.term.scrollToBottom(); } catch(e) {}
         }
         pane.tabId = null;
         tab.connected = false;

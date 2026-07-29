@@ -3,6 +3,8 @@ let CONFIG_FILE = path.join(process.env.APPDATA || process.env.HOME, 'ZTerm', 'c
 
 // ── PTY output → terminal (shared by PTY and SSH) ──
 const ptyBuffers = {};
+// DevTools 调试钩子：在 Console 用 `Object.keys(window.__ptyBuffers)` 看当前所有 tabId 的 buffer
+if (typeof window !== 'undefined') window.__ptyBuffers = ptyBuffers;
 // ── Terminal color schemes ──
 // 光标固定纯白、选中色跟随强调色（全应用统一），方案只定义背景/前景/16 色
 const TERMINAL_SCHEMES = {
