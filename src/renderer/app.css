@@ -50,7 +50,7 @@ body{display:flex;justify-content:center;align-items:center;min-height:100vh;fon
 .tab:hover .tab-reconnect,.tab.active .tab-reconnect{opacity:0.7}
 .tab-reconnect:hover{opacity:1!important}
 /* 手动重连按钮：默认宽度和透明度都为 0（完全不占位），tab hover 时平滑延展露出 */
-.tab-reconnect-normal{font-size:12px;margin-left:0;cursor:pointer;color:rgba(171,178,191,0.5);max-width:0;opacity:0;overflow:hidden;white-space:nowrap;transition:max-width 0.2s cubic-bezier(0.2,0,0,1),opacity 0.15s ease 0.05s,color 0.15s;flex-shrink:0}
+.tab-reconnect-normal{font-size:12px;margin-left:0;cursor:pointer;color:rgba(171,178,191,0.5);max-width:0;opacity:0;overflow:hidden;white-space:nowrap;transition:max-width 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),opacity 0.15s ease 0.05s,color 0.15s;flex-shrink:0}
 .tab:hover .tab-reconnect-normal{max-width:20px;opacity:0.5}
 .tab-reconnect-normal:hover{opacity:1!important;color:rgb(var(--accent-rgb))}
 #btn-add-tab{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:rgba(171,178,191,0.45);cursor:pointer;font-size:16px;transition:all 0.2s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
@@ -77,12 +77,12 @@ body{display:flex;justify-content:center;align-items:center;min-height:100vh;fon
 /* ── Split panes (absolute positioning — Tabby model) ── */
 .split-root{position:relative;width:100%;height:100%;overflow:hidden;padding:4px;background:#21252b}
 .split-root.resizing .split-pane{transition:none!important}
-.split-pane{position:absolute;display:flex;flex-direction:column;overflow:hidden;border-radius:12px;background:var(--term-bg);box-shadow:0 2px 8px rgba(0,0,0,0.25);transition:left 0.2s cubic-bezier(0.2,0,0,1),top 0.2s cubic-bezier(0.2,0,0,1),width 0.2s cubic-bezier(0.2,0,0,1),height 0.2s cubic-bezier(0.2,0,0,1),opacity 0.2s,transform 0.2s,background 0.2s cubic-bezier(0.2,0,0,1)}
+.split-pane{position:absolute;display:flex;flex-direction:column;overflow:hidden;border-radius:12px;background:var(--term-bg);box-shadow:0 2px 8px rgba(0,0,0,0.25);transition:left 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),top 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),width 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),height 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),opacity 0.2s,transform 0.2s,background 0.2s cubic-bezier(0.05, 0.7, 0.1, 1)}
 .split-root.sync-input .split-pane{outline:1.5px solid rgba(var(--accent-rgb),0.45);outline-offset:-1.5px}
 .split-pane.pane-enter{opacity:0;transform:scale(0.92)}
 .split-pane.pane-exit{opacity:0;transform:scale(0.92);pointer-events:none;z-index:5}
 .split-pane.active{box-shadow:inset 0 0 0 1px rgba(var(--accent-rgb),0.12),0 2px 8px rgba(0,0,0,0.25)}
-.split-pane:not(.active)::after{content:'';position:absolute;inset:0;background:rgba(0,0,0,0.05);pointer-events:none;z-index:10;border-radius:12px;transition:background 0.25s}
+.split-pane:not(.active)::after{content:'';position:absolute;inset:0;background:rgba(0,0,0,0.05);pointer-events:none;z-index:10;border-radius:12px;transition:background 0.2s cubic-bezier(0.05, 0.7, 0.1, 1)}
 .split-pane.maximized{z-index:10;box-shadow:inset 0 0 0 1px rgba(var(--accent-rgb),0.12),0 0 30px rgba(0,0,0,0.25)}
 .split-pane.minimized::after{background:rgba(0,0,0,0.25)}
 .split-spanner{position:absolute;z-index:20;display:flex;align-items:center;justify-content:center;transition:background 0.2s}
@@ -463,14 +463,14 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 
 /* ── Panel tabs (SSH edit etc.) ── */
 .panel-tabs{display:flex;gap:4px;padding:0 20px;position:relative}
-.panel-tab-slider{position:absolute;border-radius:20px;background:rgba(var(--accent-rgb),0.12);transition:left 0.25s cubic-bezier(0.2,0,0,1),width 0.25s cubic-bezier(0.2,0,0,1);pointer-events:none;z-index:0}
+.panel-tab-slider{position:absolute;border-radius:20px;background:rgba(var(--accent-rgb),0.12);transition:left 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),width 0.2s cubic-bezier(0.05, 0.7, 0.1, 1);pointer-events:none;z-index:0}
 .panel-tab{position:relative;z-index:1;padding:6px 14px;font-size:12px;color:rgba(171,178,191,0.4);cursor:pointer;border-radius:20px;transition:color 0.2s;font-weight:450;user-select:none;display:flex;align-items:center;gap:5px}
 .panel-tab:hover{color:rgba(171,178,191,0.7)}
 .panel-tab.active{color:#abb2bf;font-weight:550}
 .panel-tab-badge{font-size:10px;color:rgba(171,178,191,0.3);min-width:14px;text-align:center}
 .panel-tab.active .panel-tab-badge{color:rgba(var(--accent-rgb),0.7)}
 .ssh-tab-panel{display:none}
-.ssh-tab-panel.active{display:flex;animation:tabFadeIn 0.2s ease}
+.ssh-tab-panel.active{display:flex;animation:tabFadeIn 0.2s cubic-bezier(0.05, 0.7, 0.1, 1)}
 #ssh-tab-conn,#ssh-tab-scripts{min-height:300px}
 
 @keyframes tabFadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}

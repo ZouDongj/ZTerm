@@ -8,7 +8,6 @@ function _fitWithScroll(term, fitAddon, parentEl) {
     const rowH = vp && term.rows ? (vp.clientHeight / term.rows) : 20;
     const wasAtBottom = dist < rowH;
     fitAddon.fit();
-    if (vp) { vp.style.width = '100%'; vp.style.right = '0'; }
     if (wasAtBottom) {
         // Defer scroll-to-bottom so xterm has finished rendering the new row count
         requestAnimationFrame(() => {
@@ -134,17 +133,13 @@ function wireTerminal(tab, tabId) {
     tab.term = term;
     tab.fitAddon = fitAddon;
 
-    function applyFit(retries = 10) {
+    function applyFit() {
         if (_spannerDrag || TabManager._maximizing) return;
-        if (retries <= 0) return;
-        if (inner.clientWidth === 0 || inner.clientHeight === 0) {
-            setTimeout(() => applyFit(retries - 1), 50);
-            return;
-        }
         _fitWithScroll(tab.term, fitAddon, inner);
     }
 
-    setTimeout(() => applyFit(), 50);
+    // 首次 fit：等 DOM 布局完成；后续尺寸变化由 setupWrapResizeObserver 覆盖
+    setTimeout(applyFit, 50);
 
     setupWrapResizeObserver(wrap, tab);
 

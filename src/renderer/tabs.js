@@ -69,6 +69,30 @@ const TabManager = {
     _dragTab: null, // { sourceTabId, targetTabId, side: 'left'|'right' }
 
     init() {
+        // 一次性挂 chrome：addBtn / menuBtn（不再每 render 重建）
+        const bar = document.getElementById('tabbar');
+        if (bar) {
+            if (!document.getElementById('btn-add-tab')) {
+                const addBtn = document.createElement('div');
+                addBtn.id = 'btn-add-tab';
+                addBtn.title = '新建标签页（默认终端），Ctrl+Shift+N 选择会话';
+                addBtn.textContent = '+';
+                addBtn.onclick = () => {
+                    const p = getDefaultLocalProfile();
+                    TabManager.createTab({ name: p.name, type: 'local', command: p.command, args: p.args });
+                };
+                bar.appendChild(addBtn);
+            }
+            if (!document.getElementById('btn-menu')) {
+                const menuBtn = document.createElement('div');
+                menuBtn.id = 'btn-menu';
+                menuBtn.title = '菜单';
+                menuBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>';
+                menuBtn.onclick = (e) => { e.stopPropagation(); toggleMenuPopup(); };
+                bar.appendChild(menuBtn);
+            }
+        }
+
         ipcRenderer.once('profiles', async (event, { profiles, sshProfiles, lastTabs }) => {
             // 自动探测本机 shell（Git Bash/WSL 等），保留 config 里探测不到的自定义条目
             let detected = [];
@@ -361,26 +385,7 @@ const TabManager = {
         const bar = document.getElementById('tabbar');
         bar.querySelectorAll('.tab').forEach(el => el.remove());
 
-        let addBtn = document.getElementById('btn-add-tab');
-        if (!addBtn) {
-            addBtn = document.createElement('div');
-            addBtn.id = 'btn-add-tab';
-            addBtn.title = '新建标签页（默认终端），Ctrl+Shift+N 选择会话';
-            addBtn.textContent = '+';
-            addBtn.onclick = () => {
-                const p = getDefaultLocalProfile();
-                TabManager.createTab({ name: p.name, type: 'local', command: p.command, args: p.args });
-            };
-            bar.appendChild(addBtn);
-        }
-        if (!document.getElementById('btn-menu')) {
-            const menuBtn = document.createElement('div');
-            menuBtn.id = 'btn-menu';
-            menuBtn.title = '菜单';
-            menuBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>';
-            menuBtn.onclick = (e) => { e.stopPropagation(); toggleMenuPopup(); };
-            bar.appendChild(menuBtn);
-        }
+        const addBtn = document.getElementById('btn-add-tab');
 
         // Render non-settings tabs first, settings tab always at the end (rightmost)
         const sortedTabs = [...this.tabs].sort((a, b) => {
