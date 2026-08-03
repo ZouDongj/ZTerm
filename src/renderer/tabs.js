@@ -2064,35 +2064,6 @@ const TabManager = {
         }
     },
 
-    _deserializeSplitTree(saved, tab, depth = 0) {
-        if (!saved) return null;
-        // 深度上限：恶意/损坏的 config 嵌套过深会栈溢出；50 层远超任何正常使用
-        if (depth > 50) {
-            console.warn('[deserializeSplitTree] depth limit exceeded, truncating');
-            return null;
-        }
-        if (saved.orientation) {
-            return {
-                orientation: saved.orientation,
-                children: saved.children.map(c => this._deserializeSplitTree(c, tab, depth + 1)),
-                ratios: saved.ratios,
-            };
-        }
-        const id = 'p_' + (this._paneCounter++);
-        const isSSH = saved.paneType === 'ssh' || !!saved.sshHost;
-        return {
-            id, requestId: id,
-            tabId: null, term: null, fitAddon: null, focused: false,
-            name: saved.name || tab.name,
-            type: isSSH ? 'ssh' : (saved.paneType || 'local'),
-            connected: !isSSH, // local 直接在线，SSH 等握手
-            _sshHost: saved.sshHost, _sshPort: saved.sshPort, _sshUser: saved.sshUser,
-            _sshProfileId: saved.sshProfileId,
-            _command: isSSH ? '' : (saved.command || ''),
-            _args: isSSH ? [] : (saved.args || []),
-        };
-    },
-
     _restoreSplitTab(tabData) {
         const id = 't_' + (this._counter++);
         const tab = {
@@ -2107,7 +2078,10 @@ const TabManager = {
                 sshProfileId: tabData.sshProfileId,
             });
         }
-        tab.splitRoot = this._deserializeSplitTree(tabData.splitRoot, tab);
+        tab.splitRoot = deserializeSplitNode(tabData.splitRoot, {
+            defaultName: tab.name,
+            nextPaneId: () => 'p_' + (this._paneCounter++),
+        });
         // P3：异常树防御——反序列化后 normalize；空树（0 叶子）不允许进入运行态，
         // 否则关闭唯一 pane 会变成无法关闭的空分屏死 tab。退化后按普通 tab 恢复。
         if (tab.splitRoot) {

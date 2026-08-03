@@ -67,25 +67,13 @@ document.addEventListener('keydown', e => {
 // ── Save / Periodic ──
 // L4：返回 Promise——退出流程需要等待落盘完成，不能 fire-and-forget
 function saveConfig() {
-    const _ser = (node) => {
-        if (!node) return null;
-        if (node.orientation) {
-            return { orientation: node.orientation, children: node.children.map(_ser), ratios: node.ratios };
-        }
-        const isSSH = node.type === 'ssh' || !!node._sshHost;
-        return {
-            type: 'leaf', name: node.name, paneType: isSSH ? 'ssh' : (node.type || 'local'),
-            sshHost: node._sshHost, sshPort: node._sshPort, sshUser: node._sshUser, sshProfileId: node._sshProfileId,
-            command: isSSH ? '' : (node._command || ''), args: isSSH ? [] : (node._args || []),
-        };
-    };
     const tabs = TabManager.tabs
         .filter(t => t.type !== 'settings')
         .map((t, i) => {
             let saveName = t.name;
             const entry = { name: saveName, type: t.type, command: t.command || 'powershell.exe', args: t.args || [], content: t.splitRoot ? [] : (t._contentBuffer || []) };
             if (t.splitRoot) {
-                entry.splitRoot = _ser(t.splitRoot);
+                entry.splitRoot = serializeSplitNode(t.splitRoot);
             }
             if (t.type === 'ssh') {
                 entry.host = t.host; entry.port = t.port; entry.user = t.user;
