@@ -465,13 +465,13 @@ fn merge_value(base: &mut Value, over: &Value) {
     }
 }
 
-/// 校验并合并用户配置：根值非对象视为损坏（返回默认配置 + corrupt 标记），
+/// 校验并合并用户配置：根值非对象视为损坏（返回 Null + corrupt 标记），
 /// 对象则合并到默认配置之上。与 load_config 的文件 IO / 备份逻辑分离，便于单测。
 fn sanitize_config(raw: Value) -> (Value, bool) {
     // M2：根值必须是对象（数组/字符串/数字/null 均视为损坏，
     // 否则字段被静默忽略且不触发备份，后续保存会覆盖用户数据）
     if !raw.is_object() {
-        return (default_config(), true);
+        return (Value::Null, true);
     }
     let mut merged = default_config();
     merge_value(&mut merged, &raw);
@@ -2845,11 +2845,7 @@ mod tests {
             let raw_desc = format!("{:?}", raw);
             let (cfg, corrupt) = sanitize_config(raw);
             assert!(corrupt, "root {} should be marked corrupt", raw_desc);
-            assert_eq!(
-                cfg,
-                default_config(),
-                "corrupt root must fall back to defaults"
-            );
+            assert!(cfg.is_null(), "corrupt root must not yield a config value");
         }
     }
 
