@@ -7,7 +7,9 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "start": "tauri dev",
-    "e2e": "node scripts/e2e-check.mjs"
+    "e2e": "node scripts/e2e-check.mjs",
+    "test": "cd src-tauri && cargo test",
+    "verify": "npm run test && npm run e2e"
   },
   "keywords": [
     "terminal",
