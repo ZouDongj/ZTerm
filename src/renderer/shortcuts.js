@@ -1,24 +1,11 @@
-// ZTerm - 快捷键注册表 + 调度 + 自定义 UI + 数据目录/关于页（拆自 renderer.html，纯代码搬运，未改逻辑）
+// ZTerm - 快捷键注册表 + 调度 + 自定义 UI + 数据目录/关于页（纯逻辑见 shortcut-utils.js，由 renderer.html 先加载）
 // ── Keyboard shortcuts ──
 // Capture-phase handler for keys that terminal would otherwise eat
 // ── Keyboard shortcuts ──
 // 必须在 capture 阶段拦截：xterm 会把 F2/Ctrl+W/Ctrl+Tab 等键处理成转义序列
 // 并 stopPropagation，冒泡阶段的监听在终端聚焦时永远收不到。
 function _comboFromEvent(e) {
-    const parts = [];
-    if (e.ctrlKey || e.metaKey) parts.push('Ctrl');
-    if (e.altKey) parts.push('Alt');
-    if (e.shiftKey) parts.push('Shift');
-    // e.code 比 e.key 更可靠——不受键盘布局、Alt 键系统拦截、输入法等影响
-    let key = e.key;
-    if (!key || key === 'Dead' || key === 'Unidentified') {
-        const m = e.code && e.code.match(/^(?:Key|Digit)(\w)$/);
-        key = m ? m[1] : (e.code || '');
-    }
-    if (key === ' ') key = 'Space';
-    else if (key.length === 1) key = key.toUpperCase();
-    parts.push(key);
-    return parts.join('+');
+    return comboFromEvent(e);
 }
 
 // 默认快捷键绑定（用户自定义覆盖见 _settingsConfig.shortcuts）
@@ -46,7 +33,7 @@ const DEFAULT_SHORTCUTS = {
 };
 
 function _getShortcutBindings() {
-    return { ...DEFAULT_SHORTCUTS, ...(_settingsConfig.shortcuts || {}) };
+    return mergeShortcutBindings(DEFAULT_SHORTCUTS, _settingsConfig.shortcuts);
 }
 
 function _cycleTab(delta) {
@@ -198,8 +185,7 @@ const SHORTCUT_LABELS = {
 };
 
 function _comboDisplay(combo) {
-    return combo.replace(/ArrowUp/g, '↑').replace(/ArrowDown/g, '↓')
-        .replace(/ArrowLeft/g, '←').replace(/ArrowRight/g, '→');
+    return comboDisplay(combo);
 }
 
 let _shortcutCapture = null;
