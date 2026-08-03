@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [opensource, main]
+    branches: [tauri-release, main]
   pull_request:
 
 jobs:
