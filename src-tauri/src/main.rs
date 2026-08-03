@@ -86,6 +86,9 @@ async fn main() {
             .inner_size(1100.0, 720.0)
             .min_inner_size(600.0, 400.0)
             .decorations(false)
+            // 窗口/WebView 背景色与主题一致（#21252b）：resize 拖拽期间
+            // WebView 内容未覆盖到的边缘露出默认白色会形成闪烁
+            .background_color(tauri::window::Color(33, 37, 43, 255))
             .enable_clipboard_access()
             .build()?;
 

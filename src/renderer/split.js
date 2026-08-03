@@ -1,6 +1,18 @@
 // ZTerm - 分屏拖拽 + 窗口 resize（纯逻辑函数见 split-layout.js，由 renderer.html 先加载）
-// ── Spanner drag (Tabby style absolute resize) ──
+// ── Window resize：只跟手布局 DOM，抑制 term fit ──
+// 拖拽窗口期间每帧触发 resize：若同时 fit（全屏重绘 + pty-resize 下发），
+// 字符每帧重排 → 终端区域抖动（远程桌面下更明显）。改为拖拽停止 250ms 后
+// 统一由 _scheduleSettleResize（320ms debounce，含 pty-resize 上报）结算一次。
+let _windowResizing = false;
+let _windowResizeTimer = null;
+
 window.addEventListener('resize', () => {
+    _windowResizing = true;
+    clearTimeout(_windowResizeTimer);
+    _windowResizeTimer = setTimeout(() => {
+        _windowResizing = false;
+        TabManager.tabs.forEach(tab => _scheduleSettleResize(tab));
+    }, 250);
     requestAnimationFrame(() => {
         TabManager.tabs.forEach(tab => {
             if (tab.splitRoot) TabManager._layoutSplit(tab);
