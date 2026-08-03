@@ -62,6 +62,9 @@ function normalize(container) {
                     container.ratios.splice(i, 0, child.ratios[j] * ratio);
                     i++;
                 }
+                // 内层循环把 i 推进到了合并区之后；回退一步让外层 i++ 重新
+                // 检查合并区后的下一个兄弟（否则相邻的同向容器会被跳过不合并）
+                i--;
             }
         }
     }
@@ -70,21 +73,19 @@ function normalize(container) {
     container.ratios = container.ratios.map(x => x / s);
 }
 
-function getOffsetRatio(container, index) {
-    let s = 0;
-    for (let i = 0; i < index; i++) s += container.ratios[i];
-    return s;
-}
-
 // 拖拽调整相邻两个 pane 的 ratio，最小比例钳制（拖动不会把 pane 压没）
 function applyDragRatios(r1, r2, deltaRatio, minRatio) {
     let a = r1 + deltaRatio;
     let b = r2 - deltaRatio;
     if (a < minRatio) { b -= minRatio - a; a = minRatio; }
     if (b < minRatio) { a -= minRatio - b; b = minRatio; }
+    // 极端输入（两侧初始和 < minRatio）双钳制会过冲为负，裁到 0 防负尺寸
+    const sum = a + b;
+    if (a < 0) { a = 0; b = sum; }
+    if (b < 0) { b = 0; a = sum; }
     return [a, b];
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { getAllPanes, findPane, getParentOf, normalize, getOffsetRatio, applyDragRatios };
+    module.exports = { getAllPanes, findPane, getParentOf, normalize, applyDragRatios };
 }

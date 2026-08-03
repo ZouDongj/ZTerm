@@ -15,13 +15,39 @@
 
 import { spawn, execSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, copyFileSync, rmSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
 
 const EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
 const PORT = Number(process.argv[3] ?? 9222);
 
 // ── 启动 exe（带 WebView2 远程调试）──
+const DATA_CONFIG = resolve(dirname(EXE), 'data', 'config.json');
+let configBackup = null;
+
+function backupConfig() {
+  // E2E 创建的 tab/ssh profile 会被前端 15s 周期保存进 data/config.json，
+  // 污染下次启动的标签恢复；启动前备份、结束时恢复。
+  try {
+    if (existsSync(DATA_CONFIG)) {
+      configBackup = DATA_CONFIG + '.e2e-bak';
+      copyFileSync(DATA_CONFIG, configBackup);
+    }
+  } catch {}
+}
+
+function restoreConfig() {
+  try {
+    if (configBackup) {
+      copyFileSync(configBackup, DATA_CONFIG);
+      rmSync(configBackup, { force: true });
+    } else {
+      rmSync(DATA_CONFIG, { force: true });
+    }
+  } catch {}
+  configBackup = null;
+}
+
 function killExisting() {
   try { execSync('taskkill /IM zterm.exe /F', { stdio: 'ignore' }); } catch {}
 }
@@ -94,11 +120,24 @@ function check(name, pass, detail = '') {
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}${detail ? `  (${detail})` : ''}`);
 }
 
+async function waitForValue(cdp, expression, expected, timeoutMs = 8000) {
+  // 轮询等待表达式达到期望值（分屏等异步操作在慢机上需要时间，固定 sleep 会假失败）
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await cdp.eval(expression).catch(() => null);
+    if (last === expected) return last;
+    await sleep(300);
+  }
+  return last;
+}
+
 async function main() {
   if (!existsSync(EXE)) throw new Error(`exe 不存在: ${EXE}`);
   console.log(`E2E 检查: ${EXE}\n`);
 
   killExisting();
+  backupConfig();
   startApp();
   const wsUrl = await waitForPage();
   const cdp = new Cdp(wsUrl);
@@ -168,9 +207,60 @@ async function main() {
     check('IPC invoke window_maximize 可达', ipcOk === 'ok', String(ipcOk));
     await cdp.eval(`document.getElementById('win-maximize').click()`); // 还原
     await sleep(1000);
+
+    // 8. 标签页：新增 tab
+    const tabCountBefore = await cdp.eval(`document.querySelectorAll('#tabbar .tab').length`);
+    await cdp.eval(`document.getElementById('btn-add-tab').click()`);
+    await sleep(2000);
+    const tabCountAfter = await cdp.eval(`document.querySelectorAll('#tabbar .tab').length`);
+    check('点击 + 新增标签页', tabCountAfter === tabCountBefore + 1, `${tabCountBefore} -> ${tabCountAfter}`);
+
+    // 9. 分屏：水平分割 → 2 个 pane；再垂直分割 → 3 个 pane（轮询等待，防 pty 未 attach 假失败）
+    await cdp.eval(`TabManager.splitHorizontal()`);
+    const panesAfterH = await waitForValue(cdp, `getAllPanes(TabManager.getActive()).length`, 2);
+    check('水平分割产生 2 个 pane', panesAfterH === 2, `panes=${panesAfterH}`);
+    await cdp.eval(`TabManager.splitVertical()`);
+    const panesAfterV = await waitForValue(cdp, `getAllPanes(TabManager.getActive()).length`, 3);
+    check('垂直分割产生 3 个 pane', panesAfterV === 3, `panes=${panesAfterV}`);
+
+    // 10. 设置页：打开 → settings tab 出现；页面切换
+    await cdp.eval(`openSettings()`);
+    await sleep(1000);
+    const settingsOpen = await cdp.eval(`TabManager.tabs.some(t => t.type === 'settings')`);
+    check('打开设置页', settingsOpen === true, `settings tab=${settingsOpen}`);
+    await cdp.eval(`document.querySelector('.settings-sidebar-item[onclick*="appearance"]').click()`);
+    await sleep(800);
+    const appearanceActive = await cdp.eval(`document.querySelector('.settings-sidebar-item.active')?.getAttribute('onclick')?.includes('appearance')`);
+    check('设置页切换到外观', appearanceActive === true, String(appearanceActive));
+    await cdp.eval(`closeSettingsTab()`);
+    await sleep(800);
+
+    // 11. SSH 失败路径：连接立即拒绝的地址 → ssh-error 事件被处理、前端不崩溃
+    // 用 Tauri event API 直接计数 ssh-error（不依赖 UI 临时状态如 toast，更稳定）
+    await cdp.eval(`window.__sshErrCount = 0; window.__TAURI__.event.listen('ssh-error', () => { window.__sshErrCount = (window.__sshErrCount || 0) + 1; })`);
+    await cdp.eval(`
+      (() => {
+        const existing = TabManager.tabs.find(t => t.type === 'ssh');
+        if (existing) TabManager.closeTab(existing.id);
+        TabManager.sshProfiles = TabManager.sshProfiles || [];
+        TabManager.sshProfiles.push({
+          id: 'e2e-fail', name: 'E2E Fail', type: 'ssh', host: '127.0.0.1', port: 1,
+          username: 'e2e', password: '', encryptedPassword: '', privateKeyPath: '',
+        });
+        connectSSHProfile('e2e-fail');
+        return true;
+      })()
+    `);
+    await sleep(4000);
+    const sshErrCount = await cdp.eval(`window.__sshErrCount`);
+    const sshTabAlive = await cdp.eval(`TabManager.tabs.some(t => t.type === 'ssh')`);
+    const appAlive = await cdp.eval(`typeof TabManager.getActive === 'function'`);
+    check('SSH 连接失败被处理且前端存活', sshTabAlive && appAlive && sshErrCount > 0,
+      `sshTab=${sshTabAlive}, alive=${appAlive}, ssh-error 事件=${sshErrCount}`);
   } finally {
     cdp.close();
     killExisting();
+    restoreConfig();
   }
 
   const failed = results.filter((r) => !r.pass);
@@ -182,4 +272,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(`E2E 失败: ${e.message}`); killExisting(); process.exit(1); });
+main().catch((e) => { console.error(`E2E 失败: ${e.message}`); killExisting(); restoreConfig(); process.exit(1); });
