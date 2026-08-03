@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [opensource, main]
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust (fmt + check + test)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Format check
+        run: cargo fmt -- --check
+
+      - name: Compile check
+        run: cargo check
+
+      - name: Unit tests
+        run: cargo test
+
+  frontend:
+    name: Frontend syntax check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Syntax check renderer scripts
+        run: |
+          node --check src/ipc-polyfill.js
+          node --check src/renderer/main.js
+          node --check src/renderer/tabs.js
+          node --check src/renderer/terminal.js
+          node --check src/renderer/ssh.js
+          node --check src/renderer/sftp.js
+          node --check src/renderer/ipc.js
+          node --check src/renderer/settings.js
+          node --check src/renderer/utils.js
+          node --check src/renderer/state.js
+          node --check src/renderer/shortcuts.js
+          node --check src/renderer/split.js
+          node --check src/renderer/quick-commands.js
+          node --check src/renderer/command-palette.js
+          node --check src/renderer/highlight.js

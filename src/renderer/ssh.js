@@ -1,0 +1,800 @@
+// ZTerm - 会话选择器 + SSH 管理 + 菜单弹窗（拆自 renderer.html，纯代码搬运，未改逻辑）
+
+// 动态填充顶栏"⋮"菜单的快捷键文本：必须用 _getShortcutBindings() 拿当前绑定，
+// 否则用户改过快捷键后菜单显示跟实际不一致
+function updateMenuShortcuts() {
+    const bindings = _getShortcutBindings();
+    document.querySelectorAll('.menu-shortcut[data-action]').forEach(el => {
+        const actionId = el.getAttribute('data-action');
+        const combo = bindings[actionId] || '';
+        el.textContent = combo ? _comboDisplay(combo) : '';
+    });
+}
+
+function toggleMenuPopup() {
+    const popup = document.getElementById('menu-popup');
+    const backdrop = document.getElementById('menu-backdrop');
+    if (popup.classList.contains('open')) {
+        popup.classList.remove('open');
+        backdrop.classList.remove('open');
+        document.body.classList.remove('menu-open');
+        return;
+    }
+    const btn = document.getElementById('btn-menu');
+    if (btn) {
+        const rect = btn.getBoundingClientRect();
+        const popupWidth = 180;
+        popup.style.top = (rect.bottom + 4) + 'px';
+        // Align left edge to button left, expand rightward; fall back to right-aligned if no space
+        if (window.innerWidth - rect.left >= popupWidth) {
+            popup.style.left = rect.left + 'px';
+            popup.style.right = 'auto';
+        } else {
+            popup.style.left = 'auto';
+            popup.style.right = (window.innerWidth - rect.right) + 'px';
+        }
+    }
+    // Disable SFTP menu item when current tab is not SSH
+    const sftpItem = popup.querySelector('[data-action="sftp"]');
+    if (sftpItem) {
+        const tab = TabManager.getActive();
+        const isSSH = tab && (tab.type === 'ssh' || (tab.splitRoot && getAllPanes(tab).some(p => p.type === 'ssh' && p.tabId)));
+        sftpItem.classList.toggle('disabled', !isSSH);
+    }
+    popup.classList.add('open');
+    backdrop.classList.add('open');
+    document.body.classList.add('menu-open');
+}
+function closeMenuPopup() {
+    document.getElementById('menu-popup').classList.remove('open');
+    document.getElementById('menu-backdrop').classList.remove('open');
+    document.body.classList.remove('menu-open');
+}
+function openSFTPFromMenu() {
+    const tab = TabManager.getActive();
+    if (!tab) return;
+    if (tab.splitRoot) {
+        const focused = getAllPanes(tab).find(p => p.focused);
+        if (focused && focused.tabId && focused.type === 'ssh') SFTP.open(focused.tabId);
+    } else if (tab.tabId && tab.type === 'ssh') {
+        SFTP.open(tab.tabId);
+    }
+}
+// Close menu popup on click outside — the transparent backdrop intercepts all mouse events
+// (clicks, hover) so buttons underneath (e.g. "+") are never triggered while menu is open
+document.addEventListener('click', (e) => {
+    const popup = document.getElementById('menu-popup');
+    if (popup && popup.classList.contains('open') && !e.target.closest('.menu-popup') && !e.target.closest('#btn-menu')) {
+        closeMenuPopup();
+    }
+}, true);
+
+
+function openSessionSelector() {
+    document.getElementById('sessions-search').value = '';
+    renderSessionList();
+    openOverlay('overlay-sessions');
+    setTimeout(() => document.getElementById('sessions-search').focus(), 100);
+}
+
+// 默认本地终端：defaultShell 配置（兼容旧值存 command 的情况）→ 第一个 profile → 兜底 pwsh
+function getDefaultLocalProfile() {
+    const profiles = TabManager.profiles || [];
+    const cur = _settingsConfig.defaultShell || '';
+    return profiles.find(x => x.id === cur) || profiles.find(x => x.command === cur) || profiles[0]
+        || { id: 'powershell', name: 'PowerShell', type: 'local', command: 'powershell.exe', args: [] };
+}
+
+function getSessionItems(filter) {
+    const items = [];
+    const hidden = _settingsConfig.hiddenProfiles || [];
+    // Local profiles（可在设置里隐藏）
+    (TabManager.profiles || []).forEach(p => {
+        if (hidden.includes(p.id)) return;
+        const cmdShort = (p.command || '').split('\\').pop();
+        const detail = (p.args && p.args.length) ? cmdShort + ' ' + p.args.join(' ') : p.command;
+        items.push({
+            id: 'local_' + p.id, name: p.name, detail,
+            type: 'local', badge: '', icon: p.icon === 'local' ? '⊞' : '>_',
+            profile: p,
+        });
+    });
+    // SSH profiles
+    (TabManager.sshProfiles || []).forEach(p => {
+        const detail = `${p.username}@${p.host}:${p.port || 22}`;
+        items.push({
+            id: 'ssh_' + p.id, name: p.name, detail,
+            type: 'ssh', badge: p.group || '', icon: '⚡',
+            sshProfile: p,
+        });
+    });
+    if (filter) {
+        const q = filter.toLowerCase();
+        return items.filter(i =>
+            i.name.toLowerCase().includes(q) ||
+            i.detail.toLowerCase().includes(q) ||
+            i.badge.toLowerCase().includes(q)
+        );
+    }
+    return items;
+}
+
+function renderSessionList(filter) {
+    const list = document.getElementById('sessions-list');
+    const items = getSessionItems(filter);
+    if (items.length === 0) {
+        list.innerHTML = '<div style="padding:20px;text-align:center;color:rgba(171,178,191,0.3);font-size:13px">没有匹配的会话</div>';
+        return;
+    }
+    let html = '';
+    let lastType = '';
+    items.forEach((item, i) => {
+        if (item.type !== lastType) {
+            html += `<div class="panel-section-title">${item.type === 'local' ? '本地终端' : 'SSH 连接'}</div>`;
+            lastType = item.type;
+        }
+        html += `<div class="panel-item" data-index="${i}" data-session-id="${item.id}" onclick="selectSession('${item.id}')" onmouseenter="selectPanelItem(this)">
+          <div class="panel-item-icon ${item.type === 'ssh' ? 'ssh' : 'loc'}">${item.icon}</div>
+          <div class="panel-item-info">
+            <div class="panel-item-name">${escHtml(item.name)}</div>
+            <div class="panel-item-detail">${escHtml(item.detail)}</div>
+          </div>
+          ${item.badge ? `<span class="panel-item-badge">${escHtml(item.badge)}</span>` : ''}
+        </div>`;
+    });
+    list.innerHTML = html;
+    // Pre-select the default local profile (fallback: first item)
+    const defId = 'local_' + getDefaultLocalProfile().id;
+    const target = list.querySelector(`[data-session-id="${defId}"]`) || list.querySelector('.panel-item');
+    if (target) target.setAttribute('data-selected', '');
+}
+
+function filterSessions(query) {
+    renderSessionList(query);
+}
+
+function selectPanelItem(el) {
+    const list = document.getElementById('sessions-list');
+    list.querySelectorAll('.panel-item').forEach(i => i.removeAttribute('data-selected'));
+    el.setAttribute('data-selected', '');
+}
+
+function selectSession(sessionId) {
+    const items = getSessionItems();
+    const item = items.find(i => i.id === sessionId);
+    if (!item) return;
+    closeAllOverlays();
+    if (item.type === 'local') {
+        TabManager.createTab({ name: item.name, type: 'local', command: item.profile.command, args: item.profile.args });
+    } else {
+        // SSH: 注册凭据到主进程拿 credentialId，明文密码不回传 renderer
+        const p = item.sshProfile;
+        if (p.encryptedPassword || p.privateKeyPath) {
+            ipcRenderer.invoke('register-credential', {
+                encryptedPassword: p.encryptedPassword || '',
+                privateKeyPath: p.privateKeyPath || '',
+            }).then(({ credId, error }) => {
+                if (error || !credId) {
+                    showToast('凭据注册失败: ' + (error || 'unknown'), true);
+                    return;
+                }
+                TabManager.createTab({
+                    name: p.name, type: 'ssh',
+                    host: p.host, port: p.port, user: p.username,
+                    credId, sshProfileId: p.id,
+                });
+            });
+        } else {
+            TabManager.createTab({
+                name: p.name, type: 'ssh',
+                host: p.host, port: p.port, user: p.username,
+                credId: null, sshProfileId: p.id,
+            });
+        }
+    }
+}
+
+// ── SSH Manager ──
+let _editingSSHId = null;
+
+function openSSHManager() {
+    renderSSHManager();
+    openOverlay('overlay-ssh-manager');
+}
+
+function getSSHGroups() {
+    const profiles = TabManager.sshProfiles || [];
+    const groups = {};
+    profiles.forEach(p => {
+        const g = p.group || '默认';
+        if (!groups[g]) groups[g] = [];
+        groups[g].push(p);
+    });
+    return groups;
+}
+
+function renderSSHManager() {
+    const list = document.getElementById('ssh-manager-list');
+    const groups = getSSHGroups();
+    const groupNames = Object.keys(groups);
+    if (groupNames.length === 0) {
+        list.innerHTML = '<div style="padding:30px;text-align:center;color:rgba(171,178,191,0.3);font-size:13px">暂无 SSH 连接<br><span style="font-size:11px;cursor:pointer;color:rgba(var(--accent-rgb),0.5);margin-top:8px;display:inline-block" onclick="openSSHEdit(true)">+ 添加第一个连接</span></div>';
+        return;
+    }
+    let html = '';
+    groupNames.forEach(gname => {
+        const items = groups[gname];
+        html += `<div class="ssh-group">
+          <div class="ssh-group-header" onclick="toggleSSHGroup(this)">
+            <svg class="group-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+            <span class="group-name-text">${escHtml(gname)}</span>
+            <button class="group-rename" title="重命名分组" onclick="event.stopPropagation();startRenameGroup(this,'${escJsString(gname)}')"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+            <span class="ssh-group-count">${items.length}</span>
+          </div>
+          <div class="ssh-group-items">`;
+        items.forEach(p => {
+            html += `<div class="ssh-item">
+              <div class="ssh-item-icon">⚡</div>
+              <div class="ssh-item-info" style="cursor:pointer" onclick="openSSHEdit(false,'${p.id}')">
+                <div class="ssh-item-name">${escHtml(p.name)}</div>
+                <div class="ssh-item-detail">${escHtml(p.username)}@${escHtml(p.host)}:${p.port||22} ${p.authType==='key'?'🔑':''}</div>
+              </div>
+              <button class="ssh-item-btn connect" title="连接" onclick="event.stopPropagation();connectSSHProfile('${p.id}')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
+              <button class="ssh-item-btn" title="编辑" onclick="openSSHEdit(false,'${p.id}')"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+              <button class="ssh-item-btn danger" title="删除" onclick="deleteSSHProfile('${p.id}')">×</button>
+            </div>`;
+        });
+        html += '</div></div>';
+    });
+    list.innerHTML = html;
+    // Also refresh the settings page SSH list if visible
+    setTimeout(() => {
+        if (document.getElementById('settings-ssh-list')) renderSSHManagerInSettings();
+    }, 0);
+}
+
+function toggleSSHGroup(header) {
+    // Ignore if clicking on input
+    if (header.querySelector('input')) return;
+    header.classList.toggle('collapsed');
+    const items = header.nextElementSibling;
+    if (items) items.classList.toggle('collapsed');
+}
+
+function startRenameGroup(btn, oldName) {
+    const header = btn.closest('.ssh-group-header');
+    const nameSpan = header.querySelector('.group-name-text');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'group-name-input inline-edit';
+    input.value = oldName;
+    nameSpan.replaceWith(input);
+    btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#66bb6a" stroke-width="2.5"><path d="M5 13l4 4L19 7"/></svg>';
+    btn.style.color = '';
+    input.focus();
+    input.select();
+    // 保留原始 onclick 字符串（HTML 属性），Esc 时还原——
+    // 否则 finish(false) 后残留的 btn.onclick 闭包会在下次点击时执行 finish(true) 完成路径，
+    // 而非重新进入重命名
+    const originalOnClick = btn.getAttribute('onclick');
+
+    const finish = (save) => {
+        const newName = save ? input.value.trim() : oldName;
+        const span = document.createElement('span');
+        span.className = 'group-name-text';
+        span.textContent = newName || oldName;
+        input.replaceWith(span);
+        btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+        btn.style.color = '';
+        // 还原原始 onclick（被 startRenameGroup 覆盖的 HTML 属性），
+        // 否则下次点击残留的 finish 闭包走完成路径而非重新重命名
+        btn.onclick = null;
+        if (originalOnClick) btn.setAttribute('onclick', originalOnClick);
+
+        if (save && newName && newName !== oldName) {
+            const profiles = TabManager.sshProfiles || [];
+            let changed = false;
+            profiles.forEach(p => {
+                if (p.group === oldName) { p.group = newName; changed = true; }
+            });
+            if (changed) {
+                TabManager.sshProfiles = profiles;
+                ipcRenderer.send('save-ssh-profiles', { sshProfiles: profiles });
+                ipcRenderer.once('ssh-profiles-saved', () => {
+                    renderSSHManager();
+                    showToast('分组已重命名');
+                });
+            }
+        }
+    };
+
+    btn.onclick = (e) => { e.stopPropagation(); finish(true); };
+    input.addEventListener('blur', () => finish(true));
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+    });
+}
+
+function collapseAllGroups() {
+    document.querySelectorAll('#ssh-manager-list .ssh-group-header').forEach(h => h.classList.add('collapsed'));
+    document.querySelectorAll('#ssh-manager-list .ssh-group-items').forEach(i => i.classList.add('collapsed'));
+}
+
+function expandAllGroups() {
+    document.querySelectorAll('#ssh-manager-list .ssh-group-header').forEach(h => h.classList.remove('collapsed'));
+    document.querySelectorAll('#ssh-manager-list .ssh-group-items').forEach(i => i.classList.remove('collapsed'));
+}
+
+// 已配密码的状态控制：dirty=true 表示用户在"已配"状态下点过修改按钮
+// 之后才允许 saveSSHEdit 真正写新密码；false 表示保留原 encryptedPassword
+let _sshPwdDirty = false;
+
+function _updatePwdBtnVisibility() {
+    const inputEl = document.getElementById('ssh-edit-password');
+    const eyeBtn = document.getElementById('ssh-pwd-inline-eye');
+    const saveBtn = document.getElementById('ssh-pwd-inline-save');
+    const hasText = inputEl && inputEl.value.length > 0;
+    // 👁 和 ✓ 有内容时显示；× 始终显示（无条件退出）
+    if (eyeBtn) eyeBtn.classList.toggle('show', hasText);
+    if (saveBtn) saveBtn.classList.toggle('show', hasText && !!_editingSSHId);
+}
+
+function _renderPasswordField(mode) {
+    const statusEl = document.getElementById('ssh-pwd-status');
+    const inputEl = document.getElementById('ssh-edit-password');
+    const saveBtn = document.getElementById('ssh-pwd-inline-save');
+    const cancelBtn = document.getElementById('ssh-pwd-inline-cancel');
+    const eyeBtn = document.getElementById('ssh-pwd-inline-eye');
+    if (mode === 'view') {
+        statusEl.style.display = 'flex';
+        inputEl.style.display = 'none';
+        [saveBtn, cancelBtn, eyeBtn].forEach(b => { if (b) b.classList.remove('show'); });
+        if (eyeBtn) { eyeBtn.classList.remove('active'); eyeBtn.title = '显示密码'; }
+        inputEl.value = '';
+        inputEl.type = 'password';
+    } else {
+        statusEl.style.display = 'none';
+        inputEl.style.display = '';
+        inputEl.type = 'password';
+        if (eyeBtn) { eyeBtn.classList.remove('active'); eyeBtn.title = '显示密码'; }
+        inputEl.value = '';
+        inputEl.focus();
+        // × 取消始终显示
+        if (cancelBtn) cancelBtn.classList.add('show');
+        // 👁 和 ✓ 根据内容显示（由 input 事件驱动）
+        _updatePwdBtnVisibility();
+    }
+}
+
+function _togglePasswordVisibility() {
+    const inputEl = document.getElementById('ssh-edit-password');
+    const eyeBtn = document.getElementById('ssh-pwd-inline-eye');
+    if (!inputEl || !eyeBtn) return;
+    const showing = inputEl.type === 'text';
+    // 切换 type 会重置光标位置，先记住原位置再恢复
+    const pos = inputEl.selectionStart != null ? inputEl.selectionStart : inputEl.value.length;
+    inputEl.type = showing ? 'password' : 'text';
+    // 激活态持久高亮（类似 hover 的视觉），提示"显示明文"已开启
+    eyeBtn.classList.toggle('active', !showing);
+    eyeBtn.title = showing ? '显示密码' : '隐藏密码';
+    // 恢复光标（等一帧让 type 切换生效），保持焦点
+    inputEl.focus();
+    requestAnimationFrame(() => {
+        try { inputEl.setSelectionRange(pos, pos); } catch(e) {}
+    });
+}
+
+function _cancelPasswordEdit() {
+    _sshPwdDirty = false;
+    _renderPasswordField('view');
+    showToast('已取消密码修改');
+}
+
+async function _savePasswordInline() {
+    const password = document.getElementById('ssh-edit-password').value;
+    if (!password || !_editingSSHId) return;
+    try {
+        const result = await ipcRenderer.invoke('encrypt-password', { plaintext: password });
+        if (result.error) {
+            showToast('密码加密失败: ' + result.error, true);
+            return;
+        }
+        let profiles = [...(TabManager.sshProfiles || [])];
+        const idx = profiles.findIndex(p => p.id === _editingSSHId);
+        if (idx >= 0) {
+            profiles[idx].encryptedPassword = result.encrypted;
+            TabManager.sshProfiles = profiles;
+            // persist
+            await ipcRenderer.invoke('save-ssh-profiles', { sshProfiles: profiles });
+            _sshPwdDirty = false;
+            _renderPasswordField('view');
+            showToast('密码已保存');
+        }
+    } catch(e) {
+        showToast('密码保存失败: ' + e.message, true);
+    }
+}
+
+function openSSHEdit(isNew, profileId) {
+    _editingSSHId = isNew ? null : profileId;
+    document.getElementById('ssh-edit-title').textContent = isNew ? '添加 SSH 连接' : '编辑 SSH 连接';
+
+    // Remove old custom dropdown wrappers
+    document.querySelectorAll('#overlay-ssh-edit .cust-dropdown').forEach(d => d.remove());
+
+    // Reset form
+    document.getElementById('ssh-edit-name').value = '';
+    document.getElementById('ssh-edit-host').value = '';
+    document.getElementById('ssh-edit-port').value = '22';
+    document.getElementById('ssh-edit-user').value = '';
+    _sshPwdDirty = true; // 新建场景默认 true：用户输入即视为新密码要保存
+    _renderPasswordField('edit'); // 默认显示输入框（新建场景）
+    document.getElementById('ssh-edit-note').value = '';
+    document.getElementById('ssh-edit-keypath').value = '';
+    document.getElementById('ssh-edit-group').value = '';
+    document.getElementById('ssh-edit-auth').selectedIndex = 0;
+    document.getElementById('ssh-edit-followcwd').classList.remove('on');
+    document.getElementById('ssh-edit-clearonconnect').classList.add('on');
+    updateAuthFields();
+
+    // Reset to connection tab
+    switchSSHTab('conn');
+    // Populate group select from existing profiles
+    initGroupCombo();
+    clearLoginScripts();
+
+    // 密码字段：每次 openSSHEdit 重绑（避免被覆盖）
+    const pwdEditBtn = document.getElementById('ssh-pwd-edit-btn');
+    if (pwdEditBtn) pwdEditBtn.onclick = () => { _sshPwdDirty = true; _renderPasswordField('edit'); };
+    const pwdInput = document.getElementById('ssh-edit-password');
+    if (pwdInput) {
+        pwdInput.oninput = () => _updatePwdBtnVisibility();
+        pwdInput.onkeydown = (e) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                _sshPwdDirty = false;
+                _renderPasswordField('view');
+                showToast('已取消密码修改');
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                if (document.getElementById('ssh-pwd-inline-save').classList.contains('show')) {
+                    _savePasswordInline();
+                }
+            }
+        };
+        pwdInput.onblur = () => {
+            if (_sshPwdDirty) {
+                _sshPwdDirty = false;
+                _renderPasswordField('view');
+                showToast('已取消密码修改');
+            }
+        };
+    }
+    // 保存按钮 mousedown 阻止 input 失焦：避免 blur handler 在保存读取 input.value 之前
+    // 把它还原成 view 模式（清空 value + 切回状态行），导致保存丢失密码。
+    // mousedown 时机早于 blur（mousedown → button focus → input blur），用 preventDefault 阻止默认
+    // 焦点切换，input 保持 focus，保存能正常读 value；保存成功后 closeSSHEdit 关面板即可。
+    const saveBtn = document.querySelector('#overlay-ssh-edit button.btn-primary');
+    if (saveBtn) {
+        saveBtn.addEventListener('mousedown', (e) => {
+            if (document.activeElement && document.activeElement.id === 'ssh-edit-password') {
+                e.preventDefault();
+            }
+        });
+    }
+    // 内联保存/取消按钮同样阻止 blur 抢跑
+    const inlineSave = document.getElementById('ssh-pwd-inline-save');
+    const inlineCancel = document.getElementById('ssh-pwd-inline-cancel');
+    const inlineEye = document.getElementById('ssh-pwd-inline-eye');
+    [inlineSave, inlineCancel, inlineEye].forEach(btn => {
+        if (btn) btn.addEventListener('mousedown', (e) => e.preventDefault());
+    });
+
+    if (!isNew && profileId) {
+        const p = (TabManager.sshProfiles || []).find(x => x.id === profileId);
+        if (p) {
+            document.getElementById('ssh-edit-name').value = p.name || '';
+            document.getElementById('ssh-edit-host').value = p.host || '';
+            document.getElementById('ssh-edit-port').value = p.port || '22';
+            document.getElementById('ssh-edit-user').value = p.username || '';
+            document.getElementById('ssh-edit-note').value = p.note || '';
+            document.getElementById('ssh-edit-keypath').value = p.privateKeyPath || '';
+            document.getElementById('ssh-edit-group').value = p.group || '';
+            document.getElementById('ssh-edit-followcwd').classList.toggle('on', !!p.followCwd);
+            document.getElementById('ssh-edit-clearonconnect').classList.toggle('on', p.clearOnConnect !== false);
+            if (p.authType === 'key') {
+                document.getElementById('ssh-edit-auth').value = '密钥';
+            }
+            updateAuthFields();
+            // 已配密码：显示状态行（🔒 密码已加密保存 + 修改按钮），隐藏输入框
+            // _renderPasswordField 必须在 updateAuthFields 之后调用——它操作的就是 updateAuthFields 控制的密码行
+            if (p.encryptedPassword) {
+                _renderPasswordField('view');
+                _sshPwdDirty = false; // 已配密码且用户未点修改 = 不视为修改，保留原密码
+            }
+            // Restore login scripts
+            if (p.loginScripts && p.loginScripts.length > 0) {
+                p.loginScripts.forEach(s => addLoginScriptRow(s.expect, s.send, s.isRegex, s.optional));
+            }
+        }
+    }
+    openOverlay('overlay-ssh-edit');
+    setTimeout(() => {
+        _initTabSlider();
+        convertSelects();
+        document.getElementById('ssh-edit-name').focus();
+    }, 100);
+}
+
+// ── Group combobox ──
+function initGroupCombo() {
+    const input = document.getElementById('ssh-edit-group');
+    const menu = document.getElementById('group-menu');
+    const groups = [...new Set((TabManager.sshProfiles || []).map(p => p.group).filter(Boolean))];
+    let activeIdx = -1;
+
+    function renderOptions(filter) {
+        const q = (filter || '').toLowerCase();
+        const matched = groups.filter(g => g.toLowerCase().includes(q));
+        menu.innerHTML = '';
+        matched.forEach((g, i) => {
+            const div = document.createElement('div');
+            div.className = 'dd-option';
+            div.textContent = g;
+            div.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                input.value = g;
+                menu.classList.remove('open');
+            });
+            menu.appendChild(div);
+        });
+        // "Create new" option when no exact match
+        if (q && !groups.some(g => g.toLowerCase() === q)) {
+            const div = document.createElement('div');
+            div.className = 'dd-option create';
+            div.textContent = '✚ 创建分组 "' + filter + '"';
+            div.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                menu.classList.remove('open');
+            });
+            menu.appendChild(div);
+        }
+        if (matched.length > 0 || q) {
+            menu.classList.add('open');
+        } else {
+            menu.classList.remove('open');
+        }
+        activeIdx = -1;
+    }
+
+    input.addEventListener('focus', () => renderOptions(input.value));
+    input.addEventListener('input', () => renderOptions(input.value));
+    // mousedown 触发 renderOptions：用户 Esc 关掉 menu 后再点 input 时
+    // （input 没失焦，focus/input 事件不触发）能重新弹出下拉框
+    input.addEventListener('mousedown', () => renderOptions(input.value));
+    input.addEventListener('blur', () => setTimeout(() => menu.classList.remove('open'), 150));
+    input.addEventListener('keydown', (e) => {
+        const items = [...menu.querySelectorAll('.dd-option')];
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            activeIdx = Math.min(activeIdx + 1, items.length - 1);
+            items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            activeIdx = Math.max(activeIdx - 1, 0);
+            items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+        } else if (e.key === 'Enter' && activeIdx >= 0) {
+            e.preventDefault();
+            items[activeIdx].click();
+        } else if (e.key === 'Escape') {
+            e.stopPropagation();
+            menu.classList.remove('open');
+        }
+    });
+}
+function updateAuthFields() {
+    const isKey = document.getElementById('ssh-edit-auth').value === '密钥';
+    document.getElementById('ssh-pwd-row').style.display = isKey ? 'none' : '';
+    document.getElementById('ssh-key-row').style.display = isKey ? '' : 'none';
+}
+
+function switchSSHTab(name) {
+    document.querySelectorAll('.panel-tab').forEach(t => t.classList.toggle('active', t.getAttribute('data-tab') === name));
+    document.querySelectorAll('.ssh-tab-panel').forEach(p => p.classList.toggle('active', p.id === 'ssh-tab-' + name));
+    // Animate pill slider
+    const targetTab = document.querySelector('.panel-tab[data-tab="' + name + '"]');
+    const tabsEl = document.getElementById('ssh-edit-tabs');
+    const slider = document.getElementById('panel-tab-slider');
+    if (targetTab && tabsEl && slider) {
+        const tr = targetTab.getBoundingClientRect();
+        const pr = tabsEl.getBoundingClientRect();
+        slider.style.left = (tr.left - pr.left) + 'px';
+        slider.style.top = (tr.top - pr.top) + 'px';
+        slider.style.width = tr.width + 'px';
+        slider.style.height = tr.height + 'px';
+    }
+    if (name === 'scripts') {
+        requestAnimationFrame(() => _updateLSBadge());
+    }
+}
+
+// Initialize slider position when panel opens
+function _initTabSlider() {
+    const activeTab = document.querySelector('.panel-tab.active');
+    const tabsEl = document.getElementById('ssh-edit-tabs');
+    const slider = document.getElementById('panel-tab-slider');
+    if (!activeTab || !tabsEl || !slider) return;
+    const tr = activeTab.getBoundingClientRect();
+    const pr = tabsEl.getBoundingClientRect();
+    slider.style.left = (tr.left - pr.left) + 'px';
+    slider.style.top = (tr.top - pr.top) + 'px';
+    slider.style.width = tr.width + 'px';
+    slider.style.height = tr.height + 'px';
+    // Disable transition on first render so it doesn't fly in from 0,0
+    slider.style.transition = 'none';
+    requestAnimationFrame(() => { slider.style.transition = ''; });
+}
+
+function _updateLSBadge() {
+    const badge = document.getElementById('ls-tab-badge');
+    if (!badge) return;
+    const n = document.querySelectorAll('#login-scripts-container .login-script-row').length;
+    badge.textContent = n > 0 ? n : '';
+}
+
+function clearLoginScripts() {
+    const container = document.getElementById('login-scripts-container');
+    if (container) container.innerHTML = '';
+    _updateLSBadge();
+}
+
+function addLoginScriptRow(expect, send, isRegex, optional) {
+    const container = document.getElementById('login-scripts-container');
+    if (!container) return;
+    const row = document.createElement('div');
+    row.className = 'login-script-row';
+    row.innerHTML =
+        '<input class="ls-expect" placeholder="Expect" value="' + escHtml(expect || '') + '">' +
+        '<input class="ls-send" placeholder="Send" value="' + escHtml(send || '') + '">' +
+        '<span class="ls-toggle' + (isRegex ? ' on' : '') + '" title="正则匹配" onclick="this.classList.toggle(\'on\')">正则</span>' +
+        '<span class="ls-toggle' + (optional ? ' on' : '') + '" title="可选匹配" onclick="this.classList.toggle(\'on\')">可选</span>' +
+        '<button class="ls-del" onclick="deleteLoginScriptRow(this)">×</button>';
+    container.appendChild(row);
+    _updateLSBadge();
+}
+
+function deleteLoginScriptRow(btn) {
+    const row = btn.closest('.login-script-row');
+    if (row) { row.remove(); _updateLSBadge(); }
+}
+
+function collectLoginScripts() {
+    const rows = document.querySelectorAll('#login-scripts-container .login-script-row');
+    const scripts = [];
+    rows.forEach(row => {
+        const expect = row.querySelector('.ls-expect')?.value || '';
+        const send = row.querySelector('.ls-send')?.value || '';
+        const toggles = row.querySelectorAll('.ls-toggle');
+        const isRegex = toggles[0]?.classList.contains('on') || false;
+        const optional = toggles[1]?.classList.contains('on') || false;
+        if (expect || send) {
+            scripts.push({ expect, send, isRegex, optional });
+        }
+    });
+    return scripts;
+}
+
+function closeSSHEdit() {
+    closeOverlay('overlay-ssh-edit');
+}
+
+async function saveSSHEdit() {
+    const name = document.getElementById('ssh-edit-name').value.trim();
+    const host = document.getElementById('ssh-edit-host').value.trim();
+    const port = parseInt(document.getElementById('ssh-edit-port').value) || 22;
+    const username = document.getElementById('ssh-edit-user').value.trim();
+    // 密码：仅当用户点过"修改"按钮（_sshPwdDirty=true）才读 input 值；
+    // 已配状态下未点修改 = 保留原密码；点过修改但清空 input = 保留原密码（清空=不删）
+    const password = _sshPwdDirty ? document.getElementById('ssh-edit-password').value : '';
+    const note = document.getElementById('ssh-edit-note').value.trim();
+    const group = document.getElementById('ssh-edit-group').value.trim();
+    const authType = document.getElementById('ssh-edit-auth').value === '密钥' ? 'key' : 'password';
+    const privateKeyPath = document.getElementById('ssh-edit-keypath').value.trim();
+    const followCwd = document.getElementById('ssh-edit-followcwd').classList.contains('on');
+    const clearOnConnect = document.getElementById('ssh-edit-clearonconnect').classList.contains('on');
+
+    if (!name || !host) {
+        showToast('名称和主机地址不能为空', true);
+        return;
+    }
+
+    const doSave = async (encryptedPassword) => {
+        let profiles = [...(TabManager.sshProfiles || [])];
+        const profile = {
+            id: _editingSSHId || ('ssh_' + Date.now()),
+            name, group, host, port, username, authType,
+            encryptedPassword: encryptedPassword || '',
+            privateKeyPath: authType === 'key' ? privateKeyPath : '',
+            note, followCwd, clearOnConnect,
+            loginScripts: collectLoginScripts(),
+        };
+
+        if (_editingSSHId) {
+            const idx = profiles.findIndex(p => p.id === _editingSSHId);
+            if (idx >= 0) {
+                profile.id = _editingSSHId;
+                profiles[idx] = profile;
+            } else {
+                profiles.push(profile);
+            }
+        } else {
+            profiles.push(profile);
+        }
+
+        TabManager.sshProfiles = profiles;
+        await ipcRenderer.invoke('save-ssh-profiles', { sshProfiles: profiles });
+        renderSSHManager();
+        closeSSHEdit();
+        showToast('SSH 连接已保存');
+    };
+
+    if (authType === 'password' && password) {
+        try {
+            const result = await ipcRenderer.invoke('encrypt-password', { plaintext: password });
+            if (result.error) {
+                showToast('密码加密失败: ' + result.error, true);
+                return;
+            }
+            await doSave(result.encrypted);
+        } catch(e) {
+            showToast('密码加密失败', true);
+        }
+    } else {
+        await doSave(_editingSSHId ? (TabManager.sshProfiles.find(p => p.id === _editingSSHId) || {}).encryptedPassword || '' : '');
+    }
+}
+
+function connectSSHProfile(profileId) {
+    closeAllOverlays();
+    const p = (TabManager.sshProfiles || []).find(x => x.id === profileId);
+    if (!p) return;
+    if (p.encryptedPassword || p.privateKeyPath) {
+        ipcRenderer.invoke('register-credential', {
+            encryptedPassword: p.encryptedPassword || '',
+            privateKeyPath: p.privateKeyPath || '',
+        }).then(({ credId, error }) => {
+            if (error || !credId) {
+                showToast('凭据注册失败: ' + (error || 'unknown'), true);
+                return;
+            }
+            TabManager.createTab({
+                name: p.name, type: 'ssh',
+                host: p.host, port: p.port, user: p.username,
+                credId, sshProfileId: p.id,
+            });
+        });
+    } else {
+        TabManager.createTab({
+            name: p.name, type: 'ssh',
+            host: p.host, port: p.port, user: p.username,
+            credId: null, sshProfileId: p.id,
+        });
+    }
+}
+
+function deleteSSHProfile(id) {
+    showConfirm('确定删除此 SSH 连接？', () => {
+        let profiles = (TabManager.sshProfiles || []).filter(p => p.id !== id);
+        TabManager.sshProfiles = profiles;
+        ipcRenderer.once('ssh-profiles-saved', () => {
+            renderSSHManager();
+            showToast('SSH 连接已删除');
+        });
+        ipcRenderer.send('save-ssh-profiles', { sshProfiles: profiles });
+    });
+}
+
+// ── Confirm dialog ──

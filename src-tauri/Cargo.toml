@@ -1,0 +1,28 @@
+[package]
+name = "zterm"
+version = "1.0.4"
+edition = "2021"
+description = "ZTerm - A modern terminal emulator for Windows with SSH management"
+authors = ["zoudongjie <zoudongjie96@163.com>"]
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-dialog = "2"
+russh-sftp = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "sync", "time"] }
+portable-pty = "0.8"
+parking_lot = "0.12"
+regex = "1"
+russh = { version = "0.60", features = ["aws-lc-rs"] }
+anyhow = "1"
+winapi = { version = "0.3", features = ["dpapi", "minwindef", "ntdef", "winbase", "wincrypt", "wingdi", "winnt", "winreg", "winuser"] }
+arboard = "3"
+
+# PoC 2: 验证 portable-pty 本地 shell + Tauri Channel 通信
+# russh 0.60 re-exports russh_keys as russh::key, 不需要单独依赖 russh-keys
