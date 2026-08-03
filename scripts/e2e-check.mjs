@@ -48,7 +48,12 @@ async function waitForPage(timeoutMs = 30000) {
     } catch {}
     await sleep(500);
   }
-  throw new Error(`页面在 ${timeoutMs}ms 内未就绪（exe 是否启动成功？）`);
+  // 诊断：进程与调试端口状态，帮助区分"exe 未启动"与"WebView2 不可用"
+  let procInfo = '(不可用)';
+  try { procInfo = execSync('tasklist /FI "IMAGENAME eq zterm.exe" /FO CSV /NH', { encoding: 'utf8' }).trim() || '(无 zterm 进程)'; } catch {}
+  let portInfo = '(不可用)';
+  try { const r = await fetch(`http://127.0.0.1:${PORT}/json/version`); portInfo = r.ok ? '调试端口已开放' : `HTTP ${r.status}`; } catch { portInfo = '调试端口未开放'; }
+  throw new Error(`页面在 ${timeoutMs}ms 内未就绪。进程: ${procInfo}; ${portInfo}`);
 }
 
 // ── CDP 会话 ──
