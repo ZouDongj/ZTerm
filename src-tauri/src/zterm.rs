@@ -444,7 +444,7 @@ fn default_config() -> Value {
             "fontSize": 14,
             "fontWeight": "450",
             "fontWeightBold": "700",
-            "theme": "onedark"
+            "theme": "dark"
         }
     })
 }
@@ -2809,7 +2809,7 @@ mod tests {
         assert!(names.contains(&"Command Prompt"));
         assert!(cfg["sshProfiles"].as_array().unwrap().is_empty());
         assert!(cfg["lastTabs"].as_array().unwrap().is_empty());
-        assert_eq!(cfg["appearance"]["theme"], "onedark");
+        assert_eq!(cfg["appearance"]["theme"], "dark");
     }
 
     #[test]
@@ -2827,7 +2827,7 @@ mod tests {
         assert_eq!(cfg["profiles"][0]["name"], "Git Bash");
         assert_eq!(cfg["appearance"]["fontSize"], 16);
         // 默认字段保留
-        assert_eq!(cfg["appearance"]["theme"], "onedark");
+        assert_eq!(cfg["appearance"]["theme"], "dark");
         assert!(cfg["lastTabs"].is_array());
         // 自定义字段保留
         assert_eq!(cfg["customKey"]["nested"], true);
