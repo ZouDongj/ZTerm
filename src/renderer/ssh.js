@@ -86,37 +86,9 @@ function getDefaultLocalProfile() {
 }
 
 function getSessionItems(filter) {
-    const items = [];
     const hidden = _settingsConfig.hiddenProfiles || [];
-    // Local profiles（可在设置里隐藏）
-    (TabManager.profiles || []).forEach(p => {
-        if (hidden.includes(p.id)) return;
-        const cmdShort = (p.command || '').split('\\').pop();
-        const detail = (p.args && p.args.length) ? cmdShort + ' ' + p.args.join(' ') : p.command;
-        items.push({
-            id: 'local_' + p.id, name: p.name, detail,
-            type: 'local', badge: '', icon: p.icon === 'local' ? '⊞' : '>_',
-            profile: p,
-        });
-    });
-    // SSH profiles
-    (TabManager.sshProfiles || []).forEach(p => {
-        const detail = `${p.username}@${p.host}:${p.port || 22}`;
-        items.push({
-            id: 'ssh_' + p.id, name: p.name, detail,
-            type: 'ssh', badge: p.group || '', icon: '⚡',
-            sshProfile: p,
-        });
-    });
-    if (filter) {
-        const q = filter.toLowerCase();
-        return items.filter(i =>
-            i.name.toLowerCase().includes(q) ||
-            i.detail.toLowerCase().includes(q) ||
-            i.badge.toLowerCase().includes(q)
-        );
-    }
-    return items;
+    const items = buildSessionItems(TabManager.profiles, TabManager.sshProfiles, hidden);
+    return filterSessionItems(items, filter);
 }
 
 function renderSessionList(filter) {
