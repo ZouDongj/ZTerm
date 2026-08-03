@@ -257,6 +257,17 @@ async function main() {
     const appAlive = await cdp.eval(`typeof TabManager.getActive === 'function'`);
     check('SSH 连接失败被处理且前端存活', sshTabAlive && appAlive && sshErrCount > 0,
       `sshTab=${sshTabAlive}, alive=${appAlive}, ssh-error 事件=${sshErrCount}`);
+
+    // 12. SFTP 面板：打开 → 面板可见 → 关闭
+    await cdp.eval(`SFTP.open('e2e-dummy-tab')`);
+    await sleep(800);
+    const sftpOpen = await cdp.eval(`document.getElementById('overlay-sftp').classList.contains('open')`);
+    const sftpBreadcrumb = await cdp.eval(`document.getElementById('sftp-breadcrumb')?.textContent`);
+    check('SFTP 面板打开', sftpOpen === true, `overlay-sftp.open=${sftpOpen}, breadcrumb=${sftpBreadcrumb}`);
+    await cdp.eval(`SFTP.close()`);
+    await sleep(500);
+    const sftpClosed = await cdp.eval(`!document.getElementById('overlay-sftp').classList.contains('open')`);
+    check('SFTP 面板关闭', sftpClosed === true, `overlay-sftp.open=${!sftpClosed}`);
   } finally {
     cdp.close();
     killExisting();

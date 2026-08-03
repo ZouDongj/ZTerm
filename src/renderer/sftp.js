@@ -50,8 +50,17 @@ const SFTP = {
         // 旧请求的响应不得覆盖当前面板状态
         const myTab = tabId;
         const seq = ++SFTP._reqSeq;
-        const { path: homePath, files, error } = await ipcRenderer.invoke('sftp-open', { tabId });
+        let result;
+        try {
+            result = await ipcRenderer.invoke('sftp-open', { tabId });
+        } catch (e) {
+            // 会话不存在/已断开时 Rust 返回 Err（invoke reject），不能留下未处理 rejection
+            showToast('无法打开 SFTP: ' + (e?.message || '会话不可用'), true);
+            document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载失败</div>';
+            return;
+        }
         if (seq !== SFTP._reqSeq || this._tabId !== myTab) return;
+        const { path: homePath, files, error } = result;
         if (error) {
             showToast(error, true);
             document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载失败</div>';
@@ -94,8 +103,20 @@ async navigate(path) {
     // M3：请求序号 + 归属校验（同 open）
     const myTab = this._tabId;
     const seq = ++SFTP._reqSeq;
-    const { files, error } = await ipcRenderer.invoke('sftp-readdir', { tabId: myTab, path });
+    let result;
+    try {
+        result = await ipcRenderer.invoke('sftp-readdir', { tabId: myTab, path });
+    } catch (e) {
+        // 会话断开时 Rust 返回 Err（invoke reject），显示错误并恢复原内容
+        showToast('无法访问: ' + (e?.message || '会话不可用'), true);
+        if (seq === SFTP._reqSeq && this._tabId === myTab) {
+            this._renderBreadcrumb();
+            this._renderFiles();
+        }
+        return;
+    }
     if (seq !== SFTP._reqSeq || this._tabId !== myTab) return;
+    const { files, error } = result;
     if (error) {
         showToast('无法访问: ' + error, true);
         // 恢复之前的内容
@@ -219,7 +240,15 @@ async navigate(path) {
         const result = await ipcRenderer.invoke('show-save-dialog', { defaultPath: filename });
         if (result.canceled) return;
         const tid = TransferManager.add(filename, 'download', this._tabId, result.filePath);
-        const { error, total } = await ipcRenderer.invoke('sftp-download', { tabId: this._tabId, remotePath, localPath: result.filePath, transferId: tid });
+        let transferResult;
+        try {
+            transferResult = await ipcRenderer.invoke('sftp-download', { tabId: this._tabId, remotePath, localPath: result.filePath, transferId: tid });
+        } catch (e) {
+            TransferManager.cancel(tid);
+            showToast('下载失败: ' + (e?.message || '会话不可用'), true);
+            return;
+        }
+        const { error, total } = transferResult;
         if (error) {
             TransferManager.cancel(tid);
             if (error === 'Transfer cancelled') {
@@ -236,7 +265,15 @@ async navigate(path) {
         const filename = localPath.split(/[\\/]/).pop();
         const remotePath = (this._path === '/' ? '' : this._path) + '/' + filename;
         const tid = TransferManager.add(filename, 'upload', this._tabId);
-        const { error } = await ipcRenderer.invoke('sftp-upload', { tabId: this._tabId, localPath, remotePath, transferId: tid });
+        let transferResult;
+        try {
+            transferResult = await ipcRenderer.invoke('sftp-upload', { tabId: this._tabId, localPath, remotePath, transferId: tid });
+        } catch (e) {
+            TransferManager.cancel(tid);
+            showToast('上传失败: ' + (e?.message || '会话不可用'), true);
+            return;
+        }
+        const { error } = transferResult;
         if (error) {
             TransferManager.cancel(tid);
             if (error === 'Transfer cancelled') {
@@ -281,7 +318,14 @@ async navigate(path) {
             if (!removed) { removed = true; row.remove(); }
             if (!name) return;
             const path = (this._path === '/' ? '' : this._path) + '/' + name;
-            const { error } = await ipcRenderer.invoke('sftp-mkdir', { tabId: this._tabId, path });
+            let result;
+            try {
+                result = await ipcRenderer.invoke('sftp-mkdir', { tabId: this._tabId, path });
+            } catch (e) {
+                showToast('创建失败: ' + (e?.message || '会话不可用'), true);
+                return;
+            }
+            const { error } = result;
             if (error) { showToast('创建失败: ' + error, true); return; }
             showToast('目录已创建');
             await this.refresh();

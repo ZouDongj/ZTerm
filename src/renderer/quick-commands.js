@@ -38,11 +38,7 @@ function closeQC() {
 
 function qcFilter() {
     const query = document.getElementById('qc-input').value.toLowerCase();
-    const filtered = _qcCommands.filter(c =>
-        c.name.toLowerCase().includes(query) ||
-        c.group.toLowerCase().includes(query) ||
-        c.command.toLowerCase().includes(query)
-    );
+    const filtered = filterQuickCommands(_qcCommands, query);
     const list = document.getElementById('qc-list');
     if (filtered.length === 0) {
         list.innerHTML = '<div style="padding:30px;text-align:center;color:rgba(171,178,191,0.25);font-size:13px">没有匹配的命令<br><span style="font-size:11px;cursor:pointer;color:rgba(var(--accent-rgb),0.5);margin-top:8px;display:inline-block" onclick="closeQC();openSettings(\'quickcommands\')">+ 添加第一个命令</span></div>';
@@ -67,11 +63,7 @@ function qcSelect(i) {
 
 function qcKeydown(e) {
     const query = document.getElementById('qc-input').value.toLowerCase();
-    const filtered = _qcCommands.filter(c =>
-        c.name.toLowerCase().includes(query) ||
-        c.group.toLowerCase().includes(query) ||
-        c.command.toLowerCase().includes(query)
-    );
+    const filtered = filterQuickCommands(_qcCommands, query);
     if (e.key === 'ArrowDown') { e.preventDefault(); qcSelect(Math.min(_qcSelected + 1, filtered.length - 1)); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); qcSelect(Math.max(_qcSelected - 1, 0)); }
     else if (e.key === 'Enter') { e.preventDefault(); if (filtered[_qcSelected]) qcRun(filtered[_qcSelected].id); }

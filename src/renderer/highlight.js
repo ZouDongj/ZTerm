@@ -182,19 +182,12 @@ function applyHighlightToLine(line, rules) {
     // Collect first match from each rule
     const matches = [];
     for (const rule of rules) {
-        try {
-            let regex;
-            if (rule.isRegExp) {
-                regex = new RegExp(rule.text, rule.isCaseSensitive ? 'gd' : 'gid');
-            } else {
-                const escaped = rule.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                regex = new RegExp(escaped, rule.isCaseSensitive ? 'gd' : 'gid');
-            }
-            const match = regex.exec(line);
-            if (match) {
-                matches.push({ start: match.index, end: match.index + match[0].length, rule });
-            }
-        } catch(e) {}
+        const regex = buildHighlightRegex(rule.text, rule.isRegExp, rule.isCaseSensitive);
+        if (!regex) continue; // 非法正则跳过该规则
+        const match = regex.exec(line);
+        if (match) {
+            matches.push({ start: match.index, end: match.index + match[0].length, rule });
+        }
     }
     if (matches.length === 0) return line;
     // ANSI 序列（CSI/OSC/其他）区间内的匹配全部丢弃——向 OSC 注入颜色码会打断序列，匹配文本会泄漏成可见输出
