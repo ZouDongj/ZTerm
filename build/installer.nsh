@@ -1,5 +1,5 @@
 ; ZTerm - 自定义 NSIS 安装/卸载脚本
-; electron-builder 自动 include 此文件
+; Tauri installerHooks 自动 include 此文件
 ;
 ; 设计目标：
 ; - 覆盖安装（${isUpdated} = true，或 ${Silent} = true）：保留 $INSTDIR\data\ 不删

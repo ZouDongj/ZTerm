@@ -34,13 +34,13 @@ Prerequisites: [Rust](https://rustup.rs/) (stable), [Node.js](https://nodejs.org
 git clone https://github.com/ZouDongj/zterm.git
 cd zterm/ZTerm
 npm install          # installs @tauri-apps/cli
-npx tauri dev        # run in development mode
+npm run dev          # run in development mode
 ```
 
 To build the release installer (NSIS, x64):
 
 ```bash
-npx tauri build
+npm run build
 ```
 
 The installer is written to `src-tauri/target/release/bundle/nsis/`.
