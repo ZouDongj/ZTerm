@@ -130,11 +130,10 @@ fn feed_login_scripts(data: &str, scripts: &mut Vec<LoginScript>) -> Option<Stri
 /// Execute all unconditional scripts (empty expect field) and return their send texts.
 fn execute_unconditional(scripts: &mut Vec<LoginScript>) -> Vec<String> {
     let mut result = Vec::new();
-    let mut i = 0;
-    while i < scripts.len() {
-        if scripts[i].expect.is_empty() {
-            result.push(ensure_newline(&scripts[i].send));
-            scripts.remove(i);
+    while !scripts.is_empty() {
+        if scripts[0].expect.is_empty() {
+            result.push(ensure_newline(&scripts[0].send));
+            scripts.remove(0);
         } else {
             break;
         }
@@ -154,12 +153,9 @@ pub struct SshSession {
     pub writer_tx: mpsc::Sender<Vec<u8>>,
     pub resize_tx: mpsc::Sender<(u16, u16)>,
     pub handle: Arc<russh::client::Handle<SshHandler>>,
-    pub channel_id: russh::ChannelId,
     pub sftp: Option<Arc<russh_sftp::client::SftpSession>>,
     pub sftp_transfer: Option<Arc<russh_sftp::client::SftpSession>>,
     pub transfer_cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
-    pub login_scripts: Vec<LoginScript>,
-    pub follow_cwd: bool,
     pub cwd: Arc<Mutex<Option<String>>>,
 }
 
@@ -1218,12 +1214,9 @@ pub async fn ssh_connect(
                 writer_tx: writer_tx.clone(),
                 resize_tx,
                 handle,
-                channel_id,
                 sftp,
                 sftp_transfer,
                 transfer_cancels: cancels.clone(),
-                login_scripts: login_scripts,
-                follow_cwd: follow_cwd,
                 cwd,
             }),
         );
@@ -2313,7 +2306,7 @@ pub async fn sftp_download(
     // 避免长期运行后残留失效条目
     let init_result: Result<_, String> = async {
         use russh_sftp::protocol::OpenFlags;
-        let mut file = sftp
+        let file = sftp
             .open_with_flags(remote_path, OpenFlags::READ)
             .await
             .map_err(|e| format!("open: {e}"))?;
@@ -2324,7 +2317,7 @@ pub async fn sftp_download(
         // L3：先写本地临时文件，成功后 rename——取消/失败时删除临时文件，
         // 不再残留半截文件冒充完整文件
         let tmp_local = format!("{}.zterm-tmp-{}", local_path, transfer_id_num);
-        let mut local = tokio::fs::File::create(&tmp_local)
+        let local = tokio::fs::File::create(&tmp_local)
             .await
             .map_err(|e| format!("create: {e}"))?;
         Ok::<_, String>((file, metadata, tmp_local, local))
@@ -2446,14 +2439,14 @@ pub async fn sftp_upload(
         // L3：先写远端临时文件，成功后 rename——取消/失败时删除远端临时文件，
         // 不再残留半截文件（也避免 TRUNCATE 直接破坏已存在的同名文件）
         let tmp_remote = format!("{}.zterm-tmp-{}", remote_path, transfer_id_num);
-        let mut file = sftp
+        let file = sftp
             .open_with_flags(
                 &tmp_remote,
                 OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
             )
             .await
             .map_err(|e| format!("open: {e}"))?;
-        let mut local = tokio::fs::File::open(local_path)
+        let local = tokio::fs::File::open(local_path)
             .await
             .map_err(|e| format!("open: {e}"))?;
         Ok::<_, String>((local_meta, tmp_remote, file, local))
