@@ -47,7 +47,7 @@ The installer is written to `src-tauri/target/release/bundle/nsis/`.
 
 ## Verification
 
-`npm run e2e` launches a release build and drives it through the WebView2 debugging protocol to verify that interactive elements actually work at runtime (CSP-effective `unsafe-inline`, compiled `onclick` handlers, window minimize/maximize/restore, menu interaction, IPC reachability). This catches issues that unit tests and syntax checks cannot — e.g. a CSP change that silently disables every inline click handler. Requires Node 22+ and a desktop session. The same checks run in CI after every push.
+`npm run e2e` launches a release build and drives it through the WebView2 debugging protocol to verify that interactive elements actually work at runtime (CSP-effective `unsafe-inline`, compiled `onclick` handlers, window minimize/maximize/restore, menu interaction, IPC reachability). This catches issues that unit tests and syntax checks cannot — e.g. a CSP change that silently disables every inline click handler. Requires Node 22+ and a desktop session (WebView2 cannot initialize on CI runners, so this runs locally rather than in CI).
 
 ## Tech Stack
 

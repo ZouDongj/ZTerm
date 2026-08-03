@@ -30,30 +30,10 @@ jobs:
 
       - name: Unit tests
         run: cargo test
-
-  e2e:
-    name: E2E window interaction
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-
-      - name: Build release
-        working-directory: src-tauri
-        run: cargo build --release
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Run E2E interaction checks
-        run: node scripts/e2e-check.mjs src-tauri/target/release/zterm.exe
+  # E2E window interaction checks (scripts/e2e-check.mjs) intentionally
+  # NOT part of CI: WebView2 requires an interactive desktop session,
+  # which GitHub Actions Windows runners do not provide (the exe starts
+  # but WebView2 never initializes). Run locally with `npm run e2e`.
 
   frontend:
     name: Frontend syntax check
