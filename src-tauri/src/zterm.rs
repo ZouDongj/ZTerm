@@ -284,6 +284,7 @@ fn save_known_hosts(hosts: &Value) {
     }
 }
 
+#[derive(Debug)]
 enum HostKeyStatus {
     Known,
     Unknown,
@@ -293,10 +294,10 @@ enum HostKeyStatus {
     },
 }
 
-fn known_hosts_check(host: &str, port: u16, fingerprint: &str) -> HostKeyStatus {
-    let id = format!("{}:{}", host, port);
-    let hosts = load_known_hosts();
-    match hosts.get(&id) {
+/// 已知主机记录比较（纯逻辑，便于单测）：无记录 → Unknown；
+/// 指纹一致 → Known；不一致 → Mismatch（带旧算法与旧指纹）。
+fn check_known_host_entry(entry: Option<&Value>, fingerprint: &str) -> HostKeyStatus {
+    match entry {
         None => HostKeyStatus::Unknown,
         Some(entry) => {
             let known_fp = entry
@@ -317,6 +318,12 @@ fn known_hosts_check(host: &str, port: u16, fingerprint: &str) -> HostKeyStatus 
             }
         }
     }
+}
+
+fn known_hosts_check(host: &str, port: u16, fingerprint: &str) -> HostKeyStatus {
+    let id = format!("{}:{}", host, port);
+    let hosts = load_known_hosts();
+    check_known_host_entry(hosts.get(&id), fingerprint)
 }
 
 fn known_hosts_trust(host: &str, port: u16, algorithm: &str, fingerprint: &str) {
@@ -442,22 +449,42 @@ fn default_config() -> Value {
     })
 }
 
+/// 递归合并：对象字段逐键合并（用户值优先），非对象整体替换。
+/// 这样用户手写部分字段（如只改 appearance.fontSize）时不会丢掉默认字段。
+fn merge_value(base: &mut Value, over: &Value) {
+    if base.is_object() && over.is_object() {
+        for (k, v) in over.as_object().unwrap() {
+            if let Some(b) = base.get_mut(k) {
+                merge_value(b, v);
+            } else {
+                base[k] = v.clone();
+            }
+        }
+    } else {
+        *base = over.clone();
+    }
+}
+
+/// 校验并合并用户配置：根值非对象视为损坏（返回默认配置 + corrupt 标记），
+/// 对象则合并到默认配置之上。与 load_config 的文件 IO / 备份逻辑分离，便于单测。
+fn sanitize_config(raw: Value) -> (Value, bool) {
+    // M2：根值必须是对象（数组/字符串/数字/null 均视为损坏，
+    // 否则字段被静默忽略且不触发备份，后续保存会覆盖用户数据）
+    if !raw.is_object() {
+        return (default_config(), true);
+    }
+    let mut merged = default_config();
+    merge_value(&mut merged, &raw);
+    (merged, false)
+}
+
 fn load_config() -> Value {
     let path = config_path();
     if path.exists() {
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Ok(raw) = serde_json::from_str::<Value>(&content) {
-                // M2：结构校验——根值必须是对象（数组/字符串/数字/null 均视为损坏，
-                // 否则字段被静默忽略且不触发备份，后续保存会覆盖用户数据）
-                if raw.is_object() {
-                    let mut merged = default_config();
-                    if let Value::Object(ref mut m) = merged {
-                        if let Value::Object(r) = raw {
-                            for (k, v) in r {
-                                m.insert(k.clone(), v.clone());
-                            }
-                        }
-                    }
+                let (merged, corrupt) = sanitize_config(raw);
+                if !corrupt {
                     return merged;
                 }
             }
@@ -2717,5 +2744,246 @@ mod tests {
         // known_hosts 键格式：host:port
         let id = format!("{}:{}", "example.com", 2222);
         assert_eq!(id, "example.com:2222");
+    }
+
+    #[test]
+    fn known_host_entry_unknown() {
+        assert!(matches!(
+            check_known_host_entry(None, "fp1"),
+            HostKeyStatus::Unknown
+        ));
+    }
+
+    #[test]
+    fn known_host_entry_known_when_fingerprint_matches() {
+        let entry = json!({ "algorithm": "ssh-ed25519", "fingerprint": "fp1" });
+        assert!(matches!(
+            check_known_host_entry(Some(&entry), "fp1"),
+            HostKeyStatus::Known
+        ));
+    }
+
+    #[test]
+    fn known_host_entry_mismatch_reports_old_data() {
+        let entry = json!({ "algorithm": "ssh-rsa", "fingerprint": "old-fp" });
+        match check_known_host_entry(Some(&entry), "new-fp") {
+            HostKeyStatus::Mismatch {
+                old_algorithm,
+                old_fingerprint,
+            } => {
+                assert_eq!(old_algorithm, "ssh-rsa");
+                assert_eq!(old_fingerprint, "old-fp");
+            }
+            other => panic!("expected Mismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn known_host_entry_missing_fields_handled() {
+        // 记录缺少 fingerprint/algorithm 字段时不应 panic，且视为不匹配
+        let entry = json!({});
+        match check_known_host_entry(Some(&entry), "fp") {
+            HostKeyStatus::Mismatch {
+                old_algorithm,
+                old_fingerprint,
+            } => {
+                assert!(old_algorithm.is_empty());
+                assert!(old_fingerprint.is_empty());
+            }
+            other => panic!("expected Mismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn default_config_shape() {
+        let cfg = default_config();
+        assert_eq!(cfg["version"], 1);
+        assert!(cfg["profiles"].is_array());
+        let names: Vec<&str> = cfg["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        assert!(names.contains(&"PowerShell"));
+        assert!(names.contains(&"Command Prompt"));
+        assert!(cfg["sshProfiles"].as_array().unwrap().is_empty());
+        assert!(cfg["lastTabs"].as_array().unwrap().is_empty());
+        assert_eq!(cfg["appearance"]["theme"], "onedark");
+    }
+
+    #[test]
+    fn sanitize_config_merges_user_values_over_defaults() {
+        let raw = json!({
+            "version": 1,
+            "profiles": [{ "id": "git-bash", "name": "Git Bash", "type": "local" }],
+            "appearance": { "fontSize": 16 },
+            "customKey": { "nested": true },
+        });
+        let (cfg, corrupt) = sanitize_config(raw);
+        assert!(!corrupt);
+        // 用户字段覆盖默认
+        assert_eq!(cfg["profiles"].as_array().unwrap().len(), 1);
+        assert_eq!(cfg["profiles"][0]["name"], "Git Bash");
+        assert_eq!(cfg["appearance"]["fontSize"], 16);
+        // 默认字段保留
+        assert_eq!(cfg["appearance"]["theme"], "onedark");
+        assert!(cfg["lastTabs"].is_array());
+        // 自定义字段保留
+        assert_eq!(cfg["customKey"]["nested"], true);
+    }
+
+    #[test]
+    fn sanitize_config_rejects_non_object_roots() {
+        for raw in [
+            json!(null),
+            json!([]),
+            json!("string"),
+            json!(42),
+            json!(true),
+        ] {
+            let raw_desc = format!("{:?}", raw);
+            let (cfg, corrupt) = sanitize_config(raw);
+            assert!(corrupt, "root {} should be marked corrupt", raw_desc);
+            assert_eq!(
+                cfg,
+                default_config(),
+                "corrupt root must fall back to defaults"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_config_preserves_ssh_profiles() {
+        let raw = json!({
+            "sshProfiles": [{ "id": "s1", "name": "prod", "host": "example.com", "port": 22 }],
+        });
+        let (cfg, corrupt) = sanitize_config(raw);
+        assert!(!corrupt);
+        let ssh = cfg["sshProfiles"].as_array().unwrap();
+        assert_eq!(ssh.len(), 1);
+        assert_eq!(ssh[0]["host"], "example.com");
+        assert_eq!(ssh[0]["port"], 22);
+    }
+
+    fn script(expect: &str, send: &str) -> LoginScript {
+        LoginScript {
+            expect: expect.into(),
+            send: send.into(),
+            is_regex: false,
+            optional: false,
+        }
+    }
+
+    #[test]
+    fn feed_login_scripts_contains_match_consumes_script() {
+        let mut scripts = vec![script("Password:", "secret")];
+        let send = feed_login_scripts("Password: ", &mut scripts);
+        assert_eq!(send.as_deref(), Some("secret\n"));
+        assert!(scripts.is_empty(), "matched script must be consumed");
+    }
+
+    #[test]
+    fn feed_login_scripts_regex_match() {
+        let mut scripts = vec![LoginScript {
+            expect: r"(\[sudo\] )?password.*".into(),
+            send: "pw".into(),
+            is_regex: true,
+            optional: false,
+        }];
+        let send = feed_login_scripts("[sudo] password for user:", &mut scripts);
+        assert_eq!(send.as_deref(), Some("pw\n"));
+        assert!(scripts.is_empty());
+    }
+
+    #[test]
+    fn feed_login_scripts_invalid_regex_is_no_match() {
+        let mut scripts = vec![LoginScript {
+            expect: "([unclosed".into(),
+            send: "x".into(),
+            is_regex: true,
+            optional: false,
+        }];
+        // 非法正则按不匹配处理：不 panic；非 optional 时脚本保留等待后续输入
+        let send = feed_login_scripts("anything", &mut scripts);
+        assert_eq!(send, None);
+        assert_eq!(scripts.len(), 1);
+    }
+
+    #[test]
+    fn feed_login_scripts_optional_miss_is_consumed() {
+        let mut scripts = vec![LoginScript {
+            expect: "NotPresent".into(),
+            send: "x".into(),
+            is_regex: false,
+            optional: true,
+        }];
+        let send = feed_login_scripts("Hello world", &mut scripts);
+        assert_eq!(send, None);
+        assert!(
+            scripts.is_empty(),
+            "optional script must be dropped on miss"
+        );
+    }
+
+    #[test]
+    fn feed_login_scripts_required_miss_kept_for_later_output() {
+        let mut scripts = vec![script("Password:", "secret")];
+        let send = feed_login_scripts("Hello", &mut scripts);
+        assert_eq!(send, None);
+        // 非 optional 未命中：保留脚本，等待下一次输出再次尝试
+        assert_eq!(scripts.len(), 1);
+        let send = feed_login_scripts("Password:", &mut scripts);
+        assert_eq!(send.as_deref(), Some("secret\n"));
+        assert!(scripts.is_empty());
+    }
+
+    #[test]
+    fn feed_login_scripts_skips_unconditional_entries() {
+        // 空 expect 的条目由 execute_unconditional 负责，feed 阶段跳过
+        let mut scripts = vec![script("", "first"), script("Password:", "secret")];
+        let send = feed_login_scripts("Password:", &mut scripts);
+        assert_eq!(send.as_deref(), Some("secret\n"));
+        assert_eq!(
+            scripts.len(),
+            1,
+            "unconditional entry must be skipped, not consumed"
+        );
+        assert_eq!(scripts[0].send, "first");
+    }
+
+    #[test]
+    fn execute_unconditional_consumes_leading_empty_expects() {
+        let mut scripts = vec![script("", "a"), script("", "b"), script("Password:", "c")];
+        let sends = execute_unconditional(&mut scripts);
+        assert_eq!(sends, vec!["a\n", "b\n"]);
+        assert_eq!(scripts.len(), 1);
+        assert_eq!(scripts[0].expect, "Password:");
+    }
+
+    #[test]
+    fn execute_unconditional_no_op_when_no_leading_empty() {
+        let mut scripts = vec![script("Password:", "c")];
+        let sends = execute_unconditional(&mut scripts);
+        assert!(sends.is_empty());
+        assert_eq!(scripts.len(), 1);
+    }
+
+    #[test]
+    fn base64_decode_invalid_input_no_panic() {
+        // 非法字符被跳过、'=' 截断，不应 panic
+        assert!(base64_decode_raw("!!!").is_empty());
+        assert!(base64_decode_raw("").is_empty());
+        assert_eq!(base64_decode_raw("YWJj"), b"abc");
+        assert_eq!(base64_decode_raw("YWJj=="), b"abc");
+    }
+
+    #[test]
+    fn dpapi_encrypt_decrypt_roundtrip() {
+        // DPAPI 绑定本机用户会话；加密解密同上下文，roundtrip 无副作用
+        let plain = "secret-密码-🔑";
+        let enc = dpapi_encrypt(plain).expect("dpapi encrypt");
+        let dec = dpapi_decrypt(&enc).expect("dpapi decrypt");
+        assert_eq!(String::from_utf8(dec).unwrap(), plain);
     }
 }
