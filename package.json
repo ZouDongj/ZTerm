@@ -6,10 +6,13 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
+    "build:release": "cd src-tauri && cargo build --release",
     "start": "tauri dev",
     "e2e": "node scripts/e2e-check.mjs",
-    "test": "cd src-tauri && cargo test",
-    "verify": "npm run test && npm run e2e"
+    "test": "npm run test:rust && npm run test:frontend",
+    "test:rust": "cd src-tauri && cargo test",
+    "test:frontend": "node --test \"tests/*.test.mjs\"",
+    "verify": "npm run test && npm run build:release && npm run e2e"
   },
   "keywords": [
     "terminal",
