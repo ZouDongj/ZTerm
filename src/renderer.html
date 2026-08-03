@@ -1,0 +1,930 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>ZTerm</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns%3D'http://www.w3.org/2000/svg' viewBox%3D'0 0 512 512' width%3D'512' height%3D'512'%3E %3Crect x%3D'16' y%3D'16' width%3D'480' height%3D'480' rx%3D'112' fill%3D'%2312141c'/%3E %3Cg fill%3D'%23e8e9f1'%3E %3Crect x%3D'96' y%3D'96' width%3D'56' height%3D'56' rx%3D'12'/%3E %3Crect x%3D'160' y%3D'96' width%3D'56' height%3D'56' rx%3D'12'/%3E %3Crect x%3D'224' y%3D'96' width%3D'56' height%3D'56' rx%3D'12'/%3E %3Crect x%3D'288' y%3D'96' width%3D'56' height%3D'56' rx%3D'12'/%3E %3Crect x%3D'352' y%3D'96' width%3D'56' height%3D'56' rx%3D'12'/%3E %3Crect x%3D'288' y%3D'160' width%3D'56' height%3D'56' rx%3D'12'/%3E %3Crect x%3D'224' y%3D'224' width%3D'56' height%3D'56' rx%3D'12'/%3E %3Crect x%3D'160' y%3D'288' width%3D'56' height%3D'56' rx%3D'12'/%3E %3Crect x%3D'96' y%3D'352' width%3D'56' height%3D'56' rx%3D'12'/%3E %3Crect x%3D'160' y%3D'352' width%3D'56' height%3D'56' rx%3D'12'/%3E %3Crect x%3D'224' y%3D'352' width%3D'56' height%3D'56' rx%3D'12'/%3E %3Crect x%3D'288' y%3D'352' width%3D'56' height%3D'56' rx%3D'12'/%3E %3Crect x%3D'352' y%3D'352' width%3D'56' height%3D'56' rx%3D'12' fill%3D'%237ee787'/%3E %3C/g%3E %3C/svg%3E">
+<link rel="stylesheet" href="renderer/xterm.css">
+<link rel="stylesheet" href="renderer/app.css">
+<body>
+<div class="window">
+  <div class="titlebar" data-tauri-drag-region>
+    <div id="tabbar"></div>
+    <div class="win-controls">
+      <button class="win-ctrl" id="win-minimize" onclick="window.electronAPI.minimize()" title="最小化"></button>
+      <button class="win-ctrl" id="win-maximize" onclick="window.electronAPI.maximize()" title="最大化"></button>
+      <button class="win-ctrl win-close" id="win-close" onclick="window.electronAPI.close()" title="关闭"></button>
+    </div>
+  </div>
+  <!-- Menu popup -->
+  <div class="menu-backdrop" id="menu-backdrop" onclick="closeMenuPopup()"></div>
+  <div class="menu-popup" id="menu-popup">
+    <div class="menu-item" onclick="closeMenuPopup();openQC()"><span class="menu-icon">⌘</span><span class="menu-label">快捷命令</span><span class="menu-shortcut" data-action="quickCommands"></span></div>
+    <div class="menu-item" data-action="sftp" onclick="closeMenuPopup();openSFTPFromMenu()"><span class="menu-icon">📁</span><span class="menu-label">SFTP 文件传输</span><span class="menu-shortcut" data-action="sftp"></span></div>
+    <div class="menu-item" onclick="closeMenuPopup();openPalette()"><span class="menu-icon">⌘</span><span class="menu-label">命令面板</span><span class="menu-shortcut" data-action="commandPalette"></span></div>
+    <div class="menu-item" onclick="closeMenuPopup();openSettings()"><span class="menu-icon">⚙</span><span class="menu-label">设置</span><span class="menu-shortcut" data-action="openSettings"></span></div>
+  </div>
+
+  <!-- SFTP Overlay -->
+  <div class="overlay" id="overlay-sftp" onclick="SFTP.close()">
+    <div class="sftp-window" onclick="event.stopPropagation()">
+      <div class="sftp-header">
+        <h2>SFTP</h2>
+        <span class="sftp-conn" id="sftp-conn"></span>
+        <div style="flex:1"></div>
+        <div class="sftp-actions">
+          <button id="sftp-pin-btn" onclick="SFTP.togglePin()" title="锁定当前目录"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6a3 3 0 0 0-6 0v4.76z"/></svg></button>
+          <button onclick="SFTP.refresh()" title="刷新"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+          <button onclick="SFTP.goUp()" title="上级目录"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
+          <button onclick="SFTP.close()" title="关闭"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+        </div>
+      </div>
+      <div class="sftp-breadcrumb-bar">
+        <div class="sftp-breadcrumb" id="sftp-breadcrumb"></div>
+      </div>
+      <div class="sftp-body" id="sftp-body"></div>
+      <div class="sftp-footer">
+        <button onclick="SFTP.upload()">⬆ 上传文件</button>
+        <button onclick="SFTP.mkdir()">📂 新建目录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Transfer Panel Overlay -->
+  <div class="overlay" id="transfer-panel" onclick="TransferManager.closePanel()">
+    <div class="transfer-window" onclick="event.stopPropagation()">
+      <div class="transfer-header">
+        <h2>传输任务</h2>
+        <div style="flex:1"></div>
+        <button class="transfer-close" onclick="TransferManager.closePanel()">×</button>
+      </div>
+      <div class="transfer-panel-body" id="transfer-panel-body"></div>
+    </div>
+  </div>
+
+  <!-- Quick Commands Overlay -->
+  <div class="overlay" id="overlay-qc" onclick="closeQC()">
+    <div class="panel qc-panel" onclick="event.stopPropagation()">
+      <div class="panel-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="qc-input" placeholder="输入命令名称或分组…" oninput="qcFilter()" onkeydown="qcKeydown(event)">
+      </div>
+      <div class="qc-list" id="qc-list"></div>
+      <div class="qc-footer">
+        <span>↑↓ 选择</span>
+        <span>Enter 执行</span>
+        <span>Esc 关闭</span>
+        <span style="margin-left:auto;cursor:pointer;color:rgba(var(--accent-rgb),0.5)" onclick="closeQC();openSettings('quickcommands')">管理命令 →</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 命令面板 -->
+  <div class="overlay" id="overlay-palette" onclick="closePalette()">
+    <div class="panel palette-panel" onclick="event.stopPropagation()">
+      <div class="panel-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="palette-input" placeholder="搜索操作…" oninput="paletteFilter()" onkeydown="paletteKeyDown(event)">
+      </div>
+      <div class="palette-list" id="palette-list"></div>
+      <div class="palette-empty" id="palette-empty">无匹配的操作</div>
+      <div class="qc-footer">
+        <span>↑↓ 选择</span>
+        <span>Enter 执行</span>
+        <span>Esc 关闭</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="main" id="main-area">
+    <!-- Search bar -->
+  <div class="search-bar" id="search-bar">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(171,178,191,0.35)" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input type="text" id="search-input" placeholder="搜索…" oninput="doSearch()" onkeydown="onSearchKey(event)">
+    <span class="count" id="search-count"></span>
+    <button onclick="searchPrev()" title="上一个 (Shift+Enter)">↑</button>
+    <button onclick="searchNext()" title="下一个 (Enter)">↓</button>
+    <button onclick="closeSearch()">×</button>
+  </div>
+
+  <!-- Settings pane (rendered inline, not as overlay) -->
+    <div class="settings-pane" id="settings-pane">
+      <div class="settings-header">
+        <button class="back-btn" onclick="closeSettingsTab()" title="返回终端">
+          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10 12L6 8L10 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <h1>设置</h1>
+      </div>
+      <div class="settings-body">
+        <div class="settings-sidebar" id="settings-sidebar">
+          <div class="settings-sidebar-item active" onclick="switchSettingsTab(this,'terminal')">终端</div>
+          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'appearance')">外观</div>
+          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'ssh')">SSH 配置管理</div>
+          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'highlight')">高亮</div>
+          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'quickcommands')">快捷命令</div>
+          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'keys')">快捷键</div>
+          <div class="settings-sidebar-item" style="margin-top:auto" onclick="switchSettingsTab(this,'about')">关于</div>
+        </div>
+        <div class="settings-content" id="settings-content">
+          <!-- Terminal page -->
+          <div class="settings-page active" data-page="terminal">
+            <h2>终端</h2><p class="desc">调整终端行为和外观。</p>
+
+            <div class="settings-section">启动</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">默认终端</div>
+                  <div class="settings-card-desc">新建标签页和启动时默认使用的 shell</div>
+                </div>
+                <div class="settings-card-control">
+                  <select class="styled-select" id="set-default-shell" onchange="saveTerminal()"></select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">启动目录</div>
+                  <div class="settings-card-desc">本地终端的初始工作目录，留空为用户目录</div>
+                </div>
+                <div class="settings-card-control">
+                  <input type="text" id="set-startup-dir" placeholder="留空为用户目录" onchange="saveTerminal()">
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">新建会话列表</div>
+            <div class="settings-card" id="shell-visibility-list"></div>
+
+            <div class="settings-section">光标</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">光标样式</div>
+                </div>
+                <div class="settings-card-control">
+                  <select class="styled-select" id="set-cursor" onchange="saveTerminal()">
+                    <option value="bar">竖线 (Bar)</option>
+                    <option value="block">方块 (Block)</option>
+                    <option value="underline">下划线 (Underline)</option>
+                  </select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">光标闪烁</div>
+                </div>
+                <div class="settings-card-control">
+                  <select class="styled-select" id="set-blink" onchange="saveTerminal()">
+                    <option value="on">开启</option>
+                    <option value="off">关闭</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">回滚</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">回滚缓冲区</div>
+                  <div class="settings-card-desc">终端保留的历史行数</div>
+                </div>
+                <div class="settings-card-control">
+                  <input type="text" id="set-scrollback" value="10000" onchange="saveTerminal()">
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">Bell 通知</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">通知方式</div>
+                  <div class="settings-card-desc">终端响铃时的提醒方式</div>
+                </div>
+                <div class="settings-card-control">
+                  <select class="styled-select" id="set-bell" onchange="saveTerminal()">
+                    <option value="off">关闭</option>
+                    <option value="notification">应用内通知</option>
+                    <option value="flash">标签页闪烁</option>
+                    <option value="notification+flash">通知 + 标签页闪烁</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">复制 & 粘贴</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">选中自动复制</div>
+                  <div class="settings-card-desc">选中文本后自动复制到剪贴板</div>
+                </div>
+                <div class="toggle-switch on" id="toggle-autocopy" onclick="toggleSwitch(this);saveTerminal()"></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">右键自动粘贴</div>
+                  <div class="settings-card-desc">右键点击终端时自动粘贴剪贴板内容</div>
+                </div>
+                <div class="toggle-switch on" id="toggle-rightclick" onclick="toggleSwitch(this);saveTerminal()"></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">复制时保留富文本</div>
+                  <div class="settings-card-desc">将 ANSI 颜色转换为 HTML/RTF 格式一起复制</div>
+                </div>
+                <div class="toggle-switch" id="toggle-richtext" onclick="toggleSwitch(this);saveTerminal()"></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">智能换行处理</div>
+                  <div class="settings-card-desc">复制时自动去除软换行产生的多余空格</div>
+                </div>
+                <div class="toggle-switch on" id="toggle-smartcopy" onclick="toggleSwitch(this);saveTerminal()"></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">OSC 52 剪贴板</div>
+                  <div class="settings-card-desc">允许远程程序通过 OSC 52 读写本地剪贴板</div>
+                </div>
+                <div class="toggle-switch on" id="toggle-osc52" onclick="toggleSwitch(this);saveTerminal()"></div>
+              </div>
+            </div>
+
+            <div class="settings-section">启动</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">启动时恢复终端内容</div>
+                  <div class="settings-card-desc">重新打开软件时恢复上次的终端内容</div>
+                </div>
+                <div class="toggle-switch" id="toggle-restore-local" onclick="toggleSwitch(this);saveTerminal()"></div>
+              </div>
+            </div>
+          </div>
+          <!-- Appearance page -->
+          <div class="settings-page" data-page="appearance">
+            <h2>外观</h2><p class="desc">自定义界面主题和颜色。</p>
+
+            <div class="settings-section">主题</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">主题</div>
+                  <div class="settings-card-desc">界面整体明暗风格</div>
+                </div>
+                <div class="settings-card-control">
+                  <select class="styled-select" id="set-theme">
+                    <option value="dark" selected>暗色</option>
+                    <option value="light" disabled>亮色（远期）</option>
+                  </select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">终端配色</div>
+                  <div class="settings-card-desc">终端的颜色方案，光标和选中色不变</div>
+                </div>
+                <div class="settings-card-control">
+                  <select class="styled-select" id="set-terminal-scheme" onchange="saveAppearance()">
+                  </select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">强调色</div>
+                  <div class="settings-card-desc">界面高亮和焦点颜色</div>
+                </div>
+                <div class="settings-card-control" style="display:flex;gap:0;align-items:center">
+                  <input type="text" id="set-accent" value="#61afef" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid transparent;border-radius:8px 0 0 8px;padding:6px 10px;color:#abb2bf;font-size:12px;font-family:'JetBrains Mono',monospace;outline:none;border-right:none" onchange="updateAccentDot();saveAppearance()">
+                  <div id="accent-dot" style="width:28px;height:28px;background:rgb(var(--accent-rgb));border-radius:0 8px 8px 0;border:1.5px solid rgba(var(--accent-rgb),0.2);border-left:none;flex-shrink:0;cursor:pointer;box-sizing:border-box" onclick="openColorPicker()"></div>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">预设色板</div>
+                  <div class="settings-card-desc">快速选择常用强调色</div>
+                </div>
+                <div class="settings-card-control" style="display:flex;gap:6px;align-items:center" id="accent-swatches"></div>
+              </div>
+            </div>
+
+            <div class="settings-section">文本</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">字体</div>
+                  <div class="settings-card-desc">终端使用的等宽字体</div>
+                </div>
+                <div class="settings-card-control">
+                  <select class="styled-select" id="set-font" onchange="saveAppearance()"></select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">字号</div>
+                  <div class="settings-card-desc">终端字体大小</div>
+                </div>
+                <div class="settings-card-control">
+                  <input type="text" id="set-font-size" value="13.5" onchange="saveAppearance()">
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">行距</div>
+                  <div class="settings-card-desc">终端行高倍数</div>
+                </div>
+                <div class="settings-card-control">
+                  <input type="text" id="set-line-height" value="1.6" onchange="saveAppearance()">
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">字体粗细</div>
+                  <div class="settings-card-desc">正常文本的字重（1-1000，常规为 400）</div>
+                </div>
+                <div class="settings-card-control">
+                  <input type="text" id="set-font-weight" placeholder="400" onchange="saveAppearance()">
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">粗体粗细</div>
+                  <div class="settings-card-desc">粗体文本的字重（1-1000，粗体为 700）</div>
+                </div>
+                <div class="settings-card-control">
+                  <input type="text" id="set-font-weight-bold" placeholder="700" onchange="saveAppearance()">
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">Fallback 字体</div>
+                  <div class="settings-card-desc">终端字体缺失时的备选字体</div>
+                </div>
+                <div class="settings-card-control">
+                  <select class="styled-select" id="set-fallback-font" onchange="saveAppearance()"></select>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">最小对比度</div>
+                  <div class="settings-card-desc">终端文本与背景的最低对比度，1=关闭，4=默认，7=AAA，最大 21。支持小数如 4.5</div>
+                </div>
+                <div class="settings-card-control">
+                  <input type="number" id="set-contrast" value="4" min="1" max="21" step="0.5" onchange="saveAppearance()" style="width:80px">
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-section">视觉效果</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">动画效果</div>
+                  <div class="settings-card-desc">面板弹出和切换动画</div>
+                </div>
+                <div class="toggle-switch on" id="toggle-animations" onclick="toggleSwitch(this);saveAppearance()"></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">显示标签页状态点</div>
+                  <div class="settings-card-desc">标签页左侧显示连接状态圆点</div>
+                </div>
+                <div class="toggle-switch on" id="toggle-statusdot" onclick="toggleSwitch(this);saveAppearance()"></div>
+              </div>
+            </div>
+          </div>
+          <!-- SSH page -->
+          <div class="settings-page" data-page="ssh">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:4px">
+              <div><h2>SSH 配置管理</h2><p class="desc">管理远程服务器连接。密码使用 Windows DPAPI 加密存储。</p></div>
+              <div style="display:flex;gap:6px;flex-shrink:0">
+                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="collapseAllGroups()">折叠全部</button>
+                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="expandAllGroups()">展开全部</button>
+                <button class="btn-primary" style="font-size:11px;padding:5px 14px" onclick="openSSHEdit(true)">+ 添加连接</button>
+              </div>
+            </div>
+            <div id="settings-ssh-list"></div>
+          </div>
+          <!-- Highlight page -->
+          <div class="settings-page" data-page="highlight">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div><h2>高亮</h2><p class="desc">自定义终端输出高亮规则。</p></div>
+              <div style="display:flex;gap:6px;flex-shrink:0">
+                <button class="btn-primary" style="font-size:11px;padding:5px 12px" onclick="openHighlightEdit(true)">+ 添加规则</button>
+              </div>
+            </div>
+
+            <div class="settings-card" style="margin-bottom:16px">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">启用高亮</div>
+                  <div class="settings-card-desc">高亮总开关</div>
+                </div>
+                <div class="settings-card-control">
+                  <div class="toggle-switch" id="toggle-highlight" onclick="toggleHighlightEnabled()"></div>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">在备用屏幕中禁用高亮</div>
+                  <div class="settings-card-desc">例如：vi/vim、htop</div>
+                </div>
+                <div class="settings-card-control">
+                  <div class="toggle-switch" id="toggle-highlight-alt" onclick="toggleHighlightAlternate()"></div>
+                </div>
+              </div>
+            </div>
+
+            <div id="highlight-rules-list"></div>
+          </div>
+          <!-- Quick Commands page -->
+          <div class="settings-page" data-page="quickcommands">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div><h2>快捷命令</h2><p class="desc">保存常用命令，通过 Ctrl+Shift+P 快速执行。</p></div>
+              <div style="display:flex;gap:6px;flex-shrink:0">
+                <button class="btn-outline" style="font-size:11px;padding:4px 10px" onclick="expandAllQC()">展开全部</button>
+                <button class="btn-outline" style="font-size:11px;padding:4px 10px" onclick="collapseAllQC()">折叠全部</button>
+                <button class="btn-primary" style="font-size:11px;padding:5px 12px" onclick="openQCEdit(true)">+ 添加命令</button>
+              </div>
+            </div>
+            <div id="qc-commands-list"></div>
+          </div>
+          <!-- Shortcuts page -->
+          <div class="settings-page" data-page="keys">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+              <div><h2>快捷键</h2><p class="desc">点击「修改」后按下新的快捷键组合，Esc 取消。</p></div>
+              <div style="display:flex;gap:6px;flex-shrink:0">
+                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="resetAllShortcuts()">全部重置</button>
+              </div>
+            </div>
+            <table class="kb-table" id="shortcuts-table"></table>
+          </div>
+          <!-- About page -->
+          <div class="settings-page" data-page="about">
+            <div class="about-info">
+              <div class="about-logo"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAAHgUlEQVR4nO2dQW/byBXH3xtyKCmyw3Btq24cOF8gx/0WewoQ5xPspQn2kmYvAYowl+TSSy+9Fb3bPWz2sPkk2fOiCORIjr2WEIsSyeErhlIAy3VkWTS5JOf9DAGGzb9GEv8cDt9/OAJgGIZhGIZhGIZhGIZhGIZhGIZhGIZhGIZhGIZhGIZhKg8W1RARLdUWIhLra4Te8URkXWN767xZTNfnjZ13A7MjWhFREwBag8Hg0u1c14VuFyaIOGJ9ceTmtJmL8f379/bWn3bfNKTzaBJGbaIEiebbRQRCFOQ4MlAq/nkyHvx49+7dgPXw1VNiFXoAgYiq1xu+7myuP/t0PALLEvrPXxXEcQybG+0nvV7cQMTvtY9M1tP01KGgaj2APvq1c4mo1esPfpOysRGGE1j47qc9QWJZNigVjx2Z7HieN+ofDT/YtmOUPo5VEIWD+7u7uydfPkuo4hhgMBi0iFASJdrJ6TtZtD0RifTUQWBHkdPq9/uKoOkYpweyhWi3AeDE932tyc0ACx15A6z8wnX3kSSJ0XoogLwNwJQcNoDhsAEMhw1gOGwAw8m7FLxynUFfMiGKlS+A66CHqvcAruuOESHWFUFETOgKZtfKChCU40Tjo04n1AUy0/SonwPsNBPxfZ8qZ4BZFdDSwQ4R/Ocbr6V/tyzLwkUPIYTY3GhbCPiT53mnDxBDIjgwUP/23j33ePYZVjYL0I4X3S48/3Q8klLKh1EUtWbx6IUwCLXzSUo5Pj45eyeleqq30VWwRN0uhd5xnIdRFN5KEl3puxDXftE7Wj/6JXv7carXn2Eue+Z821AQp6fkxXLUhgAoCIK5dlutlnY5SnkrcF08LqP+5IRcKaF5dvb50vfXbq/B2loaZ5/m0X5l0U7e37/WhIhZPbwc+i8QkU1EbSK6dXh42D7/SP82/Z+8RHcj7ddiSpjv6/b8r2zhg++ngyAqg54uzGdwpHwchlFbnwIujs/18E2ItAsPYhW/jSbD5xfz/Kyvv/IGqBo0HYDp+Qx/73TW/6rz/KsuzPRAfnOjDb3e4F/b23fSPH86oi8vbIAc5jMUmeeXfk5glRmsOp+hwDw/K1wKXkzp8/yssAEMhw1gOGwAw2EDGA4bwHDYADnOZ4AKUIkX+QcWgm71+sPfpJTfRFGUXudfJbVtm5RS4ziC+7NIt9SFIO4B8pnPUFienxVjeoDrrk9AszCo24Wm0xj9w7LEUnl+kqh3AsOnnucNzz9fWam9AWY7K71RdcntLT0R4+KOq2ueX/ssIOv6BESEBwcg7tzB3wFAPxYyGycUHuuuSm17gBtanwDKnudnpc4GMCLPz0otDWBSnp+VWo8BTMjzs1L3OkDt8/ys1N0AzBWwAQyHDWA4bADDYQMYTt0NUPs8Pyu1fJMm5flZqWUPYFKeb0wPwHm+oQbgPN/wLIDzfEN7AM7zi6HMBuA831QDcJ5fHKUeA3Cenz9lrwNwnm+4AZicYQMYDhvAcNgAhsMGMJyyG4DzfMMLQZznm9gDcJ5fHIUuFp3l/nzbtpZarz9RyS8CJ/93f/51279IVj0QIF1R10K9O/T3jtbJADeV56+6Xn/W9inr6yfAfdgXj/HxUvo92rcO4HFSlBGK7AGWuj9/Z2f+/vxzep1bNPSvHz9+nHvd29vb9BEAtwFCRIxyar+ZRf+S/t1sQtAa/HcArjv/P/2U7q4L425v8mrn1aX6yhnghvL8rOv131j7jRX0PvgI78GmreYb27EfqYlqJ9Mvl75wCpuuK2A7VpDE6meKgh/9u/7c+gRVTAPTbrPXG77ubK4/0/fnW5ZYOO6M41jfn/+k14sbiPi93rfzegusBd+9oZTytjbW/tLrKedyfdb2xbX1fzt8/drt3Hn2+WgIaCFYC465JE5gbct9MjhMUr0+Hei3BVXrAbLm+UrFY0cmO57njfpHww+27VRKH6l4/Gfp7nzrfTv6rvfog2VbG3EYL6HHBC2hjRCIeHz/1e6r3NcnsEuZ5xPYUeS0+v2+Img6VdMjgQ0RtIL+mgICZzYwvFIPBGJ2hWPbYr2Q9QlEmfP8JEkqqwcCshNnZX1MMRlbCGKKgw1gOGwAw2EDGA4bwHDsMuf5iGLlC+A/Wg8IGGOIq379s402Vr4HcF13jAixrgjqIgddwexaWQGCcpxofNTphPqKqGp6RFDgwBiOjlI9TJ8z0ZeGi34ojY505Y+UBWGaCfi+T5UzwA3k+T95nnf6ADEkgoMq6tHD018f/BoS4MHaxrolUFiYPsuChwCxvnXbQoS3L+69ON6jvdzXJ8jzFKCPGNHtwvNPxyMppVxqvf3jk7N3Uqqn08WZfUzU7UrrIQmef/4EUkjroYpVCxIdJs1XBPXxAijIktb47Ojzu0lDpPo0Vs45sC0sDs663n7V9W9O/+mN42FbQkxRMH9+l62YIrCxIdvBC/eHSn3fwJVoJ+/vp7XwZbefrddbDz0Q4N7+3tL6l/TySx5QvylhWdbbr4feX/h56wFf3dckYhiGYRiGYRiGYRiGYRiGYRiGYRiGYRiGYRiGYRiGYRiGYeAm+R8yqtbhQO4DAwAAAABJRU5ErkJggg==" style="width:72px;height:72px"></div>
+              <div class="about-name">ZTerm</div>
+              <div class="about-ver" id="about-ver">版本 …</div>
+            </div>
+            <div class="ssh-card" style="margin-top:16px">
+              <div class="ssh-card-row">
+                <div class="ssh-card-field"><label>框架</label><span style="font-size:12px;color:#abb2bf" id="about-fw">…</span></div>
+                <div class="ssh-card-field"><label>终端引擎</label><span style="font-size:12px;color:#abb2bf" id="about-engine">…</span></div>
+              </div>
+              <div class="ssh-card-row">
+                <div class="ssh-card-field"><label>SSH 库</label><span style="font-size:12px;color:#abb2bf" id="about-ssh">…</span></div>
+                <div class="ssh-card-field"><label>平台</label><span style="font-size:12px;color:#abb2bf" id="about-platform">Windows 10+ (x64)</span></div>
+              </div>
+            </div>
+            <div class="settings-section">数据</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">数据目录</div>
+                  <div class="settings-card-desc">配置、SSH 连接、快捷命令等数据的存放位置</div>
+                  <div class="settings-card-desc" id="data-dir-path" style="color:rgba(171,178,191,0.6);font-family:'JetBrains Mono',monospace;font-size:11px;margin-top:4px">…</div>
+                </div>
+                <div class="settings-card-control" style="display:flex;gap:6px;flex-shrink:0">
+                  <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="changeDataDir()">更改…</button>
+                  <button class="btn-outline" style="font-size:11px;padding:5px 12px;display:none" id="data-dir-reset" onclick="resetDataDir()">恢复默认</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="statusbar">
+    <span id="sb-conn">⊞ PowerShell</span>
+    <div class="transfer-btn" id="transfer-btn" onclick="TransferManager.openPanel()" title="传输任务">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg>
+      <span class="transfer-count"></span>
+    </div>
+    <span style="margin-left:auto">UTF-8</span>
+  </div>
+</div>
+
+<!-- ── Session Selector Overlay ── -->
+<div class="overlay" id="overlay-sessions">
+  <div class="overlay-backdrop" onclick="closeOverlay('overlay-sessions')"></div>
+  <div class="panel" style="width:520px;max-height:520px" onclick="event.stopPropagation()">
+    <div class="panel-header">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(171,178,191,0.4)" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <h3>新建会话</h3>
+      <div class="spacer"></div>
+      <button class="panel-close" onclick="closeOverlay('overlay-sessions')">×</button>
+    </div>
+    <div class="panel-search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <input id="sessions-search" type="text" placeholder="搜索会话..." oninput="filterSessions(this.value)">
+    </div>
+    <div class="panel-list" id="sessions-list"></div>
+    <div class="panel-footer">
+      <span><kbd>↑↓</kbd> 导航</span>
+      <span><kbd>Enter</kbd> 选择</span>
+      <span><kbd>Esc</kbd> 关闭</span>
+      <span style="margin-left:auto;cursor:pointer;color:rgba(var(--accent-rgb),0.5)" onclick="closeOverlay('overlay-sessions');openSSHManager()">管理 SSH 连接 →</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── SSH Manager Overlay ── -->
+<div class="overlay" id="overlay-ssh-manager">
+  <div class="overlay-backdrop" onclick="closeOverlay('overlay-ssh-manager')"></div>
+  <div class="panel" style="width:560px;max-height:540px" onclick="event.stopPropagation()">
+    <div class="panel-header">
+      <h3>SSH 连接管理</h3>
+      <div class="spacer"></div>
+      <button class="panel-close" onclick="closeOverlay('overlay-ssh-manager')">×</button>
+    </div>
+    <div class="ssh-manager-actions">
+      <button onclick="collapseAllGroups()">折叠全部</button>
+      <button onclick="expandAllGroups()">展开全部</button>
+      <div class="spacer"></div>
+      <button class="primary" onclick="openSSHEdit(true)">+ 添加连接</button>
+    </div>
+    <div class="panel-list" id="ssh-manager-list"></div>
+    <div class="panel-footer">
+      <span>密码使用 Windows DPAPI 加密存储</span>
+      <span style="margin-left:auto;cursor:pointer;color:rgba(var(--accent-rgb),0.5)" onclick="closeOverlay('overlay-ssh-manager');openSessionSelector()">← 返回会话选择</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── SSH Edit Modal ── -->
+<div class="overlay" id="overlay-ssh-edit" style="z-index:25">
+  <div class="overlay-backdrop" onclick="closeSSHEdit()"></div>
+  <div class="panel" style="width:540px" onclick="event.stopPropagation()">
+    <div class="panel-header">
+      <h3 id="ssh-edit-title">添加 SSH 连接</h3>
+      <div class="spacer"></div>
+      <button class="panel-close" onclick="closeSSHEdit()">×</button>
+    </div>
+    <div class="panel-tabs" id="ssh-edit-tabs">
+      <div class="panel-tab-slider" id="panel-tab-slider"></div>
+      <div class="panel-tab active" data-tab="conn" onclick="switchSSHTab('conn')">连接</div>
+      <div class="panel-tab" data-tab="scripts" onclick="switchSSHTab('scripts')">登录脚本<span id="ls-tab-badge" class="panel-tab-badge"></span></div>
+    </div>
+    <div style="padding:0 20px 20px">
+      <!-- 连接 tab -->
+      <div id="ssh-tab-conn" class="ssh-tab-panel active" style="flex-direction:column;gap:12px">
+        <div class="form-row">
+          <div class="form-group">
+            <label>名称</label>
+            <input id="ssh-edit-name" type="text" placeholder="我的服务器">
+          </div>
+          <div class="form-group">
+            <label>分组</label>
+            <div class="cust-combo" id="group-combo">
+              <input id="ssh-edit-group" type="text" placeholder="输入或选择分组" autocomplete="off">
+              <div class="dd-menu" id="group-menu"></div>
+            </div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>主机地址</label>
+            <input id="ssh-edit-host" type="text" placeholder="hostname or IP">
+          </div>
+          <div class="form-group">
+            <label>端口</label>
+            <input id="ssh-edit-port" type="text" value="22">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>用户名</label>
+            <input id="ssh-edit-user" type="text" placeholder="user">
+          </div>
+          <div class="form-group">
+            <label>认证方式</label>
+            <select id="ssh-edit-auth" class="styled-select" onchange="updateAuthFields()">
+              <option>密码</option>
+              <option>密钥</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row" id="ssh-pwd-row">
+          <div class="form-group">
+            <label>密码</label>
+            <div id="ssh-pwd-status" class="ssh-pwd-status" style="display:none">
+              <span class="ssh-pwd-status-text">🔒 密码已加密保存</span>
+              <button type="button" id="ssh-pwd-edit-btn" class="btn-outline">修改</button>
+            </div>
+            <div style="position:relative;display:inline-block;width:100%">
+            <input id="ssh-edit-password" class="inline-edit" type="password" placeholder="输入密码" style="padding-right:64px;width:100%;box-sizing:border-box">
+            <button type="button" id="ssh-pwd-inline-eye" class="ssh-pwd-inline-act" style="position:absolute;top:50%;transform:translateY(-50%);right:44px" onclick="_togglePasswordVisibility()" title="显示/隐藏密码">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+            <button type="button" id="ssh-pwd-inline-save" class="ssh-pwd-inline-act" style="position:absolute;top:50%;transform:translateY(-50%);right:24px" onclick="_savePasswordInline()" title="保存密码">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </button>
+            <button type="button" id="ssh-pwd-inline-cancel" class="ssh-pwd-inline-act" style="position:absolute;top:50%;transform:translateY(-50%);right:4px" onclick="_cancelPasswordEdit()" title="取消修改">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>备注</label>
+            <input id="ssh-edit-note" type="text" placeholder="可选">
+          </div>
+        </div>
+        <div class="form-row" id="ssh-key-row" style="display:none">
+          <div class="form-group" style="grid-column:1/-1">
+            <label>私钥路径</label>
+            <input id="ssh-edit-keypath" type="text" placeholder="~/.ssh/id_rsa">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group" style="grid-column:1/-1;flex-direction:row;align-items:center;gap:8px">
+            <div class="toggle-switch" id="ssh-edit-followcwd" onclick="this.classList.toggle('on')"></div>
+            <div>
+              <div style="font-size:12.5px;color:#abb2bf">SFTP 跟随终端目录</div>
+              <div style="font-size:11px;color:rgba(171,178,191,0.35)">开启后 SFTP 自动进入终端当前目录（首次连接无欢迎信息）</div>
+            </div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group" style="grid-column:1/-1;flex-direction:row;align-items:center;gap:8px">
+            <div class="toggle-switch on" id="ssh-edit-clearonconnect" onclick="this.classList.toggle('on')"></div>
+            <div>
+              <div style="font-size:12.5px;color:#abb2bf">连接时清空终端</div>
+              <div style="font-size:11px;color:rgba(171,178,191,0.35)">关闭后，强制或断开重连时保留之前的终端内容</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- 登录脚本 tab -->
+      <div id="ssh-tab-scripts" class="ssh-tab-panel" style="flex-direction:column;gap:8px">
+        <div id="login-scripts-container" style="display:flex;flex-direction:column;gap:2px;max-height:320px;overflow-y:auto"></div>
+        <span class="form-section-add" onclick="addLoginScriptRow()" style="align-self:flex-start">+ 添加脚本</span>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+        <button class="btn-outline" onclick="closeSSHEdit()">取消</button>
+        <button class="btn-primary" id="ssh-edit-save-btn" onclick="saveSSHEdit()">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Quick Command Edit Modal ── -->
+<div class="overlay" id="overlay-qc-edit" style="z-index:26">
+  <div class="overlay-backdrop" onclick="closeQCEdit()"></div>
+  <div class="panel" style="width:480px" onclick="event.stopPropagation()">
+    <div class="panel-header">
+      <h3 id="qc-edit-title">添加命令</h3>
+      <div class="spacer"></div>
+      <button class="panel-close" onclick="closeQCEdit()">×</button>
+    </div>
+    <div style="padding:0 20px 20px;display:flex;flex-direction:column;gap:12px">
+      <div class="form-row">
+        <div class="form-group">
+          <label>名称</label>
+          <input id="qc-edit-name" type="text" placeholder="查看日志">
+        </div>
+        <div class="form-group">
+          <label>分组</label>
+          <div class="cust-combo" id="qc-group-combo">
+            <input id="qc-edit-group" type="text" placeholder="输入或选择分组" autocomplete="off">
+            <div class="dd-menu" id="qc-group-menu"></div>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group" style="grid-column:1/-1">
+          <label>命令</label>
+          <textarea id="qc-edit-command" rows="3" placeholder="tail -f /var/log/app.log" style="background:rgba(var(--accent-rgb),0.06);border:1.5px solid transparent;border-radius:10px;padding:8px 12px;color:#abb2bf;font-size:12.5px;font-family:'JetBrains Mono',monospace;outline:none;resize:vertical;width:100%"></textarea>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+        <button class="btn-outline" onclick="closeQCEdit()">取消</button>
+        <button class="btn-primary" onclick="saveQCEdit()">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Highlight Rule Edit Modal ── -->
+<div class="overlay" id="overlay-highlight-edit" style="z-index:26">
+  <div class="overlay-backdrop" onclick="closeHighlightEdit()"></div>
+  <div class="panel" style="width:480px" onclick="event.stopPropagation()">
+    <div class="panel-header">
+      <h3 id="highlight-edit-title">添加高亮规则</h3>
+      <div class="spacer"></div>
+      <button class="panel-close" onclick="closeHighlightEdit()">×</button>
+    </div>
+    <div style="padding:0 20px 20px;display:flex;flex-direction:column;gap:12px">
+      <div class="form-row">
+        <div class="form-group" style="grid-column:1/-1">
+          <label>关键字或正则表达式</label>
+          <input id="hl-edit-text" type="text" placeholder="ERROR 或 \b(error|fail)\b">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group" style="flex-direction:row;align-items:center;gap:8px">
+          <div class="toggle-switch" id="hl-edit-regexp" onclick="this.classList.toggle('on')"></div>
+          <label style="margin:0;font-size:12px">正则表达式</label>
+        </div>
+        <div class="form-group" style="flex-direction:row;align-items:center;gap:8px">
+          <div class="toggle-switch" id="hl-edit-case" onclick="this.classList.toggle('on')"></div>
+          <label style="margin:0;font-size:12px">大小写敏感</label>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group" style="grid-column:1/-1">
+          <label>前景色</label>
+          <div style="display:flex;align-items:center;gap:8px">
+            <div class="toggle-switch" id="hl-edit-fg" onclick="this.classList.toggle('on')"></div>
+            <div style="flex:1;display:flex;align-items:center">
+              <input id="hl-edit-fgcolor" type="text" placeholder="#e06c75" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid transparent;border-radius:8px 0 0 8px;padding:6px 10px;color:#abb2bf;font-size:12px;font-family:'JetBrains Mono',monospace;outline:none;border-right:none" oninput="document.getElementById('hl-fg-dot').style.background=this.value||'#e06c75'">
+              <div id="hl-fg-dot" style="width:28px;height:28px;background:#e06c75;border-radius:0 8px 8px 0;border:1.5px solid rgba(var(--accent-rgb),0.2);border-left:none;flex-shrink:0;cursor:pointer;box-sizing:border-box" onclick="openColorPicker(document.getElementById('hl-edit-fgcolor').value || '#e06c75', (hex) => { document.getElementById('hl-edit-fgcolor').value = hex; document.getElementById('hl-fg-dot').style.background = hex; })"></div>
+            </div>
+          </div>
+        </div>
+        <div class="form-group" style="grid-column:1/-1">
+          <label>背景色</label>
+          <div style="display:flex;align-items:center;gap:8px">
+            <div class="toggle-switch" id="hl-edit-bg" onclick="this.classList.toggle('on')"></div>
+            <div style="flex:1;display:flex;align-items:center">
+              <input id="hl-edit-bgcolor" type="text" placeholder="#282c34" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid transparent;border-radius:8px 0 0 8px;padding:6px 10px;color:#abb2bf;font-size:12px;font-family:'JetBrains Mono',monospace;outline:none;border-right:none" oninput="document.getElementById('hl-bg-dot').style.background=this.value||'#282c34'">
+              <div id="hl-bg-dot" style="width:28px;height:28px;background:#282c34;border-radius:0 8px 8px 0;border:1.5px solid rgba(var(--accent-rgb),0.2);border-left:none;flex-shrink:0;cursor:pointer;box-sizing:border-box" onclick="openColorPicker(document.getElementById('hl-edit-bgcolor').value || '#282c34', (hex) => { document.getElementById('hl-edit-bgcolor').value = hex; document.getElementById('hl-bg-dot').style.background = hex; })"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group" style="flex-direction:row;align-items:center;gap:16px;grid-column:1/-1">
+          <div style="display:flex;align-items:center;gap:6px">
+            <div class="toggle-switch" id="hl-edit-bold" onclick="this.classList.toggle('on')"></div>
+            <label style="margin:0;font-size:12px">粗体</label>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <div class="toggle-switch" id="hl-edit-italic" onclick="this.classList.toggle('on')"></div>
+            <label style="margin:0;font-size:12px">斜体</label>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <div class="toggle-switch" id="hl-edit-underline" onclick="this.classList.toggle('on')"></div>
+            <label style="margin:0;font-size:12px">下划线</label>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+        <button class="btn-outline" onclick="closeHighlightEdit()">取消</button>
+        <button class="btn-primary" onclick="saveHighlightEdit()">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Dialog -->
+<div class="overlay" id="overlay-confirm" style="z-index:40">
+  <div class="overlay-backdrop"></div>
+  <div class="panel" style="width:360px;padding:24px;gap:16px;text-align:center" onclick="event.stopPropagation()">
+    <div style="font-size:14px;color:#abb2bf;font-weight:500" id="confirm-msg">确认操作？</div>
+    <div style="display:flex;gap:10px;justify-content:center">
+      <button class="btn-outline" id="confirm-cancel">取消</button>
+      <button class="btn-danger" id="confirm-ok">删除</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<!-- Color Picker -->
+<div class="color-picker-overlay" id="color-picker-overlay" onclick="if(event.target===this)closeColorPicker()">
+  <div class="color-picker" onclick="event.stopPropagation()">
+    <div class="color-picker-canvas" id="cp-canvas">
+      <div class="color-picker-canvas-dot" id="cp-canvas-dot"></div>
+    </div>
+    <div class="color-picker-hue" id="cp-hue">
+      <div class="color-picker-hue-dot" id="cp-hue-dot"></div>
+    </div>
+    <div class="color-picker-rgb">
+      <input type="text" id="cp-r" placeholder="R" maxlength="3">
+      <input type="text" id="cp-g" placeholder="G" maxlength="3">
+      <input type="text" id="cp-b" placeholder="B" maxlength="3">
+    </div>
+    <div class="color-picker-hex">
+      <input type="text" id="cp-hex" placeholder="#000000" maxlength="7">
+    </div>
+    <div class="color-picker-actions">
+      <button class="color-picker-cancel" onclick="closeColorPicker()">取消</button>
+      <button class="color-picker-ok" onclick="confirmColorPicker()">确定</button>
+    </div>
+  </div>
+</div>
+
+  <!-- Tauri 迁移: 在 14 个 renderer/*.js 之前注入 polyfill + require shim + xterm UMD -->
+  <!-- 1. xterm UMD bundle (挂 window.Terminal / window.FitAddon 等) -->
+  <script src="vendor/xterm.js"></script>
+  <script src="vendor/addon-fit.js"></script>
+  <script src="vendor/addon-webgl.js"></script>
+  <script src="vendor/addon-search.js"></script>
+  <script src="vendor/addon-clipboard.js"></script>
+  <script src="vendor/addon-web-links.js"></script>
+
+  <!-- 2. ipcRenderer polyfill (同步暴露 window.ipcRenderer, 异步加载 Tauri API) -->
+  <script src="ipc-polyfill.js"></script>
+
+  <!-- 3. require shim: 拦截 require('electron'/'fs'/'path'/'@xterm/...') 转发到 window 全局 -->
+  <script>
+    // 最小 path shim (state.js 用 path.join, utils.js 用 path.basename/dirname)
+    const pathShim = {
+      join: function() { return Array.from(arguments).join('/').replace(/\/+/g, '/'); },
+      basename: function(p) { return p.split(/[\\/]/).pop(); },
+      dirname: function(p) { return p.split(/[\\/]/).slice(0, -1).join('/') || '.'; },
+      extname: function(p) { var i = p.lastIndexOf('.'); return i < 0 ? '' : p.slice(i); },
+      normalize: function(p) { return p.replace(/\\/g, '/'); },
+      isAbsolute: function(p) { return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('/'); },
+      sep: '/',
+    };
+    // 最小 fs shim (utils.js 用 fs.existsSync / fs.readFileSync / fs.writeFileSync)
+    const fsShim = {
+      existsSync: function() { return false; },
+      readFileSync: function() { return ''; },
+      writeFileSync: function() {},
+      statSync: function() { return { isFile: function() { return false; }, isDirectory: function() { return false; } }; },
+      mkdirSync: function() {},
+      unlinkSync: function() {},
+      renameSync: function() {},
+      copyFileSync: function() {},
+    };
+    // electron clipboard stub — use browser Clipboard API (Tauri WebView2 supports it)
+    // 注意: WebView2 的 Clipboard API 全部异步; readTextAsync 供右键粘贴(异步)使用,
+    // readText 保留同步占位(返回空, 兼容未改造的同步调用点)
+    const electronClipboard = {
+      readText: function() { return ''; },
+      readTextAsync: function() { return navigator.clipboard.readText(); },
+      // P2：Tauri 下走 Rust arboard（系统剪贴板，无 WebView2 权限限制）；
+      // navigator.clipboard.writeText 在非手势（如 selectionchange 自动复制）下会
+      // 抛 NotAllowedError，且 Promise 拒绝需要 catch 否则成为 unhandled rejection
+      writeText: function(text) {
+        if (typeof isTauri !== 'undefined' && isTauri) {
+          ipcRenderer.invoke('clipboard-write-text', { text: text }).catch(() => {});
+          return;
+        }
+        try { navigator.clipboard.writeText(text).catch(() => {}); } catch(e) {}
+      },
+      write: function(data) {
+        try {
+          const items = {};
+          if (data && data.text != null) items['text/plain'] = new Blob([data.text], { type: 'text/plain' });
+          if (data && data.html != null) items['text/html'] = new Blob([data.html], { type: 'text/html' });
+          if (items['text/plain'] || items['text/html']) {
+            navigator.clipboard.write([new ClipboardItem(items)]).catch(() => {});
+          }
+        } catch(e) {
+          // ClipboardItem 不可用(旧版 WebView2)时兜底: 只写纯文本
+          if (data && data.text != null) { try { navigator.clipboard.writeText(data.text); } catch(e2) {} }
+        }
+      },
+    };
+    // electron shell stub
+    const electronShell = {
+      openExternal: function(url) { window.open(url, '_blank'); },
+      showItemInFolder: function() {},
+    };
+
+    // state.js 直接用 path.join 而不 require('path'), 需要全局 path
+    // utils.js require('fs') 但有些地方直接用 fs, 也挂全局
+    // state.js 用 process.env.APPDATA/HOME, 需要全局 process
+    window.path = pathShim;
+    window.fs = fsShim;
+    window.process = { env: { APPDATA: '', HOME: '', USERPROFILE: '', LOCALAPPDATA: '', TEMP: '' }, platform: 'win32' };
+
+    // addon UMD 工厂返回 { FitAddon: class }，直接赋给 window.FitAddon，需解包
+    window.require = function(name) {
+      if (name === 'electron') return { ipcRenderer: window.electron.ipcRenderer, clipboard: electronClipboard, shell: electronShell };
+      if (name === 'fs') return fsShim;
+      if (name === 'path') return pathShim;
+      if (name === '@xterm/xterm') return { Terminal: window.Terminal };
+      if (name === '@xterm/addon-fit') return { FitAddon: window.FitAddon.FitAddon };
+      if (name === '@xterm/addon-webgl') return { WebglAddon: window.WebglAddon.WebglAddon };
+      if (name === '@xterm/addon-search') return { SearchAddon: window.SearchAddon.SearchAddon };
+      if (name === '@xterm/addon-clipboard') return { ClipboardAddon: window.ClipboardAddon.ClipboardAddon };
+      if (name === '@xterm/addon-web-links') return { WebLinksAddon: window.WebLinksAddon.WebLinksAddon };
+      console.warn('[require-shim] unknown module:', name);
+      return {};
+    };
+  </script>
+
+  <script src="renderer/utils.js"></script>
+  <script src="renderer/state.js"></script>
+  <script src="renderer/tabs.js"></script>
+  <script src="renderer/split.js"></script>
+  <script src="renderer/terminal.js"></script>
+  <script src="renderer/ipc.js"></script>
+  <script src="renderer/ssh.js"></script>
+  <script src="renderer/sftp.js"></script>
+  <script src="renderer/quick-commands.js"></script>
+  <script src="renderer/command-palette.js"></script>
+  <script src="renderer/highlight.js"></script>
+  <script src="renderer/settings.js"></script>
+  <script src="renderer/shortcuts.js"></script>
+  <script src="renderer/main.js"></script>
+</body>
+</html>
