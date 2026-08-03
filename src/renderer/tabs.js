@@ -760,7 +760,9 @@ const TabManager = {
                     if (TabManager._layoutAnimating) return;
                     raf = true;
                     requestAnimationFrame(() => {
-                        if (!_spannerDrag && !TabManager._maximizing) _fitWithScroll(p.term, p.fitAddon, body);
+                        // _windowResizing：窗口拖拽 resize 期间抑制 fit（每帧全屏重绘 + pty-resize 风暴），
+                        // 停止后由 split.js 的 resize 结算统一 fit
+                        if (!_spannerDrag && !TabManager._maximizing && !_windowResizing) _fitWithScroll(p.term, p.fitAddon, body);
                         raf = false;
                     });
                 });

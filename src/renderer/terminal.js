@@ -54,7 +54,9 @@ function setupWrapResizeObserver(wrap, tab) {
         if (rafPending) return;
         rafPending = true;
         requestAnimationFrame(() => {
-            if (!_spannerDrag && !TabManager._maximizing) _fitWithScroll(tab.term, tab.fitAddon, inner);
+            // _windowResizing：窗口拖拽 resize 期间抑制 fit，停止后由
+            // split.js 的 resize 结算统一 fit（避免每帧全屏重绘导致抖动）
+            if (!_spannerDrag && !TabManager._maximizing && !_windowResizing) _fitWithScroll(tab.term, tab.fitAddon, inner);
             rafPending = false;
         });
     });
