@@ -86,6 +86,9 @@ async fn main() {
             .inner_size(1100.0, 720.0)
             .min_inner_size(600.0, 400.0)
             .decorations(false)
+            // 先隐藏，恢复窗口状态后再显示——否则窗口先以默认尺寸闪现，
+            // 最大化状态变成"先窗口化再最大化"的跳跃
+            .visible(false)
             // 窗口/WebView 背景色与主题一致（#21252b）：resize 拖拽期间
             // WebView 内容未覆盖到的边缘露出默认白色会形成闪烁
             .background_color(tauri::window::Color(33, 37, 43, 255))
@@ -102,6 +105,8 @@ async fn main() {
                     let _ = window.maximize();
                 }
             }
+            // 状态就绪后显示窗口（最大化/尺寸已应用，无闪现）
+            let _ = window.show();
 
             #[cfg(debug_assertions)]
             {
