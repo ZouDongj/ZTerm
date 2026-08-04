@@ -15,7 +15,7 @@
 
 import { spawn, execSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { existsSync, copyFileSync, rmSync } from 'node:fs';
+import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 
 const EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
@@ -323,6 +323,41 @@ async function main() {
     await sleep(500);
     const sftpClosed = await cdp.eval(`!document.getElementById('overlay-sftp').classList.contains('open')`);
     check('SFTP 面板关闭', sftpClosed === true, `overlay-sftp.open=${!sftpClosed}`);
+
+    // 13. 窗口状态恢复：写入 config 的 window 字段 → 重启 → 验证最大化/尺寸恢复
+    async function writeWindowState(state) {
+      // 读现有 config（若存在）并注入 window 字段
+      let cfg = {};
+      try { cfg = JSON.parse(readFileSync(DATA_CONFIG, 'utf8')); } catch {}
+      cfg.window = state;
+      writeFileSync(DATA_CONFIG, JSON.stringify(cfg), 'utf8');
+    }
+    async function restartAndConnect() {
+      killExisting();
+      await sleep(800);
+      startApp();
+      const url = await waitForPage();
+      const c2 = new Cdp(url);
+      await c2.connect();
+      return c2;
+    }
+    killExisting();
+    await sleep(500);
+    await writeWindowState({ x: 50, y: 50, width: 800, height: 600, maximized: true });
+    const cdp2 = await restartAndConnect();
+    const restoredMax = await cdp2.eval(`window.__TAURI__.window.getCurrentWindow().isMaximized().then(r => r)`);
+    check('重启后恢复最大化状态', restoredMax === true, `isMaximized=${restoredMax}`);
+    cdp2.close();
+    await sleep(500);
+    await writeWindowState({ x: 60, y: 60, width: 900, height: 700, maximized: false });
+    const cdp3 = await restartAndConnect();
+    const restoredMax2 = await cdp3.eval(`window.__TAURI__.window.getCurrentWindow().isMaximized().then(r => r)`);
+    const restoredW = await cdp3.eval(`window.innerWidth`);
+    check('重启后恢复窗口化尺寸', restoredMax2 === false && Math.abs(restoredW - 900) < 120,
+      `isMaximized=${restoredMax2}, innerWidth=${restoredW} (期望 ~900)`);
+    cdp3.close();
+    killExisting();
+    await sleep(500);
   } finally {
     cdp.close();
     killExisting();
