@@ -357,6 +357,18 @@ async function main() {
     const qcFont = await cdp.eval(`getComputedStyle(document.getElementById('qc-edit-command')).fontFamily`);
     check('输入框跟随界面字体', accentFont.includes('Consolas') && qcFont.includes('Consolas'),
       `accent=${accentFont.slice(0, 40)}, qc=${qcFont.slice(0, 40)}`);
+    // 自定义下拉列表字体跟随界面字体（dd-option 曾硬编码 Segoe UI 不随界面字体）
+    const ddOptionFont = await cdp.eval(`(() => {
+      const el = document.querySelector('.cust-dropdown .dd-option');
+      return el ? getComputedStyle(el).fontFamily : '(无 dd-option)';
+    })()`);
+    check('自定义下拉列表字体跟随界面字体', ddOptionFont.includes('Consolas'), `dd-option=${ddOptionFont.slice(0, 50)}`);
+    // 按钮跟随界面字体（btn-primary 等曾硬编码 Segoe UI）
+    const btnFont = await cdp.eval(`(() => {
+      const el = document.querySelector('.btn-primary');
+      return el ? getComputedStyle(el).fontFamily : '(无 .btn-primary)';
+    })()`);
+    check('按钮字体跟随界面字体', btnFont.includes('Consolas'), `btn=${btnFont.slice(0, 50)}`);
     // 恢复默认（跟随开）
     await cdp.eval(`_settingsConfig.uiFollowTerminal = true; syncUiFollowUI(); applyUiFont(); closeSettingsTab()`);
     await sleep(500);
