@@ -163,7 +163,7 @@ body.tab-dragging{user-select:none}
 /* Pane 拖拽重排 drop zones（未悬停不可见；悬停显示虚线框，方案 E） */
 #pane-drop-layer{position:absolute;inset:0;z-index:20;pointer-events:none}
 .pane-drop-zone{position:absolute;pointer-events:auto;background:transparent;transition:background 0.12s,border-color 0.12s}
-.pane-drop-zone.drag-over{background:rgba(var(--accent-rgb),0.09);border:1px solid rgba(var(--accent-rgb),0.35);border-radius:8px}
+.pane-drop-zone.drag-over{background:rgba(var(--accent-rgb),0.14);border:1px solid rgba(var(--accent-rgb),0.55);border-radius:8px}
 .pane-drag-ghost{position:fixed;z-index:9999;pointer-events:none;background:#282c34;border:1px solid rgba(var(--accent-rgb),0.4);border-radius:10px;padding:5px 12px;font-size:12px;color:#abb2bf;box-shadow:0 8px 24px rgba(0,0,0,0.5);opacity:0.9;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 拖拽中全局抓取光标（覆盖终端的 I-beam） */
 body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
