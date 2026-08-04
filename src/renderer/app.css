@@ -355,7 +355,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 /* Search */
 .panel-search{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid rgba(var(--accent-rgb),0.06)}
 .panel-search svg{flex-shrink:0;color:rgba(171,178,191,0.3)}
-.panel-search input{flex:1;background:none;border:none;outline:none;color:#abb2bf;font-size:13px;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
+.panel-search input{flex:1;background:none;border:none;outline:none;color:#abb2bf;font-size:13px;font-family:inherit}
 .panel-search input::placeholder{color:rgba(171,178,191,0.3)}
 
 /* Panel items */
@@ -426,7 +426,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .transfer-item-btn{width:22px;height:22px;border-radius:4px;border:none;background:transparent;color:rgba(171,178,191,0.3);cursor:pointer;font-size:11px;display:flex;align-items:center;justify-content:center;transition:all 0.15s;flex-shrink:0}
 .transfer-item-btn:hover{background:rgba(var(--accent-rgb),0.1);color:#abb2bf}
 .sftp-footer{display:flex;align-items:center;padding:10px 18px;gap:8px;border-top:1px solid rgba(var(--accent-rgb),0.06);flex-shrink:0}
-.sftp-footer button{font-size:11px;padding:5px 12px;border-radius:14px;border:none;cursor:pointer;background:rgba(var(--accent-rgb),0.06);color:rgba(171,178,191,0.5);transition:all 0.15s;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
+.sftp-footer button{font-size:11px;padding:5px 12px;border-radius:14px;border:none;cursor:pointer;background:rgba(var(--accent-rgb),0.06);color:rgba(171,178,191,0.5);transition:all 0.15s;font-family:inherit}
 .sftp-footer button:hover{background:rgba(var(--accent-rgb),0.12);color:#abb2bf}
 
 /* ── SSH Manager ── */
@@ -456,15 +456,15 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ssh-group-header .group-name-input:focus{border-color:rgb(var(--accent-rgb))}
 
 .ssh-manager-actions{display:flex;gap:8px;padding:0 12px 10px}
-.ssh-manager-actions button{font-size:11px;padding:5px 12px;border-radius:14px;border:none;cursor:pointer;background:rgba(var(--accent-rgb),0.06);color:rgba(171,178,191,0.5);transition:all 0.15s;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
+.ssh-manager-actions button{font-size:11px;padding:5px 12px;border-radius:14px;border:none;cursor:pointer;background:rgba(var(--accent-rgb),0.06);color:rgba(171,178,191,0.5);transition:all 0.15s;font-family:inherit}
 .ssh-manager-actions button:hover{background:rgba(var(--accent-rgb),0.12);color:#abb2bf}
 .ssh-manager-actions button.primary{background:rgb(var(--accent-rgb));color:var(--accent-contrast);font-weight:550}
 .ssh-manager-actions button.primary:hover{opacity:0.9}
 
 /* ── Buttons ── */
-.btn-primary{background:rgb(var(--accent-rgb));color:var(--accent-contrast);border:none;padding:8px 20px;border-radius:20px;font-size:13px;font-weight:550;cursor:pointer;transition:all 0.15s;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
+.btn-primary{background:rgb(var(--accent-rgb));color:var(--accent-contrast);border:none;padding:8px 20px;border-radius:20px;font-size:13px;font-weight:550;cursor:pointer;transition:all 0.15s;font-family:inherit}
 .btn-primary:hover{opacity:0.9}
-.btn-outline{background:transparent;color:rgba(171,178,191,0.5);border:1px solid rgba(var(--accent-rgb),0.15);padding:8px 20px;border-radius:20px;font-size:13px;cursor:pointer;transition:all 0.15s;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
+.btn-outline{background:transparent;color:rgba(171,178,191,0.5);border:1px solid rgba(var(--accent-rgb),0.15);padding:8px 20px;border-radius:20px;font-size:13px;cursor:pointer;transition:all 0.15s;font-family:inherit}
 .btn-outline:hover{background:rgba(var(--accent-rgb),0.06);color:#abb2bf;border-color:rgba(var(--accent-rgb),0.3)}
 
 /* ── Form fields ── */
@@ -505,7 +505,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .cust-dropdown.open .dd-trigger{background:rgba(var(--accent-rgb),0.1);border-color:rgba(var(--accent-rgb),0.25)}
 .cust-dropdown .dd-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:#282c34;border-radius:12px;border:1px solid rgba(var(--accent-rgb),0.08);box-shadow:0 8px 24px rgba(0,0,0,0.4);z-index:50;overflow:hidden;opacity:0;pointer-events:none;transform:translateY(-8px);transition:opacity 0.22s cubic-bezier(0.05,0.7,0.1,1),transform 0.22s cubic-bezier(0.05,0.7,0.1,1);max-height:240px;overflow-y:auto}
 .cust-dropdown.open .dd-menu{opacity:1;pointer-events:auto;transform:translateY(0)}
-.cust-dropdown .dd-option{padding:8px 12px;font-size:12.5px;color:rgba(171,178,191,0.6);cursor:pointer;transition:background 0.1s;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
+.cust-dropdown .dd-option{padding:8px 12px;font-size:12.5px;color:rgba(171,178,191,0.6);cursor:pointer;transition:background 0.1s;font-family:inherit}
 .cust-dropdown .dd-option:hover{background:rgba(var(--accent-rgb),0.08);color:#abb2bf}
 .cust-dropdown .dd-option.selected{background:rgba(var(--accent-rgb),0.12);color:rgb(var(--accent-rgb));font-weight:500}
 .cust-dropdown .dd-option.new-group{color:rgba(var(--accent-rgb),0.5);border-top:1px solid rgba(var(--accent-rgb),0.06);margin-top:4px;padding-top:10px}
@@ -517,7 +517,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .cust-combo input::placeholder{color:rgba(171,178,191,0.3)}
 .cust-combo .dd-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:#282c34;border-radius:12px;border:1px solid rgba(var(--accent-rgb),0.08);box-shadow:0 8px 24px rgba(0,0,0,0.4);z-index:50;overflow:hidden;opacity:0;pointer-events:none;transform:translateY(-8px);transition:opacity 0.22s cubic-bezier(0.05,0.7,0.1,1),transform 0.22s cubic-bezier(0.05,0.7,0.1,1);max-height:180px;overflow-y:auto}
 .cust-combo .dd-menu.open{opacity:1;pointer-events:auto;transform:translateY(0)}
-.cust-combo .dd-option{padding:8px 12px;font-size:12.5px;color:rgba(171,178,191,0.6);cursor:pointer;transition:background 0.1s;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
+.cust-combo .dd-option{padding:8px 12px;font-size:12.5px;color:rgba(171,178,191,0.6);cursor:pointer;transition:background 0.1s;font-family:inherit}
 .cust-combo .dd-option:hover,.cust-combo .dd-option.active{background:rgba(var(--accent-rgb),0.08);color:#abb2bf}
 .cust-combo .dd-option.create{color:rgba(var(--accent-rgb),0.6);border-top:1px solid rgba(var(--accent-rgb),0.06);margin-top:2px;padding-top:10px;font-style:italic}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
@@ -559,6 +559,6 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .toast.error::before{mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'/%3E%3Cline x1='6' y1='6' x2='18' y2='18'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'/%3E%3Cline x1='6' y1='6' x2='18' y2='18'/%3E%3C/svg%3E")}
 
 /* Confirm dialog */
-.btn-danger{background:rgba(242,184,181,0.18);border:1px solid rgba(242,184,181,0.18);color:#eed2d0;padding:8px 20px;border-radius:20px;font-size:13px;cursor:pointer;transition:all 0.15s;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
+.btn-danger{background:rgba(242,184,181,0.18);border:1px solid rgba(242,184,181,0.18);color:#eed2d0;padding:8px 20px;border-radius:20px;font-size:13px;cursor:pointer;transition:all 0.15s;font-family:inherit}
 .btn-danger:hover{background:rgba(242,184,181,0.28);border-color:rgba(242,184,181,0.28);color:#fef0ef}
 

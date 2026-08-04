@@ -55,7 +55,7 @@ function renderPaletteList(filter = '') {
                   onclick="paletteClickItem('${id}')"
                   onmouseenter="paletteSelect(${i})">
                   <span class="qc-item-name">${escHtml(label)}</span>
-                  ${comboDisplay ? `<span style="margin-left:auto;font-size:10px;color:rgba(171,178,191,0.45);font-family:'JetBrains Mono',monospace">${escHtml(comboDisplay)}</span>` : ''}
+                  ${comboDisplay ? `<span style="margin-left:auto;font-size:10px;color:rgba(171,178,191,0.45);font-family:inherit">${escHtml(comboDisplay)}</span>` : ''}
                 </div>`;
     });
     list.innerHTML = html;
