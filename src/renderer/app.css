@@ -5,9 +5,9 @@
   --surface-win:#12141b;      /* 窗口底座 */
   --surface-float:#2a303e;    /* 浮层（弹窗/面板/设置页） */
   --surface-card:#343b4b;     /* 设置卡片（比浮层高一级） */
-  --text-1:#eceff5;           /* 主文字 */
-  --text-2:rgba(236,239,245,0.6);  /* 次级文字 */
-  --text-3:rgba(236,239,245,0.38); /* 弱化文字 */
+  --text-1:#abb2bf;           /* 主文字（保持原基准，避免刺眼） */
+  --text-2:rgba(171,178,191,0.6);  /* 次级文字 */
+  --text-3:rgba(171,178,191,0.38); /* 弱化文字 */
   --shadow-pane:0 6px 20px rgba(0,0,0,0.4),0 2px 6px rgba(0,0,0,0.35),inset 0 1px 0 rgba(255,255,255,0.06);
   --shadow-float:0 20px 56px rgba(0,0,0,0.6),0 4px 14px rgba(0,0,0,0.4),inset 0 1px 0 rgba(255,255,255,0.06);
 }
