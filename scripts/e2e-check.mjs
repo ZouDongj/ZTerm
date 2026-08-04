@@ -289,10 +289,23 @@ async function main() {
     const uiFontSelect = await cdp.eval(`!!document.getElementById('set-ui-font')`);
     const uiFontOptions = await cdp.eval(`document.getElementById('set-ui-font')?.options.length || 0`);
     check('界面字体设置项存在且有选项', uiFontSelect && uiFontOptions > 0, `options=${uiFontOptions}`);
+    // 界面字体跟随开关：默认开 → 界面字体行隐藏
+    const followDefault = await cdp.eval(`document.getElementById('toggle-ui-follow').classList.contains('on')`);
+    const uiRowHidden = await cdp.eval(`document.getElementById('row-ui-font').style.display === 'none'`);
     const fontBefore = await cdp.eval(`document.body.style.fontFamily || '(css默认)'`);
+    check('界面字体跟随开关默认开且隐藏设置行', followDefault === true && uiRowHidden === true, `follow=${followDefault}, rowHidden=${uiRowHidden}`);
+    // 跟随模式下 body 应用终端字体组合
+    const followApplied = await cdp.eval(`document.body.style.fontFamily.includes('monospace') || document.body.style.fontFamily.includes('JetBrains') || document.body.style.fontFamily.includes('Consolas')`);
+    check('跟随模式下界面使用终端字体', followApplied === true, `body=${fontBefore.slice(0, 60)}`);
+    // 关闭跟随 → 界面字体行显示 → 选界面字体应用
+    await cdp.eval(`toggleUiFollowTerminal()`);
+    await sleep(500);
+    const uiRowShown = await cdp.eval(`document.getElementById('row-ui-font').style.display !== 'none'`);
+    check('关闭跟随后面临字体行显示', uiRowShown === true, `rowShown=${uiRowShown}`);
     const setResult = await cdp.eval(`document.getElementById('set-ui-font').value = "'Consolas',sans-serif"; saveAppearance(); document.body.style.fontFamily`);
-    check('界面字体选择应用生效', setResult.includes('Consolas'), `before=${fontBefore}, after=${setResult}`);
-    await cdp.eval(`_settingsConfig.uiFont = ''; applyUiFont(); closeSettingsTab()`);
+    check('界面字体选择应用生效', setResult.includes('Consolas'), `after=${setResult.slice(0, 60)}`);
+    // 恢复默认（跟随开）
+    await cdp.eval(`_settingsConfig.uiFollowTerminal = true; syncUiFollowUI(); applyUiFont(); closeSettingsTab()`);
     await sleep(500);
 
     // 12. SFTP 面板：打开 → 面板可见 → 关闭

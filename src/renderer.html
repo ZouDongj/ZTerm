@@ -323,11 +323,29 @@
               </div>
               <div class="settings-row">
                 <div class="settings-card-label">
+                  <div class="settings-card-title">界面字体跟随终端</div>
+                  <div class="settings-card-desc">开启时界面使用终端字体（含回退），隐藏下方界面字体设置</div>
+                </div>
+                <div class="settings-card-control">
+                  <div class="toggle-switch on" id="toggle-ui-follow" onclick="toggleUiFollowTerminal()"></div>
+                </div>
+              </div>
+              <div class="settings-row" id="row-ui-font" style="display:none">
+                <div class="settings-card-label">
                   <div class="settings-card-title">界面字体</div>
                   <div class="settings-card-desc">软件界面（标题栏、设置、面板）使用的字体</div>
                 </div>
                 <div class="settings-card-control">
                   <select class="styled-select" id="set-ui-font" onchange="saveAppearance()"></select>
+                </div>
+              </div>
+              <div class="settings-row" id="row-ui-fallback" style="display:none">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">界面回退字体</div>
+                  <div class="settings-card-desc">界面字体缺失时使用的回退字体</div>
+                </div>
+                <div class="settings-card-control">
+                  <select class="styled-select" id="set-ui-fallback-font" onchange="saveAppearance()"></select>
                 </div>
               </div>
               <div class="settings-row">
