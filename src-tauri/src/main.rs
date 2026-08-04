@@ -122,6 +122,21 @@ async fn main() {
                     let _ = handle.emit("app-before-quit", json!({}));
                 }
             });
+            // 兜底：renderer 初始化失败/崩溃会导致 renderer-ready 永不调用、窗口永远隐藏。
+            // 5s 后仍不可见则强制显示并补发 window-shown（正常路径 renderer-ready 早已完成，
+            // 这里 is_visible 为 true 直接跳过，不会重复淡入）
+            let win_fallback = window.clone();
+            let app_fallback = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                match win_fallback.is_visible() {
+                    Ok(false) | Err(_) => {
+                        let _ = win_fallback.show();
+                        let _ = app_fallback.emit("window-shown", json!({}));
+                    }
+                    Ok(true) => {}
+                }
+            });
             Ok(())
         })
         .run(tauri::generate_context!())

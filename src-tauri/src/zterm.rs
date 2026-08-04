@@ -1507,8 +1507,8 @@ pub struct WindowState {
     pub maximized: bool,
 }
 
-pub fn load_window_state() -> Option<WindowState> {
-    let config = load_config();
+// 从配置值解析窗口状态（纯函数，与文件 IO 分离便于单测；字段缺失/类型错误 → None）
+fn window_state_from_config(config: &Value) -> Option<WindowState> {
     let w = config.get("window")?;
     Some(WindowState {
         x: w.get("x")?.as_i64()? as i32,
@@ -1522,20 +1522,25 @@ pub fn load_window_state() -> Option<WindowState> {
     })
 }
 
+fn window_state_to_config(state: &WindowState) -> Value {
+    json!({
+        "x": state.x,
+        "y": state.y,
+        "width": state.width,
+        "height": state.height,
+        "maximized": state.maximized,
+    })
+}
+
+pub fn load_window_state() -> Option<WindowState> {
+    window_state_from_config(&load_config())
+}
+
 pub fn save_window_state(state: &WindowState) {
     let _guard = CONFIG_WRITE_LOCK.lock();
     let mut config = load_config();
     if let Value::Object(ref mut c) = config {
-        c.insert(
-            "window".into(),
-            json!({
-                "x": state.x,
-                "y": state.y,
-                "width": state.width,
-                "height": state.height,
-                "maximized": state.maximized,
-            }),
-        );
+        c.insert("window".into(), window_state_to_config(state));
     }
     save_config(&config);
 }
@@ -1548,6 +1553,8 @@ pub fn renderer_ready(app: AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
+    // 已由主进程 5s 兜底显示过（renderer-ready 迟到）则只恢复状态，不重复 emit 淡入
+    let already_visible = window.is_visible().unwrap_or(false);
     // 恢复上次关闭时的窗口状态（位置/大小/最大化，与 Tabby 一致）
     if let Some(ws) = load_window_state() {
         if window_position_visible(ws.x, ws.y, ws.width, ws.height, &window) {
@@ -1558,11 +1565,29 @@ pub fn renderer_ready(app: AppHandle) -> Result<(), String> {
             let _ = window.maximize();
         }
     }
+    if already_visible {
+        return Ok(());
+    }
     // 状态就绪后显示窗口（最大化/尺寸已应用，无闪现）
     let _ = window.show();
     // 通知 renderer 播放启动动画（renderer 的监听器已注册，不会丢失）
     let _ = app.emit("window-shown", json!({}));
     Ok(())
+}
+
+// 显示器矩形（纯数据，便于单测）
+struct MonitorRect {
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+}
+
+// 窗口中心点是否落在任一显示器矩形内（纯函数，与窗口句柄分离便于单测）
+fn center_on_any_monitor(cx: i32, cy: i32, monitors: &[MonitorRect]) -> bool {
+    monitors
+        .iter()
+        .any(|m| cx >= m.x && cx < m.x + m.w as i32 && cy >= m.y && cy < m.y + m.h as i32)
 }
 
 // 窗口位置是否落在任一显示器的可见区域内（防止显示器配置变化后窗口"消失"，
@@ -1578,16 +1603,16 @@ pub fn window_position_visible(
         if monitors.is_empty() {
             return true;
         }
-        let cx = x + (width as i32) / 2;
-        let cy = y + (height as i32) / 2;
-        for m in monitors {
-            let r = m.position();
-            let s = m.size();
-            if cx >= r.x && cx < r.x + s.width as i32 && cy >= r.y && cy < r.y + s.height as i32 {
-                return true;
-            }
-        }
-        return false;
+        let rects: Vec<MonitorRect> = monitors
+            .iter()
+            .map(|m| MonitorRect {
+                x: m.position().x,
+                y: m.position().y,
+                w: m.size().width,
+                h: m.size().height,
+            })
+            .collect();
+        return center_on_any_monitor(x + (width as i32) / 2, y + (height as i32) / 2, &rects);
     }
     true
 }
@@ -3281,5 +3306,60 @@ mod tests {
         let enc = dpapi_encrypt(plain).expect("dpapi encrypt");
         let dec = dpapi_decrypt(&enc).expect("dpapi decrypt");
         assert_eq!(String::from_utf8(dec).unwrap(), plain);
+    }
+
+    #[test]
+    fn window_state_roundtrip() {
+        let state = WindowState {
+            x: -50,
+            y: 120,
+            width: 900,
+            height: 700,
+            maximized: true,
+        };
+        let mut cfg = json!({});
+        cfg["window"] = window_state_to_config(&state);
+        let parsed = window_state_from_config(&cfg).expect("parse");
+        assert_eq!(parsed.x, -50);
+        assert_eq!(parsed.y, 120);
+        assert_eq!(parsed.width, 900);
+        assert_eq!(parsed.height, 700);
+        assert!(parsed.maximized);
+    }
+
+    #[test]
+    fn window_state_missing_field_returns_none() {
+        assert!(window_state_from_config(&json!({})).is_none());
+        // window 存在但字段缺失
+        assert!(window_state_from_config(&json!({"window": {"x": 1}})).is_none());
+        // 字段类型错误（字符串而非数字）
+        assert!(
+            window_state_from_config(&json!({"window": {"x": "a", "y": 2, "width": 3, "height": 4}}))
+                .is_none()
+        );
+        // maximized 缺失 → 默认 false
+        let s = window_state_from_config(&json!({"window": {"x": 1, "y": 2, "width": 3, "height": 4}}))
+            .unwrap();
+        assert!(!s.maximized);
+    }
+
+    #[test]
+    fn window_center_on_any_monitor() {
+        let one = [MonitorRect { x: 0, y: 0, w: 1920, h: 1080 }];
+        assert!(center_on_any_monitor(960, 540, &one));
+        assert!(center_on_any_monitor(0, 0, &one));
+        // 边界外：左侧/右侧/下侧
+        assert!(!center_on_any_monitor(-1, 540, &one));
+        assert!(!center_on_any_monitor(1920, 540, &one));
+        assert!(!center_on_any_monitor(960, 1080, &one));
+        // 双显示器（副屏在左侧，负坐标）
+        let two = [
+            MonitorRect { x: 0, y: 0, w: 1920, h: 1080 },
+            MonitorRect { x: -1920, y: 0, w: 1920, h: 1080 },
+        ];
+        assert!(center_on_any_monitor(-960, 540, &two));
+        assert!(center_on_any_monitor(-1920, 540, &two), "左屏左边缘在内");
+        assert!(!center_on_any_monitor(-1921, 540, &two));
+        assert!(!center_on_any_monitor(2000, 540, &two));
     }
 }

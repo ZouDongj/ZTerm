@@ -389,30 +389,37 @@ async function main() {
       await c2.connect();
       return c2;
     }
+    // 窗口状态恢复由 renderer-ready 触发（页面加载完成后异步执行），轮询等待。
+    // 注意：innerWidth 是 CSS 像素，set_size 恢复的是物理像素（outer_size 保存值），
+    // 期望宽度 = expectW / devicePixelRatio，比较时按 DPR 换算避免缩放缩放下误报失败。
+    async function assertWindowRestored(cdp, expectMax, expectW) {
+      for (let i = 0; i < 25; i++) {
+        const max = await cdp.eval(`window.__TAURI__.window.getCurrentWindow().isMaximized().then(r => r)`).catch(() => false);
+        if (max !== expectMax) { await sleep(300); continue; }
+        if (expectW) {
+          const dpr = await cdp.eval(`window.devicePixelRatio`).catch(() => 1);
+          const w = await cdp.eval(`window.innerWidth`).catch(() => 0);
+          if (Math.abs(w * dpr - expectW) < 120) return { max, w, dpr };
+          await sleep(300);
+          continue;
+        }
+        return { max, w: 0, dpr: 1 };
+      }
+      return { max: null, w: 0, dpr: 1 };
+    }
     killExisting();
     await sleep(500);
     await writeWindowState({ x: 50, y: 50, width: 800, height: 600, maximized: true });
     const cdp2 = await restartAndConnect();
-    // 窗口状态恢复由 renderer-ready 触发（页面加载完成后异步执行），轮询等待
-    let restoredMax = false;
-    for (let i = 0; i < 25 && !restoredMax; i++) {
-      restoredMax = await cdp2.eval(`window.__TAURI__.window.getCurrentWindow().isMaximized().then(r => r)`).catch(() => false);
-      if (!restoredMax) await sleep(300);
-    }
-    check('重启后恢复最大化状态', restoredMax === true, `isMaximized=${restoredMax}`);
+    const r2 = await assertWindowRestored(cdp2, true, null);
+    check('重启后恢复最大化状态', r2.max === true, `isMaximized=${r2.max}`);
     cdp2.close();
     await sleep(500);
     await writeWindowState({ x: 60, y: 60, width: 900, height: 700, maximized: false });
     const cdp3 = await restartAndConnect();
-    let restoredMax2 = false, restoredW = 0;
-    for (let i = 0; i < 25; i++) {
-      restoredMax2 = await cdp3.eval(`window.__TAURI__.window.getCurrentWindow().isMaximized().then(r => r)`).catch(() => false);
-      restoredW = await cdp3.eval(`window.innerWidth`).catch(() => 0);
-      if (restoredMax2 === false && Math.abs(restoredW - 900) < 120) break;
-      await sleep(300);
-    }
-    check('重启后恢复窗口化尺寸', restoredMax2 === false && Math.abs(restoredW - 900) < 120,
-      `isMaximized=${restoredMax2}, innerWidth=${restoredW} (期望 ~900)`);
+    const r3 = await assertWindowRestored(cdp3, false, 900);
+    check('重启后恢复窗口化尺寸', r3.max === false && r3.w !== 0,
+      `isMaximized=${r3.max}, innerWidth=${r3.w} (期望 ~900/${r3.dpr} CSS px)`);
     cdp3.close();
     killExisting();
     await sleep(500);
