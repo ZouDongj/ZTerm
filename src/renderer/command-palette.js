@@ -51,11 +51,12 @@ function renderPaletteList(filter = '') {
         const combo = bindings[id] || '';
         const comboDisplay = typeof _comboDisplay === 'function' ? _comboDisplay(combo) : combo;
         const sel = i === _paletteSelected ? ' data-selected' : '';
-        html += `<div class="qc-item"${sel} data-action-id="${id}"
+        // V3 表项（无分组纯列表）：名称 + 快捷键
+        html += `<div class="v3-item"${sel} data-action-id="${id}"
                   onclick="paletteClickItem('${id}')"
                   onmouseenter="paletteSelect(${i})">
-                  <span class="qc-item-name">${escHtml(label)}</span>
-                  ${comboDisplay ? `<span style="margin-left:auto;font-size:10px;color:rgba(171,178,191,0.45);font-family:inherit">${escHtml(comboDisplay)}</span>` : ''}
+                  <span class="v3-name">${escHtml(label)}</span>
+                  ${comboDisplay ? `<span class="v3-kbd">${escHtml(comboDisplay)}</span>` : ''}
                 </div>`;
     });
     list.innerHTML = html;
@@ -63,7 +64,7 @@ function renderPaletteList(filter = '') {
 
 function paletteSelect(i) {
     _paletteSelected = i;
-    const items = document.querySelectorAll('#palette-list .qc-item');
+    const items = document.querySelectorAll('#palette-list .v3-item');
     items.forEach((el, idx) => {
         if (idx === i) {
             el.setAttribute('data-selected', '');

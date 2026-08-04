@@ -41,21 +41,33 @@ function qcFilter() {
     const filtered = filterQuickCommands(_qcCommands, query);
     const list = document.getElementById('qc-list');
     if (filtered.length === 0) {
-        list.innerHTML = '<div style="padding:30px;text-align:center;color:rgba(171,178,191,0.25);font-size:13px">没有匹配的命令<br><span style="font-size:11px;cursor:pointer;color:rgba(var(--accent-rgb),0.5);margin-top:8px;display:inline-block" onclick="closeQC();openSettings(\'quickcommands\')">+ 添加第一个命令</span></div>';
+        list.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-3);font-size:13px">没有匹配的命令<br><span style="font-size:11px;cursor:pointer;color:#8fc1ee;margin-top:8px;display:inline-block" onclick="closeQC();openSettings(\'quickcommands\')">+ 添加第一个命令</span></div>';
         return;
     }
-    list.innerHTML = filtered.map((c, i) => `
-        <div class="qc-item" data-index="${i}" ${i === _qcSelected ? 'data-selected' : ''} onclick="qcRun('${c.id}')" onmouseenter="qcSelect(${i})">
-            <span class="qc-item-name">${escHtml(c.name)}</span>
-            <span class="qc-item-cmd">${escHtml(c.command)}</span>
-            ${c.group ? `<span class="qc-item-group">${escHtml(c.group)}</span>` : ''}
-        </div>
-    `).join('');
+    // V3 分区标题式：按分组渲染分区标题 + 表项（名称 + 命令 + Enter 徽标）
+    const groups = {};
+    filtered.forEach((c, i) => {
+        const k = c.group || '未分组';
+        (groups[k] = groups[k] || []).push({ c, i });
+    });
+    let html = '';
+    Object.entries(groups).forEach(([g, arr]) => {
+        html += `<div class="v3-section">${escHtml(g)}</div>`;
+        arr.forEach(({ c, i }) => {
+            html += `
+        <div class="v3-item" data-index="${i}" ${i === _qcSelected ? 'data-selected' : ''} onclick="qcRun('${c.id}')" onmouseenter="qcSelect(${i})">
+            <span class="v3-name">${escHtml(c.name)}</span>
+            <span class="v3-cmd">${escHtml(c.command)}</span>
+            <span class="v3-kbd">Enter</span>
+        </div>`;
+        });
+    });
+    list.innerHTML = html;
 }
 
 function qcSelect(i) {
     _qcSelected = i;
-    document.querySelectorAll('#qc-list .qc-item').forEach((el, idx) => {
+    document.querySelectorAll('#qc-list .v3-item').forEach((el, idx) => {
         if (idx === i) el.setAttribute('data-selected', '');
         else el.removeAttribute('data-selected');
     });
