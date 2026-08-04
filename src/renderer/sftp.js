@@ -343,7 +343,7 @@ const TransferManager = {
 
     add(name, type, tabId, localPath) {
         const id = this._nextId++;
-        this._transfers.push({ id, name, type, tabId, localPath, transferred: 0, total: 0, done: false, cancelled: false, startTime: Date.now() });
+        this._transfers.push({ id, name, type, tabId, localPath, transferred: 0, total: 0, done: false, cancelled: false, startTime: Date.now(), _lastUpdate: Date.now(), _lastBytes: 0, _speed: 0 });
         this._render();
         this._showButton();
         showToast(type === 'download' ? '开始下载: ' + name : '开始上传: ' + name);
@@ -355,7 +355,14 @@ const TransferManager = {
         if (!t) return;
         t.transferred = transferred;
         t.total = total;
-        this._render();
+        // 节流渲染：sftp-progress 事件频率远超人眼可感知刷新率，
+        // 每次事件都重建整个面板会让速度/进度文字高频抖动（抽搐）；
+        // 合并为 300ms 一次，速度与进度每帧只变化一次，视觉稳定
+        if (this._panelTimer) return;
+        this._panelTimer = setTimeout(() => {
+            this._panelTimer = null;
+            this._render();
+        }, 300);
     },
 
     complete(id) {
@@ -440,8 +447,21 @@ const TransferManager = {
             const btn = t.done
                 ? '<button class="transfer-item-btn" onclick="TransferManager.remove(' + t.id + ')">✓</button>'
                 : '<button class="transfer-item-btn" onclick="TransferManager.cancel(' + t.id + ')">×</button>';
-            const elapsed = (Date.now() - t.startTime) / 1000;
-            const speed = elapsed > 0 ? t.transferred / elapsed : 0;
+            const now = Date.now();
+            // 速度用 EMA 平滑（最近窗口的瞬时速率），替代全程平均值：
+            // 平均值在传输中单调漂移、字节突发时跳变，是文字抽搐的主要来源
+            let speed = t._speed || 0;
+            if (!t.done && !t.cancelled) {
+                const dt = (now - t._lastUpdate) / 1000;
+                if (dt > 0.05) {
+                    const inst = Math.max(0, t.transferred - t._lastBytes) / dt;
+                    t._speed = t._speed > 0 ? t._speed * 0.6 + inst * 0.4 : inst;
+                    t._lastUpdate = now;
+                    t._lastBytes = t.transferred;
+                    speed = t._speed;
+                }
+            }
+            const speedText = t.done ? '完成' : (speed > 0 ? formatSize(speed) + '/s' : '0 B/s');
             html += '<div class="transfer-item">' +
                 '<span class="transfer-item-icon">' + icon + '</span>' +
                 '<div class="transfer-item-main">' +
@@ -449,7 +469,7 @@ const TransferManager = {
                     '<div class="transfer-item-bar"><div class="transfer-item-bar-fill ' + barClass + '" style="width:' + pct + '%"></div></div>' +
                     '<div class="transfer-item-meta">' +
                         '<span>' + formatSize(t.transferred) + ' / ' + formatSize(t.total) + '</span>' +
-                        '<span class="speed">' + (t.done ? '完成' : formatSize(speed) + '/s') + '</span>' +
+                        '<span class="speed">' + speedText + '</span>' +
                     '</div>' +
                 '</div>' +
                 btn +

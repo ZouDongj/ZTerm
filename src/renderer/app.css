@@ -421,7 +421,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .transfer-item-bar-fill{height:100%;background:rgb(var(--accent-rgb));border-radius:2px;transition:width 0.2s;width:0%}
 .transfer-item-bar-fill.done{background:#98c379}
 .transfer-item-bar-fill.cancelled{background:#e06c75}
-.transfer-item-meta{display:flex;align-items:center;font-size:10px;color:rgba(171,178,191,0.35)}
+.transfer-item-meta{display:flex;align-items:center;font-size:10px;color:rgba(171,178,191,0.35);font-variant-numeric:tabular-nums}
 .transfer-item-meta .speed{margin-left:auto}
 .transfer-item-btn{width:22px;height:22px;border-radius:4px;border:none;background:transparent;color:rgba(171,178,191,0.3);cursor:pointer;font-size:11px;display:flex;align-items:center;justify-content:center;transition:all 0.15s;flex-shrink:0}
 .transfer-item-btn:hover{background:rgba(var(--accent-rgb),0.1);color:#abb2bf}

@@ -64,6 +64,26 @@ document.addEventListener('keydown', e => {
     }
 });
 
+// ── 全局禁用表单补全/拼写建议 ──
+// WebView2 的 autofill 已在主进程关闭（general_autofill_enabled(false)）；
+// 这里再兜一层：所有输入框关闭 autocomplete/autocorrect/spellcheck，
+// 防止动态创建的输入框（登录脚本行、重命名输入等）触发浏览器式建议弹窗
+function _disableFormEnhancements(root) {
+    (root.querySelectorAll ? root.querySelectorAll('input, textarea') : []).forEach(el => {
+        if (!el.hasAttribute('autocomplete')) el.setAttribute('autocomplete', 'off');
+        if (!el.hasAttribute('autocorrect')) el.setAttribute('autocorrect', 'off');
+        if (!el.hasAttribute('spellcheck')) el.setAttribute('spellcheck', 'false');
+    });
+}
+new MutationObserver(muts => {
+    for (const m of muts) {
+        for (const n of m.addedNodes) {
+            if (n.nodeType === 1) _disableFormEnhancements(n);
+        }
+    }
+}).observe(document.documentElement, { childList: true, subtree: true });
+_disableFormEnhancements(document);
+
 // ── Save / Periodic ──
 // L4：返回 Promise——退出流程需要等待落盘完成，不能 fire-and-forget
 function saveConfig() {
