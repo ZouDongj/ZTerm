@@ -81,7 +81,11 @@ function executeQuickCommand(cmd) {
     const tab = TabManager.getActive();
     if (!tab) return;
     // Insert command text into terminal (user can edit before pressing Enter)
-    const text = cmd.command;
+    // “末尾回车自动执行”开关：关闭时剥掉末尾一个换行（只注入命令文本，不自动执行）
+    let text = cmd.command;
+    if (!_settingsConfig.qcAutoEnter) {
+        text = stripTrailingNewline(text);
+    }
     if (tab.splitRoot) {
         const focused = getAllPanes(tab).find(p => p.focused);
         if (focused && focused.tabId) {
@@ -94,9 +98,20 @@ function executeQuickCommand(cmd) {
     }
 }
 
+// “末尾回车自动执行”全局开关（设置 → 快捷命令页顶部）
+function toggleQCAutoEnter() {
+    _settingsConfig.qcAutoEnter = !_settingsConfig.qcAutoEnter;
+    const el = document.getElementById('qc-auto-enter');
+    if (el) el.classList.toggle('on', !!_settingsConfig.qcAutoEnter);
+    persistSettings();
+}
+
 function renderQCCommandsList() {
     const container = document.getElementById('qc-commands-list');
     if (!container) return;
+    // 同步“末尾回车自动执行”开关状态
+    const qcToggle = document.getElementById('qc-auto-enter');
+    if (qcToggle) qcToggle.classList.toggle('on', !!_settingsConfig.qcAutoEnter);
     if (_qcCommands.length === 0) {
         container.innerHTML = '<div style="padding:30px;text-align:center;color:rgba(171,178,191,0.25);font-size:13px">暂无命令</div>';
         return;
@@ -288,17 +303,19 @@ function closeQCEdit() {
 
 function saveQCEdit() {
     const name = document.getElementById('qc-edit-name').value.trim();
-    const command = document.getElementById('qc-edit-command').value.trim();
+    // command 保存原文（保留用户输入的末尾回车）：编辑栏显示什么就存什么，
+    // 末尾回车是否注入由“末尾回车自动执行”开关在注入时决定
+    const commandRaw = document.getElementById('qc-edit-command').value;
     const group = document.getElementById('qc-edit-group').value.trim();
-    if (!name || !command) {
+    if (!name || !commandRaw.trim()) {
         showToast('名称和命令不能为空', true);
         return;
     }
     if (_editingQCId) {
         const c = _qcCommands.find(x => x.id === _editingQCId);
-        if (c) { c.name = name; c.command = command; c.group = group; }
+        if (c) { c.name = name; c.command = commandRaw; c.group = group; }
     } else {
-        _qcCommands.push({ id: 'qc_' + Date.now(), name, command, group });
+        _qcCommands.push({ id: 'qc_' + Date.now(), name, command: commandRaw, group });
     }
     saveQuickCommands();
     closeQCEdit();

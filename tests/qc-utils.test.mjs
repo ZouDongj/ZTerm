@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { filterQuickCommands } = require('../src/renderer/qc-utils.js');
+const { filterQuickCommands, stripTrailingNewline } = require('../src/renderer/qc-utils.js');
 
 const COMMANDS = [
     { id: '1', name: '查看系统信息', command: 'htop', group: '常用' },
@@ -39,4 +39,29 @@ test('filterQuickCommands 缺字段命令不崩溃', () => {
     const dirty = [{ id: 'x' }, { id: 'y', name: 'ok' }];
     assert.equal(filterQuickCommands(dirty, 'ok').length, 1);
     assert.equal(filterQuickCommands(dirty, 'x').length, 0); // 无 name/group/command 字段不匹配
+});
+
+// ── stripTrailingNewline（末尾回车自动执行开关）──
+
+test('stripTrailingNewline 剥掉末尾一个换行', () => {
+    assert.equal(stripTrailingNewline('tail -f /var/log/a.log\n'), 'tail -f /var/log/a.log');
+    // 多行命令：只剥最后一个，中间换行保留
+    assert.equal(stripTrailingNewline('cd /app\nnpm run dev\n'), 'cd /app\nnpm run dev');
+});
+
+test('stripTrailingNewline 多个末尾换行只剥一个', () => {
+    assert.equal(stripTrailingNewline('a\n\n'), 'a\n');
+    assert.equal(stripTrailingNewline('a\n\n\n'), 'a\n\n');
+});
+
+test('stripTrailingNewline 无末尾换行原样返回', () => {
+    assert.equal(stripTrailingNewline('ls -la'), 'ls -la');
+    assert.equal(stripTrailingNewline(''), '');
+    assert.equal(stripTrailingNewline('\n'), '');
+    // 末尾空格不受影响
+    assert.equal(stripTrailingNewline('ls  '), 'ls  ');
+});
+
+test('stripTrailingNewline 中间换行不受影响', () => {
+    assert.equal(stripTrailingNewline('a\nb'), 'a\nb');
 });
