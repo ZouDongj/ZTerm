@@ -1906,7 +1906,7 @@ pub fn get_system_fonts(args: Vec<Value>) -> Result<Value, String> {
     let _ = args;
     // 用 Win32 EnumFontFamiliesExW 枚举系统字体，避免 spawn 控制台子进程
     // （GUI 进程 spawn powershell 会触发系统默认终端激活，弹出 Windows Terminal）
-    let fonts = enumerate_system_fonts();
+    let fonts = filter_system_fonts(enumerate_system_fonts());
     if fonts.is_empty() {
         return Ok(json!([
             "JetBrains Mono",
@@ -1918,6 +1918,21 @@ pub fn get_system_fonts(args: Vec<Value>) -> Result<Value, String> {
         ]));
     }
     Ok(Value::Array(fonts.into_iter().map(|s| json!(s)).collect()))
+}
+
+// 过滤系统字体列表：排除 "@" 竖排变体（@宋体 等 Windows 垂直书写字体）
+// 和系统保留字体（System/Terminal/Fixedsys 等），避免污染字体下拉列表
+fn filter_system_fonts(fonts: Vec<String>) -> Vec<String> {
+    fonts
+        .into_iter()
+        .filter(|f| !f.starts_with('@'))
+        .filter(|f| {
+            !matches!(
+                f.as_str(),
+                "System" | "Terminal" | "Fixedsys" | "MS Sans Serif" | "MS Serif"
+            )
+        })
+        .collect()
 }
 
 fn enumerate_system_fonts() -> Vec<String> {
@@ -2864,6 +2879,37 @@ mod tests {
         // 非法输入
         assert!(aes_gcm_decrypt_payload(&key, &[]).is_none());
         assert!(aes_gcm_decrypt_payload(&[1u8; 16], &payload).is_none());
+    }
+
+    #[test]
+    fn filter_system_fonts_excludes_at_and_system_fonts() {
+        let fonts = vec![
+            "JetBrains Mono".into(),
+            "@JetBrains Mono".into(),
+            "System".into(),
+            "@System".into(),
+            "宋体".into(),
+            "@宋体".into(),
+            "Terminal".into(),
+            "Cascadia Code".into(),
+            "Consolas".into(),
+        ];
+        let filtered = filter_system_fonts(fonts);
+        assert_eq!(
+            filtered,
+            vec!["JetBrains Mono", "宋体", "Cascadia Code", "Consolas"]
+        );
+        // 正常字体保留，@ 前缀与 System 类字体全部排除
+        assert!(!filtered.iter().any(|f| f.starts_with('@')));
+        assert!(!filtered.iter().any(|f| matches!(f.as_str(), "System" | "Terminal")));
+    }
+
+    #[test]
+    fn filter_system_fonts_empty_input() {
+        assert!(filter_system_fonts(vec![]).is_empty());
+        // 中文正常字体名不被误伤
+        let filtered = filter_system_fonts(vec!["微软雅黑".into()]);
+        assert_eq!(filtered, vec!["微软雅黑"]);
     }
 
     #[test]

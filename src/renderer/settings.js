@@ -431,14 +431,38 @@ function populateFontList() {
             if (current) fontEl.value = current;
         }
 
+        // Populate UI font dropdown（界面字体，默认系统字体栈）
+        const uiFontEl = document.getElementById('set-ui-font');
+        if (uiFontEl) {
+            const current = _settingsConfig.uiFont || '';
+            uiFontEl.innerHTML = '';
+            allFonts.forEach(f => {
+                const opt = document.createElement('option');
+                opt.value = `'${f}',sans-serif`;
+                opt.textContent = f;
+                uiFontEl.appendChild(opt);
+            });
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = '系统默认';
+            uiFontEl.appendChild(opt);
+            // 配置的字体不在枚举列表里 → 追加一个选项保留配置
+            if (current && ![...uiFontEl.options].some(o => o.value === current)) {
+                const extra = document.createElement('option');
+                extra.value = current;
+                extra.textContent = current.replace(/'/g, '').replace(/,sans-serif$/, '');
+                uiFontEl.appendChild(extra);
+            }
+            if (current) uiFontEl.value = current;
+        }
+
         // Populate fallback font dropdown with ALL system fonts
         const fallbackEl = document.getElementById('set-fallback-font');
         if (fallbackEl) {
             const current = _settingsConfig.fallbackFont !== undefined ? _settingsConfig.fallbackFont : fallbackEl.value;
             fallbackEl.innerHTML = '';
             allFonts.forEach(f => {
-                const opt = document.createElement('option');
-                opt.value = f;
+                const opt = document.createElement('option');                opt.value = f;
                 opt.textContent = f;
                 fallbackEl.appendChild(opt);
             });
@@ -460,10 +484,19 @@ function populateFontList() {
     });
 }
 
+// 界面字体默认值：系统字体栈（不依赖外部字体，内网/离线环境稳定）
+const DEFAULT_UI_FONT = "'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif";
+
+// 应用界面字体到 body（空 = 系统默认栈）
+function applyUiFont() {
+    document.body.style.fontFamily = _settingsConfig.uiFont || DEFAULT_UI_FONT;
+}
+
 // 字重校验：1-1000 的数字（xterm 只接受 number 1-1000 或 'normal'/'bold'/'100'..'900' 整百字符串，
 // 数字字符串如 '550' 会被静默打回默认值——所以这里必须返回 number）
 function saveAppearance() {
     const fontFamily = document.getElementById('set-font')?.value || '';
+    const uiFont = document.getElementById('set-ui-font')?.value || _settingsConfig.uiFont || '';
     const fontSize = parseFloat(document.getElementById('set-font-size')?.value) || 13.5;
     const lineHeight = parseFloat(document.getElementById('set-line-height')?.value) || 1.6;
     const fontWeight = _clampFontWeight(document.getElementById('set-font-weight')?.value, '400');
@@ -476,9 +509,10 @@ function saveAppearance() {
     const terminalScheme = document.getElementById('set-terminal-scheme')?.value || 'onedark';
     const minimumContrastRatio = parseFloat(document.getElementById('set-contrast')?.value) || 4;
 
-    const config = { fontFamily, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, terminalScheme, minimumContrastRatio, theme: 'dark' };
+    const config = { fontFamily, uiFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, terminalScheme, minimumContrastRatio, theme: 'dark' };
     _settingsConfig = { ..._settingsConfig, ...config };
     persistSettings();
+    applyUiFont();
 
     // Apply animations setting
     const winEl = document.querySelector('.window');
@@ -560,6 +594,7 @@ function persistSettings() {
     const config = { ..._settingsConfig };
     ipcRenderer.send('save-appearance', {
         fontFamily: config.fontFamily,
+        uiFont: config.uiFont,
         fontSize: config.fontSize,
         lineHeight: config.lineHeight,
         fontWeight: config.fontWeight,
