@@ -102,13 +102,42 @@ ipcRenderer.on('window-shown', () => {
         winEl.classList.add('win-in');
         setTimeout(() => winEl.classList.remove('win-in'), 400);
     }
+    // 窗口已显示：解除 splash 隐藏禁令；若此前有被推迟的隐藏请求（首帧早于窗口弹出），立即重试
+    _windowShownAt = Date.now();
+    if (_splashHidePending) { _splashHidePending = false; hideStartupSplash(); }
 });
+
+// renderer 加载完成且监听器已注册：通知主进程恢复窗口状态并显示窗口。
+// 主进程据此保证 window-shown 一定在监听就绪后 emit（否则启动界面会卡住）
+ipcRenderer.invoke('renderer-ready').catch(() => {});
 
 // 启动界面：首个终端首帧渲染完成后淡出（xterm onRender 精确判定 + 3s 兜底）
 let _splashHidden = false;
-function hideStartupSplash() {
+// 窗口显示时间戳：splash 在窗口显示前禁止隐藏（防止窗口弹出前启动页就消失），
+// 窗口显示后终端首帧一到立即淡出，不额外停留
+let _windowShownAt = 0;
+let _splashHidePending = false;
+// 绿点加载动画：沿 Z 形方块单向循环移动，一格一格走（当前格变白、下一格变绿），慢速
+let _splashLoaderTimer = null;
+function startSplashLoader() {
+    const cells = document.querySelectorAll('#splash-cells .cell');
+    if (!cells.length) return;
+    let idx = 0;
+    cells[idx].classList.add('loading');
+    _splashLoaderTimer = setInterval(() => {
+        cells[idx].classList.remove('loading');
+        idx = (idx + 1) % cells.length;
+        cells[idx].classList.add('loading');
+    }, 450); // 450ms/格，13 格一圈约 5.9s，慢速一格一格走
+}
+function hideStartupSplash(force) {
     if (_splashHidden) return;
+    // 窗口未显示（还在恢复状态/未 show）：推迟到 window-shown 后再隐藏
+    if (!force && !_windowShownAt) { _splashHidePending = true; return; }
+    // 终端首帧已渲染 → 立即淡出（不额外停留，force 兜底路径同样立即）
     _splashHidden = true;
+    _splashHidePending = false;
+    if (_splashLoaderTimer) { clearInterval(_splashLoaderTimer); _splashLoaderTimer = null; }
     const s = document.getElementById('startup-splash');
     if (s) {
         s.classList.add('leaving');
@@ -129,7 +158,14 @@ function armSplashHide() {
         setTimeout(waitTerm, 200);
     };
     waitTerm();
-    setTimeout(hideStartupSplash, 3000); // 兜底：onRender 未触发也不让启动页滞留
+    // 兜底 1：window-shown 事件异常丢失时（正常路径主进程等页面加载完才 emit），
+    // 强制解除"窗口未显示"禁令并重试，避免 splash 永久滞留
+    setTimeout(() => {
+        if (!_windowShownAt) _windowShownAt = Date.now();
+        if (_splashHidePending) { _splashHidePending = false; hideStartupSplash(); }
+    }, 1200);
+    // 兜底 2：无论首帧/事件是否正常，3s 后强制隐藏（绕过停留限制）
+    setTimeout(() => hideStartupSplash(true), 3000);
 }
 
 // ── Settings ──
@@ -151,5 +187,6 @@ function armSplashHide() {
     const _winEl = document.querySelector('.window');
     if (_winEl && _settingsConfig.animations === false) _winEl.classList.add('no-animations');
     TabManager.init();
+    startSplashLoader();
     armSplashHide();
 })();

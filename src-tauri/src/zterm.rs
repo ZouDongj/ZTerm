@@ -1540,6 +1540,31 @@ pub fn save_window_state(state: &WindowState) {
     save_config(&config);
 }
 
+// renderer 加载完成（window-shown 监听已注册）后调用：恢复窗口状态 → 显示窗口 → 通知播放启动动画。
+// 用 renderer 主动上报而不是主进程 on_page_load：保证事件 emit 时监听器一定已就绪，
+// 否则事件丢失会导致启动界面无法隐藏（卡在启动页）
+#[tauri::command]
+pub fn renderer_ready(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window not found".to_string())?;
+    // 恢复上次关闭时的窗口状态（位置/大小/最大化，与 Tabby 一致）
+    if let Some(ws) = load_window_state() {
+        if window_position_visible(ws.x, ws.y, ws.width, ws.height, &window) {
+            let _ = window.set_position(tauri::PhysicalPosition::new(ws.x, ws.y));
+            let _ = window.set_size(tauri::PhysicalSize::new(ws.width, ws.height));
+        }
+        if ws.maximized {
+            let _ = window.maximize();
+        }
+    }
+    // 状态就绪后显示窗口（最大化/尺寸已应用，无闪现）
+    let _ = window.show();
+    // 通知 renderer 播放启动动画（renderer 的监听器已注册，不会丢失）
+    let _ = app.emit("window-shown", json!({}));
+    Ok(())
+}
+
 // 窗口位置是否落在任一显示器的可见区域内（防止显示器配置变化后窗口"消失"，
 // 恢复位置前检查；无法枚举显示器时保守视为可见）
 pub fn window_position_visible(
