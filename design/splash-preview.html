@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>ZTerm 启动界面样稿</title>
+<style>
+  body{background:#17191f;color:#e8e9f1;font-family:'Segoe UI','Microsoft YaHei UI',sans-serif;margin:0;padding:32px}
+  h1{font-size:20px;font-weight:600;margin:0 0 6px}
+  .sub{color:rgba(232,233,241,0.5);font-size:13px;margin-bottom:28px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;margin-bottom:32px}
+  .card{background:#21252b;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:12px}
+  .card h3{font-size:14px;margin:0;color:#abb2bf;font-weight:600}
+  .card .tag{font-size:11px;color:rgba(171,178,191,0.45);font-family:Consolas,monospace}
+  .stage{height:200px;border-radius:12px;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+  .stage .logo{animation:splash-pop 0.45s cubic-bezier(0.2,0.8,0.3,1.1)}
+  @keyframes splash-pop{from{opacity:0;transform:scale(0.82)}to{opacity:1;transform:scale(1)}}
+  .cell{transition:fill 0.18s ease-out}
+  .cell.loading{fill:#8affa0}
+  .controls{display:flex;gap:10px;margin-bottom:8px}
+  button{background:rgba(97,175,239,0.12);border:1px solid rgba(97,175,239,0.25);color:#abb2bf;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer}
+  button:hover{background:rgba(97,175,239,0.2)}
+  .note{font-size:12px;color:rgba(171,178,191,0.5);line-height:1.6}
+</style>
+</head>
+<body>
+<h1>ZTerm 启动界面样稿</h1>
+<div class="sub">无边框：只有 Z 形方块 + 绿点动画；四版底色对比（图标底色 vs 终端配色）。绿色 cell 沿 Z 单向循环移动，慢速</div>
+
+<div class="controls">
+  <button onclick="setSpeed(220)">快</button>
+  <button onclick="setSpeed(300)">中</button>
+  <button onclick="setSpeed(420)">慢</button>
+</div>
+
+<div class="grid">
+  <!-- A 图标渐变底 -->
+  <div class="card">
+    <h3>A · 图标渐变底</h3>
+    <div class="tag">#131624 → #0a0c12（与软件图标一致）</div>
+    <div class="stage" style="background:linear-gradient(135deg,#131624,#0a0c12)">
+      <svg class="logo" width="130" height="130" viewBox="0 0 512 512" fill="none">
+        <g fill="#f4f6ff">
+          <rect class="cell" x="96" y="96" width="56" height="56" rx="12"/><rect class="cell" x="160" y="96" width="56" height="56" rx="12"/><rect class="cell" x="224" y="96" width="56" height="56" rx="12"/><rect class="cell" x="288" y="96" width="56" height="56" rx="12"/><rect class="cell" x="352" y="96" width="56" height="56" rx="12"/>
+          <rect class="cell" x="288" y="160" width="56" height="56" rx="12"/>
+          <rect class="cell" x="224" y="224" width="56" height="56" rx="12"/>
+          <rect class="cell" x="160" y="288" width="56" height="56" rx="12"/>
+          <rect class="cell" x="96" y="352" width="56" height="56" rx="12"/><rect class="cell" x="160" y="352" width="56" height="56" rx="12"/><rect class="cell" x="224" y="352" width="56" height="56" rx="12"/><rect class="cell" x="288" y="352" width="56" height="56" rx="12"/><rect class="cell" x="352" y="352" width="56" height="56" rx="12"/>
+        </g>
+      </svg>
+    </div>
+    <div class="note">与图标同源的渐变，视觉连贯；黑得够深，白色 Z 对比最强</div>
+  </div>
+
+  <!-- B 图标原底色 -->
+  <div class="card">
+    <h3>B · 图标原底色</h3>
+    <div class="tag">#12141c（旧版图标单色底）</div>
+    <div class="stage" style="background:#12141c">
+      <svg class="logo" width="130" height="130" viewBox="0 0 512 512" fill="none">
+        <g fill="#f4f6ff">
+          <rect class="cell" x="96" y="96" width="56" height="56" rx="12"/><rect class="cell" x="160" y="96" width="56" height="56" rx="12"/><rect class="cell" x="224" y="96" width="56" height="56" rx="12"/><rect class="cell" x="288" y="96" width="56" height="56" rx="12"/><rect class="cell" x="352" y="96" width="56" height="56" rx="12"/>
+          <rect class="cell" x="288" y="160" width="56" height="56" rx="12"/>
+          <rect class="cell" x="224" y="224" width="56" height="56" rx="12"/>
+          <rect class="cell" x="160" y="288" width="56" height="56" rx="12"/>
+          <rect class="cell" x="96" y="352" width="56" height="56" rx="12"/><rect class="cell" x="160" y="352" width="56" height="56" rx="12"/><rect class="cell" x="224" y="352" width="56" height="56" rx="12"/><rect class="cell" x="288" y="352" width="56" height="56" rx="12"/><rect class="cell" x="352" y="352" width="56" height="56" rx="12"/>
+        </g>
+      </svg>
+    </div>
+    <div class="note">旧图标底色，中性偏暖的深灰蓝</div>
+  </div>
+
+  <!-- C 终端配色 -->
+  <div class="card">
+    <h3>C · 终端配色背景</h3>
+    <div class="tag">#282c34（默认终端背景，one-dark）</div>
+    <div class="stage" style="background:#282c34">
+      <svg class="logo" width="130" height="130" viewBox="0 0 512 512" fill="none">
+        <g fill="#f4f6ff">
+          <rect class="cell" x="96" y="96" width="56" height="56" rx="12"/><rect class="cell" x="160" y="96" width="56" height="56" rx="12"/><rect class="cell" x="224" y="96" width="56" height="56" rx="12"/><rect class="cell" x="288" y="96" width="56" height="56" rx="12"/><rect class="cell" x="352" y="96" width="56" height="56" rx="12"/>
+          <rect class="cell" x="288" y="160" width="56" height="56" rx="12"/>
+          <rect class="cell" x="224" y="224" width="56" height="56" rx="12"/>
+          <rect class="cell" x="160" y="288" width="56" height="56" rx="12"/>
+          <rect class="cell" x="96" y="352" width="56" height="56" rx="12"/><rect class="cell" x="160" y="352" width="56" height="56" rx="12"/><rect class="cell" x="224" y="352" width="56" height="56" rx="12"/><rect class="cell" x="288" y="352" width="56" height="56" rx="12"/><rect class="cell" x="352" y="352" width="56" height="56" rx="12"/>
+        </g>
+      </svg>
+    </div>
+    <div class="note">与终端内容同底色：splash → 终端无缝过渡，像是"终端自己亮起来"</div>
+  </div>
+
+  <!-- D 纯黑 -->
+  <div class="card">
+    <h3>D · 纯黑</h3>
+    <div class="tag">#05060a（最黑）</div>
+    <div class="stage" style="background:#05060a">
+      <svg class="logo" width="130" height="130" viewBox="0 0 512 512" fill="none">
+        <g fill="#f4f6ff">
+          <rect class="cell" x="96" y="96" width="56" height="56" rx="12"/><rect class="cell" x="160" y="96" width="56" height="56" rx="12"/><rect class="cell" x="224" y="96" width="56" height="56" rx="12"/><rect class="cell" x="288" y="96" width="56" height="56" rx="12"/><rect class="cell" x="352" y="96" width="56" height="56" rx="12"/>
+          <rect class="cell" x="288" y="160" width="56" height="56" rx="12"/>
+          <rect class="cell" x="224" y="224" width="56" height="56" rx="12"/>
+          <rect class="cell" x="160" y="288" width="56" height="56" rx="12"/>
+          <rect class="cell" x="96" y="352" width="56" height="56" rx="12"/><rect class="cell" x="160" y="352" width="56" height="56" rx="12"/><rect class="cell" x="224" y="352" width="56" height="56" rx="12"/><rect class="cell" x="288" y="352" width="56" height="56" rx="12"/><rect class="cell" x="352" y="352" width="56" height="56" rx="12"/>
+        </g>
+      </svg>
+    </div>
+    <div class="note">最纯粹的深色，OLED 友好，白 Z 最突出</div>
+  </div>
+</div>
+
+<script>
+  const groups = [...document.querySelectorAll('.card')].map(card => [...card.querySelectorAll('.cell')]);
+  const timers = groups.map(() => null);
+  const states = groups.map(() => ({ idx: 0 }));
+  let speed = 300;
+  function stepAll() {
+    groups.forEach((cells, gi) => {
+      const st = states[gi];
+      cells.forEach((c, i) => c.classList.toggle('loading', i === st.idx));
+      st.idx = (st.idx + 1) % cells.length;
+    });
+  }
+  function startAll() {
+    timers.forEach(t => clearInterval(t));
+    groups.forEach((_, gi) => { timers[gi] = setInterval(stepAll, speed); });
+  }
+  function setSpeed(ms) { speed = ms; startAll(); }
+  startAll();
+</script>
+</body>
+</html>

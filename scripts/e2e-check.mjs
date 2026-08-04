@@ -144,8 +144,40 @@ async function main() {
   await cdp.connect();
 
   try {
-    // 0. 启动界面：首帧渲染后应自动淡出（最多等 5s）；兜底主动隐藏防遮挡后续检查
+    // 等页面完全加载（CDP 页面一出现即可连，但此时网络栈可能未就绪，
+    // 立即 fetch 自身会 Failed to fetch——先等 readyState=complete 再开始检查）
+    await waitForValue(cdp, `document.readyState`, 'complete', 15000);
+
+    // 0. 启动界面：结构正确（只显示图标 + 绿点动画）+ 首帧渲染后自动淡出（最多等 5s）；兜底主动隐藏防遮挡后续检查
     const splashExists = await cdp.eval(`!!document.getElementById('startup-splash')`);
+    const splashStruct = await cdp.eval(`(() => {
+      const s = document.getElementById('startup-splash');
+      if (!s) return { missing: true };
+      return {
+        cells: s.querySelectorAll('.cell').length,
+        loading: s.querySelectorAll('.cell.loading').length,
+        leaving: s.classList.contains('leaving'),
+        hasName: !!s.querySelector('.startup-name'),
+        hasHint: !!s.querySelector('.startup-hint'),
+        hasLogo: !!s.querySelector('svg.startup-logo')
+      };
+    })()`);
+    // 只验静态结构（动画运行有独立的轮询检查；startSplashLoader 在 async Init 中启动，可能晚于此检查）
+    const structOk = splashStruct.missing === true || (splashStruct.cells === 13 &&
+      !splashStruct.hasName && !splashStruct.hasHint && splashStruct.hasLogo);
+    check('启动界面结构：仅图标 + 13 格 Z', structOk === true, JSON.stringify(splashStruct));
+    // 动画验证：splash 存在时轮询绿点出现（startSplashLoader 在 async Init 中启动，
+    // 可能晚于结构检查）；splash 已被移除同样视为通过
+    let animOk = true;
+    if (!splashStruct.missing) {
+      animOk = false;
+      for (let i = 0; i < 12; i++) {
+        if (await cdp.eval(`!document.getElementById('startup-splash')`)) { animOk = true; break; }
+        if ((await cdp.eval(`document.querySelectorAll('#splash-cells .cell.loading').length`)) > 0) { animOk = true; break; }
+        await sleep(200);
+      }
+    }
+    check('绿点动画运行（或已随 splash 移除）', animOk === true, `splash存在=${!splashStruct.missing}`);
     let splashGone = false;
     for (let i = 0; i < 25; i++) {
       splashGone = await cdp.eval(`!document.getElementById('startup-splash')`);
@@ -156,7 +188,12 @@ async function main() {
     check('启动界面首帧渲染后自动淡出', splashGone === true, `splash存在=${splashExists}, 自动移除=${splashGone}`);
 
     // 1. CSP：'unsafe-inline' 必须真正生效（未被 Tauri 注入的 hash 挤掉）
-    const csp = await cdp.eval(`fetch(location.href, {cache:'no-store'}).then(r => r.headers.get('content-security-policy'))`);
+    // fetch 自身在页面刚就绪时偶发失败，重试几次
+    let csp = null;
+    for (let i = 0; i < 5 && csp === null; i++) {
+      try { csp = await cdp.eval(`fetch(location.href, {cache:'no-store'}).then(r => r.headers.get('content-security-policy'))`); }
+      catch { await sleep(500); }
+    }
     const hasUnsafeInline = /script-src[^;]*'unsafe-inline'/.test(csp ?? '');
     const hasHash = /script-src[^;]*'sha256-/.test(csp ?? '');
     check('CSP script-src 含生效的 unsafe-inline', hasUnsafeInline && !hasHash, (csp ?? '').slice(0, 80) + '...');
@@ -356,14 +393,24 @@ async function main() {
     await sleep(500);
     await writeWindowState({ x: 50, y: 50, width: 800, height: 600, maximized: true });
     const cdp2 = await restartAndConnect();
-    const restoredMax = await cdp2.eval(`window.__TAURI__.window.getCurrentWindow().isMaximized().then(r => r)`);
+    // 窗口状态恢复由 renderer-ready 触发（页面加载完成后异步执行），轮询等待
+    let restoredMax = false;
+    for (let i = 0; i < 25 && !restoredMax; i++) {
+      restoredMax = await cdp2.eval(`window.__TAURI__.window.getCurrentWindow().isMaximized().then(r => r)`).catch(() => false);
+      if (!restoredMax) await sleep(300);
+    }
     check('重启后恢复最大化状态', restoredMax === true, `isMaximized=${restoredMax}`);
     cdp2.close();
     await sleep(500);
     await writeWindowState({ x: 60, y: 60, width: 900, height: 700, maximized: false });
     const cdp3 = await restartAndConnect();
-    const restoredMax2 = await cdp3.eval(`window.__TAURI__.window.getCurrentWindow().isMaximized().then(r => r)`);
-    const restoredW = await cdp3.eval(`window.innerWidth`);
+    let restoredMax2 = false, restoredW = 0;
+    for (let i = 0; i < 25; i++) {
+      restoredMax2 = await cdp3.eval(`window.__TAURI__.window.getCurrentWindow().isMaximized().then(r => r)`).catch(() => false);
+      restoredW = await cdp3.eval(`window.innerWidth`).catch(() => 0);
+      if (restoredMax2 === false && Math.abs(restoredW - 900) < 120) break;
+      await sleep(300);
+    }
     check('重启后恢复窗口化尺寸', restoredMax2 === false && Math.abs(restoredW - 900) < 120,
       `isMaximized=${restoredMax2}, innerWidth=${restoredW} (期望 ~900)`);
     cdp3.close();

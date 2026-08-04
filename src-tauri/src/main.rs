@@ -67,6 +67,7 @@ async fn main() {
             zterm::quit_ready,
             zterm::clipboard_write_text,
             zterm::clipboard_read_text,
+            zterm::renderer_ready,
         ])
         .setup(|app| {
             // 注册全局 AppHandle（config-corrupted 等事件 emit 用）
@@ -95,21 +96,9 @@ async fn main() {
             .enable_clipboard_access()
             .build()?;
 
-            // 恢复上次关闭时的窗口状态（位置/大小/最大化，与 Tabby 一致）
-            if let Some(ws) = zterm::load_window_state() {
-                if zterm::window_position_visible(ws.x, ws.y, ws.width, ws.height, &window) {
-                    let _ = window.set_position(tauri::PhysicalPosition::new(ws.x, ws.y));
-                    let _ = window.set_size(tauri::PhysicalSize::new(ws.width, ws.height));
-                }
-                if ws.maximized {
-                    let _ = window.maximize();
-                }
-            }
-            // 状态就绪后显示窗口（最大化/尺寸已应用，无闪现）
-            let _ = window.show();
-            // 通知 renderer 播放启动动画（窗口此时已可见）
-            let _ = app.emit("window-shown", json!({}));
-
+            // 窗口状态恢复 + show 移到 renderer_ready command：
+            // renderer 加载完成并注册好 window-shown 监听后才通知主进程显示窗口，
+            // 避免事件在监听器就绪前 emit 导致启动界面无法隐藏
             #[cfg(debug_assertions)]
             {
                 window.open_devtools();

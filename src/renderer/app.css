@@ -10,12 +10,17 @@ body{display:flex;justify-content:center;align-items:center;min-height:100vh;fon
 .window.win-in{animation:zterm-window-in 0.4s ease-out}
 @keyframes zterm-window-in{from{opacity:0}to{opacity:1}}
 
-/* 启动界面：终端后台加载期间显示，首帧渲染完成后淡出（借鉴 Tabby 的启动体验） */
-.startup-splash{position:fixed;inset:0;background:#21252b;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;z-index:9999}
-.startup-splash .startup-name{font-size:18px;font-weight:600;color:#abb2bf;letter-spacing:0.5px}
-.startup-splash .startup-hint{font-size:11px;color:rgba(171,178,191,0.35)}
+/* 启动界面：A 版 —— 无边框，渐变底 + 纯 Z 形方块；绿点沿 Z 单向循环移动 */
+.startup-splash{position:fixed;inset:0;background:linear-gradient(135deg,#131624,#0a0c12);display:flex;align-items:center;justify-content:center;z-index:9999}
+/* 图标弹出：缩放 + 淡入（用户要的"放大感"） */
+.startup-splash .startup-logo{animation:splash-pop 0.45s cubic-bezier(0.2,0.8,0.3,1.1)}
+@keyframes splash-pop{from{opacity:0;transform:scale(0.82)}to{opacity:1;transform:scale(1)}}
+/* 绿点加载动画：一格一格走，变色过渡柔和 */
+.startup-splash .cell{transition:fill 0.22s ease-out}
+.startup-splash .cell.loading{fill:#8affa0}
 .startup-splash.leaving{opacity:0;transition:opacity 0.4s ease-out}
 .window.no-animations ~ .startup-splash.leaving{transition:none}
+.window.no-animations ~ .startup-splash .startup-logo{animation:none}
 
 /* Animations toggle */
 .window.no-animations *,

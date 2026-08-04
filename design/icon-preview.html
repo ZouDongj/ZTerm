@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>ZTerm 图标 & 启动界面设计稿</title>
+<style>
+  body{background:#17191f;color:#e8e9f1;font-family:'Segoe UI','Microsoft YaHei UI',sans-serif;margin:0;padding:32px}
+  h1{font-size:20px;font-weight:600;margin:0 0 6px}
+  .sub{color:rgba(232,233,241,0.5);font-size:13px;margin-bottom:28px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px;margin-bottom:40px}
+  .card{background:#21252b;border-radius:16px;padding:20px;display:flex;flex-direction:column;gap:14px}
+  .card h3{font-size:14px;margin:0;color:#abb2bf;font-weight:600}
+  .card .desc{font-size:12px;color:rgba(171,178,191,0.45);margin:0;line-height:1.5}
+  .icon-row{display:flex;gap:16px;align-items:center;justify-content:center;padding:12px 0}
+  .icon-box{width:96px;height:96px;display:flex;align-items:center;justify-content:center;border-radius:20px}
+  .icon-box.bg-dark{background:#101218}
+  .icon-box.bg-light{background:#e8e9f1}
+  .tag{font-size:11px;color:rgba(171,178,191,0.6);text-align:center}
+  /* 启动界面预览 */
+  .splash-preview{background:#21252b;border-radius:20px;padding:48px;display:flex;flex-direction:column;align-items:center;gap:24px}
+  .splash-preview .preview-label{font-size:12px;color:rgba(171,178,191,0.4)}
+  .splash-icon{animation:splash-pop 0.5s cubic-bezier(0.2,0.8,0.3,1.2)}
+  @keyframes splash-pop{from{opacity:0;transform:scale(0.85)}to{opacity:1;transform:scale(1)}}
+  .cell{transition:fill 0.15s}
+  .cell.active{fill:#8affa0 !important}
+  .controls{display:flex;gap:10px;margin-top:8px}
+  button{background:rgba(97,175,239,0.12);border:1px solid rgba(97,175,239,0.25);color:#abb2bf;border-radius:8px;padding:6px 14px;font-size:12px;cursor:pointer}
+  button:hover{background:rgba(97,175,239,0.2)}
+</style>
+</head>
+<body>
+<h1>ZTerm 图标 & 启动界面设计稿</h1>
+<div class="sub">深色/浅色各展示一版（真实环境为深色）；启动界面预览在下方，绿点沿 Z 形方块序列 ping-pong 移动</div>
+
+<div class="grid">
+  <!-- V1 高对比原结构 -->
+  <div class="card">
+    <h3>V1 · 高对比原结构</h3>
+    <p class="desc">保持现有窗格 Z 形布局；黑底更深（#0b0d14）、白色更亮（#f4f6ff）、绿点提亮（#8affa0）</p>
+    <div class="icon-row">
+      <div class="icon-box bg-dark">
+        <svg width="88" height="88" viewBox="0 0 512 512">
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="#0b0d14"/>
+          <g fill="#f4f6ff">
+            <rect x="96" y="96" width="56" height="56" rx="12"/><rect x="160" y="96" width="56" height="56" rx="12"/><rect x="224" y="96" width="56" height="56" rx="12"/><rect x="288" y="96" width="56" height="56" rx="12"/><rect x="352" y="96" width="56" height="56" rx="12"/>
+            <rect x="288" y="160" width="56" height="56" rx="12"/>
+            <rect x="224" y="224" width="56" height="56" rx="12"/>
+            <rect x="160" y="288" width="56" height="56" rx="12"/>
+            <rect x="96" y="352" width="56" height="56" rx="12"/><rect x="160" y="352" width="56" height="56" rx="12"/><rect x="224" y="352" width="56" height="56" rx="12"/><rect x="288" y="352" width="56" height="56" rx="12"/>
+            <rect x="352" y="352" width="56" height="56" rx="12" fill="#8affa0"/>
+          </g>
+        </svg>
+      </div>
+      <div class="icon-box bg-light">
+        <svg width="88" height="88" viewBox="0 0 512 512">
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="#f4f6ff"/>
+          <g fill="#10131c">
+            <rect x="96" y="96" width="56" height="56" rx="12"/><rect x="160" y="96" width="56" height="56" rx="12"/><rect x="224" y="96" width="56" height="56" rx="12"/><rect x="288" y="96" width="56" height="56" rx="12"/><rect x="352" y="96" width="56" height="56" rx="12"/>
+            <rect x="288" y="160" width="56" height="56" rx="12"/>
+            <rect x="224" y="224" width="56" height="56" rx="12"/>
+            <rect x="160" y="288" width="56" height="56" rx="12"/>
+            <rect x="96" y="352" width="56" height="56" rx="12"/><rect x="160" y="352" width="56" height="56" rx="12"/><rect x="224" y="352" width="56" height="56" rx="12"/><rect x="288" y="352" width="56" height="56" rx="12"/>
+            <rect x="352" y="352" width="56" height="56" rx="12" fill="#2ecc71"/>
+          </g>
+        </svg>
+      </div>
+    </div>
+    <div class="tag">深色 / 浅色</div>
+  </div>
+
+  <!-- V2 发光绿点 -->
+  <div class="card">
+    <h3>V2 · 发光绿点</h3>
+    <p class="desc">绿点带柔和外发光（SVG glow），更醒目的"在线"感；其余同 V1 高对比</p>
+    <div class="icon-row">
+      <div class="icon-box bg-dark">
+        <svg width="88" height="88" viewBox="0 0 512 512">
+          <defs>
+            <filter id="glow2" x="-40%" y="-40%" width="180%" height="180%">
+              <feGaussianBlur stdDeviation="10" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="#0b0d14"/>
+          <g fill="#f4f6ff">
+            <rect x="96" y="96" width="56" height="56" rx="12"/><rect x="160" y="96" width="56" height="56" rx="12"/><rect x="224" y="96" width="56" height="56" rx="12"/><rect x="288" y="96" width="56" height="56" rx="12"/><rect x="352" y="96" width="56" height="56" rx="12"/>
+            <rect x="288" y="160" width="56" height="56" rx="12"/>
+            <rect x="224" y="224" width="56" height="56" rx="12"/>
+            <rect x="160" y="288" width="56" height="56" rx="12"/>
+            <rect x="96" y="352" width="56" height="56" rx="12"/><rect x="160" y="352" width="56" height="56" rx="12"/><rect x="224" y="352" width="56" height="56" rx="12"/><rect x="288" y="352" width="56" height="56" rx="12"/>
+            <rect x="352" y="352" width="56" height="56" rx="12" fill="#8affa0" filter="url(#glow2)"/>
+          </g>
+        </svg>
+      </div>
+      <div class="icon-box bg-light">
+        <svg width="88" height="88" viewBox="0 0 512 512">
+          <defs>
+            <filter id="glow2l" x="-40%" y="-40%" width="180%" height="180%">
+              <feGaussianBlur stdDeviation="10" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="#f4f6ff"/>
+          <g fill="#10131c">
+            <rect x="96" y="96" width="56" height="56" rx="12"/><rect x="160" y="96" width="56" height="56" rx="12"/><rect x="224" y="96" width="56" height="56" rx="12"/><rect x="288" y="96" width="56" height="56" rx="12"/><rect x="352" y="96" width="56" height="56" rx="12"/>
+            <rect x="288" y="160" width="56" height="56" rx="12"/>
+            <rect x="224" y="224" width="56" height="56" rx="12"/>
+            <rect x="160" y="288" width="56" height="56" rx="12"/>
+            <rect x="96" y="352" width="56" height="56" rx="12"/><rect x="160" y="352" width="56" height="56" rx="12"/><rect x="224" y="352" width="56" height="56" rx="12"/><rect x="288" y="352" width="56" height="56" rx="12"/>
+            <rect x="352" y="352" width="56" height="56" rx="12" fill="#2ecc71" filter="url(#glow2l)"/>
+          </g>
+        </svg>
+      </div>
+    </div>
+    <div class="tag">深色 / 浅色</div>
+  </div>
+
+  <!-- V3 悬浮层次 -->
+  <div class="card">
+    <h3>V3 · 悬浮层次</h3>
+    <p class="desc">窗格带轻微内阴影层次，Z 形更立体；底色用深色渐变（#131624 → #0a0c12）</p>
+    <div class="icon-row">
+      <div class="icon-box bg-dark">
+        <svg width="88" height="88" viewBox="0 0 512 512">
+          <defs>
+            <linearGradient id="bg3" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#131624"/><stop offset="1" stop-color="#0a0c12"/>
+            </linearGradient>
+          </defs>
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg3)"/>
+          <g fill="#f4f6ff">
+            <rect x="96" y="96" width="56" height="56" rx="12"/><rect x="160" y="96" width="56" height="56" rx="12"/><rect x="224" y="96" width="56" height="56" rx="12"/><rect x="288" y="96" width="56" height="56" rx="12"/><rect x="352" y="96" width="56" height="56" rx="12"/>
+            <rect x="288" y="160" width="56" height="56" rx="12"/>
+            <rect x="224" y="224" width="56" height="56" rx="12"/>
+            <rect x="160" y="288" width="56" height="56" rx="12"/>
+            <rect x="96" y="352" width="56" height="56" rx="12"/><rect x="160" y="352" width="56" height="56" rx="12"/><rect x="224" y="352" width="56" height="56" rx="12"/><rect x="288" y="352" width="56" height="56" rx="12"/>
+            <rect x="352" y="352" width="56" height="56" rx="12" fill="#8affa0"/>
+          </g>
+        </svg>
+      </div>
+      <div class="icon-box bg-light">
+        <svg width="88" height="88" viewBox="0 0 512 512">
+          <defs>
+            <linearGradient id="bg3l" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#dfe3ee"/>
+            </linearGradient>
+          </defs>
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg3l)"/>
+          <g fill="#10131c">
+            <rect x="96" y="96" width="56" height="56" rx="12"/><rect x="160" y="96" width="56" height="56" rx="12"/><rect x="224" y="96" width="56" height="56" rx="12"/><rect x="288" y="96" width="56" height="56" rx="12"/><rect x="352" y="96" width="56" height="56" rx="12"/>
+            <rect x="288" y="160" width="56" height="56" rx="12"/>
+            <rect x="224" y="224" width="56" height="56" rx="12"/>
+            <rect x="160" y="288" width="56" height="56" rx="12"/>
+            <rect x="96" y="352" width="56" height="56" rx="12"/><rect x="160" y="352" width="56" height="56" rx="12"/><rect x="224" y="352" width="56" height="56" rx="12"/><rect x="288" y="352" width="56" height="56" rx="12"/>
+            <rect x="352" y="352" width="56" height="56" rx="12" fill="#2ecc71"/>
+          </g>
+        </svg>
+      </div>
+    </div>
+    <div class="tag">深色 / 浅色</div>
+  </div>
+
+  <!-- V4 简洁 Z 线 -->
+  <div class="card">
+    <h3>V4 · 简洁 Z 线 + 光标块</h3>
+    <p class="desc">Z 形改为连续粗线条（终端光标风格），末端绿光标块；更现代的几何感</p>
+    <div class="icon-row">
+      <div class="icon-box bg-dark">
+        <svg width="88" height="88" viewBox="0 0 512 512">
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="#0b0d14"/>
+          <path d="M120 128 H392 L120 384 H392" stroke="#f4f6ff" stroke-width="56" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <rect x="336" y="328" width="56" height="56" rx="10" fill="#8affa0"/>
+        </svg>
+      </div>
+      <div class="icon-box bg-light">
+        <svg width="88" height="88" viewBox="0 0 512 512">
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="#f4f6ff"/>
+          <path d="M120 128 H392 L120 384 H392" stroke="#10131c" stroke-width="56" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <rect x="336" y="328" width="56" height="56" rx="10" fill="#2ecc71"/>
+        </svg>
+      </div>
+    </div>
+    <div class="tag">深色 / 浅色</div>
+  </div>
+
+  <!-- V5 圆角终端窗格 -->
+  <div class="card">
+    <h3>V5 · 终端窗格意象</h3>
+    <p class="desc">抽象"分屏窗格"（两个窗格 + 终端提示符 >_），强调多窗格/SSH 产品属性</p>
+    <div class="icon-row">
+      <div class="icon-box bg-dark">
+        <svg width="88" height="88" viewBox="0 0 512 512">
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="#0b0d14"/>
+          <rect x="104" y="96" width="304" height="152" rx="24" fill="#1c2130"/>
+          <rect x="104" y="264" width="304" height="152" rx="24" fill="#1c2130"/>
+          <path d="M150 140 l28 24 -28 24" stroke="#8affa0" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <rect x="200" y="132" width="90" height="16" rx="8" fill="#f4f6ff"/>
+          <rect x="150" y="308" width="70" height="16" rx="8" fill="#8affa0"/>
+          <rect x="236" y="308" width="120" height="16" rx="8" fill="#f4f6ff"/>
+        </svg>
+      </div>
+      <div class="icon-box bg-light">
+        <svg width="88" height="88" viewBox="0 0 512 512">
+          <rect x="16" y="16" width="480" height="480" rx="112" fill="#f4f6ff"/>
+          <rect x="104" y="96" width="304" height="152" rx="24" fill="#e8ebf4"/>
+          <rect x="104" y="264" width="304" height="152" rx="24" fill="#e8ebf4"/>
+          <path d="M150 140 l28 24 -28 24" stroke="#2ecc71" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          <rect x="200" y="132" width="90" height="16" rx="8" fill="#10131c"/>
+          <rect x="150" y="308" width="70" height="16" rx="8" fill="#2ecc71"/>
+          <rect x="236" y="308" width="120" height="16" rx="8" fill="#10131c"/>
+        </svg>
+      </div>
+    </div>
+    <div class="tag">深色 / 浅色</div>
+  </div>
+</div>
+
+<h2 style="font-size:16px;margin-bottom:12px">启动界面效果预览</h2>
+<div class="splash-preview">
+  <div class="preview-label">绿点沿 Z 形方块序列 ping-pong 移动（加载指示，无文字）；图标带缩放弹出动画</div>
+  <div class="splash-icon" id="splash-icon">
+    <svg width="120" height="120" viewBox="0 0 512 512">
+      <rect x="16" y="16" width="480" height="480" rx="112" fill="#0b0d14"/>
+      <g id="splash-cells" fill="#f4f6ff">
+        <rect class="cell" x="96" y="96" width="56" height="56" rx="12"/><rect class="cell" x="160" y="96" width="56" height="56" rx="12"/><rect class="cell" x="224" y="96" width="56" height="56" rx="12"/><rect class="cell" x="288" y="96" width="56" height="56" rx="12"/><rect class="cell" x="352" y="96" width="56" height="56" rx="12"/>
+        <rect class="cell" x="288" y="160" width="56" height="56" rx="12"/>
+        <rect class="cell" x="224" y="224" width="56" height="56" rx="12"/>
+        <rect class="cell" x="160" y="288" width="56" height="56" rx="12"/>
+        <rect class="cell" x="96" y="352" width="56" height="56" rx="12"/><rect class="cell" x="160" y="352" width="56" height="56" rx="12"/><rect class="cell" x="224" y="352" width="56" height="56" rx="12"/><rect class="cell" x="288" y="352" width="56" height="56" rx="12"/><rect class="cell" x="352" y="352" width="56" height="56" rx="12"/>
+      </g>
+    </svg>
+  </div>
+  <div class="controls">
+    <button onclick="setSpeed(90)">快</button>
+    <button onclick="setSpeed(180)">中</button>
+    <button onclick="setSpeed(320)">慢</button>
+    <button onclick="toggleDir()">切换：单向循环 / 往返</button>
+  </div>
+</div>
+
+<script>
+  const cells = document.querySelectorAll('#splash-cells .cell');
+  let idx = 0, dir = 1, speed = 180, pingpong = true, timer = null;
+  function step() {
+    cells.forEach((c, i) => c.classList.toggle('active', i === idx));
+    idx += dir;
+    if (pingpong) {
+      if (idx >= cells.length) { idx = cells.length - 2; dir = -1; }
+      else if (idx < 0) { idx = 1; dir = 1; }
+    } else {
+      if (idx >= cells.length) idx = 0;
+    }
+  }
+  function start() { clearInterval(timer); timer = setInterval(step, speed); }
+  function setSpeed(ms) { speed = ms; start(); }
+  function toggleDir() { pingpong = !pingpong; if (!pingpong && idx > 0) dir = 1; }
+  start();
+</script>
+</body>
+</html>
