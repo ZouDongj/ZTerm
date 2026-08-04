@@ -144,6 +144,17 @@ async function main() {
   await cdp.connect();
 
   try {
+    // 0. 启动界面：首帧渲染后应自动淡出（最多等 5s）；兜底主动隐藏防遮挡后续检查
+    const splashExists = await cdp.eval(`!!document.getElementById('startup-splash')`);
+    let splashGone = false;
+    for (let i = 0; i < 25; i++) {
+      splashGone = await cdp.eval(`!document.getElementById('startup-splash')`);
+      if (splashGone) break;
+      await sleep(200);
+    }
+    if (!splashGone) await cdp.eval(`hideStartupSplash()`);
+    check('启动界面首帧渲染后自动淡出', splashGone === true, `splash存在=${splashExists}, 自动移除=${splashGone}`);
+
     // 1. CSP：'unsafe-inline' 必须真正生效（未被 Tauri 注入的 hash 挤掉）
     const csp = await cdp.eval(`fetch(location.href, {cache:'no-store'}).then(r => r.headers.get('content-security-policy'))`);
     const hasUnsafeInline = /script-src[^;]*'unsafe-inline'/.test(csp ?? '');

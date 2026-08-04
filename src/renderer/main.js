@@ -104,6 +104,34 @@ ipcRenderer.on('window-shown', () => {
     }
 });
 
+// 启动界面：首个终端首帧渲染完成后淡出（xterm onRender 精确判定 + 3s 兜底）
+let _splashHidden = false;
+function hideStartupSplash() {
+    if (_splashHidden) return;
+    _splashHidden = true;
+    const s = document.getElementById('startup-splash');
+    if (s) {
+        s.classList.add('leaving');
+        setTimeout(() => s.remove(), 450);
+    }
+}
+
+function armSplashHide() {
+    const waitTerm = () => {
+        const t = TabManager.tabs.find(t => t.term || (t.splitRoot && getAllPanes(t)[0] && getAllPanes(t)[0].term));
+        if (t) {
+            const term = t.term || getAllPanes(t)[0].term;
+            if (term) {
+                const un = term.onRender(() => { un.dispose(); hideStartupSplash(); });
+                return;
+            }
+        }
+        setTimeout(waitTerm, 200);
+    };
+    waitTerm();
+    setTimeout(hideStartupSplash, 3000); // 兜底：onRender 未触发也不让启动页滞留
+}
+
 // ── Settings ──
 // ── Init ──
 (async () => {
@@ -123,4 +151,5 @@ ipcRenderer.on('window-shown', () => {
     const _winEl = document.querySelector('.window');
     if (_winEl && _settingsConfig.animations === false) _winEl.classList.add('no-animations');
     TabManager.init();
+    armSplashHide();
 })();
