@@ -456,6 +456,33 @@ function populateFontList() {
             if (current) uiFontEl.value = current;
         }
 
+        // Populate UI fallback font dropdown
+        const uiFbEl = document.getElementById('set-ui-fallback-font');
+        if (uiFbEl) {
+            const current = _settingsConfig.uiFallbackFont || '';
+            uiFbEl.innerHTML = '';
+            allFonts.forEach(f => {
+                const opt = document.createElement('option');
+                opt.value = f;
+                opt.textContent = f;
+                uiFbEl.appendChild(opt);
+            });
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = '无';
+            uiFbEl.appendChild(opt);
+            if (current && ![...uiFbEl.options].some(o => o.value === current)) {
+                const extra = document.createElement('option');
+                extra.value = current;
+                extra.textContent = current;
+                uiFbEl.appendChild(extra);
+            }
+            uiFbEl.value = current || '';
+        }
+
+        // 同步界面字体跟随开关状态与行可见性
+        syncUiFollowUI();
+
         // Populate fallback font dropdown with ALL system fonts
         const fallbackEl = document.getElementById('set-fallback-font');
         if (fallbackEl) {
@@ -487,9 +514,35 @@ function populateFontList() {
 // 界面字体默认值：系统字体栈（不依赖外部字体，内网/离线环境稳定）
 const DEFAULT_UI_FONT = "'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif";
 
-// 应用界面字体到 body（空 = 系统默认栈）
+// 界面字体跟随终端字体开关：开启时界面复用终端字体组合，隐藏界面字体设置
+function toggleUiFollowTerminal() {
+    _settingsConfig.uiFollowTerminal = !(_settingsConfig.uiFollowTerminal !== false);
+    syncUiFollowUI();
+    persistSettings();
+    applyUiFont();
+}
+
+function syncUiFollowUI() {
+    const follow = _settingsConfig.uiFollowTerminal !== false;
+    const sw = document.getElementById('toggle-ui-follow');
+    if (sw) sw.classList.toggle('on', follow);
+    const rowUi = document.getElementById('row-ui-font');
+    const rowFb = document.getElementById('row-ui-fallback');
+    if (rowUi) rowUi.style.display = follow ? 'none' : '';
+    if (rowFb) rowFb.style.display = follow ? 'none' : '';
+}
+
+// 应用界面字体到 body：
+// 跟随终端 → 终端字体 + 终端回退组合；独立 → 界面字体 + 界面回退组合
 function applyUiFont() {
-    document.body.style.fontFamily = _settingsConfig.uiFont || DEFAULT_UI_FONT;
+    const follow = _settingsConfig.uiFollowTerminal !== false;
+    let family;
+    if (follow) {
+        family = _normalizeFontFamily(_settingsConfig.fontFamily, _settingsConfig.fallbackFont) + ',system-ui,sans-serif';
+    } else {
+        family = _normalizeFontFamily(_settingsConfig.uiFont, _settingsConfig.uiFallbackFont) + ',system-ui,sans-serif';
+    }
+    document.body.style.fontFamily = family || DEFAULT_UI_FONT;
 }
 
 // 字重校验：1-1000 的数字（xterm 只接受 number 1-1000 或 'normal'/'bold'/'100'..'900' 整百字符串，
@@ -497,6 +550,7 @@ function applyUiFont() {
 function saveAppearance() {
     const fontFamily = document.getElementById('set-font')?.value || '';
     const uiFont = document.getElementById('set-ui-font')?.value || _settingsConfig.uiFont || '';
+    const uiFallbackFont = document.getElementById('set-ui-fallback-font')?.value || _settingsConfig.uiFallbackFont || '';
     const fontSize = parseFloat(document.getElementById('set-font-size')?.value) || 13.5;
     const lineHeight = parseFloat(document.getElementById('set-line-height')?.value) || 1.6;
     const fontWeight = _clampFontWeight(document.getElementById('set-font-weight')?.value, '400');
@@ -509,7 +563,7 @@ function saveAppearance() {
     const terminalScheme = document.getElementById('set-terminal-scheme')?.value || 'onedark';
     const minimumContrastRatio = parseFloat(document.getElementById('set-contrast')?.value) || 4;
 
-    const config = { fontFamily, uiFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, terminalScheme, minimumContrastRatio, theme: 'dark' };
+    const config = { fontFamily, uiFont, uiFallbackFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, terminalScheme, minimumContrastRatio, theme: 'dark' };
     _settingsConfig = { ..._settingsConfig, ...config };
     persistSettings();
     applyUiFont();
@@ -595,6 +649,8 @@ function persistSettings() {
     ipcRenderer.send('save-appearance', {
         fontFamily: config.fontFamily,
         uiFont: config.uiFont,
+        uiFallbackFont: config.uiFallbackFont,
+        uiFollowTerminal: config.uiFollowTerminal,
         fontSize: config.fontSize,
         lineHeight: config.lineHeight,
         fontWeight: config.fontWeight,
