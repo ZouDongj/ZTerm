@@ -1183,13 +1183,6 @@ pub async fn ssh_connect(
     // FollowCwd typed injection: fallback when RC wrapper unavailable
     let inject = follow_cwd && exec_cmd.is_none();
     let track_cwd = follow_cwd; // OSC 7 parsing active for both rc wrapper and typed injection
-    // 诊断：记录 followCwd 实际走哪条路径（wrapper / injection / off），renderer console 可见
-    if follow_cwd {
-        let _ = app.emit(
-            "ssh-followcwd-mode",
-            json!({ "tabId": tab_id, "mode": if exec_cmd.is_some() { "wrapper" } else { "injection" } }),
-        );
-    }
                                 // 注入过滤标志：注入发送时才激活，避免吞掉登录脚本的输出
     let filtering = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let filtering_inject = Arc::clone(&filtering);
