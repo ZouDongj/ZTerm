@@ -549,6 +549,47 @@ pub fn get_profiles(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
 
 // ── Command: pty_create (local shell, emits pty-created) ──
 
+/// 增量 UTF-8 解码：把新字节接到 carry 上，解码出所有完整字符并返回；
+/// 块尾不完整的多字节序列（error_len 为 None）留在 carry 等下一块补齐，
+/// 避免单块 from_utf8_lossy 把跨块字符（中文/emoji 等）替换成 U+FFFD（�）。
+/// 真非法字节（error_len 为 Some）按 U+FFFD 替换并跳过，与 from_utf8_lossy 一致。
+fn drain_utf8(carry: &mut Vec<u8>, data: &[u8]) -> String {
+    carry.extend_from_slice(data);
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(carry) {
+            Ok(s) => {
+                out.push_str(s);
+                carry.clear();
+                break;
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                if valid > 0 {
+                    // valid_up_to 保证 [..valid] 是有效 UTF-8 前缀
+                    out.push_str(
+                        std::str::from_utf8(&carry[..valid])
+                            .expect("valid_up_to prefix is valid UTF-8"),
+                    );
+                }
+                match e.error_len() {
+                    Some(n) => {
+                        // 真非法字节：替换并跳过，继续解码剩余部分
+                        out.push('\u{FFFD}');
+                        carry.drain(..valid + n);
+                    }
+                    None => {
+                        // 块尾不完整序列：保留，等下一块
+                        carry.drain(..valid);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 #[tauri::command]
 pub async fn pty_create(
     app: AppHandle,
@@ -632,12 +673,15 @@ pub async fn pty_create(
     let tid = tab_id.clone();
     tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 4096];
+        // 跨块字符 carry：read 块边界可能切在 UTF-8 多字节序列中间，
+        // 单块 from_utf8_lossy 会把半截字符变成 U+FFFD（�）
+        let mut utf8_carry: Vec<u8> = Vec::new();
         loop {
             use std::io::Read;
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let text = drain_utf8(&mut utf8_carry, &buf[..n]);
                     let _ = app2.emit("pty-output", json!({ "tabId": tid, "data": text }));
                 }
                 Err(_) => break,
@@ -1139,6 +1183,9 @@ pub async fn ssh_connect(
     let cwd_reader = Arc::clone(&cwd);
     let filtering_reader = Arc::clone(&filtering);
     tokio::spawn(async move {
+        // 跨块字符 carry：SSH channel 数据可切在 UTF-8 多字节序列中间，
+        // 单块 from_utf8_lossy 会把半截字符变成 U+FFFD（�）
+        let mut utf8_carry: Vec<u8> = Vec::new();
         // Inject state machine: filter output until ZTERM_INJECTED marker.
         // Filtering only activates when the injection task sets the flag.
         let mut inject_buffer = String::new();
@@ -1158,7 +1205,7 @@ pub async fn ssh_connect(
                 msg = channel.wait() => {
                     match msg {
                         Some(russh::ChannelMsg::Data { ref data }) => {
-                            let text = String::from_utf8_lossy(data).to_string();
+                            let text = drain_utf8(&mut utf8_carry, data);
                             // Feed to login script processor (drop guard before await)
                             let send_text = {
                                 let mut s = scripts_reader.lock();
@@ -3341,6 +3388,69 @@ mod tests {
         let s = window_state_from_config(&json!({"window": {"x": 1, "y": 2, "width": 3, "height": 4}}))
             .unwrap();
         assert!(!s.maximized);
+    }
+
+    #[test]
+    fn drain_utf8_ascii_passthrough() {
+        let mut carry = Vec::new();
+        let mut out = String::new();
+        out.push_str(&drain_utf8(&mut carry, b"hello\r\n"));
+        out.push_str(&drain_utf8(&mut carry, b"world"));
+        assert!(carry.is_empty());
+        assert_eq!(out, "hello\r\nworld");
+    }
+
+    #[test]
+    fn drain_utf8_multibyte_split_across_chunks() {
+        // "你好" = E4 BD A0 E5 A5 BD：切在 3 字节序列中间，不允许出现 U+FFFD
+        let mut carry = Vec::new();
+        let mut out = String::new();
+        out.push_str(&drain_utf8(&mut carry, &[0xE4])); // "你" 的第 1 字节
+        assert_eq!(out, "");
+        assert_eq!(carry, vec![0xE4], "不完整序列必须留在 carry");
+        out.push_str(&drain_utf8(&mut carry, &[0xBD, 0xA0, 0xE5])); // 补全"你" + "好" 第 1 字节
+        assert_eq!(out, "你");
+        assert_eq!(carry, vec![0xE5]);
+        out.push_str(&drain_utf8(&mut carry, &[0xA5, 0xBD]));
+        assert_eq!(out, "你好");
+        assert!(carry.is_empty());
+        assert!(!out.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn drain_utf8_emoji_split_across_chunks() {
+        // 😀 = F0 9F 98 80（4 字节）：切 3+1
+        let mut carry = Vec::new();
+        let mut out = String::new();
+        out.push_str(&drain_utf8(&mut carry, &[0xF0, 0x9F, 0x98]));
+        assert_eq!(out, "");
+        out.push_str(&drain_utf8(&mut carry, &[0x80, b'x']));
+        assert_eq!(out, "😀x");
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn drain_utf8_invalid_byte_replaced_and_continue() {
+        // 真非法字节（0xFF）按 U+FFFD 替换，剩余部分继续解码
+        let mut carry = Vec::new();
+        let mut out = String::new();
+        out.push_str(&drain_utf8(&mut carry, &[b'a', 0xFF, b'b']));
+        assert_eq!(out, "a\u{FFFD}b");
+        assert!(carry.is_empty());
+        // 非法字节在块尾：替换后不阻塞后续块
+        out.push_str(&drain_utf8(&mut carry, &[0xFF]));
+        assert_eq!(out, "a\u{FFFD}b\u{FFFD}");
+        out.push_str(&drain_utf8(&mut carry, b"c"));
+        assert_eq!(out, "a\u{FFFD}b\u{FFFD}c");
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn drain_utf8_empty_input() {
+        let mut carry = vec![0xE4];
+        let out = drain_utf8(&mut carry, b"");
+        assert_eq!(out, "");
+        assert_eq!(carry, vec![0xE4], "空输入不得动 carry");
     }
 
     #[test]
