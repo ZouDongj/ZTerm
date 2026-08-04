@@ -95,7 +95,7 @@ ipcRenderer.on('app-before-quit', async () => {
 });
 
 // 启动动画：窗口状态（位置/大小/最大化）恢复并显示后，主进程 emit 此事件，
-// 触发 .window 的淡入动画（克制的 220ms，避免启动突兀）
+// 触发 .window 的淡入动画（克制的 0.4s，避免启动突兀）
 ipcRenderer.on('window-shown', () => {
     const winEl = document.querySelector('.window');
     if (winEl && !winEl.classList.contains('win-in')) {
@@ -161,11 +161,24 @@ function armSplashHide() {
     // 兜底 1：window-shown 事件异常丢失时（正常路径主进程等页面加载完才 emit），
     // 强制解除"窗口未显示"禁令并重试，避免 splash 永久滞留
     setTimeout(() => {
-        if (!_windowShownAt) _windowShownAt = Date.now();
+        if (!_windowShownAt) {
+            console.warn('[startup] window-shown 1.2s 未收到，假定窗口已显示并重试隐藏 splash');
+            _windowShownAt = Date.now();
+        }
         if (_splashHidePending) { _splashHidePending = false; hideStartupSplash(); }
     }, 1200);
-    // 兜底 2：无论首帧/事件是否正常，3s 后强制隐藏（绕过停留限制）
-    setTimeout(() => hideStartupSplash(true), 3000);
+    // 兜底 2：无论首帧/事件是否正常，3s 后强制隐藏（绕过停留限制）。
+    // 按 Tabby 调研 §10.4：超时不能无提示地移除启动页——记录启动诊断再隐藏；
+    // 仅当 splash 仍存在时记录（正常路径首帧早已移除，避免误导性日志）
+    setTimeout(() => {
+        if (_splashHidden) return;
+        console.warn('[startup] splash 3s 兜底强制隐藏（未检测到终端首帧）', {
+            tabs: TabManager.tabs.length,
+            terminalReady: TabManager.tabs.some(t => t.term || (t.splitRoot && getAllPanes(t)[0] && getAllPanes(t)[0].term)),
+            windowShownAt: _windowShownAt || null,
+        });
+        hideStartupSplash(true);
+    }, 3000);
 }
 
 // ── Settings ──
@@ -185,7 +198,11 @@ function armSplashHide() {
     // 顶栏菜单的快捷键提示需反映用户自定义：loadSettings 之后立刻填
     if (typeof updateMenuShortcuts === 'function') updateMenuShortcuts();
     const _winEl = document.querySelector('.window');
-    if (_winEl && _settingsConfig.animations === false) _winEl.classList.add('no-animations');
+    if (_winEl && _settingsConfig.animations === false) {
+        _winEl.classList.add('no-animations');
+        // 启动页在 .window 之外，兄弟选择器不可达：同步给 body 加锚点（app.css 依赖）
+        document.body.classList.add('no-animations');
+    }
     TabManager.init();
     startSplashLoader();
     armSplashHide();

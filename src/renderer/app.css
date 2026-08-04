@@ -19,8 +19,11 @@ body{display:flex;justify-content:center;align-items:center;min-height:100vh;fon
 .startup-splash .cell{transition:fill 0.22s ease-out}
 .startup-splash .cell.loading{fill:#8affa0}
 .startup-splash.leaving{opacity:0;transition:opacity 0.4s ease-out}
-.window.no-animations ~ .startup-splash.leaving{transition:none}
-.window.no-animations ~ .startup-splash .startup-logo{animation:none}
+/* 启动页在 .window 之前，兄弟选择器(.window ~ .startup-splash)不可达：
+   改由 body.no-animations 锚定（main.js 在动画关闭时同步加类） */
+body.no-animations .startup-splash.leaving{transition:none}
+body.no-animations .startup-splash .startup-logo{animation:none}
+body.no-animations .startup-splash .cell{transition:none}
 
 /* Animations toggle */
 .window.no-animations *,
