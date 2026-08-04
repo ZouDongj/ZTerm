@@ -6,9 +6,9 @@ textarea{font-family:inherit}
 html,body{background:#21252b;margin:0;padding:0;overflow:hidden;width:100vw;height:100vh}
 body{display:flex;justify-content:center;align-items:center;min-height:100vh;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
 .window{width:100vw;height:100vh;background:#21252b;display:flex;flex-direction:column;overflow:hidden}
-/* 启动动画：窗口恢复状态并显示后播放一次（克制淡入 + 轻微缩放） */
-.window.win-in{animation:zterm-window-in 0.22s cubic-bezier(0.2,0.7,0.3,1)}
-@keyframes zterm-window-in{from{opacity:0;transform:scale(0.985)}to{opacity:1;transform:scale(1)}}
+/* 启动动画：窗口恢复状态并显示后播放一次（借鉴 Tabby：纯淡入 ease-out，无缩放） */
+.window.win-in{animation:zterm-window-in 0.4s ease-out}
+@keyframes zterm-window-in{from{opacity:0}to{opacity:1}}
 
 /* Animations toggle */
 .window.no-animations *,
