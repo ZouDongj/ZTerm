@@ -1382,6 +1382,13 @@ const TabManager = {
             };
         }
         if (!mt || !mid) return;
+        // 幂等防呆：若被拖的 terminal 元素已在目标分屏 DOM 中（任何双路径重复
+        // drop / 重复 move 导致），拒绝再次插入——防止同一连接以两个 pane 出现
+        const tgtRoot = document.getElementById('split_' + targetTab.id);
+        if (tgtRoot && mt.element && tgtRoot.contains(mt.element)) {
+            console.warn('[tabdrag] terminal already in target split, drop ignored');
+            return;
+        }
         if (!targetTab.splitRoot) {
             const ew = document.getElementById('wrap_' + targetTab.id);
             if (ew) ew.remove();
