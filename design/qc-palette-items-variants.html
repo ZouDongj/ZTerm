@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>快捷命令/命令面板 表项设计样稿</title>
+<style>
+/* ═══════════════════════════════════════════════════════════
+   快捷命令 / 命令面板 表项设计对比（Design C1v2-A 语言）
+   点击表项可选中查看状态
+   ═══════════════════════════════════════════════════════════ */
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d0f14;display:flex;flex-direction:column;align-items:center;min-height:100vh;font-family:'Segoe UI Variable','Segoe UI',system-ui,sans-serif;padding:36px 24px;gap:8px}
+h1{font-size:15px;font-weight:600;color:#e9edf3;letter-spacing:0.2px}
+p.sub{font-size:12px;color:rgba(233,237,243,0.45);margin-bottom:18px}
+:root{
+  --accent-rgb:97,175,239;
+  --surface-float:#2a303e; --surface-card:#343b4b;
+  --text-1:#eceff5; --text-2:rgba(236,239,245,0.6); --text-3:rgba(236,239,245,0.38);
+  --shadow-float:0 20px 56px rgba(0,0,0,0.6),0 4px 14px rgba(0,0,0,0.4),inset 0 1px 0 rgba(255,255,255,0.06);
+}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:34px 44px;max-width:1100px}
+.col{display:flex;flex-direction:column;gap:10px}
+.col-head{display:flex;align-items:baseline;gap:10px}
+.col-head .name{font-size:14px;font-weight:600;color:#e9edf3}
+.col-head .tag{font-size:10.5px;padding:2px 9px;border-radius:10px;background:rgba(97,175,239,0.16);color:#8fc1ee}
+.col-head .desc{font-size:11px;color:rgba(233,237,243,0.38);margin-left:auto}
+
+/* ── 面板骨架 ── */
+.panel{width:420px;background:var(--surface-float);border-radius:16px;box-shadow:var(--shadow-float);overflow:hidden;display:flex;flex-direction:column}
+.search{display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid rgba(255,255,255,0.05)}
+.search svg{width:14px;height:14px;color:var(--text-3);flex-shrink:0}
+.search input{flex:1;background:none;border:none;outline:none;color:var(--text-1);font-size:13px;font-family:inherit}
+.search input::placeholder{color:var(--text-3)}
+.list{flex:1;padding:8px 10px 10px;overflow:hidden}
+.footer{display:flex;gap:12px;padding:10px 16px 12px;font-size:10.5px;color:var(--text-3);border-top:1px solid rgba(255,255,255,0.05)}
+.footer kbd{background:rgba(var(--accent-rgb),0.12);padding:2px 7px;border-radius:5px;font-family:inherit;color:#9cc8ee}
+.footer .sp{margin-left:auto}
+
+/* ══════════ V1 · 双行命令式（Linear 风）══════════ */
+.v1-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;cursor:pointer;border-left:3px solid transparent;transition:background 0.1s}
+.v1-item:hover{background:rgba(255,255,255,0.04)}
+.v1-item.sel{background:rgba(var(--accent-rgb),0.16);border-left-color:rgb(var(--accent-rgb))}
+.v1-main{flex:1;min-width:0}
+.v1-name{font-size:13px;color:var(--text-1);font-weight:500}
+.v1-cmd{font-size:11px;color:var(--text-3);font-family:'Cascadia Code',Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+.v1-group{font-size:10px;color:#8fc1ee;background:rgba(var(--accent-rgb),0.12);padding:2px 9px;border-radius:6px;flex-shrink:0}
+
+/* ══════════ V2 · 单行对齐式 ══════════ */
+.v2-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;cursor:pointer;transition:background 0.1s}
+.v2-item:hover{background:rgba(255,255,255,0.04)}
+.v2-item.sel{background:rgba(var(--accent-rgb),0.16)}
+.v2-icon{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:13px}
+.v2-icon.orange{background:rgba(255,183,77,0.14);color:#ffb74d}
+.v2-icon.blue{background:rgba(var(--accent-rgb),0.14);color:#8fc1ee}
+.v2-icon.green{background:rgba(139,215,154,0.14);color:#8bd79a}
+.v2-name{width:118px;flex-shrink:0;font-size:13px;color:var(--text-1);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.v2-cmd{flex:1;min-width:0;font-size:11px;color:var(--text-3);font-family:'Cascadia Code',Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v2-kbd{font-size:10px;color:var(--text-3);background:rgba(255,255,255,0.05);padding:2px 7px;border-radius:5px;flex-shrink:0;font-family:inherit}
+
+/* ══════════ V3 · 分区标题式（最克制）══════════ */
+.v3-section{font-size:10.5px;font-weight:600;color:var(--text-3);letter-spacing:0.8px;text-transform:uppercase;padding:10px 12px 4px}
+.v3-item{display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:9px;cursor:pointer;transition:background 0.1s}
+.v3-item:hover{background:rgba(255,255,255,0.04)}
+.v3-item.sel{background:rgba(var(--accent-rgb),0.16)}
+.v3-name{flex:1;min-width:0;font-size:13px;color:var(--text-1);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v3-cmd{font-size:10.5px;color:var(--text-3);font-family:'Cascadia Code',Consolas,monospace;max-width:55%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v3-kbd{font-size:10px;color:#9cc8ee;background:rgba(var(--accent-rgb),0.1);padding:2px 7px;border-radius:5px;flex-shrink:0;font-family:inherit}
+
+/* ══════════ V4 · 卡片悬浮式 ══════════ */
+.v4-list{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px}
+.v4-item{display:flex;align-items:center;gap:12px;padding:11px 13px;border-radius:12px;background:var(--surface-card);box-shadow:inset 0 1px 0 rgba(255,255,255,0.05);cursor:pointer;transition:background 0.15s,box-shadow 0.15s}
+.v4-item:hover{background:#3a4253;box-shadow:inset 0 1px 0 rgba(255,255,255,0.07),0 2px 8px rgba(0,0,0,0.25)}
+.v4-item.sel{background:rgba(var(--accent-rgb),0.2);box-shadow:inset 0 1px 0 rgba(255,255,255,0.08),0 0 0 1px rgba(var(--accent-rgb),0.35)}
+.v4-icon{width:32px;height:32px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:13px}
+.v4-icon.orange{background:rgba(255,183,77,0.14);color:#ffb74d}
+.v4-icon.blue{background:rgba(var(--accent-rgb),0.14);color:#8fc1ee}
+.v4-icon.green{background:rgba(139,215,154,0.14);color:#8bd79a}
+.v4-main{flex:1;min-width:0}
+.v4-name{font-size:12.5px;color:var(--text-1);font-weight:500}
+.v4-cmd{font-size:10.5px;color:var(--text-3);font-family:'Cascadia Code',Consolas,monospace;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v4-kbd{font-size:10px;color:var(--text-3);background:rgba(255,255,255,0.05);padding:2px 7px;border-radius:5px;flex-shrink:0;font-family:inherit}
+
+/* 说明 */
+.note{max-width:1100px;margin-top:22px;font-size:11.5px;color:rgba(233,237,243,0.4);line-height:1.8;text-align:center}
+</style>
+</head>
+<body>
+<h1>快捷命令 / 命令面板 · 表项设计对比</h1>
+<p class="sub">点击任意表项可查看选中态 · 四版均可用在 QC 与命令面板</p>
+
+<div class="grid">
+  <!-- V1 -->
+  <div class="col">
+    <div class="col-head"><span class="name">V1 · 双行命令式</span><span class="tag">推荐</span><span class="desc">Linear 风 · 命令为主体</span></div>
+    <div class="panel">
+      <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input placeholder="搜索操作…"></div>
+      <div class="list">
+        <div class="v1-item sel" onclick="sel(this)"><div class="v1-main"><div class="v1-name">查看应用日志</div><div class="v1-cmd">tail -f /var/log/app.log</div></div><span class="v1-group">运维</span></div>
+        <div class="v1-item" onclick="sel(this)"><div class="v1-main"><div class="v1-name">部署前端</div><div class="v1-cmd">cd /srv/www &amp;&amp; npm run deploy</div></div><span class="v1-group">运维</span></div>
+        <div class="v1-item" onclick="sel(this)"><div class="v1-main"><div class="v1-name">磁盘占用</div><div class="v1-cmd">du -sh /* 2>/dev/null</div></div><span class="v1-group">运维</span></div>
+        <div class="v1-item" onclick="sel(this)"><div class="v1-main"><div class="v1-name">git 状态</div><div class="v1-cmd">git status --short &amp;&amp; git log --oneline -5</div></div><span class="v1-group">开发</span></div>
+        <div class="v1-item" onclick="sel(this)"><div class="v1-main"><div class="v1-name">清空缓存</div><div class="v1-cmd">npm cache clean --force</div></div><span class="v1-group">开发</span></div>
+      </div>
+      <div class="footer"><span><kbd>↑↓</kbd> 选择</span><span><kbd>Enter</kbd> 执行</span><span class="sp">Esc 关闭</span></div>
+    </div>
+  </div>
+
+  <!-- V2 -->
+  <div class="col">
+    <div class="col-head"><span class="name">V2 · 单行对齐式</span><span class="desc">图标+名称+命令+快捷键</span></div>
+    <div class="panel">
+      <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input placeholder="搜索操作…"></div>
+      <div class="list">
+        <div class="v2-item sel" onclick="sel(this)"><span class="v2-icon orange">⚡</span><span class="v2-name">查看应用日志</span><span class="v2-cmd">tail -f /var/log/app.log</span><span class="v2-kbd">Enter</span></div>
+        <div class="v2-item" onclick="sel(this)"><span class="v2-icon blue">▣</span><span class="v2-name">连接 SSH 会话</span><span class="v2-cmd">prod-web-01 · 10.0.3.11</span><span class="v2-kbd">Ctrl+Shift+S</span></div>
+        <div class="v2-item" onclick="sel(this)"><span class="v2-icon green">⚡</span><span class="v2-name">部署前端</span><span class="v2-cmd">cd /srv/www &amp;&amp; npm run deploy</span><span class="v2-kbd">Enter</span></div>
+        <div class="v2-item" onclick="sel(this)"><span class="v2-icon orange">⚡</span><span class="v2-name">磁盘占用</span><span class="v2-cmd">du -sh /* 2>/dev/null</span><span class="v2-kbd">Enter</span></div>
+        <div class="v2-item" onclick="sel(this)"><span class="v2-icon blue">▣</span><span class="v2-name">SFTP 文件传输</span><span class="v2-cmd">当前 SSH 会话</span><span class="v2-kbd">Ctrl+Shift+F</span></div>
+      </div>
+      <div class="footer"><span><kbd>↑↓</kbd> 选择</span><span><kbd>Enter</kbd> 执行</span><span class="sp">Esc 关闭</span></div>
+    </div>
+  </div>
+
+  <!-- V3 -->
+  <div class="col">
+    <div class="col-head"><span class="name">V3 · 分区标题式</span><span class="tag">最克制</span><span class="desc">分组作标题 · 无图标</span></div>
+    <div class="panel">
+      <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input placeholder="搜索操作…"></div>
+      <div class="list">
+        <div class="v3-section">运维</div>
+        <div class="v3-item sel" onclick="sel(this)"><span class="v3-name">查看应用日志</span><span class="v3-cmd">tail -f /var/log/app.log</span></div>
+        <div class="v3-item" onclick="sel(this)"><span class="v3-name">部署前端</span><span class="v3-cmd">cd /srv/www &amp;&amp; npm run deploy</span></div>
+        <div class="v3-item" onclick="sel(this)"><span class="v3-name">磁盘占用</span><span class="v3-cmd">du -sh /* 2>/dev/null</span></div>
+        <div class="v3-section">开发</div>
+        <div class="v3-item" onclick="sel(this)"><span class="v3-name">git 状态</span><span class="v3-cmd">git status --short</span><span class="v3-kbd">Enter</span></div>
+        <div class="v3-item" onclick="sel(this)"><span class="v3-name">清空缓存</span><span class="v3-cmd">npm cache clean --force</span><span class="v3-kbd">Enter</span></div>
+      </div>
+      <div class="footer"><span><kbd>↑↓</kbd> 选择</span><span><kbd>Enter</kbd> 执行</span><span class="sp">Esc 关闭</span></div>
+    </div>
+  </div>
+
+  <!-- V4 -->
+  <div class="col">
+    <div class="col-head"><span class="name">V4 · 卡片悬浮式</span><span class="desc">表项独立卡片 · 呼吸最强</span></div>
+    <div class="panel">
+      <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><input placeholder="搜索操作…"></div>
+      <div class="v4-list">
+        <div class="v4-item sel" onclick="sel(this)"><span class="v4-icon orange">⚡</span><div class="v4-main"><div class="v4-name">查看应用日志</div><div class="v4-cmd">tail -f /var/log/app.log</div></div><span class="v4-kbd">Enter</span></div>
+        <div class="v4-item" onclick="sel(this)"><span class="v4-icon blue">▣</span><div class="v4-main"><div class="v4-name">连接 SSH 会话</div><div class="v4-cmd">prod-web-01 · 10.0.3.11</div></div><span class="v4-kbd">Ctrl+Shift+S</span></div>
+        <div class="v4-item" onclick="sel(this)"><span class="v4-icon green">⚡</span><div class="v4-main"><div class="v4-name">部署前端</div><div class="v4-cmd">cd /srv/www &amp;&amp; npm run deploy</div></div><span class="v4-kbd">Enter</span></div>
+        <div class="v4-item" onclick="sel(this)"><span class="v4-icon orange">⚡</span><div class="v4-main"><div class="v4-name">磁盘占用</div><div class="v4-cmd">du -sh /* 2>/dev/null</div></div><span class="v4-kbd">Enter</span></div>
+        <div class="v4-item" onclick="sel(this)"><span class="v4-icon blue">▣</span><div class="v4-main"><div class="v4-name">SFTP 文件传输</div><div class="v4-cmd">当前 SSH 会话</div></div><span class="v4-kbd">Ctrl+Shift+F</span></div>
+      </div>
+      <div class="footer"><span><kbd>↑↓</kbd> 选择</span><span><kbd>Enter</kbd> 执行</span><span class="sp">Esc 关闭</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="note">
+  V1 双行：命令是主体，名称在上命令在下，视觉重心稳定、长命令不挤 —— 推荐用于快捷命令；命令面板（操作类、无长命令）建议用 V2 或 V3。<br>
+  V3 分区：分组从「每行小徽标」升级为「分区标题」，列表最干净 —— 推荐用于命令面板。<br>
+  V4 卡片：表项间 6px 间隙 + 独立表面，呼吸感最强，但列表密度最低，适合条目少的场景。
+</div>
+
+<script>
+function sel(el){ el.parentElement.querySelectorAll('[class*="-item"]').forEach(x=>x.classList.remove('sel')); el.classList.add('sel'); }
+</script>
+</body>
+</html>

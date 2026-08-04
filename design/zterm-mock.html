@@ -1,0 +1,2425 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>ZTerm UI Mock · Design C1v2-A</title>
+<style>
+/* ═══════════════════════════════════════════════════════════
+   ZTerm UI 全交互模拟 · Design C1v2-A (Contrast Float)
+   结构/位置与真实软件一致，仅样式为设计稿 · 终端内容为模拟
+   ═══════════════════════════════════════════════════════════ */
+:root{
+  --accent-rgb:97,175,239; --accent-contrast:#10161d;
+  --surface-win:#12141b;          /* 窗口 */
+  --surface-float:#2a303e;        /* 浮层（弹窗/面板） */
+  --surface-card:#343b4b;         /* 设置卡片（比浮层高一级） */
+  --surface-pane:#272c39;         /* pane 头部/卡片壳 */
+  --surface-input:rgba(255,255,255,0.05);
+  --text-1:#eceff5; --text-2:rgba(236,239,245,0.6); --text-3:rgba(236,239,245,0.38);
+  --hairline:rgba(255,255,255,0.05);
+  --shadow-pane:0 6px 20px rgba(0,0,0,0.4),0 2px 6px rgba(0,0,0,0.35),inset 0 1px 0 rgba(255,255,255,0.06);
+  --shadow-float:0 20px 56px rgba(0,0,0,0.6),0 4px 14px rgba(0,0,0,0.4),inset 0 1px 0 rgba(255,255,255,0.06);
+  --term-bg:#282c34;
+  --r-sm:8px; --r-md:12px; --r-lg:16px; --r-xl:18px;
+}
+html,body{height:100%;margin:0;padding:0;overflow:hidden;background:#0d0f14}
+body{font-family:'Segoe UI Variable','Segoe UI',system-ui,sans-serif;color:var(--text-1)}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+button{font-family:inherit}
+
+/* ── Window ── */
+.window{width:100vw;height:100vh;background:var(--surface-win);display:flex;flex-direction:column;overflow:hidden;position:relative}
+.window::before{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(120% 80% at 50% 0%,rgba(255,255,255,0.025) 0%,transparent 60%)}
+
+/* ── Titlebar ── */
+.titlebar{height:40px;display:flex;align-items:center;padding-left:10px;flex-shrink:0;position:relative;z-index:5}
+#tabbar{display:flex;align-items:center;gap:2px;flex:1;min-width:0;overflow:hidden}
+.tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text-3);cursor:pointer;border-radius:16px;white-space:nowrap;transition:background 0.15s,color 0.15s;height:28px;user-select:none;flex-shrink:0}
+.tab:hover{background:rgba(255,255,255,0.05);color:var(--text-2)}
+.tab.active{background:rgba(var(--accent-rgb),0.24);color:#eaf3fc;font-weight:600}
+.tab .tab-name{max-width:150px;overflow:hidden;text-overflow:ellipsis}
+.tab-icon{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.tab-icon.connected{background:#7dd58a}
+.tab-icon.disconnected{background:rgba(255,255,255,0.25)}
+.tab-close{font-size:13px;line-height:1;color:var(--text-3);opacity:0;transition:opacity 0.1s;flex-shrink:0}
+.tab:hover .tab-close,.tab.active .tab-close{opacity:0.7}
+.tab-close:hover{opacity:1;color:#f19b92}
+.tab-reconnect{font-size:11px;color:#ffb74d;opacity:0;flex-shrink:0;transition:opacity 0.1s}
+.tab:hover .tab-reconnect,.tab.active .tab-reconnect{opacity:0.8}
+.tab.dragging{opacity:0.35}
+.tab.drag-over-left{box-shadow:inset 2px 0 0 0 rgba(var(--accent-rgb),0.6)}
+.tab.drag-over-right{box-shadow:inset -2px 0 0 0 rgba(var(--accent-rgb),0.6)}
+.tab.tab-exit{max-width:0;padding-left:0;padding-right:0;opacity:0;overflow:hidden;pointer-events:none;transition:max-width 0.2s cubic-bezier(0.05,0.7,0.1,1),padding 0.2s,opacity 0.2s}
+.tab-rename-input{background:rgba(var(--accent-rgb),0.1);border:1px solid rgba(var(--accent-rgb),0.35);border-radius:6px;padding:2px 6px;color:var(--text-1);font-size:12px;font-family:inherit;outline:none;width:110px}
+#btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;font-size:15px;transition:all 0.15s;margin-left:4px;flex-shrink:0;user-select:none}
+#btn-add-tab:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+#btn-menu{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;transition:all 0.15s;margin-right:2px;flex-shrink:0;user-select:none}
+#btn-menu:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+.win-controls{display:flex;align-items:stretch;flex-shrink:0;height:100%}
+.win-ctrl{width:46px;border:none;background:transparent;color:var(--text-3);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.12s}
+.win-ctrl:hover{background:rgba(var(--accent-rgb),0.12);color:var(--text-1)}
+.win-close:hover{background:#c42b1c;color:#fff}
+.win-ctrl svg{width:11px;height:11px}
+
+/* ── Main ── */
+.main{flex:1;display:flex;position:relative;margin:2px 12px 8px;border-radius:16px;overflow:hidden}
+.term-wrap{position:absolute;top:0;left:0;right:0;bottom:0;display:none;overflow:hidden;border-radius:14px;padding:6px;background:var(--term-bg);transition:background 0.25s}
+.term-wrap.active{display:flex;flex-direction:column}
+.term-inner{flex:1;min-height:0;min-width:0;position:relative}
+
+/* ── Split panes ── */
+.split-root{position:relative;width:100%;height:100%;overflow:hidden;padding:6px;background:transparent}
+.split-pane{position:absolute;display:flex;flex-direction:column;overflow:hidden;border-radius:12px;background:var(--term-bg);transition:background 0.25s;
+  box-shadow:var(--shadow-pane);
+  transition:left 0.2s cubic-bezier(0.05,0.7,0.1,1),top 0.2s cubic-bezier(0.05,0.7,0.1,1),width 0.2s cubic-bezier(0.05,0.7,0.1,1),height 0.2s cubic-bezier(0.05,0.7,0.1,1),opacity 0.2s,transform 0.2s,background 0.25s}
+.split-pane.pane-enter{opacity:0;transform:scale(0.94)}
+.split-pane.pane-exit{opacity:0;transform:scale(0.94);pointer-events:none;z-index:5}
+.split-pane.maximized{z-index:10;box-shadow:inset 0 0 0 1px rgba(var(--accent-rgb),0.15),0 0 30px rgba(0,0,0,0.3)}
+.pane-header{height:30px;display:flex;align-items:center;padding:0 10px;gap:7px;font-size:10.5px;color:var(--text-2);font-weight:500;flex-shrink:0;cursor:grab;user-select:none}
+.pane-header:active{cursor:grabbing}
+.pane-header .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.pane-header .dot.local{background:#7dd58a}
+.pane-header .dot.ssh{background:#ffb74d;box-shadow:0 0 8px rgba(255,183,77,0.5)}
+.pane-header .dot.disconnected{background:rgba(255,255,255,0.25)}
+.pane-header .label{flex:1;display:flex;align-items:center;gap:6px;min-width:0}
+.pane-header .label span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pane-header button{background:transparent;border:none;color:var(--text-3);cursor:pointer;width:24px;height:24px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;transition:all 0.12s;flex-shrink:0}
+.pane-header button:hover{background:rgba(var(--accent-rgb),0.16);color:#9cc8ee}
+.pane-header button svg{width:13px;height:13px}
+.pane-body{position:absolute;top:30px;left:6px;right:6px;bottom:6px;overflow:hidden;border-radius:8px;background:var(--term-bg);transition:background 0.25s}
+.split-spanner{position:absolute;z-index:20;display:flex;align-items:center;justify-content:center;transition:background 0.2s}
+.split-spanner.v{width:8px;cursor:col-resize;margin-left:-4px}
+.split-spanner.h{height:8px;cursor:row-resize;margin-top:-4px}
+.split-spanner::after{content:'';border-radius:2px;background:rgba(var(--accent-rgb),0.1);transition:all 0.2s}
+.split-spanner.v::after{width:2px;height:36px}
+.split-spanner.h::after{width:36px;height:2px}
+.split-spanner:hover::after{background:rgba(var(--accent-rgb),0.3);height:56px}
+.split-spanner:hover.v::after{height:56px;width:2px}
+.split-spanner:hover.h::after{width:56px;height:2px}
+
+/* Pane drop zones (reorder) */
+#pane-drop-layer{position:absolute;inset:0;z-index:30;pointer-events:none}
+.pane-drop-zone{position:absolute;pointer-events:auto;background:transparent;border-radius:8px;transition:background 0.12s,border-color 0.12s}
+.pane-drop-zone.drag-over{background:rgba(var(--accent-rgb),0.14);border:1px solid rgba(var(--accent-rgb),0.55)}
+#tab-drop-layer{position:absolute;inset:0;z-index:30;pointer-events:none}
+
+/* Mock terminal text */
+.term{position:absolute;inset:0;padding:8px 12px;font-family:'Cascadia Code','JetBrains Mono',Consolas,monospace;font-size:13px;line-height:1.7;color:var(--term-fg,#abb2bf);overflow:hidden;white-space:pre-wrap;word-break:break-all}
+.term .prompt{color:var(--term-blue,#61afef);font-weight:500}
+.term .cmd{color:var(--term-fg)}
+.term .out{color:var(--term-fg);opacity:0.85}
+.term .info{color:var(--term-green,#98c379)}
+.term .err{color:var(--term-red,#e06c75)}
+.term .dim{opacity:0.5}
+.term .cursor{display:inline-block;width:8px;height:15px;background:#fff;vertical-align:text-bottom;animation:blink 1.1s step-end infinite;border-radius:1px}
+@keyframes blink{50%{opacity:0}}
+.term mark{background:rgba(var(--accent-rgb),0.35);color:inherit;border-radius:2px}
+
+/* ── Search bar ── */
+.search-bar{position:absolute;top:8px;right:8px;display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--surface-float);border-radius:10px;box-shadow:var(--shadow-float);z-index:15;opacity:0;pointer-events:none;transform:translateY(-4px);transition:opacity 0.2s,transform 0.2s}
+.search-bar.open{opacity:1;pointer-events:auto;transform:translateY(0)}
+.search-bar svg{width:13px;height:13px;color:var(--text-3);flex-shrink:0}
+.search-bar input{background:none;border:none;outline:none;color:var(--text-1);font-size:12.5px;font-family:inherit;width:170px}
+.search-bar input::placeholder{color:var(--text-3)}
+.search-bar .count{font-size:11px;color:var(--text-3);min-width:30px;text-align:center}
+.search-bar button{background:none;border:none;color:var(--text-3);cursor:pointer;font-size:13px;padding:2px 7px;border-radius:6px;transition:all 0.12s}
+.search-bar button:hover{color:var(--text-1);background:rgba(var(--accent-rgb),0.14)}
+
+/* ── Statusbar ── */
+.statusbar{height:26px;display:flex;align-items:center;padding:0 14px;gap:16px;font-size:11px;color:var(--text-3);flex-shrink:0;position:relative;z-index:5}
+.statusbar span{display:flex;align-items:center;gap:5px}
+.statusbar svg{width:12px;height:12px;opacity:0.55}
+.transfer-btn{display:flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:11px;color:var(--text-3);cursor:pointer;transition:all 0.2s;opacity:0;transform:scale(0.5);pointer-events:none;margin-left:8px}
+.transfer-btn.visible{opacity:1;transform:scale(1);pointer-events:auto}
+.transfer-btn:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+.transfer-count{font-size:10px;color:#8fc1ee;font-weight:600;display:inline-block}
+.transfer-count.pulse{animation:transferPulse 0.4s cubic-bezier(0.05,0.7,0.1,1)}
+@keyframes transferPulse{0%{transform:scale(1)}50%{transform:scale(1.4)}100%{transform:scale(1)}}
+
+/* ── Menu popup ── */
+.menu-backdrop{position:fixed;inset:0;z-index:200;display:none}
+.menu-backdrop.open{display:block}
+.menu-popup{position:fixed;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float);z-index:201;min-width:220px;padding:6px;opacity:0;pointer-events:none;transform:translateY(-8px);transition:opacity 0.2s cubic-bezier(0.05,0.7,0.1,1),transform 0.2s;user-select:none}
+.menu-popup.open{opacity:1;pointer-events:auto;transform:translateY(0)}
+.menu-item{display:flex;align-items:center;gap:12px;padding:8px 12px;font-size:13px;color:var(--text-2);cursor:pointer;border-radius:8px;transition:background 0.12s}
+.menu-item:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+.menu-item.disabled{opacity:0.35;pointer-events:none}
+.menu-icon{font-size:14px;width:18px;text-align:center;flex-shrink:0}
+.menu-label{flex:1;min-width:0;font-weight:500}
+.menu-shortcut{font-size:11px;color:var(--text-3);background:rgba(255,255,255,0.05);padding:2px 7px;border-radius:5px;flex-shrink:0}
+
+/* ── Tab context menu ── */
+.tab-context-menu{position:fixed;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float);z-index:202;min-width:180px;padding:4px;user-select:none}
+.tab-context-item{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:8px 12px;font-size:12px;color:var(--text-2);cursor:pointer;border-radius:8px;transition:background 0.1s}
+.tab-context-item:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+.tab-context-shortcut{font-size:10px;color:var(--text-3);background:rgba(255,255,255,0.05);padding:2px 7px;border-radius:4px}
+
+/* ── Overlay system ── */
+.overlay{position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center;background:rgba(8,9,12,0.55);backdrop-filter:blur(6px)}
+.overlay.open{display:flex}
+.overlay-backdrop{position:absolute;inset:0}
+.panel{position:relative;background:var(--surface-float);border-radius:16px;box-shadow:var(--shadow-float);display:flex;flex-direction:column;overflow:hidden;animation:panelIn 0.22s cubic-bezier(0.05,0.7,0.1,1)}
+@keyframes panelIn{from{opacity:0;transform:scale(0.97) translateY(-10px)}to{opacity:1;transform:scale(1) translateY(0)}}
+.panel-header{display:flex;align-items:center;gap:10px;padding:18px 20px 10px;flex-shrink:0;user-select:none}
+.panel-header h3{font-size:14.5px;font-weight:600;color:var(--text-1)}
+.panel-header .spacer{flex:1}
+.panel-close{width:28px;height:28px;border-radius:8px;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:all 0.15s}
+.panel-close:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+.panel-search{display:flex;align-items:center;gap:10px;padding:12px 20px 10px}
+.panel-search svg{flex-shrink:0;color:var(--text-3)}
+.panel-search input{flex:1;background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:10px;padding:9px 13px;color:var(--text-1);font-size:13px;font-family:inherit;outline:none;transition:all 0.15s}
+.panel-search input:focus{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
+.panel-search input::placeholder{color:var(--text-3)}
+.panel-list{flex:1;overflow-y:auto;padding:6px 12px 12px;display:flex;flex-direction:column;gap:2px}
+.panel-footer{display:flex;align-items:center;gap:12px;padding:12px 20px 14px;font-size:10.5px;color:var(--text-3);border:none;flex-shrink:0}
+.panel-footer kbd{background:rgba(var(--accent-rgb),0.12);padding:2px 7px;border-radius:5px;font-family:inherit;font-size:10px;color:#9cc8ee}
+.panel-item{display:flex;align-items:center;gap:12px;padding:10px 13px;border-radius:11px;cursor:pointer;transition:background 0.1s}
+.panel-item:hover{background:rgba(255,255,255,0.04)}
+.panel-item[data-selected]{background:rgba(var(--accent-rgb),0.16)}
+.panel-item-icon{width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
+.panel-item-icon.loc{background:rgba(125,213,138,0.14);color:#7dd58a}
+.panel-item-icon.ssh{background:rgba(255,183,77,0.14);color:#ffb74d}
+.panel-item-icon svg{width:15px;height:15px}
+.panel-item-info{flex:1;min-width:0}
+.panel-item-name{font-size:13px;color:var(--text-1);font-weight:500}
+.panel-item-detail{font-size:11px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.panel-item-badge{font-size:10px;padding:2px 9px;border-radius:8px;background:rgba(var(--accent-rgb),0.14);color:#9cc8ee;flex-shrink:0}
+.panel-section-title{font-size:11px;font-weight:600;color:var(--text-3);text-transform:uppercase;letter-spacing:0.5px;padding:12px 12px 6px}
+
+/* ── Quick commands / palette ── */
+.qc-panel{width:500px;max-height:460px}
+.qc-list{overflow-y:auto;padding:8px 12px 12px;max-height:300px;min-height:90px}
+.palette-panel{width:500px;max-height:620px}
+.palette-list{overflow-y:auto;padding:8px 12px 12px;max-height:480px;min-height:90px}
+.palette-empty{display:none;padding:28px 16px;text-align:center;color:var(--text-3);font-size:12px}
+.palette-empty.show{display:block}
+/* V3 表项（分区标题式）：快捷命令/命令面板共用 */
+.v3-section{font-size:10.5px;font-weight:600;color:var(--text-3);letter-spacing:0.8px;text-transform:uppercase;padding:10px 12px 4px}
+.v3-section:first-child{padding-top:4px}
+.v3-item{display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:9px;cursor:pointer;transition:background 0.1s}
+.v3-item:hover{background:rgba(255,255,255,0.04)}
+.v3-item.sel{background:rgba(var(--accent-rgb),0.16)}
+.v3-name{flex:1;min-width:0;font-size:13px;color:var(--text-1);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v3-cmd{font-size:10.5px;color:var(--text-3);font-family:'Cascadia Code',Consolas,monospace;max-width:55%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v3-kbd{font-size:10px;color:#9cc8ee;background:rgba(var(--accent-rgb),0.1);padding:2px 7px;border-radius:5px;flex-shrink:0;font-family:inherit}
+
+/* ── Settings pane ── */
+.settings-pane{position:absolute;top:0;left:0;right:0;bottom:0;display:none;flex-direction:column;background:var(--surface-float);overflow:hidden;border-radius:16px;z-index:10}
+.settings-pane.active{display:flex}
+.settings-header{height:46px;display:flex;align-items:center;padding:0 16px;gap:10px;flex-shrink:0}
+.settings-header .back-btn{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text-3);transition:all 0.15s;background:none;border:none}
+.settings-header .back-btn:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+.settings-header h1{font-size:17px;font-weight:600;color:var(--text-1)}
+.settings-body{flex:1;display:flex;overflow:hidden}
+.settings-sidebar{width:190px;padding:10px 8px;display:flex;flex-direction:column;gap:3px;flex-shrink:0}
+.settings-sidebar-item{display:flex;align-items:center;gap:10px;padding:9px 13px;border-radius:10px;font-size:13px;color:var(--text-3);cursor:pointer;transition:all 0.15s;font-weight:500;user-select:none}
+.settings-sidebar-item:hover{background:rgba(255,255,255,0.05);color:var(--text-2)}
+.settings-sidebar-item.active{background:rgba(var(--accent-rgb),0.16);color:var(--text-1);font-weight:600}
+.settings-content{flex:1;overflow-y:auto;padding:20px 26px}
+.settings-content h2{font-size:15px;color:var(--text-1);font-weight:600;margin-bottom:4px}
+.settings-content .desc{font-size:12px;color:var(--text-3);margin-bottom:16px}
+.settings-page{display:none;max-width:900px;margin:0 auto;width:100%}
+.settings-page.active{display:block}
+.settings-section{font-size:13px;color:var(--text-2);font-weight:600;margin:26px 0 10px}
+.settings-section:first-child{margin-top:0}
+.settings-card{background:var(--surface-card);border-radius:14px;padding:0 16px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.055),0 1px 4px rgba(0,0,0,0.2)}
+.settings-row{display:flex;align-items:center;min-height:54px;padding:10px 0;gap:16px}
+.settings-card-label{flex:1;min-width:0}
+.settings-card-title{font-size:13px;color:var(--text-1);font-weight:500}
+.settings-card-desc{font-size:11px;color:var(--text-3);margin-top:2px}
+.settings-card-control{flex-shrink:0;min-width:220px;display:flex;justify-content:flex-end}
+.settings-card-control select,.settings-card-control input{width:100%;max-width:220px;background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:9px;padding:7px 11px;color:var(--text-1);font-size:12.5px;font-family:inherit;outline:none;transition:all 0.15s}
+.settings-card-control select:focus,.settings-card-control input:focus{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
+
+/* Toggle */
+.toggle-switch{width:42px;height:23px;border-radius:12px;background:rgba(255,255,255,0.16);cursor:pointer;position:relative;transition:background 0.2s;flex-shrink:0}
+.toggle-switch.on{background:rgba(var(--accent-rgb),0.6)}
+.toggle-switch::after{content:'';position:absolute;top:2px;left:2px;width:19px;height:19px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.4);transition:left 0.2s}
+.toggle-switch.on::after{left:21px}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:11px 0}
+.toggle-label{font-size:13px;color:var(--text-1)}
+.toggle-desc{font-size:11px;color:var(--text-3);margin-top:2px}
+
+/* SSH manager list */
+.ssh-group-header{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:10px;cursor:pointer;transition:background 0.15s;font-size:13px;color:var(--text-2);font-weight:500;user-select:none}
+.ssh-group-header:hover{background:rgba(255,255,255,0.04)}
+.ssh-group-header .group-chevron{transition:transform 0.2s;color:var(--text-3);font-size:10px}
+.ssh-group-header.collapsed .group-chevron{transform:rotate(-90deg)}
+.ssh-group-count{font-size:11px;color:var(--text-3);margin-left:4px}
+.ssh-group-header .group-rename{opacity:0;background:none;border:none;color:var(--text-3);cursor:pointer;font-size:11px;padding:2px 6px;border-radius:5px;transition:all 0.15s}
+.ssh-group-header:hover .group-rename{opacity:1}
+.ssh-group-header .group-rename:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+.ssh-group-header .group-name-input{background:rgba(var(--accent-rgb),0.1);border:1px solid rgba(var(--accent-rgb),0.35);border-radius:6px;padding:2px 8px;color:var(--text-1);font-size:13px;font-family:inherit;outline:none;width:130px}
+.ssh-group-items{margin-left:8px;display:flex;flex-direction:column;gap:1px}
+.ssh-group-items.collapsed{display:none}
+.ssh-item{display:flex;align-items:center;gap:9px;padding:7px 12px;border-radius:9px;transition:background 0.1s;cursor:pointer}
+.ssh-item:hover{background:rgba(255,255,255,0.04)}
+.ssh-item-icon{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0;background:rgba(255,183,77,0.14);color:#ffb74d}
+.ssh-item-icon svg{width:13px;height:13px}
+.ssh-item-info{flex:1;min-width:0}
+.ssh-item-name{font-size:12px;color:var(--text-1);font-weight:500}
+.ssh-item-detail{font-size:10.5px;color:var(--text-3)}
+.ssh-item-status{width:7px;height:7px;border-radius:50%;flex-shrink:0;background:rgba(255,255,255,0.2)}
+.ssh-item-status.connected{background:#7dd58a;box-shadow:0 0 6px rgba(125,213,138,0.4)}
+.ssh-item-btn{width:24px;height:24px;border-radius:7px;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center;transition:all 0.15s;flex-shrink:0}
+.ssh-item-btn:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+.ssh-item-btn.connect:hover{color:#8fc1ee}
+.ssh-manager-actions{display:flex;gap:8px;padding:4px 18px 10px}
+
+/* Buttons */
+.btn-primary{background:rgb(var(--accent-rgb));color:var(--accent-contrast);border:none;padding:7px 18px;border-radius:16px;font-size:12.5px;font-weight:600;cursor:pointer;transition:all 0.15s}
+.btn-primary:hover{filter:brightness(1.1)}
+.btn-primary:active{transform:translateY(1px)}
+.btn-outline{background:transparent;color:var(--text-2);border:1px solid rgba(var(--accent-rgb),0.3);padding:7px 18px;border-radius:16px;font-size:12.5px;cursor:pointer;transition:all 0.15s}
+.btn-outline:hover{background:rgba(var(--accent-rgb),0.1);color:var(--text-1)}
+.btn-danger{background:rgba(241,155,146,0.16);border:1px solid rgba(241,155,146,0.25);color:#f5c0bb;padding:7px 18px;border-radius:16px;font-size:12.5px;cursor:pointer;transition:all 0.15s}
+.btn-danger:hover{background:rgba(241,155,146,0.26)}
+
+/* Form fields */
+.form-group{display:flex;flex-direction:column;gap:5px}
+.form-group label{font-size:11px;color:var(--text-2);font-weight:500}
+.form-group input,.form-group select,.form-group textarea{background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:10px;padding:8px 12px;font-size:12.5px;color:var(--text-1);outline:none;font-family:inherit;transition:all 0.15s;width:100%}
+.form-group input:focus,.form-group select:focus,.form-group textarea:focus{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
+.form-group select{cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23ffffff55' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.form-section-add{font-size:12px;color:#8fc1ee;cursor:pointer;transition:color 0.15s;user-select:none}
+.form-section-add:hover{color:#b5d7f5}
+
+/* Cust dropdown / combo */
+.cust-dropdown{position:relative;display:inline-block;width:100%}
+.cust-dropdown .dd-trigger{background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:10px;padding:8px 30px 8px 12px;color:var(--text-1);font-size:12.5px;font-family:inherit;cursor:pointer;transition:all 0.15s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative}
+.cust-dropdown .dd-trigger:hover{background:rgba(255,255,255,0.07)}
+.cust-dropdown.open .dd-trigger{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
+.cust-dropdown .dd-trigger::after{content:'';position:absolute;right:12px;top:50%;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--text-3);transform:translateY(-2px);transition:transform 0.2s}
+.cust-dropdown.open .dd-trigger::after{transform:translateY(-2px) rotate(180deg)}
+.cust-dropdown .dd-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float);z-index:50;overflow:hidden;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 0.18s,transform 0.18s;max-height:220px;overflow-y:auto}
+.cust-dropdown.open .dd-menu{opacity:1;pointer-events:auto;transform:translateY(0)}
+.cust-dropdown .dd-option{padding:8px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;transition:background 0.1s}
+.cust-dropdown .dd-option:hover{background:rgba(var(--accent-rgb),0.1);color:var(--text-1)}
+.cust-dropdown .dd-option.selected{background:rgba(var(--accent-rgb),0.16);color:var(--text-1);font-weight:500}
+.cust-dropdown .dd-option.new-group{color:#8fc1ee;border-top:1px solid var(--hairline);margin-top:4px;padding-top:10px}
+.cust-combo{position:relative}
+.cust-combo .dd-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float);z-index:50;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 0.18s,transform 0.18s;max-height:160px;overflow-y:auto}
+.cust-combo .dd-menu.open{opacity:1;pointer-events:auto;transform:translateY(0)}
+.cust-combo .dd-option{padding:8px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;transition:background 0.1s}
+.cust-combo .dd-option:hover,.cust-combo .dd-option.active{background:rgba(var(--accent-rgb),0.1);color:var(--text-1)}
+.cust-combo .dd-option.create{color:#8fc1ee;border-top:1px solid var(--hairline);margin-top:2px;padding-top:10px;font-style:italic}
+
+/* Panel tabs (SSH edit) */
+.panel-tabs{display:flex;gap:4px;padding:0 18px;position:relative}
+.panel-tab{position:relative;padding:5px 14px;font-size:12px;color:var(--text-3);cursor:pointer;border-radius:16px;transition:all 0.15s;font-weight:500;user-select:none;display:flex;align-items:center;gap:5px}
+.panel-tab:hover{color:var(--text-2);background:rgba(255,255,255,0.04)}
+.panel-tab.active{background:rgba(var(--accent-rgb),0.16);color:#cfe3f6;font-weight:600}
+.panel-tab-badge{font-size:10px;color:var(--text-3);min-width:14px;text-align:center}
+.ssh-tab-panel{display:none}
+.ssh-tab-panel.active{display:flex;animation:tabFadeIn 0.2s cubic-bezier(0.05,0.7,0.1,1)}
+@keyframes tabFadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+
+/* Password status + inline actions */
+.ssh-pwd-status{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:10px;padding:8px 12px;font-size:12.5px;color:var(--text-1);transition:all 0.15s;min-height:36px}
+.ssh-pwd-status:hover{background:rgba(255,255,255,0.07)}
+.ssh-pwd-status .btn-outline{background:transparent;color:#8fc1ee;border:none;padding:0 4px;font-size:12.5px;border-radius:0}
+.ssh-pwd-inline-act{position:absolute;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:5px;border:none;background:transparent;color:var(--text-3);cursor:pointer;display:none;align-items:center;justify-content:center;transition:all 0.15s;padding:0}
+.ssh-pwd-inline-act:hover{background:rgba(var(--accent-rgb),0.14);color:#8fc1ee}
+.ssh-pwd-inline-act.active{background:rgba(var(--accent-rgb),0.2);color:#8fc1ee}
+.ssh-pwd-inline-act.show{display:flex}
+#ssh-pwd-inline-cancel:hover{color:#f19b92;background:rgba(241,155,146,0.12)}
+
+/* Login script rows */
+.login-script-row{display:flex;gap:6px;align-items:center;padding:4px 6px;border-radius:9px;transition:background 0.15s}
+.login-script-row:hover{background:rgba(255,255,255,0.03)}
+.login-script-row input{flex:1;min-width:0;background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:9px;padding:6px 10px;color:var(--text-1);font-size:12.5px;font-family:inherit;outline:none;transition:all 0.15s}
+.login-script-row input:focus{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
+.login-script-row .ls-toggle{font-size:10.5px;padding:2px 6px;border-radius:5px;color:var(--text-3);cursor:pointer;user-select:none;transition:all 0.15s;font-weight:500;background:transparent;border:none}
+.login-script-row .ls-toggle:hover{color:var(--text-2);background:rgba(255,255,255,0.06)}
+.login-script-row .ls-toggle.on{color:#8fc1ee;background:rgba(var(--accent-rgb),0.14)}
+.login-script-row .ls-del{width:22px;height:22px;border-radius:6px;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:all 0.15s;flex-shrink:0;opacity:0}
+.login-script-row:hover .ls-del{opacity:0.6}
+.login-script-row .ls-del:hover{opacity:1;color:#f19b92}
+
+/* ── SFTP window ── */
+.sftp-window{position:relative;background:var(--surface-float);border-radius:18px;box-shadow:var(--shadow-float);overflow:hidden;width:760px;height:500px;display:flex;flex-direction:column;animation:panelIn 0.22s cubic-bezier(0.05,0.7,0.1,1)}
+.sftp-window.drag-over{outline:2px dashed rgba(var(--accent-rgb),0.5);outline-offset:-8px;background:rgba(var(--accent-rgb),0.04)}
+.sftp-header{display:flex;align-items:center;padding:14px 18px;gap:10px;flex-shrink:0}
+.sftp-header h2{font-size:15px;color:var(--text-1);font-weight:600}
+.sftp-header .sftp-conn{font-size:11px;color:var(--text-3)}
+.sftp-actions{display:flex;gap:2px;flex-shrink:0;align-items:center;margin-left:auto}
+.sftp-actions button{width:28px;height:28px;border-radius:8px;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all 0.15s}
+.sftp-actions button:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+.sftp-actions button svg{width:14px;height:14px}
+.sftp-actions button.pinned{color:#8fc1ee;background:rgba(var(--accent-rgb),0.2)}
+.sftp-breadcrumb-bar{padding:6px 18px 10px;flex-shrink:0}
+.sftp-breadcrumb{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-2);overflow:hidden;white-space:nowrap}
+.sftp-breadcrumb span{cursor:pointer;padding:2px 6px;border-radius:5px;transition:all 0.15s}
+.sftp-breadcrumb span:hover{background:rgba(var(--accent-rgb),0.12);color:var(--text-1)}
+.sftp-breadcrumb .sep{color:var(--text-3);cursor:default;opacity:0.6}
+.sftp-body{flex:1;overflow-y:auto;padding:2px 10px 10px}
+.sftp-item{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:9px;cursor:pointer;transition:background 0.1s;font-size:12.5px;color:var(--text-2)}
+.sftp-item:hover{background:rgba(255,255,255,0.04)}
+.sftp-item.selected{background:rgba(var(--accent-rgb),0.12)}
+.sftp-item-icon{width:20px;text-align:center;flex-shrink:0;font-size:14px}
+.sftp-item-name{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.sftp-item-size{width:80px;text-align:right;flex-shrink:0;color:var(--text-3);font-size:11px}
+.sftp-item-date{width:110px;text-align:right;flex-shrink:0;color:var(--text-3);font-size:11px}
+.sftp-empty{padding:40px;text-align:center;color:var(--text-3);font-size:13px}
+.sftp-footer{display:flex;align-items:center;padding:10px 18px;gap:8px;flex-shrink:0}
+.sftp-footer button{font-size:11.5px;padding:5px 13px;border-radius:14px;border:none;cursor:pointer;background:rgba(var(--accent-rgb),0.12);color:#9cc8ee;transition:all 0.15s}
+.sftp-footer button:hover{background:rgba(var(--accent-rgb),0.2);color:var(--text-1)}
+
+/* Transfer panel */
+.transfer-window{background:var(--surface-float);border-radius:18px;box-shadow:var(--shadow-float);overflow:hidden;width:460px;max-height:420px;display:flex;flex-direction:column;animation:panelIn 0.22s cubic-bezier(0.05,0.7,0.1,1)}
+.transfer-header{display:flex;align-items:center;padding:14px 18px;flex-shrink:0}
+.transfer-header h2{font-size:15px;color:var(--text-1);font-weight:600}
+.transfer-close{width:26px;height:26px;border-radius:8px;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;margin-left:auto;transition:all 0.15s}
+.transfer-close:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+.transfer-panel-body{flex:1;overflow-y:auto;padding:4px 12px 12px}
+.transfer-empty{padding:36px;text-align:center;color:var(--text-3);font-size:13px}
+.transfer-item{display:flex;align-items:center;gap:9px;padding:9px;border-radius:10px;transition:background 0.1s}
+.transfer-item:hover{background:rgba(255,255,255,0.03)}
+.transfer-item-icon{width:26px;text-align:center;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:var(--text-3)}
+.transfer-item-icon svg{width:14px;height:14px}
+.transfer-item-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.transfer-item-name{font-size:12.5px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--text-1)}
+.transfer-item-bar{height:3px;background:rgba(var(--accent-rgb),0.12);border-radius:2px;overflow:hidden}
+.transfer-item-bar-fill{height:100%;background:rgb(var(--accent-rgb));border-radius:2px;transition:width 0.2s;width:0%}
+.transfer-item-bar-fill.done{background:#7dd58a}
+.transfer-item-bar-fill.cancelled{background:#f19b92}
+.transfer-item-meta{display:flex;align-items:center;font-size:10px;color:var(--text-3);font-variant-numeric:tabular-nums}
+.transfer-item-meta .speed{margin-left:auto}
+.transfer-item-btn{width:22px;height:22px;border-radius:6px;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center;transition:all 0.15s;flex-shrink:0}
+.transfer-item-btn:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+
+/* ── Color picker ── */
+.color-picker-overlay{position:fixed;inset:0;z-index:300;display:none;align-items:center;justify-content:center;background:rgba(8,9,12,0.55);backdrop-filter:blur(6px)}
+.color-picker-overlay.open{display:flex}
+.color-picker{background:var(--surface-float);border-radius:16px;box-shadow:var(--shadow-float);padding:16px;width:280px;animation:panelIn 0.22s cubic-bezier(0.05,0.7,0.1,1)}
+.color-picker-canvas{width:100%;height:150px;border-radius:10px;cursor:crosshair;position:relative;margin-bottom:12px;background:linear-gradient(to right,#fff,transparent),linear-gradient(to top,#000,transparent),#ff0000}
+.color-picker-canvas-dot{position:absolute;width:13px;height:13px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 4px rgba(0,0,0,0.6);transform:translate(-50%,-50%);pointer-events:none}
+.color-picker-hue{width:100%;height:12px;border-radius:6px;cursor:pointer;position:relative;margin-bottom:12px;background:linear-gradient(to right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)}
+.color-picker-hue-dot{position:absolute;top:50%;width:15px;height:15px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 4px rgba(0,0,0,0.6);transform:translate(-50%,-50%);pointer-events:none}
+.color-picker-rgb{display:flex;gap:8px;margin-bottom:12px}
+.color-picker-rgb input{flex:1;min-width:0;background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:9px;padding:7px 10px;color:var(--text-1);font-size:12.5px;font-family:inherit;outline:none;text-align:center}
+.color-picker-rgb input:focus{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
+.color-picker-hex{margin-bottom:12px}
+.color-picker-hex input{flex:1;width:100%;background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:9px;padding:7px 10px;color:var(--text-1);font-size:12.5px;font-family:inherit;outline:none}
+.color-picker-hex input:focus{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
+.color-picker-actions{display:flex;gap:8px;justify-content:flex-end}
+.color-picker-actions button{padding:6px 14px;border-radius:14px;font-size:12px;cursor:pointer;border:none;font-family:inherit;transition:all 0.15s}
+.color-picker-cancel{background:transparent;color:var(--text-2)}
+.color-picker-cancel:hover{background:rgba(255,255,255,0.06)}
+.color-picker-ok{background:rgb(var(--accent-rgb));color:var(--accent-contrast);font-weight:600}
+.color-picker-ok:hover{filter:brightness(1.1)}
+
+/* Accent swatches */
+.accent-swatch{width:26px;height:26px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:all 0.15s;flex-shrink:0}
+.accent-swatch:hover{transform:scale(1.15)}
+.accent-swatch.active{border-color:var(--text-1);box-shadow:0 0 8px currentColor}
+
+/* Shortcut table */
+.kb-table{width:100%;border-collapse:collapse;margin-top:8px}
+.kb-table th,.kb-table td{padding:9px 13px;text-align:left;font-size:12.5px}
+.kb-table th{color:var(--text-3);font-weight:600;font-size:11px}
+.kb-table td{color:var(--text-2);border-bottom:1px solid var(--hairline)}
+.kb-table tr:last-child td{border-bottom:none}
+.kb-table td kbd{background:rgba(var(--accent-rgb),0.12);padding:3px 8px;border-radius:6px;color:#9cc8ee;font-family:inherit;font-size:11px}
+.kb-table tr:hover td{background:rgba(255,255,255,0.02)}
+.shortcut-edit-btn{font-size:11px;padding:3px 12px;border-radius:12px;background:transparent;border:1px solid rgba(var(--accent-rgb),0.3);color:var(--text-2);cursor:pointer;transition:all 0.15s}
+.shortcut-edit-btn:hover{background:rgba(var(--accent-rgb),0.1)}
+.shortcut-edit-btn.capturing{color:#8fc1ee;border-color:rgba(var(--accent-rgb),0.55);background:rgba(var(--accent-rgb),0.12)}
+
+/* Highlight rules */
+.hl-rule-row{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:10px;transition:background 0.1s}
+.hl-rule-row:hover{background:rgba(255,255,255,0.03)}
+.hl-rule-name{flex:1;min-width:0}
+.hl-rule-text{font-size:12.5px;color:var(--text-1);font-family:'Cascadia Code',Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hl-rule-detail{font-size:10.5px;color:var(--text-3);margin-top:2px}
+.hl-dot{width:14px;height:14px;border-radius:50%;flex-shrink:0;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.15)}
+
+/* About */
+.about-info{text-align:center;padding:16px 0}
+.about-logo{font-size:42px;margin-bottom:10px}
+.about-name{font-size:19px;color:var(--text-1);font-weight:600}
+.about-ver{font-size:12px;color:var(--text-3);margin-top:4px}
+
+/* ── Toast ── */
+.toast{position:fixed;bottom:40px;left:50%;transform:translateX(-50%) translateY(8px);background:rgb(var(--accent-rgb));color:var(--accent-contrast);padding:7px 18px;border-radius:18px;font-size:12px;font-weight:600;z-index:400;opacity:0;transition:opacity 0.2s,transform 0.2s;pointer-events:none;display:flex;align-items:center;gap:6px}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.error{background:#f19b92;color:#3d1513}
+.toast svg{width:13px;height:13px;flex-shrink:0}
+
+/* ── Confirm dialog ── */
+.confirm-panel{width:360px}
+.confirm-text{padding:4px 22px 18px;font-size:12.5px;color:var(--text-2);line-height:1.6}
+.confirm-actions{display:flex;gap:8px;justify-content:flex-end;padding:0 22px 16px}
+
+/* ── No animations ── */
+html.no-animations *{transition:none!important;animation:none!important}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(var(--accent-rgb),0.15);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:rgba(var(--accent-rgb),0.3)}
+</style>
+</head>
+<body>
+
+<div class="window" id="win">
+  <div class="titlebar">
+    <div id="tabbar">
+      <div id="btn-add-tab" title="新建标签页（默认终端），Ctrl+Shift+N 选择会话">+</div>
+      <div id="btn-menu" title="菜单"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg></div>
+    </div>
+    <div class="win-controls">
+      <button class="win-ctrl" id="win-min" title="最小化"><svg viewBox="0 0 12 12"><line x1="6" y1="0" x2="6" y2="12" stroke="currentColor"/></svg></button>
+      <button class="win-ctrl" id="win-max" title="最大化"><svg viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" fill="none" stroke="currentColor"/></svg></button>
+      <button class="win-ctrl win-close" id="win-close" title="关闭"><svg viewBox="0 0 12 12"><line x1="1" y1="1" x2="11" y2="11" stroke="currentColor"/><line x1="11" y1="1" x2="1" y2="11" stroke="currentColor"/></svg></button>
+    </div>
+  </div>
+
+  <div class="menu-backdrop" id="menu-backdrop"></div>
+  <div class="menu-popup" id="menu-popup">
+    <div class="menu-item" data-act="qc"><span class="menu-icon">⚡</span><span class="menu-label">快捷命令</span><span class="menu-shortcut">Ctrl+Shift+P</span></div>
+    <div class="menu-item" data-act="sftp"><span class="menu-icon">📁</span><span class="menu-label">SFTP 文件传输</span><span class="menu-shortcut">Ctrl+Shift+F</span></div>
+    <div class="menu-item" data-act="palette"><span class="menu-icon">⌘</span><span class="menu-label">命令面板</span><span class="menu-shortcut">Ctrl+Shift+K</span></div>
+    <div class="menu-item" data-act="settings"><span class="menu-icon">⚙</span><span class="menu-label">设置</span><span class="menu-shortcut">Ctrl+,</span></div>
+  </div>
+
+  <!-- SFTP -->
+  <div class="overlay" id="overlay-sftp">
+    <div class="overlay-backdrop" onclick="SFTP.close()"></div>
+    <div class="sftp-window" id="sftp-win" onclick="event.stopPropagation()">
+      <div class="sftp-header">
+        <h2>SFTP</h2>
+        <span class="sftp-conn" id="sftp-conn"></span>
+        <div class="sftp-actions">
+          <button id="sftp-pin" title="锁定当前目录" onclick="SFTP.togglePin()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6a3 3 0 0 0-6 0v4.76z"/></svg></button>
+          <button title="刷新" onclick="SFTP.refresh()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+          <button title="上级目录" onclick="SFTP.goUp()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
+          <button title="关闭" onclick="SFTP.close()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+        </div>
+      </div>
+      <div class="sftp-breadcrumb-bar"><div class="sftp-breadcrumb" id="sftp-breadcrumb"></div></div>
+      <div class="sftp-body" id="sftp-body"></div>
+      <div class="sftp-footer">
+        <button onclick="showToast('模拟：开始上传')">⬆ 上传文件</button>
+        <button onclick="SFTP.mkdir()">📂 新建目录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Transfer panel -->
+  <div class="overlay" id="transfer-panel">
+    <div class="overlay-backdrop" onclick="TransferManager.closePanel()"></div>
+    <div class="transfer-window" onclick="event.stopPropagation()">
+      <div class="transfer-header"><h2>传输任务</h2><button class="transfer-close" onclick="TransferManager.closePanel()">×</button></div>
+      <div class="transfer-panel-body" id="transfer-panel-body"></div>
+    </div>
+  </div>
+
+  <!-- Quick commands -->
+  <div class="overlay" id="overlay-qc">
+    <div class="overlay-backdrop" onclick="closeQC()"></div>
+    <div class="panel qc-panel" onclick="event.stopPropagation()">
+      <div class="panel-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input id="qc-input" placeholder="输入命令名称或分组…" oninput="qcFilter()" onkeydown="qcKeydown(event)">
+      </div>
+      <div class="qc-list" id="qc-list"></div>
+      <div class="panel-footer">
+        <span><kbd>↑↓</kbd> 选择</span><span><kbd>Enter</kbd> 执行</span><span><kbd>Esc</kbd> 关闭</span>
+        <span style="margin-left:auto;cursor:pointer;color:#8fc1ee" onclick="closeQC();openSettings('quickcommands')">管理命令 →</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Command palette -->
+  <div class="overlay" id="overlay-palette">
+    <div class="overlay-backdrop" onclick="closePalette()"></div>
+    <div class="panel palette-panel" onclick="event.stopPropagation()">
+      <div class="panel-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input id="palette-input" placeholder="搜索操作…" oninput="paletteFilter()" onkeydown="paletteKeydown(event)">
+      </div>
+      <div class="palette-list" id="palette-list"></div>
+      <div class="palette-empty" id="palette-empty">无匹配的操作</div>
+      <div class="panel-footer">
+        <span><kbd>↑↓</kbd> 选择</span><span><kbd>Enter</kbd> 执行</span><span><kbd>Esc</kbd> 关闭</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="main" id="main-area">
+    <div class="search-bar" id="search-bar">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="search-input" placeholder="搜索…" oninput="doSearch()" onkeydown="onSearchKey(event)">
+      <span class="count" id="search-count">0/0</span>
+      <button onclick="searchStep(-1)" title="上一个 (Shift+Enter)">↑</button>
+      <button onclick="searchStep(1)" title="下一个 (Enter)">↓</button>
+      <button onclick="closeSearch()">×</button>
+    </div>
+
+    <div class="settings-pane" id="settings-pane">
+      <div class="settings-header">
+        <button class="back-btn" onclick="closeSettingsTab()" title="返回终端"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8L10 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <h1>设置</h1>
+      </div>
+      <div class="settings-body">
+        <div class="settings-sidebar" id="settings-sidebar">
+          <div class="settings-sidebar-item active" onclick="switchSettingsTab(this,'terminal')">终端</div>
+          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'appearance')">外观</div>
+          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'ssh')">SSH 配置管理</div>
+          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'highlight')">高亮</div>
+          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'quickcommands')">快捷命令</div>
+          <div class="settings-sidebar-item" onclick="switchSettingsTab(this,'keys')">快捷键</div>
+          <div class="settings-sidebar-item" style="margin-top:auto" onclick="switchSettingsTab(this,'about')">关于</div>
+        </div>
+        <div class="settings-content" id="settings-content">
+          <div class="settings-page active" data-page="terminal">
+            <h2>终端</h2><p class="desc">调整终端行为和外观。</p>
+            <div class="settings-section">启动</div>
+            <div class="settings-card">
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">默认终端</div><div class="settings-card-desc">新建标签页和启动时默认使用的 shell</div></div>
+                <div class="settings-card-control"><select id="set-shell"><option>PowerShell</option><option>Command Prompt</option><option>Git Bash</option></select></div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">启动目录</div><div class="settings-card-desc">本地终端的初始工作目录</div></div>
+                <div class="settings-card-control"><input placeholder="留空为用户目录"></div></div>
+            </div>
+            <div class="settings-section">光标</div>
+            <div class="settings-card">
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">光标样式</div></div>
+                <div class="settings-card-control"><select><option>竖线 (Bar)</option><option>方块 (Block)</option><option>下划线 (Underline)</option></select></div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">光标闪烁</div></div>
+                <div class="settings-card-control"><select><option>开启</option><option>关闭</option></select></div></div>
+            </div>
+            <div class="settings-section">复制 & 粘贴</div>
+            <div class="settings-card">
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">选中自动复制</div></div><div class="settings-card-control"><div class="toggle-switch on" onclick="toggleSwitch(this)"></div></div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">右键自动粘贴</div></div><div class="settings-card-control"><div class="toggle-switch on" onclick="toggleSwitch(this)"></div></div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">复制时保留富文本</div></div><div class="settings-card-control"><div class="toggle-switch" onclick="toggleSwitch(this)"></div></div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">智能换行处理</div></div><div class="settings-card-control"><div class="toggle-switch on" onclick="toggleSwitch(this)"></div></div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">OSC 52 剪贴板</div></div><div class="settings-card-control"><div class="toggle-switch on" onclick="toggleSwitch(this)"></div></div></div>
+            </div>
+          </div>
+
+          <div class="settings-page" data-page="appearance">
+            <h2>外观</h2><p class="desc">自定义界面主题和颜色。切换终端配色会实时反映到 pane 背景。</p>
+            <div class="settings-section">主题</div>
+            <div class="settings-card">
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">主题</div><div class="settings-card-desc">界面整体明暗风格</div></div>
+                <div class="settings-card-control"><select><option>暗色</option><option disabled>亮色（远期）</option></select></div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">终端配色</div><div class="settings-card-desc">pane 背景与文字颜色</div></div>
+                <div class="settings-card-control"><select id="set-scheme" onchange="applyScheme(this.value)"></select></div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">强调色</div><div class="settings-card-desc">界面高亮和焦点颜色</div></div>
+                <div class="settings-card-control" style="display:flex;gap:0;align-items:center">
+                  <input id="set-accent" value="#61afef" style="flex:1;border-radius:9px 0 0 9px;border-right:none;max-width:none" onchange="applyAccentFromInput()">
+                  <div id="accent-dot" style="width:30px;height:30px;background:#61afef;border-radius:0 9px 9px 0;border:1.5px solid rgba(97,175,239,0.2);border-left:none;flex-shrink:0;cursor:pointer" onclick="openColorPicker()"></div>
+                </div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">预设色板</div><div class="settings-card-desc">快速选择常用强调色</div></div>
+                <div class="settings-card-control" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap" id="accent-swatches"></div></div>
+            </div>
+            <div class="settings-section">文本</div>
+            <div class="settings-card">
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">终端字体</div></div>
+                <div class="settings-card-control"><select id="set-font" onchange="applyFonts()"><option>"JetBrains Mono","Cascadia Code",Consolas,monospace</option><option>Cascadia Code</option><option>Consolas</option></select></div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">界面字体跟随终端</div><div class="settings-card-desc">开启时界面使用终端字体</div></div>
+                <div class="settings-card-control"><div class="toggle-switch on" id="toggle-ui-follow" onclick="toggleUiFollow()"></div></div></div>
+              <div class="settings-row" id="row-ui-font"><div class="settings-card-label"><div class="settings-card-title">界面字体</div></div>
+                <div class="settings-card-control"><select id="set-ui-font" onchange="applyFonts()"><option>Segoe UI Variable</option><option>Segoe UI</option><option>Microsoft YaHei UI</option></select></div></div>
+              <div class="settings-row" id="row-ui-fallback"><div class="settings-card-label"><div class="settings-card-title">界面回退字体</div></div>
+                <div class="settings-card-control"><select id="set-ui-fallback"><option>Microsoft YaHei UI</option><option>Segoe UI</option></select></div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">字号</div></div>
+                <div class="settings-card-control"><input type="number" value="13.5" style="width:90px" onchange="applyFonts()"></div></div>
+            </div>
+            <div class="settings-section">视觉效果</div>
+            <div class="settings-card">
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">动画效果</div><div class="settings-card-desc">面板弹出和切换动画</div></div>
+                <div class="settings-card-control"><div class="toggle-switch on" id="toggle-animations" onclick="toggleAnimations()"></div></div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">显示标签页状态点</div></div>
+                <div class="settings-card-control"><div class="toggle-switch on" id="toggle-statusdot" onclick="toggleStatusDot()"></div></div></div>
+            </div>
+          </div>
+
+          <div class="settings-page" data-page="ssh">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px">
+              <div><h2>SSH 配置管理</h2><p class="desc">管理远程服务器连接。</p></div>
+              <div style="display:flex;gap:6px;flex-shrink:0">
+                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="collapseAllGroups()">折叠全部</button>
+                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="expandAllGroups()">展开全部</button>
+                <button class="btn-primary" style="font-size:11px;padding:5px 14px" onclick="openSSHEdit(null)">+ 添加连接</button>
+              </div>
+            </div>
+            <div id="settings-ssh-list"></div>
+          </div>
+
+          <div class="settings-page" data-page="highlight">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+              <div><h2>高亮</h2><p class="desc">自定义终端输出高亮规则。</p></div>
+              <div style="display:flex;gap:6px;flex-shrink:0"><button class="btn-primary" style="font-size:11px;padding:5px 12px" onclick="openHighlightEdit(null)">+ 添加规则</button></div>
+            </div>
+            <div class="settings-card" style="margin-bottom:14px">
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">启用高亮</div><div class="settings-card-desc">高亮总开关</div></div>
+                <div class="settings-card-control"><div class="toggle-switch on" onclick="toggleSwitch(this)"></div></div></div>
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">在备用屏幕中禁用高亮</div><div class="settings-card-desc">例如：vi/vim、htop</div></div>
+                <div class="settings-card-control"><div class="toggle-switch" onclick="toggleSwitch(this)"></div></div></div>
+            </div>
+            <div id="highlight-rules-list"></div>
+          </div>
+
+          <div class="settings-page" data-page="quickcommands">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+              <div><h2>快捷命令</h2><p class="desc">保存常用命令，通过 Ctrl+Shift+P 快速执行。</p></div>
+              <div style="display:flex;gap:6px;flex-shrink:0">
+                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="expandAllQC()">展开全部</button>
+                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="collapseAllQC()">折叠全部</button>
+                <button class="btn-primary" style="font-size:11px;padding:5px 12px" onclick="openQCEdit(null)">+ 添加命令</button>
+              </div>
+            </div>
+            <div class="toggle-row"><div><div class="toggle-label">末尾回车自动执行</div><div class="toggle-desc">关闭：仅注入命令文本</div></div><div class="toggle-switch on" onclick="toggleSwitch(this)"></div></div>
+            <div id="qc-commands-list"></div>
+          </div>
+
+          <div class="settings-page" data-page="keys">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+              <div><h2>快捷键</h2><p class="desc">点击「修改」后按下新的快捷键组合，Esc 取消。</p></div>
+              <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="resetAllShortcuts()">全部重置</button>
+            </div>
+            <table class="kb-table" id="shortcuts-table"></table>
+          </div>
+
+          <div class="settings-page" data-page="about">
+            <div class="about-info">
+              <div class="about-logo">🅩</div>
+              <div class="about-name">ZTerm</div>
+              <div class="about-ver" id="about-ver">版本 1.0.5 (模拟)</div>
+            </div>
+            <div class="settings-section">数据</div>
+            <div class="settings-card">
+              <div class="settings-row"><div class="settings-card-label"><div class="settings-card-title">数据目录</div><div class="settings-card-desc">配置、SSH 连接等数据的存放位置</div><div class="settings-card-desc" style="font-size:10.5px;margin-top:3px;opacity:0.7">D:\ZTerm\data</div></div>
+                <div class="settings-card-control" style="display:flex;gap:6px"><button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="showToast('模拟：选择目录')">更改…</button><button class="btn-outline" style="font-size:11px;padding:5px 12px">恢复默认</button></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span id="sb-conn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="3"/></svg> PowerShell</span>
+    <div class="transfer-btn" id="transfer-btn" onclick="TransferManager.openPanel()" title="传输任务">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg>
+      <span class="transfer-count" id="transfer-count"></span>
+    </div>
+    <span style="margin-left:auto">UTF-8</span>
+  </div>
+</div>
+
+<!-- Session selector -->
+<div class="overlay" id="overlay-sessions">
+  <div class="overlay-backdrop" onclick="closeOverlay('overlay-sessions')"></div>
+  <div class="panel" style="width:520px;max-height:520px" onclick="event.stopPropagation()">
+    <div class="panel-header">
+      <h3>新建会话</h3>
+      <div class="spacer"></div>
+      <button class="panel-close" onclick="closeOverlay('overlay-sessions')">×</button>
+    </div>
+    <div class="panel-search">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="sessions-search" placeholder="搜索会话..." oninput="filterSessions(this.value)" onkeydown="sessionKeydown(event)">
+    </div>
+    <div class="panel-list" id="sessions-list"></div>
+    <div class="panel-footer">
+      <span><kbd>↑↓</kbd> 导航</span><span><kbd>Enter</kbd> 选择</span><span><kbd>Esc</kbd> 关闭</span>
+      <span style="margin-left:auto;cursor:pointer;color:#8fc1ee" onclick="closeOverlay('overlay-sessions');openSSHManager()">管理 SSH 连接 →</span>
+    </div>
+  </div>
+</div>
+
+<!-- SSH Manager -->
+<div class="overlay" id="overlay-ssh-manager">
+  <div class="overlay-backdrop" onclick="closeOverlay('overlay-ssh-manager')"></div>
+  <div class="panel" style="width:560px;max-height:540px" onclick="event.stopPropagation()">
+    <div class="panel-header">
+      <h3>SSH 连接管理</h3>
+      <div class="spacer"></div>
+      <button class="panel-close" onclick="closeOverlay('overlay-ssh-manager')">×</button>
+    </div>
+    <div class="ssh-manager-actions">
+      <button class="btn-outline" style="font-size:11px;padding:4px 12px" onclick="collapseAllGroups()">折叠全部</button>
+      <button class="btn-outline" style="font-size:11px;padding:4px 12px" onclick="expandAllGroups()">展开全部</button>
+      <div style="flex:1"></div>
+      <button class="btn-primary" style="font-size:11px;padding:4px 14px" onclick="openSSHEdit(null)">+ 添加连接</button>
+    </div>
+    <div class="panel-list" id="ssh-manager-list"></div>
+    <div class="panel-footer">
+      <span>密码使用 Windows DPAPI 加密存储</span>
+      <span style="margin-left:auto;cursor:pointer;color:#8fc1ee" onclick="closeOverlay('overlay-ssh-manager');openSessionSelector()">← 返回会话选择</span>
+    </div>
+  </div>
+</div>
+
+<!-- SSH Edit -->
+<div class="overlay" id="overlay-ssh-edit" style="z-index:110">
+  <div class="overlay-backdrop" onclick="closeSSHEdit()"></div>
+  <div class="panel" style="width:540px" onclick="event.stopPropagation()">
+    <div class="panel-header">
+      <h3 id="ssh-edit-title">添加 SSH 连接</h3>
+      <div class="spacer"></div>
+      <button class="panel-close" onclick="closeSSHEdit()">×</button>
+    </div>
+    <div class="panel-tabs">
+      <div class="panel-tab active" data-tab="conn" onclick="switchSSHTab('conn')">连接</div>
+      <div class="panel-tab" data-tab="scripts" onclick="switchSSHTab('scripts')">登录脚本<span class="panel-tab-badge" id="ls-badge"></span></div>
+    </div>
+    <div style="padding:12px 20px 18px">
+      <div id="ssh-tab-conn" class="ssh-tab-panel active" style="flex-direction:column;gap:12px">
+        <div class="form-row">
+          <div class="form-group"><label>名称</label><input id="ssh-edit-name" placeholder="我的服务器"></div>
+          <div class="form-group"><label>分组</label>
+            <div class="cust-combo">
+              <input id="ssh-edit-group" placeholder="输入或选择分组" onfocus="comboOpen('group')" oninput="comboFilter('group',this.value)">
+              <div class="dd-menu" id="group-menu"></div>
+            </div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>主机地址</label><input id="ssh-edit-host" placeholder="hostname or IP"></div>
+          <div class="form-group"><label>端口</label><input id="ssh-edit-port" value="22"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>用户名</label><input id="ssh-edit-user" placeholder="user"></div>
+          <div class="form-group"><label>认证方式</label><select id="ssh-edit-auth" onchange="toggleAuthType(this.value)"><option>密码</option><option>密钥</option></select></div>
+        </div>
+        <div class="form-row" id="ssh-pwd-row">
+          <div class="form-group"><label>密码</label>
+            <div id="ssh-pwd-status" class="ssh-pwd-status" style="display:none"><span style="flex:1">🔒 密码已加密保存</span><button class="btn-outline" onclick="startPwdEdit()">修改</button></div>
+            <div style="position:relative;display:none" id="ssh-pwd-edit-wrap">
+              <input id="ssh-edit-password" type="password" placeholder="输入密码" style="padding-right:64px">
+              <button id="ssh-pwd-inline-eye" class="ssh-pwd-inline-act" style="right:44px" onclick="togglePwdVis(this)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+              <button id="ssh-pwd-inline-save" class="ssh-pwd-inline-act" style="right:24px" onclick="savePwd()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></button>
+              <button id="ssh-pwd-inline-cancel" class="ssh-pwd-inline-act" style="right:4px" onclick="cancelPwdEdit()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+          </div>
+          <div class="form-group"><label>备注</label><input placeholder="可选"></div>
+        </div>
+        <div class="form-row" id="ssh-key-row" style="display:none">
+          <div class="form-group" style="grid-column:1/-1"><label>私钥路径</label><input placeholder="~/.ssh/id_rsa"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group" style="grid-column:1/-1;flex-direction:row;align-items:center;gap:10px">
+            <div class="toggle-switch on" onclick="toggleSwitch(this)"></div>
+            <div><div style="font-size:12.5px">SFTP 跟随终端目录</div><div style="font-size:11px;color:var(--text-3)">开启后 SFTP 自动进入终端当前目录</div></div>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group" style="grid-column:1/-1;flex-direction:row;align-items:center;gap:10px">
+            <div class="toggle-switch on" onclick="toggleSwitch(this)"></div>
+            <div><div style="font-size:12.5px">连接时清空终端</div><div style="font-size:11px;color:var(--text-3)">关闭后重连时保留之前的终端内容</div></div>
+          </div>
+        </div>
+      </div>
+      <div id="ssh-tab-scripts" class="ssh-tab-panel" style="flex-direction:column;gap:6px;min-height:200px">
+        <div id="login-scripts-container" style="display:flex;flex-direction:column;gap:2px"></div>
+        <span class="form-section-add" onclick="addLoginScriptRow()" style="align-self:flex-start">+ 添加脚本</span>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+        <button class="btn-outline" onclick="closeSSHEdit()">取消</button>
+        <button class="btn-primary" onclick="saveSSHEdit()">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- QC Edit -->
+<div class="overlay" id="overlay-qc-edit" style="z-index:110">
+  <div class="overlay-backdrop" onclick="closeQCEdit()"></div>
+  <div class="panel" style="width:480px" onclick="event.stopPropagation()">
+    <div class="panel-header">
+      <h3 id="qc-edit-title">添加命令</h3>
+      <div class="spacer"></div>
+      <button class="panel-close" onclick="closeQCEdit()">×</button>
+    </div>
+    <div style="padding:0 20px 18px;display:flex;flex-direction:column;gap:12px">
+      <div class="form-row">
+        <div class="form-group"><label>名称</label><input id="qc-edit-name" placeholder="查看日志"></div>
+        <div class="form-group"><label>分组</label>
+          <div class="cust-combo">
+            <input id="qc-edit-group" placeholder="输入或选择分组" onfocus="comboOpen('qgroup')" oninput="comboFilter('qgroup',this.value)">
+            <div class="dd-menu" id="qgroup-menu"></div>
+          </div>
+        </div>
+      </div>
+      <div class="form-group"><label>命令</label><textarea rows="3" placeholder="tail -f /var/log/app.log" style="resize:vertical"></textarea></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn-outline" onclick="closeQCEdit()">取消</button>
+        <button class="btn-primary" onclick="saveQCEdit()">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Highlight Edit -->
+<div class="overlay" id="overlay-hl-edit" style="z-index:110">
+  <div class="overlay-backdrop" onclick="closeHighlightEdit()"></div>
+  <div class="panel" style="width:480px" onclick="event.stopPropagation()">
+    <div class="panel-header">
+      <h3>添加高亮规则</h3>
+      <div class="spacer"></div>
+      <button class="panel-close" onclick="closeHighlightEdit()">×</button>
+    </div>
+    <div style="padding:0 20px 18px;display:flex;flex-direction:column;gap:12px">
+      <div class="form-group"><label>关键字或正则表达式</label><input placeholder="ERROR 或 \b(error|fail)\b"></div>
+      <div class="form-row">
+        <div class="form-group" style="flex-direction:row;align-items:center;gap:8px"><div class="toggle-switch" onclick="toggleSwitch(this)"></div><label style="margin:0;font-size:12px">正则表达式</label></div>
+        <div class="form-group" style="flex-direction:row;align-items:center;gap:8px"><div class="toggle-switch" onclick="toggleSwitch(this)"></div><label style="margin:0;font-size:12px">大小写敏感</label></div>
+      </div>
+      <div class="form-group"><label>前景色</label>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="toggle-switch on" onclick="toggleSwitch(this)"></div>
+          <div style="flex:1;display:flex;align-items:center">
+            <input value="#e06c75" style="border-radius:9px 0 0 9px;border-right:none" oninput="this.nextElementSibling.style.background=this.value">
+            <div style="width:28px;height:28px;background:#e06c75;border-radius:0 9px 9px 0;border:1.5px solid rgba(97,175,239,0.2);border-left:none;flex-shrink:0;cursor:pointer" onclick="openColorPicker()"></div>
+          </div>
+        </div>
+      </div>
+      <div class="form-group"><label>背景色</label>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="toggle-switch" onclick="toggleSwitch(this)"></div>
+          <div style="flex:1;display:flex;align-items:center">
+            <input value="#282c34" style="border-radius:9px 0 0 9px;border-right:none" oninput="this.nextElementSibling.style.background=this.value">
+            <div style="width:28px;height:28px;background:#282c34;border-radius:0 9px 9px 0;border:1.5px solid rgba(97,175,239,0.2);border-left:none;flex-shrink:0;cursor:pointer" onclick="openColorPicker()"></div>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;gap:16px;align-items:center">
+        <div style="display:flex;align-items:center;gap:6px"><div class="toggle-switch" onclick="toggleSwitch(this)"></div><label style="font-size:12px">粗体</label></div>
+        <div style="display:flex;align-items:center;gap:6px"><div class="toggle-switch" onclick="toggleSwitch(this)"></div><label style="font-size:12px">斜体</label></div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn-outline" onclick="closeHighlightEdit()">取消</button>
+        <button class="btn-primary" onclick="closeHighlightEdit();showToast('高亮规则已保存')">保存</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Color picker -->
+<div class="color-picker-overlay" id="color-picker">
+  <div class="color-picker">
+    <div class="color-picker-canvas" id="cp-canvas"><div class="color-picker-canvas-dot" id="cp-dot"></div></div>
+    <div class="color-picker-hue" id="cp-hue"><div class="color-picker-hue-dot" id="cp-hue-dot"></div></div>
+    <div class="color-picker-rgb">
+      <input id="cp-r" value="97" onchange="cpFromRgb()"><input id="cp-g" value="175" onchange="cpFromRgb()"><input id="cp-b" value="239" onchange="cpFromRgb()">
+    </div>
+    <div class="color-picker-hex"><input id="cp-hex" value="#61afef" onchange="cpFromHex()"></div>
+    <div class="color-picker-actions">
+      <button class="color-picker-cancel" onclick="closeColorPicker()">取消</button>
+      <button class="color-picker-ok" onclick="cpOk()">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm -->
+<div class="overlay" id="overlay-confirm" style="z-index:320">
+  <div class="overlay-backdrop" onclick="closeConfirm(false)"></div>
+  <div class="panel confirm-panel" onclick="event.stopPropagation()">
+    <div class="panel-header"><h3 id="confirm-title">确认</h3></div>
+    <div class="confirm-text" id="confirm-text"></div>
+    <div class="confirm-actions">
+      <button class="btn-outline" onclick="closeConfirm(false)">取消</button>
+      <button class="btn-danger" onclick="closeConfirm(true)">确认</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ═══════════════ 数据 ═══════════════ */
+const SCHEMES = {
+  onedark:{name:'One Dark Pro',bg:'#282c34',fg:'#abb2bf',blue:'#61afef',green:'#98c379',red:'#e06c75'},
+  snazzy:{name:'Snazzy',bg:'#282a36',fg:'#eff0eb',blue:'#57c7ff',green:'#5af78e',red:'#ff5c57'},
+  tokyonight:{name:'Tokyo Night',bg:'#1a1b26',fg:'#c0caf5',blue:'#7aa2f7',green:'#9ece6a',red:'#f7768e'},
+  catppuccin:{name:'Catppuccin Mocha',bg:'#1e1e2e',fg:'#cdd6f4',blue:'#89b4fa',green:'#a6e3a1',red:'#f38ba8'},
+  gruvbox:{name:'Gruvbox Dark',bg:'#282828',fg:'#ebdbb2',blue:'#458588',green:'#98971a',red:'#cc241d'},
+  nord:{name:'Nord',bg:'#2e3440',fg:'#d8dee9',blue:'#81a1c1',green:'#a3be8c',red:'#bf616a'},
+  monokai:{name:'Monokai',bg:'#272822',fg:'#f8f8f2',blue:'#66d9ef',green:'#a6e22e',red:'#f92672'},
+  dracula:{name:'Dracula',bg:'#282a36',fg:'#f8f8f2',blue:'#6272a4',green:'#50fa7b',red:'#ff5555'},
+  solarized:{name:'Solarized Dark',bg:'#002b36',fg:'#839496',blue:'#268bd2',green:'#859900',red:'#dc322f'},
+  ayu:{name:'Ayu Dark',bg:'#0a0e14',fg:'#b3b1ad',blue:'#53bdfa',green:'#91b362',red:'#ea6c73'},
+};
+const PROFILES = [
+  {id:'pwsh',name:'PowerShell',type:'local',cmd:'powershell.exe'},
+  {id:'cmd',name:'Command Prompt',type:'local',cmd:'cmd.exe'},
+  {id:'gitbash',name:'Git Bash',type:'local',cmd:'bash.exe'},
+];
+let sshProfiles = [
+  {id:'s1',name:'prod-web-01',group:'生产环境',host:'10.0.3.11',port:22,user:'root',authType:'key',hasPwd:true,connected:false,note:'主站 web'},
+  {id:'s2',name:'db-server-01',group:'生产环境',host:'10.0.3.22',port:22,user:'deploy',authType:'password',hasPwd:true,connected:false},
+  {id:'s3',name:'gitlab-runner',group:'内网',host:'192.168.1.50',port:22,user:'git',authType:'key',hasPwd:false,connected:false},
+];
+let quickCommands = [
+  {id:'q1',name:'查看应用日志',group:'运维',cmd:'tail -f /var/log/app.log'},
+  {id:'q2',name:'部署前端',group:'运维',cmd:'cd /srv/www && npm run deploy'},
+  {id:'q3',name:'磁盘占用',group:'运维',cmd:'du -sh /* 2>/dev/null'},
+  {id:'q4',name:'git 状态',group:'开发',cmd:'git status --short && git log --oneline -5'},
+  {id:'q5',name:'清空缓存',group:'开发',cmd:'npm cache clean --force'},
+];
+let highlightRules = [
+  {id:'h1',text:'ERROR',regexp:false,caseSensitive:false,fg:'#e06c75',bg:'',bold:true,italic:false},
+  {id:'h2',text:'WARN',regexp:false,caseSensitive:false,fg:'#e5c07b',bg:'',bold:false,italic:false},
+  {id:'h3',text:'\\b(\\d{1,3}\\.){3}\\d{1,3}\\b',regexp:true,caseSensitive:false,fg:'#56b6c2',bg:'',bold:false,italic:false},
+];
+const SHORTCUTS = [
+  {id:'newTerminal',name:'新建终端',combo:'Ctrl+Shift+T'},
+  {id:'quickCommands',name:'快捷命令',combo:'Ctrl+Shift+P'},
+  {id:'commandPalette',name:'命令面板',combo:'Ctrl+Shift+K'},
+  {id:'sftp',name:'SFTP 文件传输',combo:'Ctrl+Shift+F'},
+  {id:'openSettings',name:'打开设置',combo:'Ctrl+,'},
+  {id:'search',name:'搜索',combo:'Ctrl+F'},
+  {id:'renameTab',name:'重命名标签页',combo:'F2'},
+  {id:'splitHorizontal',name:'水平分屏',combo:'Ctrl+Shift+D'},
+  {id:'splitVertical',name:'垂直分屏',combo:'Ctrl+Shift+E'},
+  {id:'closeTab',name:'关闭标签页',combo:'Ctrl+W'},
+];
+let shortcuts = Object.fromEntries(SHORTCUTS.map(s=>[s.id,s.combo]));
+const SESSION_ITEMS = [
+  {type:'loc',name:'PowerShell',detail:'powershell.exe',badge:'本地'},
+  {type:'loc',name:'Command Prompt',detail:'cmd.exe',badge:'本地'},
+  {type:'loc',name:'Git Bash',detail:'bash.exe',badge:'本地'},
+  ...sshProfiles.map(p=>({type:'ssh',name:p.name,detail:p.host+' · '+p.user,group:p.group})),
+];
+const PALETTE_ACTIONS = [
+  {icon:'plus',name:'新建终端',kbd:'Ctrl+Shift+T',act:()=>newLocalTab()},
+  {icon:'ssh',name:'连接 SSH 会话',kbd:'Ctrl+Shift+S',act:()=>openSessionSelector()},
+  {icon:'folder',name:'SFTP 文件传输',kbd:'Ctrl+Shift+F',act:()=>openSFTPFromMenu()},
+  {icon:'bolt',name:'快捷命令',kbd:'Ctrl+Shift+P',act:()=>openQC()},
+  {icon:'cmd',name:'命令面板',kbd:'Ctrl+Shift+K',act:()=>openPalette()},
+  {icon:'search',name:'搜索当前终端',kbd:'Ctrl+F',act:()=>openSearch()},
+  {icon:'gear',name:'打开设置',kbd:'Ctrl+,',act:()=>openSettings()},
+  {icon:'split',name:'水平分屏',kbd:'Ctrl+Shift+D',act:()=>splitActive('r')},
+  {icon:'splitv',name:'垂直分屏',kbd:'Ctrl+Shift+E',act:()=>splitActive('b')},
+];
+
+/* ═══════════════ TabManager ═══════════════ */
+let _counter = 1, _paneCounter = 1;
+const TabManager = {
+  tabs: [], activeId: null, sshProfiles,
+  _paneEls: new Map(), _spanners: [],
+  getActive(){ return this.tabs.find(t=>t.id===this.activeId) || null; },
+  addTab(t){ this.tabs.push(t); this.switchTo(t.id); this.render(); this.renderTerminal(); },
+  closeTab(id){
+    const t = this.tabs.find(x=>x.id===id); if(!t) return;
+    const el = document.querySelector(`.tab[data-tab="${id}"]`);
+    if (el) { el.classList.add('tab-exit'); setTimeout(()=>{ el.remove(); }, 220); }
+    const idx = this.tabs.indexOf(t); this.tabs.splice(idx,1);
+    if (t.type==='ssh') t.connected=false;
+    if (this.activeId===id) { const next=this.tabs.find(x=>x.type!=='settings')||this.tabs[this.tabs.length-1]; this.activeId = next?next.id:null; }
+    this.render(); this.renderTerminal();
+    if (t.type==='ssh') showToast('SSH 已断开: '+t.name);
+  },
+  closeOtherTabs(keepId){
+    [...this.tabs].filter(t=>t.id!==keepId&&t.type!=='settings').forEach(t=>this.closeTab(t.id));
+  },
+  cloneTab(id){
+    const t=this.tabs.find(x=>x.id===id); if(!t||t.type==='settings') return;
+    if(t.type==='ssh'){ this.addTab({id:'t'+(_counter++),name:t.name,type:'ssh',host:t.host,port:t.port,user:t.user,connected:false,connectOnReady:true}); }
+    else { this.addTab({id:'t'+(_counter++),name:t.name,type:'local',command:t.command||'powershell.exe',connected:true}); }
+    showToast('已克隆标签页');
+  },
+  switchTo(id){
+    this.activeId=id;
+    this.updateActiveClass();
+    this.renderTerminal();
+    const t=this.getActive();
+    this.updateStatus(t);
+  },
+  render(){
+    const bar=document.getElementById('tabbar');
+    bar.querySelectorAll('.tab').forEach(el=>el.remove());
+    const sorted=[...this.tabs].sort((a,b)=>(a.type==='settings'?1:0)-(b.type==='settings'?1:0));
+    sorted.forEach(t=>{
+      const div=document.createElement('div');
+      div.className='tab'; div.setAttribute('data-tab',t.id);
+      div.onclick=()=>this.switchTo(t.id);
+      div.ondblclick=(e)=>{ if(t.type!=='settings'){e.stopPropagation();this.startRename(t.id);} };
+      div.oncontextmenu=(e)=>{ if(t.type!=='settings'){e.preventDefault();this.showContextMenu(e,t.id);} };
+      div.onmousedown=(e)=>this.tabPointerDown(e,t.id);
+      let dot='';
+      if(t.type!=='settings'){ dot=`<span class="tab-icon ${t.connected?'connected':'disconnected'}"></span>`; }
+      let rc='';
+      if(t.type==='ssh'&&t.connected){ rc='<span class="tab-reconnect" title="强制重连" onclick="event.stopPropagation();TabManager.reconnectTab(\''+t.id+'\')">↻</span>'; }
+      if(t.type==='ssh'&&!t.connected){ rc='<span class="tab-reconnect" title="重新连接" onclick="event.stopPropagation();TabManager.reconnectTab(\''+t.id+'\')">↻</span>'; }
+      div.innerHTML=dot+`<span class="tab-name">${esc(t.name)}</span>`+rc+`<span class="tab-close" onclick="event.stopPropagation();TabManager.closeTab('${t.id}')">×</span>`;
+      bar.insertBefore(div, document.getElementById('btn-add-tab'));
+    });
+    this.updateActiveClass();
+  },
+  updateActiveClass(){
+    document.querySelectorAll('#tabbar .tab').forEach(el=>el.classList.toggle('active',el.getAttribute('data-tab')===this.activeId));
+  },
+  updateStatus(t){
+    const sb=document.getElementById('sb-conn');
+    if(!t){sb.innerHTML='';return;}
+    const icon = t.type==='ssh' ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="5"/></svg>' : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>';
+    sb.innerHTML=icon+' '+esc(t.name)+(t.type==='ssh'&&!t.connected?' (已断开)':'');
+  },
+  startRename(id){
+    const t=this.tabs.find(x=>x.id===id); if(!t) return;
+    const el=document.querySelector(`.tab[data-tab="${id}"] .tab-name`); if(!el) return;
+    const old=t.name;
+    const input=document.createElement('input');
+    input.className='tab-rename-input'; input.value=old;
+    el.replaceWith(input); input.focus(); input.select();
+    const done=(save)=>{ const v=input.value.trim(); t.name=(save&&v)?v:old; this.render(); };
+    input.onblur=()=>done(true);
+    input.onkeydown=(e)=>{ if(e.key==='Enter')done(true); else if(e.key==='Escape')done(false); };
+  },
+  reconnectTab(id){
+    const t=this.tabs.find(x=>x.id===id); if(!t) return;
+    t.connected=false; this.render();
+    showToast('重新连接: '+t.name);
+    setTimeout(()=>{ t.connected=true; this.render(); this.updateStatus(t); showToast('SSH 已连接: '+t.name); },1200);
+  },
+  /* ── Tab drag (pointer) ── */
+  _dragTab:null,
+  tabPointerDown(e,tabId){
+    if(e.button!==0)return;
+    const t=this.tabs.find(x=>x.id===tabId); if(!t||t.type==='settings')return;
+    if(e.target.closest('button'))return;
+    e.preventDefault();
+    const startX=e.clientX,startY=e.clientY;
+    let dragging=false;
+    const move=(ev)=>{
+      if(!dragging){
+        if(Math.abs(ev.clientX-startX)+Math.abs(ev.clientY-startY)<5)return;
+        dragging=true;
+        this._dragTab={sourceTabId:tabId,targetTabId:null,side:null,targetPaneId:null};
+        this.showSplitZones(t);
+      }
+      const inMain=this.pointInMain(ev);
+      if(inMain){
+        const tgt=this.getActive();
+        if(tgt&&tgt.id!==tabId&&tgt.type!=='settings'){
+          const wrap=document.getElementById('wrap_'+tgt.id);
+          if(wrap){
+            const r=wrap.getBoundingClientRect();
+            const rx=(ev.clientX-r.left)/r.width, ry=(ev.clientY-r.top)/r.height;
+            this._dragTab.side=this.pickSide(rx,ry);
+            this._dragTab.targetTabId=tgt.id;
+            this.highlightZone(this._dragTab.side);
+          }
+        } else { this._dragTab.side=null; this._dragTab.targetTabId=null; this.clearZoneHighlight(); }
+      } else {
+        // tabbar reorder
+        let hit=null;
+        document.querySelectorAll('#tabbar .tab[data-tab]').forEach(el=>{
+          const r=el.getBoundingClientRect();
+          if(ev.clientX>=r.left&&ev.clientX<=r.right&&ev.clientY>=r.top&&ev.clientY<=r.bottom)hit=el;
+        });
+        document.querySelectorAll('#tabbar .tab').forEach(el=>el.classList.remove('drag-over-left','drag-over-right'));
+        if(hit){ const hr=hit.getBoundingClientRect(); hit.classList.add(ev.clientX<hr.left+hr.width/2?'drag-over-left':'drag-over-right'); this._dragTab.reorderTarget=hit.getAttribute('data-tab'); this._dragTab.reorderBefore=ev.clientX<hr.left+hr.width/2; }
+        else { this._dragTab.reorderTarget=null; }
+      }
+    };
+    const up=(ev)=>{
+      document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up);
+      this.clearSplitZones();
+      document.querySelectorAll('#tabbar .tab').forEach(el=>el.classList.remove('drag-over-left','drag-over-right'));
+      if(!dragging)return;
+      if(!this.pointInMain(ev)&&this._dragTab.reorderTarget){
+        const src=this._dragTab.sourceTabId,tgt=this._dragTab.reorderTarget,before=this._dragTab.reorderBefore;
+        if(src!==tgt){
+          const si=this.tabs.findIndex(t=>t.id===src),ti=this.tabs.findIndex(t=>t.id===tgt);
+          if(si>=0&&ti>=0){ const [m]=this.tabs.splice(si,1); let ii=this.tabs.findIndex(t=>t.id===tgt); if(!before)ii++; this.tabs.splice(ii,0,m); }
+        }
+        this.render(); this._dragTab=null; return;
+      }
+      if(this._dragTab.targetTabId&&this._dragTab.side){
+        const src=this._dragTab.sourceTabId,tgt=this._dragTab.targetTabId,sd=this._dragTab.side;
+        this._dragTab=null;
+        this.moveTerminalToTab(src,tgt,sd);
+      } else { this._dragTab=null; }
+    };
+    document.addEventListener('mousemove',move);
+    document.addEventListener('mouseup',up);
+  },
+  pointInMain(ev){
+    const m=document.getElementById('main-area').getBoundingClientRect();
+    return ev.clientX>=m.left&&ev.clientX<=m.right&&ev.clientY>=m.top&&ev.clientY<=m.bottom;
+  },
+  pickSide(rx,ry,edge=0.3){
+    const dL=rx,dR=1-rx,dT=ry,dB=1-ry,min=Math.min(dL,dR,dT,dB);
+    if(min>edge)return null;
+    if(Math.abs(min-dL)<0.001)return 'l';
+    if(Math.abs(min-dR)<0.001)return 'r';
+    if(Math.abs(min-dT)<0.001)return 't';
+    return 'b';
+  },
+  showSplitZones(tab){
+    this.clearSplitZones();
+    const root=document.getElementById(tab.splitRoot?'split_'+tab.id:'wrap_'+tab.id);
+    if(!root)return;
+    const layer=document.createElement('div'); layer.id='tab-drop-layer';
+    const T=10;
+    [['l',0,T,T,100-T*2],['t',T,0,100-T*2,T],['r',100-T,T,T,100-T*2],['b',T,100-T,100-T*2,T]].forEach(([s,x,y,w,h])=>{
+      const el=document.createElement('div'); el.className='pane-drop-zone'; el.setAttribute('data-side',s);
+      el.style.left=x+'%';el.style.top=y+'%';el.style.width=w+'%';el.style.height=h+'%';
+      layer.appendChild(el);
+    });
+    root.appendChild(layer);
+  },
+  highlightZone(side){
+    document.querySelectorAll('#tab-drop-layer .pane-drop-zone').forEach(el=>el.classList.toggle('drag-over',el.getAttribute('data-side')===side));
+  },
+  clearZoneHighlight(){ document.querySelectorAll('#tab-drop-layer .pane-drop-zone').forEach(el=>el.classList.remove('drag-over')); },
+  clearSplitZones(){ document.getElementById('tab-drop-layer')?.remove(); },
+
+  /* ── Split ── */
+  moveTerminalToTab(sourceId,targetId,side){
+    const src=this.tabs.find(t=>t.id===sourceId),tgt=this.tabs.find(t=>t.id===targetId);
+    if(!src||!tgt||src===tgt)return;
+    if(!tgt.splitRoot){
+      this.tabs.splice(this.tabs.indexOf(src),1);
+      tgt.splitRoot={orientation:side==='l'||side==='r'?'h':'v',children:[
+        {id:'p'+(++_paneCounter),type:tgt.type,name:tgt.name,host:tgt.host,connected:tgt.connected,mock:tgt.mock},
+      ],ratios:[0.5,0.5]};
+      const isFirst=side==='l'||side==='t';
+      const np={id:'p'+(++_paneCounter),type:src.type,name:src.name,host:src.host,connected:src.connected,mock:src.mock};
+      if(isFirst)tgt.splitRoot.children.unshift(np); else tgt.splitRoot.children.push(np);
+      if(src.type==='ssh'&&src.connected){ np.connected=false; setTimeout(()=>{ np.connected=true; this.renderSplit(tgt); },900); }
+      this.renderSplit(tgt);
+    } else {
+      const all=this._allPanes(tgt);
+      const np={id:'p'+(++_paneCounter),type:src.type,name:src.name,host:src.host,connected:src.connected,mock:src.mock};
+      const root=tgt.splitRoot;
+      const newC={orientation:side==='l'||side==='r'?'h':'v',children:[np],ratios:[1]};
+      root.children.push(newC); root.ratios.push(1/(root.children.length));
+      root.children.forEach((c,i)=>{ if(i<root.children.length-1)root.ratios[i]=1/(root.children.length); });
+      if(src.type==='ssh'&&src.connected){ np.connected=false; setTimeout(()=>{ np.connected=true; this.renderSplit(tgt); },900); }
+      this.renderSplit(tgt);
+    }
+    this.tabs=this.tabs.filter(t=>t.id!==sourceId);
+    this.render();
+    this.switchTo(targetId);
+    this.updateStatus(tgt);
+  },
+  _allPanes(tab){
+    const out=[];
+    const walk=(c)=>{ (c.children||[]).forEach(ch=>{ if(ch.id&&ch.type)out.push(ch); else walk(ch); }); };
+    walk(tab.splitRoot); return out;
+  },
+  splitActive(side){
+    const t=this.getActive(); if(!t||t.type==='settings')return;
+    const clone={id:'p'+(++_paneCounter),type:t.type,name:t.name+' · 2',host:t.host,connected:t.type==='local',mock:t.mock};
+    if(t.type==='ssh'){ clone.connected=false; setTimeout(()=>{ clone.connected=true; this.renderSplit(t); },900); }
+    if(!t.splitRoot){
+      const existing={id:'p'+(++_paneCounter),type:t.type,name:t.name,host:t.host,connected:t.connected,mock:t.mock};
+      t.splitRoot={orientation:side==='l'||side==='r'?'h':'v',children:[existing,clone],ratios:[0.5,0.5]};
+    } else {
+      const root=t.splitRoot;
+      const newC={orientation:side==='l'||side==='r'?'h':'v',children:[clone],ratios:[1]};
+      root.children.push(newC); root.ratios=root.children.map(()=>1/root.children.length);
+    }
+    this.renderSplit(t);
+    showToast('已分屏');
+  },
+  closePane(tab,paneId){
+    const all=this._allPanes(tab);
+    if(all.length<=1){ this.exitSplit(tab); return; }
+    const idx=all.findIndex(p=>p.id===paneId);
+    if(idx>=0)all.splice(idx,1);
+    const flat=[]; const walk=(c)=>{ if(c.id&&c.type)flat.push(c); else (c.children||[]).forEach(walk); };
+    walk(tab.splitRoot);
+    // 重建成扁平容器
+    const container={orientation:flat.length>1?'h':'v',children:flat,ratios:flat.map(()=>1/flat.length)};
+    tab.splitRoot=flat.length===1?null:container;
+    if(!tab.splitRoot){ this.renderSplit(tab); this.updateStatus(tab); return; }
+    this.renderSplit(tab);
+  },
+  exitSplit(tab){
+    tab.splitRoot=null; this.renderSplit(tab); this.updateStatus(tab);
+  },
+  maximizePane(tab,paneId){
+    tab._maximized=paneId; this.renderSplit(tab);
+  },
+  extractPane(tab,paneId){
+    const all=this._allPanes(tab);
+    const p=all.find(x=>x.id===paneId); if(!p)return;
+    this.addTab({id:'t'+(++_counter),name:p.name,type:p.type,host:p.host,connected:p.connected,extractFrom:paneId});
+    this.closePane(tab,paneId);
+    showToast('已提取到新标签页');
+  },
+  /* ── Pane drag reorder (pointer) ── */
+  paneHeaderDown(e,tab,pane){
+    if(e.button!==0)return;
+    e.preventDefault();
+    const startX=e.clientX,startY=e.clientY;
+    let dragging=false;
+    const rootEl=document.getElementById('split_'+tab.id);
+    const showZones=()=>{
+      document.getElementById('pane-drop-layer')?.remove();
+      const layer=document.createElement('div'); layer.id='pane-drop-layer';
+      const all=this._allPanes(tab);
+      const zones=[];
+      const rootR=rootEl.getBoundingClientRect();
+      zones.push({x:0,y:0,w:100,h:8,side:'root-t',relative:null});
+      zones.push({x:0,y:92,w:100,h:8,side:'root-b',relative:null});
+      zones.push({x:0,y:0,w:8,h:100,side:'root-l',relative:null});
+      zones.push({x:92,y:0,w:8,h:100,side:'root-r',relative:null});
+      all.forEach(p=>{
+        const el=document.querySelector('.split-pane[data-pane="'+p.id+'"]');
+        if(!el)return;
+        const r=el.getBoundingClientRect();
+        zones.push({x:(r.left-rootR.left)/rootR.width*100,y:(r.top-rootR.top)/rootR.height*100,w:(r.width/rootR.width)*100-4,h:6,side:'top-'+p.id,relative:p.id});
+        zones.push({x:(r.left-rootR.left)/rootR.width*100,y:(r.top-rootR.top)/rootR.height*100+4,w:6,h:(r.height/rootR.height)*100-8,side:'left-'+p.id,relative:p.id});
+        zones.push({x:(r.left-rootR.left)/rootR.width*100,y:(r.bottom-rootR.top)/rootR.height*100-2,w:(r.width/rootR.width)*100-4,h:6,side:'bottom-'+p.id,relative:p.id});
+        zones.push({x:(r.right-rootR.left)/rootR.width*100-2,y:(r.top-rootR.top)/rootR.height*100+4,w:6,h:(r.height/rootR.height)*100-8,side:'right-'+p.id,relative:p.id});
+      });
+      zones.forEach(z=>{
+        const el=document.createElement('div'); el.className='pane-drop-zone'; el.setAttribute('data-zone',z.side);
+        el.style.left=z.x+'%';el.style.top=z.y+'%';el.style.width=z.w+'%';el.style.height=z.h+'%';
+        layer.appendChild(el);
+      });
+      rootEl.appendChild(layer);
+    };
+    const move=(ev)=>{
+      if(!dragging){ if(Math.abs(ev.clientX-startX)+Math.abs(ev.clientY-startY)<5)return; dragging=true; showZones(); }
+      document.querySelectorAll('#pane-drop-layer .pane-drop-zone').forEach(el=>{
+        const r=el.getBoundingClientRect();
+        el.classList.toggle('drag-over',ev.clientX>=r.left&&ev.clientX<=r.right&&ev.clientY>=r.top&&ev.clientY<=r.bottom);
+      });
+    };
+    const up=(ev)=>{
+      document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up);
+      document.getElementById('pane-drop-layer')?.remove();
+      if(!dragging)return;
+      let target=null;
+      document.querySelectorAll('#pane-drop-layer').length; // noop
+      const zones=rootEl.querySelectorAll('.pane-drop-zone');
+      zones.forEach(el=>{ if(el.classList.contains('drag-over'))target=el.getAttribute('data-zone'); });
+      if(!target)return;
+      if(target.startsWith('root-')){
+        const all=this._allPanes(tab);
+        const p=all.find(x=>x.id===pane.id); if(!p)return;
+        const others=all.filter(x=>x.id!==pane.id);
+        const dir=target.endsWith('l')||target.endsWith('r')?'h':'v';
+        const first=target.endsWith('l')||target.endsWith('t');
+        tab.splitRoot={orientation:dir,children:first?[p,...others]:[...others,p],ratios:[0.3,...others.map(()=>0.7/others.length)]};
+        if(first)tab.splitRoot.ratios=[0.3,...others.map(()=>0.7/others.length)];
+        else tab.splitRoot.ratios=[...others.map(()=>0.7/others.length),0.3];
+        this.renderSplit(tab);
+      } else if(target.startsWith('top-')||target.startsWith('bottom-')||target.startsWith('left-')||target.startsWith('right-')){
+        const rel=target.split('-')[1];
+        const all=this._allPanes(tab);
+        const p=all.find(x=>x.id===pane.id), rp=all.find(x=>x.id===rel);
+        if(!p||!rp||p===rp)return;
+        const others=all.filter(x=>x.id!==pane.id&&x.id!==rel);
+        const dir=(target.startsWith('left-')||target.startsWith('right-'))?'h':'v';
+        const first=target.startsWith('top-')||target.startsWith('left-');
+        const group=[rp,p];
+        const newC={orientation:dir,children:first?[p,rp]:[rp,p],ratios:[0.5,0.5]};
+        tab.splitRoot={orientation:'h',children:[...others,newC],ratios:[...others.map(()=>0.5/(others.length+1)),0.5]};
+        this.renderSplit(tab);
+      }
+    };
+    document.addEventListener('mousemove',move);
+    document.addEventListener('mouseup',up);
+  },
+  /* ── Spanner resize ── */
+  spannerDown(e,tab,dir){
+    e.preventDefault();
+    const startX=e.clientX,startY=e.clientY;
+    const rootEl=document.getElementById('split_'+tab.id);
+    const startRect=rootEl.getBoundingClientRect();
+    const tree=JSON.parse(JSON.stringify(tab.splitRoot));
+    const move=(ev)=>{
+      const dx=ev.clientX-startX, dy=ev.clientY-startY;
+      const root=tab.splitRoot;
+      // 简化：按方向平移整体分配
+      if(dir==='v'){ // vertical spanner -> horizontal split rows
+        const n=root.children.length;
+        const total=startRect.height;
+        const delta=dy/total;
+        root.ratios=root.children.map((c,i)=>i<n-1?1/n+delta*(i-(n-1)/2)*2/(n-1):1/n-delta);
+        root.ratios=root.ratios.map(r=>Math.max(0.05,Math.min(0.9,r)));
+      } else {
+        const n=root.children.length;
+        const total=startRect.width;
+        const delta=dx/total;
+        root.ratios=root.children.map((c,i)=>i<n-1?1/n+delta*(i-(n-1)/2)*2/(n-1):1/n-delta);
+        root.ratios=root.ratios.map(r=>Math.max(0.05,Math.min(0.9,r)));
+      }
+      // normalize
+      const s=root.ratios.reduce((a,b)=>a+b,0);
+      root.ratios=root.ratios.map(r=>r/s);
+      this.renderSplit(tab,true);
+    };
+    const up=()=>{ document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up); };
+    document.addEventListener('mousemove',move);
+    document.addEventListener('mouseup',up);
+  },
+  /* ── Render split ── */
+  renderSplit(tab,noAnim){
+    const main=document.getElementById('main-area');
+    main.querySelectorAll('.term-wrap').forEach(el=>el.remove());
+    let rootEl=document.getElementById('split_'+tab.id);
+    const active=this.activeId===tab.id;
+    if(!tab.splitRoot){
+      if(rootEl){ rootEl.remove(); }
+      const wrap=document.createElement('div');
+      wrap.id='wrap_'+tab.id; wrap.className='term-wrap'+(active?' active':'');
+      wrap.innerHTML='<div class="term-inner"><div class="term"></div></div>';
+      main.appendChild(wrap);
+      this.wireTerm(tab,wrap.querySelector('.term'));
+      return;
+    }
+    if(!rootEl){
+      rootEl=document.createElement('div');
+      rootEl.id='split_'+tab.id; rootEl.className='split-root';
+      rootEl.style.display=active?'':'none';
+      main.appendChild(rootEl);
+    } else rootEl.style.display=active?'':'none';
+    rootEl.innerHTML='';
+    const all=this._allPanes(tab);
+    this._renderPaneTree(tab,tab.splitRoot,rootEl,all);
+    this.layoutSplit(tab,rootEl,noAnim);
+    all.forEach(p=>{
+      const el=rootEl.querySelector('.split-pane[data-pane="'+p.id+'"]');
+      if(el)this.wirePane(tab,p,el);
+    });
+  },
+  _renderPaneTree(tab,node,rootEl,all){
+    if(node.id&&node.type){
+      const el=document.createElement('div');
+      el.className='split-pane'+(tab._maximized===node.id?' maximized':'');
+      el.setAttribute('data-pane',node.id);
+      const dotClass=node.type==='ssh'?'ssh':'local';
+      const dc=node.connected?'':' disconnected';
+      el.innerHTML=
+        '<div class="pane-header">'+
+          '<span class="dot '+dotClass+dc+'"></span>'+
+          '<span class="label"><span>'+esc(node.name)+'</span></span>'+
+          (node.type==='ssh'?'<button title="SFTP" onclick="event.stopPropagation();SFTP.open(\''+tab.id+'\',\''+node.id+'\')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>':'')+
+          (node.type==='ssh'?'<button title="重连" onclick="event.stopPropagation();TabManager.reconnectPane(\''+tab.id+'\',\''+node.id+'\')">↻</button>':'')+
+          '<button title="提取" onclick="event.stopPropagation();TabManager.extractPane(\''+tab.id+'\',\''+node.id+'\')">⤢</button>'+
+          '<button title="最大化" onclick="event.stopPropagation();TabManager.maximizePane(\''+tab.id+'\',\''+node.id+'\')">⛶</button>'+
+          '<button title="关闭" onclick="event.stopPropagation();TabManager.closePane(\''+tab.id+'\',\''+node.id+'\')">×</button>'+
+        '</div>'+
+        '<div class="pane-body"></div>';
+      el.querySelector('.pane-header').addEventListener('mousedown',(e)=>this.paneHeaderDown(e,tab,node));
+      rootEl.appendChild(el);
+      return;
+    }
+    const children=node.children||[];
+    children.forEach(c=>this._renderPaneTree(tab,c,rootEl,all));
+  },
+  wirePane(tab,pane,el){
+    const body=el.querySelector('.pane-body');
+    if(body._wired===pane.id)return;
+    body._wired=pane.id;
+    const term=document.createElement('div');
+    term.className='term';
+    body.appendChild(term);
+    this.mockTerm(tab,pane,term);
+  },
+  wireTerm(tab,termEl){
+    if(termEl._wired===tab.id)return;
+    termEl._wired=tab.id;
+    this.mockTerm(tab,tab,termEl);
+  },
+  layoutSplit(tab,rootEl,noAnim){
+    const rect=rootEl.getBoundingClientRect();
+    const W=rect.width,H=rect.height;
+    const pad=6;
+    const place=(node,x,y,w,h,ratio)=>{
+      if(node.id&&node.type){
+        const el=rootEl.querySelector('.split-pane[data-pane="'+node.id+'"]');
+        if(el)Object.assign(el.style,{left:x+'px',top:y+'px',width:w+'px',height:h+'px'});
+        return;
+      }
+      const kids=node.children,ratios=node.ratios;
+      if(!kids||!kids.length)return;
+      if(node.orientation==='h'){
+        let acc=0;
+        kids.forEach((k,i)=>{
+          const r=(ratios&&ratios[i])||1/kids.length;
+          const kw=w*r;
+          place(k,x+acc,y,kw,h);
+          acc+=kw;
+        });
+        // spanners
+        rootEl.querySelectorAll('.split-spanner').forEach(s=>s.remove());
+        let acc2=0;
+        kids.forEach((k,i)=>{
+          if(i===kids.length-1)return;
+          const r=(ratios&&ratios[i])||1/kids.length;
+          acc2+=w*r;
+          const sp=document.createElement('div');
+          sp.className='split-spanner v';
+          Object.assign(sp.style,{left:(acc2-4)+'px',top:y+'px',height:h+'px'});
+          sp.addEventListener('mousedown',(e)=>this.spannerDown(e,tab,'h'));
+          rootEl.appendChild(sp);
+        });
+      } else {
+        let acc=0;
+        kids.forEach((k,i)=>{
+          const r=(ratios&&ratios[i])||1/kids.length;
+          const kh=h*r;
+          place(k,x,y+acc,w,kh);
+          acc+=kh;
+        });
+        rootEl.querySelectorAll('.split-spanner').forEach(s=>s.remove());
+        let acc2=0;
+        kids.forEach((k,i)=>{
+          if(i===kids.length-1)return;
+          const r=(ratios&&ratios[i])||1/kids.length;
+          acc2+=h*r;
+          const sp=document.createElement('div');
+          sp.className='split-spanner h';
+          Object.assign(sp.style,{top:(acc2-4)+'px',left:x+'px',width:w+'px'});
+          sp.addEventListener('mousedown',(e)=>this.spannerDown(e,tab,'v'));
+          rootEl.appendChild(sp);
+        });
+      }
+    };
+    place(tab.splitRoot,pad,pad,W-pad*2,H-pad*2);
+  },
+  /* ── Mock terminal ── */
+  mockTerm(tab,pane,el){
+    const p=pane===tab?tab:pane;
+    const host=p.type==='ssh'?(p.host||'ssh-server'):(p.command==='cmd.exe'?'C:\\Users\\dev':(p.command==='bash.exe'?'~':'PS C:\\dev'));
+    const isPS=!p.type||p.type==='local';
+    const data={tab,pane:pane===tab?null:pane,el,lines:[],prompt:'',host,isPS};
+    el._mock=data;
+    if(p.type==='ssh'){
+      data.lines.push({t:`<span class="dim">Connecting to ${esc(p.name||'ssh')}...</span>`});
+      if(p.connected)data.lines.push({t:`<span class="info">[SSH Connected]</span>`});
+      data.prompt=`<span class="prompt">root@${esc(p.host||'web')}:~$</span> `;
+      if(p.connected){ data.lines.push({t:data.prompt+'<span class="dim">…</span>'}); }
+    } else if(p.command==='cmd.exe'){
+      data.prompt='<span class="prompt">C:\\Users\\dev&gt;</span> ';
+      data.lines.push({t:data.prompt+'<span class="out">dir</span>'});
+      data.lines.push({t:'<span class="out">&nbsp;2026-08-04&nbsp;&nbsp;10:23&nbsp;&nbsp;&lt;DIR&gt;&nbsp;&nbsp;src</span>'});
+      data.lines.push({t:'<span class="out">&nbsp;2026-08-04&nbsp;&nbsp;10:21&nbsp;&nbsp;&lt;DIR&gt;&nbsp;&nbsp;design</span>'});
+    } else if(p.command==='bash.exe'){
+      data.prompt='<span class="prompt">dev@machine:~$</span> ';
+      data.lines.push({t:data.prompt+'<span class="out">ls -la</span>'});
+      data.lines.push({t:'<span class="out">drwxr-xr-x&nbsp;&nbsp;dev&nbsp;&nbsp;dev&nbsp;&nbsp;&nbsp;&nbsp;4096&nbsp;&nbsp;Aug&nbsp;4&nbsp;10:21&nbsp;&nbsp;design</span>'});
+    } else {
+      data.prompt='<span class="prompt">PS C:\\dev&gt;</span> ';
+      data.lines.push({t:data.prompt+'<span class="out">git status --short</span>'});
+      data.lines.push({t:'<span class="out">&nbsp;&nbsp;M&nbsp;&nbsp;src/renderer/app.css</span>'});
+      data.lines.push({t:'<span class="out">&nbsp;??&nbsp;&nbsp;design/zterm-mock.html</span>'});
+      data.lines.push({t:data.prompt+'<span class="out">npm run test</span>'});
+      data.lines.push({t:'<span class="info">&nbsp;&nbsp;✓ 37 passed</span>'});
+      data.lines.push({t:'<span class="info">&nbsp;&nbsp;✓ 72 passed</span>'});
+    }
+    data.promptLine=true;
+    data.input='';
+    this.refreshMockTerm(data);
+    el.addEventListener('keydown',(e)=>{ if(e.key==='Enter'){this.mockEnter(data);} });
+    el.addEventListener('keyup',(e)=>{ if(e.key.length===1||e.key==='Backspace'){ data.input = data.input.replace(/\s+$/,''); } });
+  },
+  refreshMockTerm(d){
+    const lines=[...d.lines];
+    const last=lines[lines.length-1]||{t:''};
+    if(d.promptLine){
+      const cursor='<span class="cursor"></span>';
+      lines[lines.length-1]={t:d.prompt+esc(d.input)+cursor};
+    } else lines.push({t:d.prompt+esc(d.input)+'<span class="cursor"></span>'});
+    d.el.innerHTML=lines.map(l=>l.t).join('\n')+'&nbsp;';
+  },
+  mockEnter(d){
+    const cmd=d.input.trim();
+    d.lines[linesOf(d)]={t:d.prompt+esc(d.input)};
+    d.input='';
+    if(cmd){
+      const isPS=d.isPS&&!cmd.startsWith('root@');
+      if(/^(ls|dir)$/i.test(cmd)){ d.lines.push({t:'<span class="out">&nbsp;&nbsp;design/&nbsp;&nbsp;src/&nbsp;&nbsp;package.json</span>'}); }
+      else if(/^git status/i.test(cmd)){ d.lines.push({t:'<span class="out">&nbsp;&nbsp;M&nbsp;&nbsp;src/renderer/app.css</span>'}); }
+      else if(/^npm run test/i.test(cmd)){ d.lines.push({t:'<span class="info">&nbsp;&nbsp;✓ 37 passed</span>'}); }
+      else if(/^tail -f/i.test(cmd)){ d.lines.push({t:'<span class="info">10:23:11</span> <span class="out">INFO&nbsp;&nbsp;request 200 GET /api/health</span>'}); }
+      else if(/^(clear|cls)$/i.test(cmd)){ d.lines=[]; }
+      else { d.lines.push({t:'<span class="out">'+esc(cmd)+'</span>'}); }
+    }
+    if(d.lines.length>60)d.lines.splice(0,d.lines.length-60);
+    d.promptLine=true;
+    this.refreshMockTerm(d);
+    function linesOf(dd){ return dd.lines.length-1; }
+  },
+  renderTerminal(){
+    const sp=document.getElementById('settings-pane');
+    sp.style.display='none'; sp.classList.remove('active');
+    const t=this.getActive();
+    if(!t){ document.getElementById('main-area').querySelectorAll('.term-wrap,.split-root').forEach(el=>el.remove()); return; }
+    if(t.type==='settings'){ this.renderSettingsTerm(); return; }
+    document.querySelectorAll('.term-wrap,.split-root').forEach(el=>{ if(el.id!=='split_'+t.id&&el.id!=='wrap_'+t.id)el.style.display='none'; });
+    this.renderSplit(t);
+  },
+  renderSettingsTerm(){
+    const main=document.getElementById('main-area');
+    main.querySelectorAll('.term-wrap,.split-root').forEach(el=>{ el.style.display='none'; });
+    const sp=document.getElementById('settings-pane');
+    sp.style.display='flex'; sp.classList.add('active');
+  },
+};
+
+/* ═══════════════ Settings ═══════════════ */
+let currentSettingsPage='terminal';
+function openSettings(page){
+  const t=TabManager.getActive();
+  if(t&&t.type==='settings'){ if(page)switchSettingsTab(null,page); return; }
+  TabManager.tabs.push({id:'t'+(++_counter),name:'设置',type:'settings',connected:true});
+  TabManager.switchTo(TabManager.tabs[TabManager.tabs.length-1].id);
+  TabManager.render();
+  if(page)setTimeout(()=>switchSettingsTab(null,page),50);
+}
+function closeSettingsTab(){
+  const t=TabManager.tabs.find(x=>x.type==='settings');
+  if(t)TabManager.closeTab(t.id);
+  TabManager.renderTerminal();
+}
+function switchSettingsTab(el,page){
+  if(el)document.querySelectorAll('#settings-sidebar .settings-sidebar-item').forEach(x=>x.classList.remove('active'));
+  if(el)el.classList.add('active');
+  document.querySelectorAll('#settings-content .settings-page').forEach(p=>p.classList.remove('active'));
+  const target=document.querySelector('#settings-content .settings-page[data-page="'+page+'"]');
+  if(target)target.classList.add('active');
+  currentSettingsPage=page;
+  if(page==='ssh')renderSSHList('#settings-ssh-list');
+  if(page==='highlight')renderHighlightRules();
+  if(page==='quickcommands')renderQCList();
+  if(page==='keys')renderShortcutsTable();
+}
+function toggleSwitch(el){ el.classList.toggle('on'); }
+function applyScheme(key){
+  const s=SCHEMES[key]||SCHEMES.onedark;
+  document.documentElement.style.setProperty('--term-bg',s.bg);
+  document.documentElement.style.setProperty('--term-fg',s.fg);
+  document.documentElement.style.setProperty('--term-blue',s.blue);
+  document.documentElement.style.setProperty('--term-green',s.green);
+  document.documentElement.style.setProperty('--term-red',s.red);
+  TabManager.tabs.forEach(t=>{ if(t.splitRoot)TabManager.renderSplit(t); else TabManager.renderTerminal(); });
+  showToast('终端配色: '+s.name);
+}
+function applyAccent(hex){
+  const m=/^#?([0-9a-f]{6})$/i.exec(hex); if(!m)return;
+  const int=parseInt(m[1],16);
+  const r=(int>>16)&255,g=(int>>8)&255,b=int&255;
+  document.documentElement.style.setProperty('--accent-rgb',r+','+g+','+b);
+  const lum=(0.299*r+0.587*g+0.114*b)/255;
+  document.documentElement.style.setProperty('--accent-contrast',lum>0.5?'#10161d':'#ffffff');
+  document.getElementById('accent-dot').style.background=hex;
+  document.getElementById('set-accent').value=hex;
+}
+function applyAccentFromInput(){ applyAccent(document.getElementById('set-accent').value); }
+function toggleUiFollow(){
+  const on=document.getElementById('toggle-ui-follow').classList.toggle('on');
+  document.getElementById('row-ui-font').style.display=on?'none':'';
+  document.getElementById('row-ui-fallback').style.display=on?'none':'';
+}
+function toggleAnimations(){
+  const on=document.getElementById('toggle-animations').classList.toggle('on');
+  document.documentElement.classList.toggle('no-animations',!on);
+}
+function toggleStatusDot(){
+  const on=document.getElementById('toggle-statusdot').classList.toggle('on');
+  document.querySelectorAll('.tab-icon').forEach(el=>el.style.display=on?'':'none');
+}
+function applyFonts(){
+  const termFont=document.getElementById('set-font').value;
+  const uiFont=document.getElementById('set-ui-font').value;
+  document.querySelectorAll('.term').forEach(el=>el.style.fontFamily=termFont);
+  const follow=document.getElementById('toggle-ui-follow').classList.contains('on');
+  document.body.style.fontFamily=follow?termFont:uiFont;
+}
+
+/* ═══════════════ SSH manager ═══════════════ */
+let editingSsh=null;
+function sshGroups(){
+  const g={};
+  sshProfiles.forEach(p=>{ (g[p.group||'未分组']=g[p.group||'未分组']||[]).push(p); });
+  return g;
+}
+function renderSSHList(sel){
+  const list=document.querySelector(sel);
+  if(!list)return;
+  let html='';
+  Object.entries(sshGroups()).forEach(([g,items])=>{
+    html+='<div class="ssh-group" data-group="'+esc(g)+'">'+
+      '<div class="ssh-group-header" onclick="toggleGroup(this)"><span class="group-chevron">▼</span><span>'+esc(g)+'</span><span class="ssh-group-count">'+items.length+'</span>'+
+      '<span style="flex:1"></span><button class="group-rename" onclick="event.stopPropagation();renameGroup(this,\''+esc(g)+'\')">✎</button></div>'+
+      '<div class="ssh-group-items">'+items.map(p=>sshItemHtml(p)).join('')+'</div></div>';
+  });
+  if(!Object.keys(sshGroups()).length)html='<div class="sftp-empty">暂无连接</div>';
+  list.innerHTML=html;
+}
+function sshItemHtml(p){
+  return '<div class="ssh-item" data-id="'+p.id+'" onclick="connectSSH(\''+p.id+'\')">'+
+    '<span class="ssh-item-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="5"/></svg></span>'+
+    '<span class="ssh-item-info"><div class="ssh-item-name">'+esc(p.name)+'</div><div class="ssh-item-detail">'+esc(p.host+' · '+p.user)+'</div></span>'+
+    '<span class="ssh-item-status'+(p.connected?' connected':'')+'"></span>'+
+    '<button class="ssh-item-btn" onclick="event.stopPropagation();editSSH(\''+p.id+'\')">✎</button>'+
+    '<button class="ssh-item-btn connect" onclick="event.stopPropagation();connectSSH(\''+p.id+'\')">▶</button>'+
+  '</div>';
+}
+function toggleGroup(el){ el.classList.toggle('collapsed'); const items=el.nextElementSibling; if(items)items.classList.toggle('collapsed'); }
+function collapseAllGroups(){ document.querySelectorAll('.ssh-group-header').forEach(el=>{el.classList.add('collapsed');el.nextElementSibling?.classList.add('collapsed');}); }
+function expandAllGroups(){ document.querySelectorAll('.ssh-group-header').forEach(el=>{el.classList.remove('collapsed');el.nextElementSibling?.classList.remove('collapsed');}); }
+function renameGroup(btn,old){
+  const header=btn.closest('.ssh-group-header');
+  const span=header.querySelector('span:nth-child(2)');
+  const input=document.createElement('input');
+  input.className='group-name-input'; input.value=old;
+  span.replaceWith(input); input.focus(); input.select();
+  input.onblur=()=>finish(); input.onkeydown=(e)=>{ if(e.key==='Enter')finish(); if(e.key==='Escape'){input.value=old;finish();} };
+  function finish(){
+    const v=input.value.trim();
+    if(v&&v!==old)sshProfiles.forEach(p=>{ if((p.group||'未分组')===old)p.group=v; });
+    renderSSHList('#settings-ssh-list'); renderSSHList('#ssh-manager-list');
+  }
+}
+function connectSSH(id){
+  const p=sshProfiles.find(x=>x.id===id); if(!p)return;
+  closeOverlay('overlay-ssh-manager'); closeOverlay('overlay-sessions'); closeOverlay('overlay-qc'); closeOverlay('overlay-palette');
+  TabManager.addTab({id:'t'+(++_counter),name:p.name,type:'ssh',host:p.host,port:p.port,user:p.user,connected:false,connectOnReady:true});
+  showToast('连接中: '+p.name+' ('+p.host+')');
+  setTimeout(()=>{
+    const t=TabManager.tabs.find(x=>x.name===p.name&&x.type==='ssh');
+    if(t){ t.connected=true; p.connected=true; TabManager.render(); TabManager.renderTerminal(); TabManager.updateStatus(t); showToast('SSH 已连接: '+p.name); }
+  },1200);
+}
+function editSSH(id){ openSSHEdit(id); }
+function openSSHEdit(id){
+  const p=id?sshProfiles.find(x=>x.id===id):null;
+  editingSsh=id||null;
+  document.getElementById('ssh-edit-title').textContent=p?'编辑连接: '+p.name:'添加 SSH 连接';
+  document.getElementById('ssh-edit-name').value=p?p.name:'';
+  document.getElementById('ssh-edit-group').value=p?(p.group||''):'';
+  document.getElementById('ssh-edit-host').value=p?p.host:'';
+  document.getElementById('ssh-edit-port').value=p?p.port:22;
+  document.getElementById('ssh-edit-user').value=p?p.user:'';
+  document.getElementById('ssh-edit-auth').value=(p&&p.authType==='key')?'密钥':'密码';
+  toggleAuthType(document.getElementById('ssh-edit-auth').value);
+  const hasPwd=p&&p.hasPwd;
+  document.getElementById('ssh-pwd-status').style.display=hasPwd?'':'none';
+  document.getElementById('ssh-pwd-edit-wrap').style.display=hasPwd?'none':'';
+  document.getElementById('ssh-edit-password').value='';
+  updateLsBadge();
+  openOverlay('overlay-ssh-edit');
+}
+function closeSSHEdit(){ closeOverlay('overlay-ssh-edit'); }
+function saveSSHEdit(){
+  const name=document.getElementById('ssh-edit-name').value.trim();
+  const host=document.getElementById('ssh-edit-host').value.trim();
+  if(!name||!host){ showToast('名称和主机地址不能为空',true); return; }
+  const p={ id:editingSsh||('s'+Date.now()),name,group:document.getElementById('ssh-edit-group').value.trim()||'未分组',
+    host,port:parseInt(document.getElementById('ssh-edit-port').value)||22,user:document.getElementById('ssh-edit-user').value.trim()||'root',
+    authType:document.getElementById('ssh-edit-auth').value==='密钥'?'key':'password',hasPwd:!!document.getElementById('ssh-edit-password').value||(sshProfiles.find(x=>x.id===editingSsh)?.hasPwd)||false,connected:false };
+  if(editingSsh){ const i=sshProfiles.findIndex(x=>x.id===editingSsh); sshProfiles[i]=p; } else sshProfiles.push(p);
+  closeSSHEdit(); renderSSHList('#settings-ssh-list'); renderSSHList('#ssh-manager-list');
+  showToast('SSH 连接已保存');
+}
+function toggleAuthType(v){
+  document.getElementById('ssh-key-row').style.display=v==='密钥'?'':'none';
+  document.getElementById('ssh-pwd-row').style.display=v==='密码'?'':'none';
+}
+function switchSSHTab(t){
+  document.querySelectorAll('#ssh-edit-tabs .panel-tab').forEach(x=>x.classList.toggle('active',x.getAttribute('data-tab')===t));
+  document.getElementById('ssh-tab-conn').classList.toggle('active',t==='conn');
+  document.getElementById('ssh-tab-scripts').classList.toggle('active',t==='scripts');
+}
+let lsCount=0;
+function updateLsBadge(){ document.getElementById('ls-badge').textContent=lsCount?String(lsCount):''; }
+function addLoginScriptRow(){
+  const c=document.getElementById('login-scripts-container');
+  const row=document.createElement('div');
+  row.className='login-script-row';
+  row.innerHTML='<input class="ls-expect" placeholder="expect (如 Password:)">'+
+    '<input class="ls-send" placeholder="send">'+
+    '<button class="ls-toggle" onclick="toggleSwitch(this)">正则</button>'+
+    '<button class="ls-toggle" onclick="toggleSwitch(this)">可选</button>'+
+    '<button class="ls-del" onclick="this.parentElement.remove();lsCount--;updateLsBadge()">×</button>';
+  c.appendChild(row); lsCount++; updateLsBadge();
+}
+/* Password inline */
+function startPwdEdit(){
+  document.getElementById('ssh-pwd-status').style.display='none';
+  const wrap=document.getElementById('ssh-pwd-edit-wrap'); wrap.style.display='';
+  wrap.querySelectorAll('.ssh-pwd-inline-act').forEach(b=>b.classList.add('show'));
+  document.getElementById('ssh-edit-password').focus();
+}
+function savePwd(){
+  document.getElementById('ssh-pwd-edit-wrap').style.display='none';
+  document.getElementById('ssh-pwd-status').style.display='';
+  showToast('密码已加密保存');
+}
+function cancelPwdEdit(){
+  document.getElementById('ssh-pwd-edit-wrap').style.display='none';
+  document.getElementById('ssh-pwd-status').style.display='';
+}
+function togglePwdVis(btn){
+  const input=document.getElementById('ssh-edit-password');
+  input.type=input.type==='password'?'text':'password';
+  btn.classList.toggle('active',input.type==='text');
+}
+/* Combos */
+function comboOpen(kind){
+  const id=kind==='group'?'group-menu':'qgroup-menu';
+  const input=kind==='group'?document.getElementById('ssh-edit-group'):document.getElementById('qc-edit-group');
+  comboFilter(kind,input.value);
+  document.getElementById(id).classList.add('open');
+  input._comboClose=document.getElementById(id);
+}
+document.addEventListener('click',(e)=>{ document.querySelectorAll('.cust-combo .dd-menu').forEach(m=>{ if(!e.target.closest('.cust-combo'))m.classList.remove('open'); }); });
+function comboFilter(kind,val){
+  const groups=[...new Set([...(kind==='group'?sshProfiles:quickCommands).map(x=>x.group||''),'生产环境','内网','开发','运维'].filter(Boolean))];
+  const id=kind==='group'?'group-menu':'qgroup-menu';
+  const menu=document.getElementById(id);
+  menu.innerHTML='';
+  groups.filter(g=>g.toLowerCase().includes((val||'').toLowerCase())).forEach(g=>{
+    const d=document.createElement('div'); d.className='dd-option';
+    d.textContent=g;
+    d.onclick=()=>{ (kind==='group'?document.getElementById('ssh-edit-group'):document.getElementById('qc-edit-group')).value=g; menu.classList.remove('open'); };
+    menu.appendChild(d);
+  });
+  if(val&&!groups.some(g=>g===val)){
+    const d=document.createElement('div'); d.className='dd-option create';
+    d.textContent='创建分组 "'+val+'"';
+    d.onclick=()=>{ menu.classList.remove('open'); showToast('分组已创建'); };
+    menu.appendChild(d);
+  }
+  menu.classList.add('open');
+}
+
+/* ═══════════════ Quick commands ═══════════════ */
+let qcSelected=0, qcItems=[];
+function openQC(){
+  qcSelected=0;
+  document.getElementById('qc-input').value='';
+  renderQCList();
+  openOverlay('overlay-qc');
+  setTimeout(()=>document.getElementById('qc-input').focus(),50);
+}
+function closeQC(){ closeOverlay('overlay-qc'); }
+function renderQCList(){
+  const list=document.getElementById('qc-list');
+  const q=((document.getElementById('qc-input')||{}).value||'').toLowerCase();
+  qcItems=quickCommands.filter(x=>!q||(x.name+x.group+x.cmd).toLowerCase().includes(q));
+  const groups={};
+  qcItems.forEach((x,i)=>{ const k=x.group||'未分组'; (groups[k]=groups[k]||[]).push({x,i}); });
+  let html='';
+  Object.entries(groups).forEach(([g,arr])=>{
+    html+='<div class="v3-section">'+esc(g)+'</div>';
+    arr.forEach(({x,i})=>{
+      html+='<div class="v3-item'+(i===qcSelected?' sel':'')+'" onmouseenter="qcHover('+i+')" onclick="qcExec('+i+')">'+
+        '<span class="v3-name">'+esc(x.name)+'</span><span class="v3-cmd">'+esc(x.cmd)+'</span>'+
+        '<span class="v3-kbd">Enter</span></div>';
+    });
+  });
+  list.innerHTML=html||'<div class="transfer-empty">无匹配的命令</div>';
+}
+function qcHover(i){ qcSelected=i; renderQCList(); }
+function qcFilter(){ qcSelected=0; renderQCList(); }
+function qcExec(i){
+  const c=qcItems[i]; if(!c)return;
+  closeQC(); showToast('已执行: '+c.name); mockTypeCommand(c.cmd);
+}
+function qcKeydown(e){
+  if(e.key==='ArrowDown'){ e.preventDefault(); qcSelected=Math.min(qcSelected+1,qcItems.length-1); renderQCList(); }
+  else if(e.key==='ArrowUp'){ e.preventDefault(); qcSelected=Math.max(qcSelected-1,0); renderQCList(); }
+  else if(e.key==='Enter'){ e.preventDefault(); qcExec(qcSelected); }
+}
+function openQCEdit(){ document.getElementById('qc-edit-title').textContent='添加命令'; openOverlay('overlay-qc-edit'); }
+function closeQCEdit(){ closeOverlay('overlay-qc-edit'); }
+function saveQCEdit(){
+  const name=document.getElementById('qc-edit-name').value.trim();
+  if(!name){ showToast('名称不能为空',true); return; }
+  closeQCEdit(); renderQCList(); showToast('命令已保存');
+}
+function renderQCListSettings(){
+  const list=document.getElementById('qc-commands-list');
+  let html='';
+  const groups={};
+  quickCommands.forEach(c=>{ (groups[c.group||'未分组']=groups[c.group||'未分组']||[]).push(c); });
+  Object.entries(groups).forEach(([g,items])=>{
+    html+='<div class="ssh-group"><div class="ssh-group-header" onclick="toggleGroup(this)"><span class="group-chevron">▼</span><span>'+esc(g)+'</span><span class="ssh-group-count">'+items.length+'</span><span style="flex:1"></span>'+
+      '<button class="group-rename" onclick="event.stopPropagation();renameQCGroup(this,\''+esc(g)+'\')">✎</button></div>'+
+      '<div class="ssh-group-items">'+items.map(c=>'<div class="ssh-item"><span class="ssh-item-icon" style="background:rgba(97,175,239,0.14);color:#8fc1ee"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></span>'+
+      '<span class="ssh-item-info"><div class="ssh-item-name">'+esc(c.name)+'</div><div class="ssh-item-detail" style="font-family:Consolas,monospace">'+esc(c.cmd)+'</div></span>'+
+      '<button class="ssh-item-btn" onclick="event.stopPropagation();openQCEdit()">✎</button>'+
+      '<button class="ssh-item-btn" onclick="event.stopPropagation();showToast(\'模拟：已删除\')">×</button></div>').join('')+'</div></div>';
+  });
+  list.innerHTML=html||'<div class="sftp-empty">暂无命令</div>';
+}
+function expandAllQC(){ document.querySelectorAll('#qc-commands-list .ssh-group-header').forEach(el=>{el.classList.remove('collapsed');el.nextElementSibling?.classList.remove('collapsed');}); }
+function collapseAllQC(){ document.querySelectorAll('#qc-commands-list .ssh-group-header').forEach(el=>{el.classList.add('collapsed');el.nextElementSibling?.classList.add('collapsed');}); }
+function renameQCGroup(btn,old){
+  const header=btn.closest('.ssh-group-header');
+  const input=document.createElement('input');
+  input.className='group-name-input'; input.value=old;
+  header.querySelector('span:nth-child(2)').replaceWith(input); input.focus(); input.select();
+  input.onblur=()=>finish(); input.onkeydown=(e)=>{ if(e.key==='Enter')finish(); };
+  function finish(){
+    const v=input.value.trim();
+    if(v&&v!==old)quickCommands.forEach(c=>{ if((c.group||'未分组')===old)c.group=v; });
+    renderQCListSettings();
+  }
+}
+
+/* ═══════════════ Palette ═══════════════ */
+let palSelected=0;
+function openPalette(){
+  palSelected=0;
+  document.getElementById('palette-input').value='';
+  renderPalette();
+  openOverlay('overlay-palette');
+  setTimeout(()=>document.getElementById('palette-input').focus(),50);
+}
+function closePalette(){ closeOverlay('overlay-palette'); }
+function renderPalette(){
+  const q=(document.getElementById('palette-input')||{}).value||'';
+  palItems=PALETTE_ACTIONS.filter(x=>!q||x.name.toLowerCase().includes(q.toLowerCase()));
+  const list=document.getElementById('palette-list');
+  const empty=document.getElementById('palette-empty');
+  list.innerHTML=palItems.map((x,i)=>'<div class="v3-item'+(i===palSelected?' sel':'')+'" onmouseenter="palHover('+i+')" onclick="palExec('+i+')">'+
+    '<span class="v3-name">'+esc(x.name)+'</span>'+
+    '<span class="v3-kbd">'+esc(x.kbd||'')+'</span></div>').join('');
+  empty.classList.toggle('show',!palItems.length);
+}
+let palItems=[];
+function palHover(i){ palSelected=i; renderPalette(); }
+function palFilter(){ palSelected=0; renderPalette(); }
+function palExec(i){ const a=palItems[i]; if(!a)return; closePalette(); a.act(); }
+function palKeydown(e){
+  if(e.key==='ArrowDown'){ e.preventDefault(); palSelected=Math.min(palSelected+1,palItems.length-1); renderPalette(); }
+  else if(e.key==='ArrowUp'){ e.preventDefault(); palSelected=Math.max(palSelected-1,0); renderPalette(); }
+  else if(e.key==='Enter'){ e.preventDefault(); palExec(palSelected); }
+}
+function palIcon(k){
+  const I={plus:'+',ssh:'▣',folder:'▤',bolt:'⚡',cmd:'⌘',search:'⌕',gear:'⚙',split:'▤',splitv:'▥'};
+  return I[k]||'•';
+}
+
+/* ═══════════════ Sessions ═══════════════ */
+let sessItems=[],sessSel=0;
+function openSessionSelector(){
+  sessSel=0; document.getElementById('sessions-search').value='';
+  filterSessions('');
+  openOverlay('overlay-sessions');
+  setTimeout(()=>document.getElementById('sessions-search').focus(),50);
+}
+function filterSessions(q){
+  q=(q||'').toLowerCase();
+  sessItems=SESSION_ITEMS.filter(x=>!q||(x.name+x.detail+(x.group||'')).toLowerCase().includes(q));
+  document.getElementById('sessions-list').innerHTML=
+    sessItems.map((x,i)=>'<div class="panel-item" data-selected="'+(i===sessSel?'':'')+'" data-i="'+i+'" onmouseenter="sessHover('+i+')" onclick="sessExec('+i+')">'+
+      '<span class="panel-item-icon '+x.type+'">'+(x.type==='loc'?'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>':'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="5"/></svg>')+'</span>'+
+      '<span class="panel-item-info"><div class="panel-item-name">'+esc(x.name)+'</div><div class="panel-item-detail">'+esc(x.detail)+'</div></span>'+
+      (x.group?'<span class="panel-item-badge">'+esc(x.group)+'</span>':'')+'</div>').join('');
+}
+function sessHover(i){ sessSel=i; filterSessions(document.getElementById('sessions-search').value); }
+function sessExec(i){
+  const it=sessItems[i]; if(!it)return;
+  closeOverlay('overlay-sessions');
+  if(it.type==='ssh'){ const p=sshProfiles.find(x=>x.name===it.name); if(p){ connectSSH(p.id); return; } }
+  newLocalTab(it.name);
+}
+function sessionKeydown(e){
+  if(e.key==='ArrowDown'){ e.preventDefault(); sessSel=Math.min(sessSel+1,sessItems.length-1); filterSessions(document.getElementById('sessions-search').value); }
+  else if(e.key==='ArrowUp'){ e.preventDefault(); sessSel=Math.max(sessSel-1,0); filterSessions(document.getElementById('sessions-search').value); }
+  else if(e.key==='Enter'){ e.preventDefault(); sessExec(sessSel); }
+}
+function newLocalTab(name){
+  const cmd=name==='Command Prompt'?'cmd.exe':(name==='Git Bash'?'bash.exe':'powershell.exe');
+  TabManager.addTab({id:'t'+(++_counter),name:name||'PowerShell',type:'local',command:cmd,connected:true});
+}
+
+/* ═══════════════ SFTP ═══════════════ */
+const SFTP={
+  _tabId:null,_path:'/',_pinned:{},_pinnedPath:{},
+  _tree:{
+    '/':{dirs:['etc','home','opt','srv','var','www'],files:[{n:'app.log',s:'2.4 MB',d:'2026-08-04 10:12'},{n:'nginx.conf',s:'4.1 KB',d:'2026-07-30 09:00'},{n:'deploy.sh',s:'1.2 KB',d:'2026-08-01 15:33'}]},
+    '/etc':{dirs:['nginx','systemd','ssh'],files:[{n:'hosts',s:'220 B',d:'2026-06-12'},{n:'passwd',s:'1.8 KB',d:'2026-06-12'}]},
+    '/var':{dirs:['log','www','cache'],files:[{n:'backup.tar.gz',s:'512 MB',d:'2026-08-03 02:00'}]},
+    '/var/log':{dirs:['nginx','apt'],files:[{n:'app.log',s:'18 MB',d:'2026-08-04 10:23'},{n:'syslog',s:'6.2 MB',d:'2026-08-04 10:20'},{n:'auth.log',s:'840 KB',d:'2026-08-04 10:15'}]},
+    '/srv':{dirs:['www'],files:[]},
+    '/srv/www':{dirs:[],files:[{n:'index.html',s:'12 KB',d:'2026-08-02'},{n:'package.json',s:'640 B',d:'2026-08-02'}]},
+  },
+  open(tabId,paneId){
+    const t=TabManager.tabs.find(x=>x.id===tabId); if(!t)return;
+    const p=paneId?TabManager._allPanes(t).find(x=>x.id===paneId):t;
+    this._tabId=p.host||t.name;
+    document.getElementById('sftp-conn').textContent=p.host||t.name;
+    document.getElementById('sftp-pin').classList.toggle('pinned',!!this._pinned[this._tabId]);
+    this._path=this._pinnedPath[this._tabId]||'/';
+    this.render();
+    openOverlay('overlay-sftp');
+  },
+  close(){ closeOverlay('overlay-sftp'); },
+  togglePin(){
+    this._pinned[this._tabId]=!this._pinned[this._tabId];
+    if(this._pinned[this._tabId])this._pinnedPath[this._tabId]=this._path;
+    else delete this._pinnedPath[this._tabId];
+    document.getElementById('sftp-pin').classList.toggle('pinned',!!this._pinned[this._tabId]);
+  },
+  refresh(){ showToast('模拟：已刷新'); this.render(); },
+  goUp(){
+    if(this._path==='/')return;
+    const parts=this._path.split('/').filter(Boolean);
+    parts.pop();
+    this._path='/'+parts.join('/');
+    this.render();
+  },
+  mkdir(){
+    const n=Math.floor(Math.random()*1000);
+    const node=this._tree[this._path]||{dirs:[],files:[]};
+    node.dirs.push('new-dir-'+n);
+    this.render();
+    showToast('目录已创建: new-dir-'+n);
+  },
+  render(){
+    const node=this._tree[this._path]||{dirs:[],files:[]};
+    // breadcrumb
+    const parts=this._path.split('/').filter(Boolean);
+    let bc='<span onclick="SFTP.nav(\'/\')">/</span>';
+    let acc='';
+    parts.forEach(p=>{ acc+='/'+p; bc+='<span class="sep">›</span><span onclick="SFTP.nav(\''+acc+'\')">'+esc(p)+'</span>'; });
+    document.getElementById('sftp-breadcrumb').innerHTML=bc;
+    const body=document.getElementById('sftp-body');
+    if(!node.dirs.length&&!node.files.length){ body.innerHTML='<div class="sftp-empty">空目录</div>'; return; }
+    body.innerHTML=node.dirs.map(d=>'<div class="sftp-item" ondblclick="SFTP.nav(\''+this._path+'/'+d+'\')" onclick="SFTP.select(this)">'+
+      '<span class="sftp-item-icon">📁</span><span class="sftp-item-name">'+esc(d)+'</span><span class="sftp-item-size">—</span><span class="sftp-item-date">—</span></div>').join('')+
+      node.files.map(f=>'<div class="sftp-item" onclick="SFTP.select(this)">'+
+      '<span class="sftp-item-icon">📄</span><span class="sftp-item-name">'+esc(f.n)+'</span><span class="sftp-item-size">'+esc(f.s)+'</span><span class="sftp-item-date">'+esc(f.d)+'</span></div>').join('');
+  },
+  nav(p){ this._path=p; this.render(); },
+  select(el){ document.querySelectorAll('#sftp-body .sftp-item').forEach(x=>x.classList.remove('selected')); el.classList.add('selected'); },
+};
+/* drag-over 模拟 */
+(()=>{
+  const win=document.getElementById('sftp-win');
+  let depth=0;
+  win.addEventListener('dragenter',e=>{e.preventDefault();depth++;win.classList.add('drag-over');});
+  win.addEventListener('dragover',e=>e.preventDefault());
+  win.addEventListener('dragleave',()=>{if(--depth<=0){depth=0;win.classList.remove('drag-over');}});
+  win.addEventListener('drop',e=>{e.preventDefault();depth=0;win.classList.remove('drag-over');showToast('模拟：上传 3 个文件');TransferManager.startFake();});
+})();
+
+/* ═══════════════ TransferManager ═══════════════ */
+const TransferManager={
+  _transfers:[],_history:[],_panelTimer:null,
+  startFake(){
+    const id=Date.now();
+    this._transfers.push({id,name:'app.log (18.2 MB)',type:'upload',transferred:0,total:18227200,startTime:Date.now(),_lastUpdate:Date.now(),_lastBytes:0,_speed:0,done:false,cancelled:false});
+    this._updateBtn(); this.openPanel();
+    const tick=setInterval(()=>{
+      const t=this._transfers.find(x=>x.id===id);
+      if(!t){ clearInterval(tick); return; }
+      if(t.cancelled||t.done){ clearInterval(tick); return; }
+      t.transferred=Math.min(t.total,t.transferred+Math.floor(Math.random()*900000+500000));
+      this.update(id);
+      if(t.transferred>=t.total){ t.done=true; this.complete(id); clearInterval(tick); }
+    },400);
+  },
+  update(id){
+    const t=this._transfers.find(x=>x.id===id); if(!t)return;
+    if(this._panelTimer)return;
+    this._panelTimer=setTimeout(()=>{ this._panelTimer=null; this._renderPanel(); this._updateBtn(); },300);
+  },
+  complete(id){
+    const t=this._transfers.find(x=>x.id===id); if(!t)return;
+    t.done=true;
+    this._history.unshift({name:t.name,total:t.total,completedAt:Date.now()});
+    if(this._history.length>20)this._history.length=20;
+    this._renderPanel(); this._updateBtn();
+    showToast('上传完成: '+t.name);
+    setTimeout(()=>{ this._transfers=this._transfers.filter(x=>x.id!==id); this._renderPanel(); this._updateBtn(); },2500);
+  },
+  cancel(id){
+    const t=this._transfers.find(x=>x.id===id); if(!t)return;
+    t.cancelled=true;
+    this._renderPanel(); this._updateBtn();
+    showToast('已取消传输');
+    setTimeout(()=>{ this._transfers=this._transfers.filter(x=>x.id!==id); this._renderPanel(); this._updateBtn(); },800);
+  },
+  openPanel(){ this._renderPanel(); openOverlay('transfer-panel'); },
+  closePanel(){ closeOverlay('transfer-panel'); },
+  _updateBtn(){
+    const btn=document.getElementById('transfer-btn');
+    const active=this._transfers.filter(t=>!t.done&&!t.cancelled).length;
+    const countEl=document.getElementById('transfer-count');
+    const prev=countEl.textContent;
+    countEl.textContent=active>0?active:'';
+    if(active>0&&String(active)!==prev){ countEl.classList.remove('pulse'); void countEl.offsetWidth; countEl.classList.add('pulse'); }
+    btn.classList.toggle('visible',active>0||this._history.length>0);
+  },
+  _renderPanel(){
+    const body=document.getElementById('transfer-panel-body');
+    let html='';
+    this._transfers.forEach(t=>{
+      const pct=Math.round(t.transferred/t.total*100);
+      const now=Date.now();
+      let speed=t._speed||0;
+      if(!t.done&&!t.cancelled){
+        const dt=(now-t._lastUpdate)/1000;
+        if(dt>0.05){
+          const inst=Math.max(0,t.transferred-t._lastBytes)/dt;
+          t._speed=t._speed>0?t._speed*0.6+inst*0.4:inst;
+          t._lastUpdate=now; t._lastBytes=t.transferred; speed=t._speed;
+        }
+      }
+      const speedText=t.done?'完成':(t.cancelled?'已取消':(speed>0?fmtSize(speed)+'/s':'0 B/s'));
+      const barCls=t.cancelled?'cancelled':t.done?'done':'';
+      const btn=t.done?'<button class="transfer-item-btn" onclick="TransferManager._transfers=TransferManager._transfers.filter(x=>x.id!=='+t.id+');TransferManager._renderPanel();TransferManager._updateBtn()">✓</button>'
+        :'<button class="transfer-item-btn" onclick="TransferManager.cancel('+t.id+')">×</button>';
+      html+='<div class="transfer-item">'+
+        '<span class="transfer-item-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span>'+
+        '<div class="transfer-item-main">'+
+          '<div class="transfer-item-name">'+esc(t.name)+'</div>'+
+          '<div class="transfer-item-bar"><div class="transfer-item-bar-fill '+barCls+'" style="width:'+pct+'%"></div></div>'+
+          '<div class="transfer-item-meta"><span>'+fmtSize(t.transferred)+' / '+fmtSize(t.total)+'</span><span class="speed">'+speedText+'</span></div>'+
+        '</div>'+btn+'</div>';
+    });
+    if(this._history.length){
+      html+='<div style="padding:10px 9px 4px;font-size:11px;color:var(--text-3)">历史记录</div>';
+      this._history.forEach((h,i)=>html+='<div class="transfer-item"><span class="transfer-item-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></span>'+
+        '<div class="transfer-item-main"><div class="transfer-item-name">'+esc(h.name)+'</div>'+
+        '<div class="transfer-item-meta"><span>'+fmtSize(h.total)+'</span><span class="speed">刚刚</span></div></div>'+
+        '<button class="transfer-item-btn" onclick="TransferManager._history.splice('+i+',1);TransferManager._renderPanel();TransferManager._updateBtn()">×</button></div>');
+    }
+    body.innerHTML=html||'<div class="transfer-empty">暂无传输任务</div>';
+  },
+};
+function fmtSize(b){
+  if(!b)return '0 B';
+  const k=1024,s=['B','KB','MB','GB'],i=Math.floor(Math.log(b)/Math.log(k));
+  return parseFloat((b/Math.pow(k,i)).toFixed(1))+' '+s[i];
+}
+
+/* ═══════════════ Shortcuts table ═══════════════ */
+function renderShortcutsTable(){
+  const tb=document.getElementById('shortcuts-table');
+  tb.innerHTML='<tr><th>操作</th><th>快捷键</th><th style="width:90px"></th></tr>'+
+    SHORTCUTS.map(s=>'<tr><td>'+esc(s.name)+'</td><td><kbd>'+esc(shortcuts[s.id])+'</kbd></td>'+
+    '<td><button class="shortcut-edit-btn" onclick="captureShortcut(this,\''+s.id+'\')">修改</button></td></tr>').join('');
+}
+function captureShortcut(btn,id){
+  btn.classList.add('capturing'); btn.textContent='按下快捷键…';
+  const done=(combo)=>{
+    btn.classList.remove('capturing'); btn.textContent='修改';
+    if(combo){ shortcuts[id]=combo; renderShortcutsTable(); showToast('快捷键已更新: '+combo); }
+  };
+  const handler=(e)=>{
+    e.preventDefault(); e.stopPropagation();
+    if(e.key==='Escape'){ done(null); document.removeEventListener('keydown',handler); return; }
+    if(e.key==='Control'||e.key==='Shift'||e.key==='Alt')return;
+    const mods=[(e.ctrlKey?'Ctrl':'')+(e.shiftKey?'+Shift':'')+(e.altKey?'+Alt':'')].filter(Boolean);
+    const key=e.key===' '?'Space':e.key.length===1?e.key.toUpperCase():e.key;
+    done([...mods,key].join('+'));
+    document.removeEventListener('keydown',handler);
+  };
+  document.addEventListener('keydown',handler);
+}
+function resetAllShortcuts(){
+  SHORTCUTS.forEach(s=>shortcuts[s.id]=s.combo);
+  renderShortcutsTable(); showToast('快捷键已重置');
+}
+
+/* ═══════════════ Highlight ═══════════════ */
+function renderHighlightRules(){
+  const list=document.getElementById('highlight-rules-list');
+  list.innerHTML=highlightRules.map(r=>'<div class="hl-rule-row">'+
+    '<span class="hl-dot" style="background:'+(r.fg||'#888')+'"></span>'+
+    '<span class="hl-rule-name"><div class="hl-rule-text">'+esc(r.text)+'</div><div class="hl-rule-detail">'+(r.regexp?'正则':'关键字')+(r.caseSensitive?' · 大小写敏感':'')+(r.bold?' · 粗体':'')+(r.italic?' · 斜体':'')+'</div></span>'+
+    '<button class="ssh-item-btn" onclick="event.stopPropagation();openHighlightEdit()">✎</button>'+
+    '<button class="ssh-item-btn" onclick="event.stopPropagation();highlightRules=highlightRules.filter(x=>x.id!==\''+r.id+'\');renderHighlightRules()">×</button></div>').join('')||'<div class="sftp-empty">暂无规则</div>';
+}
+function openHighlightEdit(){ openOverlay('overlay-hl-edit'); }
+function closeHighlightEdit(){ closeOverlay('overlay-hl-edit'); }
+
+/* ═══════════════ Color picker ═══════════════ */
+let cpState={h:0,s:1,v:1};
+function openColorPicker(){
+  const hex=document.getElementById('set-accent').value;
+  const {h,s,v}=hexToHsv(hex);
+  cpState={h,s,v};
+  syncCpUI();
+  openOverlay('color-picker');
+}
+function closeColorPicker(){ closeOverlay('color-picker'); }
+function cpOk(){
+  const hex=document.getElementById('cp-hex').value;
+  applyAccent(hex);
+  closeColorPicker();
+  showToast('强调色已更新');
+}
+function hexToHsv(hex){
+  const m=/^#?([0-9a-f]{6})$/i.exec(hex||'#61afef'); if(!m)return{h:210,s:0.6,v:0.94};
+  const int=parseInt(m[1],16),r=(int>>16)&255,g=(int>>8)&255,b=int&255;
+  const mx=Math.max(r,g,b)/255,mn=Math.min(r,g,b)/255,d=mx-mn;
+  let h=0;
+  if(d){ if(mx===r/255)h=((g-b)/255/d)%6; else if(mx===g/255)h=(b/255-r/255)/d+2; else h=(r/255-g/255)/d+4; h*=60; if(h<0)h+=360; }
+  return {h,s:mx?d/mx:0,v:mx};
+}
+function hsvToHex(h,s,v){
+  const c=v*s,x=c*(1-Math.abs((h/60)%2-1)),m=v-c;
+  let r=0,g=0,b=0;
+  if(h<60){r=c;g=x;}else if(h<120){r=x;g=c;}else if(h<180){g=c;b=x;}else if(h<240){g=x;b=c;}else if(h<300){r=x;b=c;}else{r=c;b=x;}
+  const to=v=>Math.round((v+m)*255).toString(16).padStart(2,'0');
+  return '#'+to(r)+to(g)+to(b);
+}
+function syncCpUI(){
+  const {h,s,v}=cpState;
+  document.getElementById('cp-canvas').style.background='linear-gradient(to right,#fff,transparent),linear-gradient(to top,#000,transparent),hsl('+h+',100%,50%)';
+  document.getElementById('cp-dot').style.left=(s*100)+'%';
+  document.getElementById('cp-dot').style.top=((1-v)*100)+'%';
+  document.getElementById('cp-hue-dot').style.left=(h/360*100)+'%';
+  const hex=hsvToHex(h,s,v);
+  const int=parseInt(hex.slice(1),16);
+  document.getElementById('cp-r').value=(int>>16)&255;
+  document.getElementById('cp-g').value=(int>>8)&255;
+  document.getElementById('cp-b').value=int&255;
+  document.getElementById('cp-hex').value=hex;
+}
+function cpFromRgb(){
+  const r=+document.getElementById('cp-r').value||0,g=+document.getElementById('cp-g').value||0,b=+document.getElementById('cp-b').value||0;
+  const {h,s,v}=hexToHsv('#'+[r,g,b].map(x=>x.toString(16).padStart(2,'0')).join(''));
+  cpState={h,s,v}; syncCpUI();
+}
+function cpFromHex(){
+  const hex=document.getElementById('cp-hex').value;
+  const {h,s,v}=hexToHsv(hex);
+  cpState={h,s,v}; syncCpUI();
+}
+(()=>{
+  const canvas=document.getElementById('cp-canvas'),hue=document.getElementById('cp-hue');
+  canvas.addEventListener('mousedown',(e)=>{
+    const r=canvas.getBoundingClientRect();
+    const move=(ev)=>{
+      const x=Math.max(0,Math.min(1,(ev.clientX-r.left)/r.width));
+      const y=Math.max(0,Math.min(1,(ev.clientY-r.top)/r.height));
+      cpState.s=x; cpState.v=1-y; syncCpUI();
+    };
+    move(e);
+    const up=()=>{ document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up); };
+    document.addEventListener('mousemove',move); document.addEventListener('mouseup',up);
+  });
+  hue.addEventListener('mousedown',(e)=>{
+    const r=hue.getBoundingClientRect();
+    const move=(ev)=>{
+      const x=Math.max(0,Math.min(1,(ev.clientX-r.left)/r.width));
+      cpState.h=x*360; syncCpUI();
+    };
+    move(e);
+    const up=()=>{ document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up); };
+    document.addEventListener('mousemove',move); document.addEventListener('mouseup',up);
+  });
+})();
+
+/* ═══════════════ Highlight rules / swatches init ═══════════════ */
+const ACCENT_PRESETS=['#61afef','#7d9cf8','#c678dd','#e06c75','#e5c07b','#98c379','#56b6c2','#ffb74d','#ff6ac1','#8bd7a0'];
+
+/* ═══════════════ Search ═══════════════ */
+function openSearch(){
+  document.getElementById('search-bar').classList.add('open');
+  setTimeout(()=>document.getElementById('search-input').focus(),50);
+}
+function closeSearch(){
+  document.getElementById('search-bar').classList.remove('open');
+  document.getElementById('search-input').value='';
+  clearSearchMarks();
+}
+function doSearch(){
+  const q=document.getElementById('search-input').value.toLowerCase();
+  clearSearchMarks();
+  if(!q){ document.getElementById('search-count').textContent='0/0'; return; }
+  const active=TabManager.getActive();
+  if(!active)return;
+  const terms=active.splitRoot?TabManager._allPanes(active).map(p=>p.id):[active.id];
+  let total=0;
+  terms.forEach(id=>{
+    const el=document.querySelector('.split-pane[data-pane="'+id+'"] .term, #wrap_'+active.id+' .term');
+    if(!el)return;
+    const m=el._mock; if(!m)return;
+    m.lines.forEach(l=>{ const t=l.t.replace(/<[^>]+>/g,''); const c=(t.toLowerCase().split(q).length-1); total+=c; });
+  });
+  document.getElementById('search-count').textContent=total>0?'1/'+total:'0/0';
+  if(total){
+    const el=document.querySelector('.split-pane[data-pane="'+terms[0]+'"] .term, #wrap_'+active.id+' .term');
+    if(el){ const html=el.innerHTML; el.innerHTML=html.replace(new RegExp('('+q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark>$1</mark>'); }
+  }
+}
+function clearSearchMarks(){ document.querySelectorAll('.term mark').forEach(m=>{ const t=document.createTextNode(m.textContent); m.replaceWith(t); }); }
+function searchStep(){ showToast('模拟：已在首个匹配处'); }
+function onSearchKey(e){
+  if(e.key==='Enter'){ e.preventDefault(); searchStep(e.shiftKey?-1:1); }
+  else if(e.key==='Escape'){ closeSearch(); }
+}
+
+/* ═══════════════ Overlays / Toast / misc ═══════════════ */
+function openOverlay(id){ document.getElementById(id).classList.add('open'); }
+function closeOverlay(id){ document.getElementById(id).classList.remove('open'); }
+let toastTimer=null;
+function showToast(msg,isErr){
+  const t=document.getElementById('toast');
+  t.innerHTML=(isErr?'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>':'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>')+esc(msg);
+  t.className='toast show'+(isErr?' error':'');
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>t.classList.remove('show'),2400);
+}
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+/* Confirm */
+let confirmCb=null;
+function showConfirm(title,text,cb){ confirmCb=cb; document.getElementById('confirm-title').textContent=title; document.getElementById('confirm-text').textContent=text; openOverlay('overlay-confirm'); }
+function closeConfirm(ok){ closeOverlay('overlay-confirm'); if(ok&&confirmCb)confirmCb(); confirmCb=null; }
+
+/* Menu */
+function openMenuPopup(){
+  const btn=document.getElementById('btn-menu');
+  const r=btn.getBoundingClientRect();
+  const popup=document.getElementById('menu-popup');
+  // 与真实软件一致：顶=按钮底+4，左=按钮左缘向右下展开；右侧空间不足才右对齐
+  popup.style.top=(r.bottom+4)+'px';
+  if(window.innerWidth-r.left>=220){ popup.style.left=r.left+'px'; popup.style.right='auto'; }
+  else { popup.style.left='auto'; popup.style.right=(window.innerWidth-r.right)+'px'; }
+  popup.classList.add('open');
+  document.getElementById('menu-backdrop').classList.add('open');
+}
+function closeMenuPopup(){ document.getElementById('menu-popup').classList.remove('open'); document.getElementById('menu-backdrop').classList.remove('open'); }
+document.getElementById('btn-menu').onclick=(e)=>{ e.stopPropagation(); document.getElementById('menu-popup').classList.contains('open')?closeMenuPopup():openMenuPopup(); };
+document.getElementById('menu-backdrop').onclick=closeMenuPopup;
+document.querySelectorAll('#menu-popup .menu-item').forEach(item=>{
+  item.onclick=()=>{
+    closeMenuPopup();
+    const act=item.getAttribute('data-act');
+    if(act==='qc')openQC(); else if(act==='sftp')openSFTPFromMenu(); else if(act==='palette')openPalette(); else if(act==='settings')openSettings();
+  };
+});
+
+/* Tab context menu */
+TabManager.showContextMenu=function(e,tabId){
+  document.getElementById('tab-context-menu')?.remove();
+  const menu=document.createElement('div');
+  menu.id='tab-context-menu'; menu.className='tab-context-menu';
+  const items=[
+    {label:'重命名',short:shortcuts.renameTab,act:()=>this.startRename(tabId)},
+    {label:'克隆标签页',short:shortcuts.cloneTab||'',act:()=>this.cloneTab(tabId)},
+    {label:'关闭',short:shortcuts.closeTab,act:()=>this.closeTab(tabId)},
+    {label:'关闭其他标签页',short:'',act:()=>this.closeOtherTabs(tabId)},
+  ];
+  items.forEach(it=>{
+    const el=document.createElement('div');
+    el.className='tab-context-item';
+    el.innerHTML='<span>'+esc(it.label)+'</span>'+(it.short?'<span class="tab-context-shortcut">'+esc(it.short)+'</span>':'');
+    el.onclick=()=>{ menu.remove(); it.act(); };
+    menu.appendChild(el);
+  });
+  document.body.appendChild(menu);
+  const x=Math.min(e.clientX,window.innerWidth-210);
+  const y=Math.min(e.clientY,window.innerHeight-items.length*36-10);
+  menu.style.left=x+'px'; menu.style.top=y+'px';
+  setTimeout(()=>document.addEventListener('click',()=>menu.remove(),{once:true}),0);
+};
+
+/* Reconnect pane */
+TabManager.reconnectPane=function(tabId,paneId){
+  const t=this.tabs.find(x=>x.id===tabId); if(!t)return;
+  const p=this._allPanes(t).find(x=>x.id===paneId); if(!p)return;
+  p.connected=false; this.renderSplit(t);
+  showToast('重新连接: '+p.name);
+  setTimeout(()=>{ p.connected=true; this.renderSplit(t); showToast('SSH 已连接: '+p.name); },1200);
+};
+
+/* ── mockTypeCommand: 向激活终端注入一条命令 ── */
+function mockTypeCommand(cmd){
+  const t=TabManager.getActive(); if(!t)return;
+  const el=t.splitRoot?document.querySelector('.split-pane[data-pane="'+t.splitRoot.children[0]?.id+'"] .term'):document.querySelector('#wrap_'+t.id+' .term');
+  if(!el||!el._mock)return;
+  const d=el._mock;
+  d.input=cmd;
+  refreshTerm(d);
+  setTimeout(()=>{ d.lines[Math.max(0,d.lines.length-1)]={t:d.prompt+esc(cmd)}; d.input=''; d.promptLine=true; refreshTerm(d); },600);
+}
+function refreshTerm(d){ TabManager.refreshMockTerm(d); }
+
+/* ── Window controls (mock) ── */
+let maximized=false;
+document.getElementById('win-max').onclick=()=>{
+  maximized=!maximized;
+  document.getElementById('win-max').innerHTML=maximized
+    ?'<svg viewBox="0 0 12 12"><path d="M3 1h6l2 2-6 6-2-2 0-4z" fill="none" stroke="currentColor"/><path d="M5 3L1 7v3h3l4-4" fill="none" stroke="currentColor"/></svg>'
+    :'<svg viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" fill="none" stroke="currentColor"/></svg>';
+  showToast(maximized?'模拟：最大化':'模拟：还原');
+};
+document.getElementById('win-min').onclick=()=>showToast('模拟：最小化');
+document.getElementById('win-close').onclick=()=>showConfirm('关闭 ZTerm','确定要退出 ZTerm 吗？',()=>showToast('模拟：应用已退出'));
+
+/* ── openSFTPFromMenu ── */
+function openSFTPFromMenu(){
+  const t=TabManager.getActive();
+  if(!t)return;
+  if(t.type==='ssh'){ SFTP.open(t.id,null); return; }
+  showToast('当前终端不是 SSH 连接',true);
+}
+
+/* ── Keyboard shortcuts ── */
+document.addEventListener('keydown',(e)=>{
+  const inOverlay=[...document.querySelectorAll('.overlay.open, .color-picker-overlay.open')].length>0;
+  if(e.key==='Escape'){
+    if(document.getElementById('search-bar').classList.contains('open')){ closeSearch(); return; }
+    const open=[...document.querySelectorAll('.overlay.open')].reverse().find(o=>o.id!=='overlay-sftp');
+    if(open)closeOverlay(open.id);
+    return;
+  }
+  if(inOverlay)return;
+  const c=e.ctrlKey||e.metaKey;
+  const combo=(c?'Ctrl+':'')+(e.shiftKey?'Shift+':'')+(e.altKey?'Alt+':'')+(e.key===' '?'Space':e.key.length===1?e.key.toUpperCase():e.key);
+  const map={
+    'Ctrl+Shift+P':()=>openQC(),
+    'Ctrl+Shift+K':()=>openPalette(),
+    'Ctrl+Shift+F':()=>openSFTPFromMenu(),
+    'Ctrl+Shift+S':()=>openSessionSelector(),
+    'Ctrl+Shift+T':()=>newLocalTab(),
+    'Ctrl+Shift+D':()=>TabManager.splitActive('r'),
+    'Ctrl+Shift+E':()=>TabManager.splitActive('b'),
+    'Ctrl+F':()=>openSearch(),
+    'Ctrl+W':()=>{ const t=TabManager.getActive(); if(t)TabManager.closeTab(t.id); },
+    'Ctrl+,':()=>openSettings(),
+    'F2':()=>{ const t=TabManager.getActive(); if(t&&t.type!=='settings')TabManager.startRename(t.id); },
+  };
+  if(map[combo]){ e.preventDefault(); map[combo](); }
+});
+
+/* ═══════════════ Init ═══════════════ */
+function init(){
+  // schemes select
+  const sel=document.getElementById('set-scheme');
+  Object.entries(SCHEMES).forEach(([k,s])=>{ const o=document.createElement('option'); o.value=k; o.textContent=s.name; sel.appendChild(o); });
+  sel.value='onedark';
+  // accent swatches
+  const sw=document.getElementById('accent-swatches');
+  ACCENT_PRESETS.forEach(c=>{
+    const el=document.createElement('div');
+    el.className='accent-swatch'; el.style.background=c; el.style.color=c;
+    el.onclick=()=>{ applyAccent(c); document.querySelectorAll('.accent-swatch').forEach(x=>x.classList.toggle('active',x.style.background===c)); };
+    sw.appendChild(el);
+  });
+  document.querySelectorAll('.accent-swatch').forEach(x=>x.classList.toggle('active',x.style.background==='#61afef'));
+  // default tabs
+  TabManager.addTab({id:'t'+(++_counter),name:'PowerShell',type:'local',command:'powershell.exe',connected:true});
+  TabManager.addTab({id:'t'+(++_counter),name:'prod-web-01',type:'ssh',host:'10.0.3.11',port:22,user:'root',connected:false,connectOnReady:true});
+  // 自动连接 SSH
+  setTimeout(()=>{
+    const t=TabManager.tabs.find(x=>x.type==='ssh');
+    if(t){ t.connected=true; const p=sshProfiles.find(x=>x.name===t.name); if(p)p.connected=true; TabManager.render(); TabManager.renderTerminal(); TabManager.updateStatus(t); showToast('SSH 已连接: prod-web-01'); }
+  },1400);
+  // transfer button demo: 1.5s 后出现一个已完成的历史
+  setTimeout(()=>{ TransferManager._history.unshift({name:'nginx.conf (4.1 KB)',total:4200,completedAt:Date.now()}); TransferManager._updateBtn(); },4000);
+}
+init();
+</script>
+</body>
+</html>

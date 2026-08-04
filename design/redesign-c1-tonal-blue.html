@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Redesign C1 · Tonal Blue — 蓝色色调化</title>
+<style>
+/* ═══════════════════════════════════════════════════════════
+   DESIGN C1 — Tonal Blue · 蓝色色调化
+   M3 色调化表面 · 无分割线（间距+色差分层）· 保留 ZTerm 蓝色强调色
+   改动路径：对现有主题最平滑的升级
+   ═══════════════════════════════════════════════════════════ */
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+body{background:#14161c;display:flex;justify-content:center;align-items:center;min-height:100vh;font-family:'Segoe UI Variable','Segoe UI',system-ui,sans-serif;padding:40px}
+h1.doc{position:fixed;top:18px;left:50%;transform:translateX(-50%);font-size:15px;font-weight:600;color:#e9edf3;letter-spacing:0.2px}
+p.doc{position:fixed;top:44px;left:50%;transform:translateX(-50%);font-size:12px;color:rgba(233,237,243,0.45)}
+
+.window{width:1060px;height:640px;border-radius:18px;overflow:hidden;position:relative;display:flex;flex-direction:column;background:#1d212a;
+  box-shadow:0 0 0 1px rgba(255,255,255,0.06),0 24px 72px rgba(0,0,0,0.55)}
+
+/* ── Titlebar：无分割线，tab 用色调 pill ── */
+.titlebar{height:44px;display:flex;align-items:center;padding-left:12px;flex-shrink:0}
+.logo{width:24px;height:24px;border-radius:8px;background:rgba(97,175,239,0.14);display:flex;align-items:center;justify-content:center;margin-right:10px}
+.logo svg{width:15px;height:15px}
+.tabbar{display:flex;align-items:center;gap:2px;flex:1;min-width:0}
+.tab{display:flex;align-items:center;gap:8px;padding:6px 14px;font-size:12.5px;color:rgba(233,237,243,0.5);cursor:pointer;border-radius:18px;white-space:nowrap;transition:all 0.15s}
+.tab:hover{background:rgba(255,255,255,0.05);color:rgba(233,237,243,0.85)}
+.tab.active{background:rgba(97,175,239,0.16);color:#e9edf3}
+.tab-dot{width:8px;height:8px;border-radius:50%}
+.tab-dot.green{background:#7dd58a}.tab-dot.orange{background:#ffb74d}.tab-dot.gray{background:rgba(255,255,255,0.25)}
+.win-controls{display:flex;height:100%;align-items:stretch}
+.win-btn{width:46px;border:none;background:transparent;color:rgba(233,237,243,0.5);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all 0.12s}
+.win-btn:hover{background:rgba(97,175,239,0.12);color:#fff}
+.win-btn.close:hover{background:#c42b1c;color:#fff}
+.win-btn svg{width:11px;height:11px}
+
+/* ── Main ── */
+.main{flex:1;display:flex;flex-direction:column;margin:4px 14px 14px;border-radius:16px;overflow:hidden;background:#171a21;position:relative}
+.split{flex:1;display:flex;padding:10px;gap:10px;min-height:0}
+
+/* ── Pane：色调面，无边框，靠投影+色调差 ── */
+.pane{flex:1;border-radius:14px;background:#22262f;display:flex;flex-direction:column;overflow:hidden;min-width:0;
+  box-shadow:0 2px 10px rgba(0,0,0,0.3),inset 0 1px 0 rgba(255,255,255,0.045)}
+.pane:last-child{flex:0 0 38%}
+.pane-header{height:38px;display:flex;align-items:center;padding:0 14px;gap:8px;font-size:11px;color:rgba(233,237,243,0.45);font-weight:500;flex-shrink:0}
+.pane-header .dot{width:7px;height:7px;border-radius:50%}
+.pane-header .dot.orange{background:#ffb74d;box-shadow:0 0 8px rgba(255,183,77,0.45)}
+.pane-header .dot.green{background:#7dd58a}
+.pane-header .label{flex:1;display:flex;align-items:center;gap:6px}
+.pane-actions{display:flex;gap:2px;opacity:0;transition:opacity 0.15s}
+.pane:hover .pane-actions{opacity:1}
+.pane-act{width:24px;height:24px;border-radius:7px;border:none;background:transparent;color:rgba(233,237,243,0.4);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all 0.12s}
+.pane-act:hover{background:rgba(97,175,239,0.14);color:#9cc8ee}
+.pane-act svg{width:13px;height:13px}
+.term-body{flex:1;padding:12px 18px 16px;font-family:'Cascadia Code','JetBrains Mono',Consolas,monospace;font-size:13px;line-height:1.8;color:#b8c0cc;overflow:hidden}
+.prompt{color:#8fc1ee;font-weight:500}
+.cmd{color:#f0f3f7}
+.out{color:#9aa3b2}
+.info{color:#8bd79a}
+.err{color:#f19b92}
+.dim{color:#565f6e}
+.cursor{display:inline-block;width:8px;height:17px;background:#61afef;vertical-align:text-bottom;animation:blink 1.1s step-end infinite;border-radius:1px;box-shadow:0 0 8px rgba(97,175,239,0.5)}
+@keyframes blink{50%{opacity:0}}
+
+/* ── Statusbar：无顶线，靠色调差 ── */
+.statusbar{height:30px;display:flex;align-items:center;padding:0 16px;gap:16px;font-size:11px;color:rgba(233,237,243,0.5);flex-shrink:0}
+.sb-item{display:flex;align-items:center;gap:5px}
+.sb-item svg{width:12px;height:12px;opacity:0.55}
+.sb-right{margin-left:auto;display:flex;gap:16px;align-items:center}
+.sb-chip{background:rgba(97,175,239,0.14);color:#8fc1ee;border-radius:12px;padding:1px 10px;font-size:10.5px;font-weight:600;display:flex;align-items:center;gap:4px}
+
+/* ── SSH 编辑面板：无分割线，行间距分层 ── */
+.float{position:absolute;right:26px;bottom:44px;width:430px;background:#262b35;border-radius:16px;overflow:hidden;z-index:10;
+  box-shadow:0 20px 56px rgba(0,0,0,0.55),inset 0 1px 0 rgba(255,255,255,0.05)}
+.float-head{display:flex;align-items:center;padding:16px 18px 10px;gap:8px}
+.float-head h3{font-size:14px;font-weight:600;color:#f0f3f7}
+.mtabbar{display:flex;gap:4px;padding:4px 18px 12px}
+.mtab{font-size:12px;color:rgba(233,237,243,0.45);cursor:pointer;padding:5px 13px;border-radius:14px;font-weight:500;transition:all 0.15s}
+.mtab:hover{background:rgba(255,255,255,0.05);color:rgba(233,237,243,0.8)}
+.mtab.active{background:rgba(97,175,239,0.16);color:#cfe3f6}
+.float-body{padding:0 18px 16px;display:flex;flex-direction:column;gap:14px}
+.frow{display:flex;flex-direction:column;gap:5px}
+.frow label{font-size:11px;color:rgba(233,237,243,0.5);font-weight:500}
+.finput{background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:10px;padding:9px 12px;font-size:12.5px;color:#f0f3f7;font-family:inherit;outline:none;width:100%;transition:all 0.15s}
+.finput:hover{background:rgba(255,255,255,0.06)}
+.finput:focus{background:rgba(97,175,239,0.1);border-color:rgba(97,175,239,0.4)}
+.frow2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+/* toggle — M3 */
+.toggle{width:44px;height:24px;border-radius:13px;background:rgba(255,255,255,0.15);position:relative;cursor:pointer;transition:background 0.2s}
+.toggle.on{background:rgba(97,175,239,0.55)}
+.toggle::after{content:'';position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.4);transition:left 0.2s}
+.toggle.on::after{left:22px}
+.trow{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 0}
+.trow .tlabel{font-size:12.5px;color:#eceff4}
+.trow .tdesc{font-size:11px;color:rgba(233,237,243,0.4);margin-top:2px}
+.float-foot{display:flex;justify-content:flex-end;gap:8px;padding:12px 18px 14px}
+.fbtn{border:none;border-radius:16px;padding:7px 20px;font-size:12.5px;font-weight:600;font-family:inherit;cursor:pointer;transition:all 0.15s}
+.fbtn.ghost{background:rgba(255,255,255,0.06);color:rgba(233,237,243,0.75)}
+.fbtn.ghost:hover{background:rgba(255,255,255,0.1)}
+.fbtn.primary{background:#61afef;color:#10161d}
+.fbtn.primary:hover{background:#72baf2}
+
+/* ── 令牌说明 ── */
+.tokens{margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;justify-content:center;max-width:1060px}
+.tk{background:#262b35;border-radius:8px;padding:6px 12px;font-size:11px;color:rgba(233,237,243,0.6);display:flex;align-items:center;gap:8px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.05)}
+.tk b{color:#eceff4;font-weight:500}
+.sw{width:14px;height:14px;border-radius:4px;flex-shrink:0}
+</style>
+</head>
+<body>
+<h1 class="doc">Design C1 · Tonal Blue</h1>
+<p class="doc">M3 色调化 + ZTerm 蓝色强调色 · 零分割线 · 对现有主题最平滑升级</p>
+
+<div class="window">
+  <div class="titlebar">
+    <div class="logo"><svg viewBox="0 0 512 512" fill="#61afef"><rect x="96" y="96" width="56" height="56" rx="12"/><rect x="160" y="96" width="56" height="56" rx="12"/><rect x="224" y="96" width="56" height="56" rx="12"/><rect x="288" y="96" width="56" height="56" rx="12"/><rect x="352" y="96" width="56" height="56" rx="12"/><rect x="288" y="160" width="56" height="56" rx="12"/><rect x="224" y="224" width="56" height="56" rx="12"/><rect x="160" y="288" width="56" height="56" rx="12"/><rect x="96" y="352" width="56" height="56" rx="12"/><rect x="160" y="352" width="56" height="56" rx="12"/><rect x="224" y="352" width="56" height="56" rx="12"/><rect x="288" y="352" width="56" height="56" rx="12"/><rect x="352" y="352" width="56" height="56" rx="12" fill="#7ee787"/></svg></div>
+    <div class="tabbar">
+      <div class="tab"><span class="tab-dot green"></span>PowerShell</div>
+      <div class="tab active"><span class="tab-dot orange"></span>prod-web-01</div>
+      <div class="tab"><span class="tab-dot gray"></span>设置</div>
+    </div>
+    <div class="win-controls">
+      <button class="win-btn"><svg viewBox="0 0 12 12"><line x1="6" y1="0" x2="6" y2="12" stroke="currentColor"/></svg></button>
+      <button class="win-btn"><svg viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" fill="none" stroke="currentColor"/></svg></button>
+      <button class="win-btn close"><svg viewBox="0 0 12 12"><line x1="1" y1="1" x2="11" y2="11" stroke="currentColor"/><line x1="11" y1="1" x2="1" y2="11" stroke="currentColor"/></svg></button>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="split">
+      <div class="pane">
+        <div class="pane-header">
+          <span class="dot orange"></span>
+          <span class="label">prod-web-01 · /var/log</span>
+          <div class="pane-actions">
+            <button class="pane-act" title="SFTP"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
+            <button class="pane-act" title="maximize"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg></button>
+            <button class="pane-act" title="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          </div>
+        </div>
+        <div class="term-body">
+          <div><span class="prompt">root@prod-web-01:/var/log$</span> <span class="cmd">tail -f app.log</span></div>
+          <div><span class="info">10:23:11</span> <span class="out">INFO  request 200 GET /api/health 12ms</span></div>
+          <div><span class="info">10:23:12</span> <span class="out">INFO  request 200 GET /api/users 34ms</span></div>
+          <div><span class="info">10:23:13</span> <span class="err">ERROR request 500 POST /api/pay</span></div>
+          <div><span class="info">10:23:14</span> <span class="out">INFO  db.pool  connection acquired (12/20)</span></div>
+          <div><span class="dim">… waiting for new log entries</span></div>
+          <div><span class="prompt">root@prod-web-01:/var/log$</span> <span class="cursor"></span></div>
+        </div>
+      </div>
+      <div class="pane">
+        <div class="pane-header">
+          <span class="dot green"></span>
+          <span class="label">PowerShell · C:\dev</span>
+          <div class="pane-actions">
+            <button class="pane-act" title="maximize"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg></button>
+            <button class="pane-act" title="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          </div>
+        </div>
+        <div class="term-body">
+          <div><span class="prompt">PS C:\dev&gt;</span> <span class="cmd">git status --short</span></div>
+          <div><span class="out">&nbsp;&nbsp;M&nbsp;&nbsp;src/renderer/app.css</span></div>
+          <div><span class="out">&nbsp;??&nbsp;&nbsp;design/redesign-c1.html</span></div>
+          <div><span class="dim">&nbsp;</span></div>
+          <div><span class="prompt">PS C:\dev&gt;</span> <span class="cmd">npm run test</span></div>
+          <div><span class="out">&nbsp;&nbsp;✓ 37 passed</span></div>
+          <div><span class="out">&nbsp;&nbsp;✓ 72 passed</span></div>
+          <div><span class="dim">&nbsp;</span></div>
+          <div><span class="prompt">PS C:\dev&gt;</span> <span class="cursor"></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span class="sb-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="3"/></svg> PowerShell</span>
+    <span class="sb-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="5"/></svg> prod-web-01</span>
+    <span class="sb-right">
+      <span class="sb-chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> 2</span>
+      <span>UTF-8</span>
+    </span>
+  </div>
+
+  <!-- SSH 编辑面板 -->
+  <div class="float">
+    <div class="float-head"><h3>添加 SSH 连接</h3></div>
+    <div class="mtabbar">
+      <div class="mtab active">连接</div>
+      <div class="mtab">登录脚本</div>
+    </div>
+    <div class="float-body">
+      <div class="frow2">
+        <div class="frow"><label>名称</label><input class="finput" placeholder="我的服务器"></div>
+        <div class="frow"><label>分组</label><input class="finput" placeholder="生产环境"></div>
+      </div>
+      <div class="frow2">
+        <div class="frow"><label>主机地址</label><input class="finput" value="prod-web-01.corp"></div>
+        <div class="frow"><label>端口</label><input class="finput" value="22"></div>
+      </div>
+      <div class="trow">
+        <div><div class="tlabel">SFTP 跟随终端目录</div><div class="tdesc">开启后 SFTP 自动进入终端当前目录</div></div>
+        <div class="toggle on"></div>
+      </div>
+      <div class="trow">
+        <div><div class="tlabel">连接时清空终端</div><div class="tdesc">重连时保留之前的终端内容</div></div>
+        <div class="toggle"></div>
+      </div>
+    </div>
+    <div class="float-foot">
+      <button class="fbtn ghost">取消</button>
+      <button class="fbtn primary">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="tokens">
+  <div class="tk"><span class="sw" style="background:#22262f"></span> pane <b>#22262f</b></div>
+  <div class="tk"><span class="sw" style="background:#171a21"></span> 底座 <b>#171a21</b></div>
+  <div class="tk"><span class="sw" style="background:#262b35"></span> 浮层 <b>#262b35</b></div>
+  <div class="tk">染色 <b>rgba(97,175,239,0.16)</b></div>
+  <div class="tk">主按钮 <b>#61afef / 深字</b></div>
+  <div class="tk">分割线 <b>0 条</b></div>
+  <div class="tk">圆角 <b>10 / 14 / 16 / 18px</b></div>
+</div>
+</body>
+</html>

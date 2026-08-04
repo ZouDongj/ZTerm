@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Theme Separation Preview · 主题分离感预览</title>
+<style>
+/* ═══════════════════════════════════════════════════════════
+   主题分离感预览（Design C1v2-A · 单层结构）
+   pane = 终端主题色（保持现状结构），切换窗口底色对比分离感
+   ═══════════════════════════════════════════════════════════ */
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d0f14;display:flex;flex-direction:column;align-items:center;min-height:100vh;font-family:'Segoe UI Variable','Segoe UI',system-ui,sans-serif;padding:32px 24px;gap:16px}
+h1{font-size:15px;font-weight:600;color:#e9edf3;letter-spacing:0.2px}
+p.sub{font-size:12px;color:rgba(233,237,243,0.45);margin-top:-12px}
+
+/* ── 控制条 ── */
+.controls{display:flex;flex-direction:column;gap:12px;align-items:center}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center}
+.row-label{font-size:11px;color:rgba(233,237,243,0.45);margin-right:4px;font-weight:500}
+.chip{display:flex;align-items:center;gap:7px;padding:5px 12px;border-radius:14px;border:1px solid transparent;cursor:pointer;font-size:11.5px;color:rgba(233,237,243,0.6);background:rgba(255,255,255,0.04);transition:all 0.15s;font-family:inherit}
+.chip:hover{background:rgba(255,255,255,0.08);color:#fff}
+.chip.active{border-color:rgba(97,175,239,0.55);background:rgba(97,175,239,0.16);color:#cfe3f6}
+.chip .sw{width:13px;height:13px;border-radius:4px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.15)}
+.chip .fav{font-size:9px;color:#ffb74d;margin-left:2px}
+.winchip .sw{width:13px;height:13px;border-radius:50%}
+
+/* ── 判定条 ── */
+.verdict{display:flex;align-items:center;gap:10px;font-size:12px;color:rgba(233,237,243,0.6)}
+.verdict b{font-weight:600}
+.v-good{color:#8bd79a}.v-mid{color:#e5c07b}.v-bad{color:#f19b92}
+.dl{font-family:'Cascadia Code',Consolas,monospace;font-size:11.5px;color:rgba(233,237,243,0.5)}
+
+/* ── 窗口（Design C1v2-A 骨架，pane 单层 = 主题色）── */
+.window{width:760px;height:440px;border-radius:16px;overflow:hidden;position:relative;display:flex;flex-direction:column;
+  background:var(--winbg,#12141b);transition:background 0.25s;
+  box-shadow:0 0 0 1px rgba(255,255,255,0.05),0 24px 72px rgba(0,0,0,0.6)}
+.window::before{content:'';position:absolute;inset:0;pointer-events:none;background:radial-gradient(120% 80% at 50% 0%,rgba(255,255,255,0.025) 0%,transparent 60%);transition:opacity 0.25s}
+.titlebar{height:40px;display:flex;align-items:center;padding-left:12px;flex-shrink:0;position:relative}
+.logo{width:22px;height:22px;border-radius:7px;background:rgba(97,175,239,0.16);display:flex;align-items:center;justify-content:center;margin-right:10px}
+.logo svg{width:13px;height:13px}
+.tabbar{display:flex;align-items:center;gap:2px;flex:1;min-width:0}
+.tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12px;color:rgba(233,237,243,0.45);border-radius:16px;white-space:nowrap;transition:all 0.15s}
+.tab.active{background:rgba(97,175,239,0.24);color:#eaf3fc;font-weight:600}
+.tab-dot{width:7px;height:7px;border-radius:50%}
+.tab-dot.green{background:#7dd58a}.tab-dot.orange{background:#ffb74d}
+.win-btn{width:42px;border:none;background:transparent;color:rgba(233,237,243,0.5);display:flex;align-items:center;justify-content:center;cursor:pointer}
+.win-btn.close:hover{background:#c42b1c;color:#fff}
+.win-btn svg{width:10px;height:10px}
+.main{flex:1;display:flex;margin:2px 12px 8px;position:relative}
+.split{flex:1;display:flex;padding:8px;gap:10px;min-height:0}
+
+/* pane：单层，背景 = 主题色（保持现状结构） */
+.pane{flex:1;border-radius:12px;background:var(--pbg,#282c34);display:flex;flex-direction:column;overflow:hidden;min-width:0;
+  box-shadow:0 6px 20px rgba(0,0,0,0.4),0 2px 6px rgba(0,0,0,0.35),inset 0 1px 0 rgba(255,255,255,0.05);transition:background 0.25s}
+.pane:last-child{flex:0 0 36%}
+.pane-header{height:30px;display:flex;align-items:center;padding:0 10px;gap:7px;font-size:10.5px;color:rgba(233,237,243,0.5);font-weight:500;flex-shrink:0}
+.pane-header .dot{width:6px;height:6px;border-radius:50%}
+.pane-header .dot.orange{background:#ffb74d;box-shadow:0 0 8px rgba(255,183,77,0.5)}
+.pane-header .dot.green{background:#7dd58a}
+.pane-header .label{flex:1;display:flex;align-items:center;gap:6px}
+.term-body{flex:1;padding:10px 14px 12px;font-family:'Cascadia Code','JetBrains Mono',Consolas,monospace;font-size:12px;line-height:1.8;color:var(--pfg,#abb2bf);overflow:hidden;transition:color 0.25s}
+.prompt{color:var(--pblue,#61afef);font-weight:500}
+.info{color:var(--pgreen,#98c379)}
+.err{color:var(--pred,#e06c75)}
+.dim{opacity:0.55}
+.cursor{display:inline-block;width:7px;height:15px;background:#fff;vertical-align:text-bottom;animation:blink 1.1s step-end infinite;border-radius:1px}
+@keyframes blink{50%{opacity:0}}
+
+/* ── 图例 ── */
+.legend{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+.lg{display:flex;align-items:center;gap:6px;font-size:11px;color:rgba(233,237,243,0.55)}
+.lg .sw{width:12px;height:12px;border-radius:3px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.12)}
+.lg b{color:#e9edf3;font-weight:500}
+
+.note{font-size:11px;color:rgba(233,237,243,0.35);max-width:720px;text-align:center;line-height:1.7}
+</style>
+</head>
+<body>
+<h1>主题分离感预览</h1>
+<p class="sub">pane 保持单层结构（= 终端主题色）· 切换主题与窗口底色，看分离感够不够</p>
+
+<div class="controls">
+  <div class="row">
+    <span class="row-label">终端主题</span>
+    <div id="theme-chips"></div>
+  </div>
+  <div class="row">
+    <span class="row-label">窗口底色</span>
+    <div id="win-chips"></div>
+  </div>
+</div>
+
+<div class="verdict">
+  当前组合：<span id="v-name"></span> · 窗口 <span id="v-win"></span> · 色差 ΔL=<span id="v-dl" class="dl"></span>
+  <b id="v-verdict"></b>
+</div>
+
+<div class="window" id="win">
+  <div class="titlebar">
+    <div class="logo"><svg viewBox="0 0 512 512" fill="#61afef"><rect x="96" y="96" width="56" height="56" rx="12"/><rect x="224" y="96" width="56" height="56" rx="12"/><rect x="352" y="96" width="56" height="56" rx="12"/><rect x="224" y="224" width="56" height="56" rx="12"/><rect x="96" y="352" width="56" height="56" rx="12"/><rect x="224" y="352" width="56" height="56" rx="12"/><rect x="352" y="352" width="56" height="56" rx="12" fill="#7ee787"/></svg></div>
+    <div class="tabbar">
+      <div class="tab"><span class="tab-dot green"></span>PowerShell</div>
+      <div class="tab active"><span class="tab-dot orange"></span>prod-web-01</div>
+      <div class="tab">设置</div>
+    </div>
+    <button class="win-btn"><svg viewBox="0 0 12 12"><line x1="6" y1="0" x2="6" y2="12" stroke="currentColor"/></svg></button>
+    <button class="win-btn"><svg viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" fill="none" stroke="currentColor"/></svg></button>
+    <button class="win-btn close"><svg viewBox="0 0 12 12"><line x1="1" y="1" x2="11" y2="11" stroke="currentColor"/><line x1="11" y1="1" x2="1" y2="11" stroke="currentColor"/></svg></button>
+  </div>
+  <div class="main">
+    <div class="split">
+      <div class="pane">
+        <div class="pane-header"><span class="dot orange"></span><span class="label">prod-web-01 · /var/log</span></div>
+        <div class="term-body">
+          <div><span class="prompt">root@web:/var/log$</span> <span style="color:var(--pfg)">tail -f app.log</span></div>
+          <div><span class="info">10:23:11</span> <span>INFO  request 200 GET /api/health 12ms</span></div>
+          <div><span class="info">10:23:12</span> <span>INFO  request 200 GET /api/users 34ms</span></div>
+          <div><span class="err">10:23:13 ERROR request 500 POST /api/pay</span></div>
+          <div><span class="info">10:23:14</span> <span>INFO  db.pool  connection acquired</span></div>
+          <div><span class="dim">… waiting for new log entries</span></div>
+          <div><span class="prompt">root@web:/var/log$</span> <span class="cursor"></span></div>
+        </div>
+      </div>
+      <div class="pane">
+        <div class="pane-header"><span class="dot green"></span><span class="label">PowerShell · C:\dev</span></div>
+        <div class="term-body">
+          <div><span class="prompt">PS C:\dev&gt;</span> <span style="color:var(--pfg)">npm test</span></div>
+          <div><span class="info">✓ 37 passed</span></div>
+          <div><span class="info">✓ 72 passed</span></div>
+          <div>&nbsp;</div>
+          <div><span class="prompt">PS C:\dev&gt;</span> <span class="cursor"></span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="legend">
+  <div class="lg"><span class="sw" id="lg-win" style="background:#12141b"></span> 窗口（可切换）</div>
+  <div class="lg"><span class="sw" id="lg-pane" style="background:#282c34"></span> pane = 终端主题色</div>
+</div>
+
+<div class="note">
+  ΔL 为相对亮度差（WCAG 公式）。<b>ΔL ≥ 0.08</b> 分离明显；<b>0.04~0.08</b> 尚可（靠阴影/内高光兜底）；<b>&lt; 0.04</b> 会糊。
+  你常用的 One Dark Pro / One Half Dark / Snazzy 底色都在 #282c34 一带，与 #12141b 窗口的 ΔL 约 0.12——分离充足。
+  真正危险的是 Ayu Dark / Campbell / Tango Dark（接近纯黑），那时只能靠卡片阴影和头部色条兜底。
+</div>
+
+<script>
+// 真实配色（与 src/renderer/state.js 的 TERMINAL_SCHEMES 一致）
+const SCHEMES = [
+  { key:'onedark',  name:'One Dark Pro',      bg:'#282c34', fg:'#abb2bf', blue:'#61afef', green:'#98c379', red:'#e06c75', fav:true },
+  { key:'onehalf',  name:'One Half Dark',     bg:'#282c34', fg:'#dcdfe4', blue:'#61afef', green:'#98c379', red:'#e06c75', fav:true },
+  { key:'snazzy',   name:'Snazzy',            bg:'#282a36', fg:'#eff0eb', blue:'#57c7ff', green:'#5af78e', red:'#ff5c57', fav:true },
+  { key:'tokyonight',name:'Tokyo Night',      bg:'#1a1b26', fg:'#c0caf5', blue:'#7aa2f7', green:'#9ece6a', red:'#f7768e' },
+  { key:'catppuccin',name:'Catppuccin Mocha', bg:'#1e1e2e', fg:'#cdd6f4', blue:'#89b4fa', green:'#a6e3a1', red:'#f38ba8' },
+  { key:'gruvbox',  name:'Gruvbox Dark',      bg:'#282828', fg:'#ebdbb2', blue:'#458588', green:'#98971a', red:'#cc241d' },
+  { key:'nord',     name:'Nord',              bg:'#2e3440', fg:'#d8dee9', blue:'#81a1c1', green:'#a3be8c', red:'#bf616a' },
+  { key:'monokai',  name:'Monokai',           bg:'#272822', fg:'#f8f8f2', blue:'#66d9ef', green:'#a6e22e', red:'#f92672' },
+  { key:'ayu',      name:'Ayu Dark',          bg:'#0a0e14', fg:'#b3b1ad', blue:'#53bdfa', green:'#91b362', red:'#ea6c73' },
+  { key:'kanagawa', name:'Kanagawa Wave',     bg:'#1f1f28', fg:'#dcd7ba', blue:'#7e9cd8', green:'#98bb6c', red:'#e46876' },
+  { key:'dracula',  name:'Dracula',           bg:'#282a36', fg:'#f8f8f2', blue:'#6272a4', green:'#50fa7b', red:'#ff5555' },
+  { key:'solarized',name:'Solarized Dark',    bg:'#002b36', fg:'#839496', blue:'#268bd2', green:'#859900', red:'#dc322f' },
+  { key:'campbell', name:'Campbell',          bg:'#0c0c0c', fg:'#cccccc', blue:'#3b78ff', green:'#16c60c', red:'#e74856' },
+  { key:'campbellps',name:'Campbell PowerShell',bg:'#012456',fg:'#cccccc', blue:'#3b78ff', green:'#16c60c', red:'#e74856' },
+  { key:'tango',    name:'Tango Dark',        bg:'#000000', fg:'#d3d7cf', blue:'#3465a4', green:'#4e9a06', red:'#cc0000' },
+  { key:'darkplus', name:'Dark+',             bg:'#1e1e1e', fg:'#cccccc', blue:'#569cd6', green:'#6a9955', red:'#f48771' },
+  { key:'vscodedeep',name:'VSCode Dark Modern',bg:'#1f1f1f',fg:'#cccccc', blue:'#569cd6', green:'#6a9955', red:'#f48771' },
+];
+const WINDOWS = [
+  { key:'a',  name:'Design A 深底', bg:'#12141b' },
+  { key:'mid',name:'中间色',       bg:'#171a21' },
+  { key:'cur',name:'现状 #21252b',  bg:'#21252b' },
+];
+let curTheme = SCHEMES[0], curWin = WINDOWS[0];
+
+// WCAG 相对亮度
+function lum(hex) {
+  const c = hex.replace('#','');
+  const rgb = [0,2,4].map(i => parseInt(c.substr(i,2),16)/255).map(v => v <= 0.03928 ? v/12.92 : Math.pow((v+0.055)/1.055, 2.4));
+  return 0.2126*rgb[0] + 0.7152*rgb[1] + 0.0722*rgb[2];
+}
+
+function apply() {
+  const win = document.getElementById('win');
+  win.style.setProperty('--winbg', curWin.bg);
+  win.style.setProperty('--pbg', curTheme.bg);
+  win.style.setProperty('--pfg', curTheme.fg);
+  win.style.setProperty('--pblue', curTheme.blue);
+  win.style.setProperty('--pgreen', curTheme.green);
+  win.style.setProperty('--pred', curTheme.red);
+  document.getElementById('lg-win').style.background = curWin.bg;
+  document.getElementById('lg-pane').style.background = curTheme.bg;
+  const dl = Math.abs(lum(curTheme.bg) - lum(curWin.bg));
+  document.getElementById('v-name').textContent = curTheme.name;
+  document.getElementById('v-win').textContent = curWin.name + ' ' + curWin.bg;
+  document.getElementById('v-dl').textContent = dl.toFixed(3);
+  const v = document.getElementById('v-verdict');
+  if (dl >= 0.08) { v.textContent = '分离明显 ✓'; v.className = 'v-good'; }
+  else if (dl >= 0.04) { v.textContent = '尚可（阴影兜底）'; v.className = 'v-mid'; }
+  else { v.textContent = '偏弱，会糊'; v.className = 'v-bad'; }
+}
+
+// 渲染 chips
+const tc = document.getElementById('theme-chips');
+SCHEMES.forEach(s => {
+  const el = document.createElement('div');
+  el.className = 'chip' + (s === curTheme ? ' active' : '');
+  el.innerHTML = '<span class="sw" style="background:' + s.bg + '"></span>' + s.name + (s.fav ? '<span class="fav">常用</span>' : '');
+  el.onclick = () => { curTheme = s; document.querySelectorAll('#theme-chips .chip').forEach(c => c.classList.remove('active')); el.classList.add('active'); apply(); };
+  tc.appendChild(el);
+});
+const wc = document.getElementById('win-chips');
+WINDOWS.forEach(w => {
+  const el = document.createElement('div');
+  el.className = 'chip winchip' + (w === curWin ? ' active' : '');
+  el.innerHTML = '<span class="sw" style="background:' + w.bg + '"></span>' + w.name;
+  el.onclick = () => { curWin = w; document.querySelectorAll('#win-chips .chip').forEach(c => c.classList.remove('active')); el.classList.add('active'); apply(); };
+  wc.appendChild(el);
+});
+apply();
+</script>
+</body>
+</html>
