@@ -1496,6 +1496,77 @@ pub fn save_appearance(args: Vec<Value>) -> Result<(), String> {
     Ok(())
 }
 
+// ── Window state persistence（与 Tabby 一致：记住上次的位置/大小/最大化状态）──
+
+#[derive(Clone)]
+pub struct WindowState {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub maximized: bool,
+}
+
+pub fn load_window_state() -> Option<WindowState> {
+    let config = load_config();
+    let w = config.get("window")?;
+    Some(WindowState {
+        x: w.get("x")?.as_i64()? as i32,
+        y: w.get("y")?.as_i64()? as i32,
+        width: w.get("width")?.as_i64()? as u32,
+        height: w.get("height")?.as_i64()? as u32,
+        maximized: w
+            .get("maximized")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+pub fn save_window_state(state: &WindowState) {
+    let _guard = CONFIG_WRITE_LOCK.lock();
+    let mut config = load_config();
+    if let Value::Object(ref mut c) = config {
+        c.insert(
+            "window".into(),
+            json!({
+                "x": state.x,
+                "y": state.y,
+                "width": state.width,
+                "height": state.height,
+                "maximized": state.maximized,
+            }),
+        );
+    }
+    save_config(&config);
+}
+
+// 窗口位置是否落在任一显示器的可见区域内（防止显示器配置变化后窗口"消失"，
+// 恢复位置前检查；无法枚举显示器时保守视为可见）
+pub fn window_position_visible(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    window: &tauri::WebviewWindow,
+) -> bool {
+    if let Ok(monitors) = window.available_monitors() {
+        if monitors.is_empty() {
+            return true;
+        }
+        let cx = x + (width as i32) / 2;
+        let cy = y + (height as i32) / 2;
+        for m in monitors {
+            let r = m.position();
+            let s = m.size();
+            if cx >= r.x && cx < r.x + s.width as i32 && cy >= r.y && cy < r.y + s.height as i32 {
+                return true;
+            }
+        }
+        return false;
+    }
+    true
+}
+
 // ── Window control commands ──
 
 #[tauri::command]
@@ -2901,7 +2972,9 @@ mod tests {
         );
         // 正常字体保留，@ 前缀与 System 类字体全部排除
         assert!(!filtered.iter().any(|f| f.starts_with('@')));
-        assert!(!filtered.iter().any(|f| matches!(f.as_str(), "System" | "Terminal")));
+        assert!(!filtered
+            .iter()
+            .any(|f| matches!(f.as_str(), "System" | "Terminal")));
     }
 
     #[test]

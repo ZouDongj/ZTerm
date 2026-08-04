@@ -92,14 +92,37 @@ async fn main() {
             .enable_clipboard_access()
             .build()?;
 
+            // 恢复上次关闭时的窗口状态（位置/大小/最大化，与 Tabby 一致）
+            if let Some(ws) = zterm::load_window_state() {
+                if zterm::window_position_visible(ws.x, ws.y, ws.width, ws.height, &window) {
+                    let _ = window.set_position(tauri::PhysicalPosition::new(ws.x, ws.y));
+                    let _ = window.set_size(tauri::PhysicalSize::new(ws.width, ws.height));
+                }
+                if ws.maximized {
+                    let _ = window.maximize();
+                }
+            }
+
             #[cfg(debug_assertions)]
             {
                 window.open_devtools();
             }
-            // 关闭前通知 renderer 保存状态
+            // 关闭前通知 renderer 保存状态；同时保存窗口状态（位置/大小/最大化）
             let handle = app.handle().clone();
+            let win_for_state = window.clone();
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    if let (Ok(pos), Ok(size)) =
+                        (win_for_state.outer_position(), win_for_state.outer_size())
+                    {
+                        zterm::save_window_state(&zterm::WindowState {
+                            x: pos.x,
+                            y: pos.y,
+                            width: size.width,
+                            height: size.height,
+                            maximized: win_for_state.is_maximized().unwrap_or(false),
+                        });
+                    }
                     let _ = handle.emit("app-before-quit", json!({}));
                 }
             });
