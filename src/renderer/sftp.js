@@ -506,11 +506,6 @@ ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd }) => {
     }
 });
 
-// 诊断：followCwd 实际路径（wrapper=RC wrapper / injection=打字注入），排查 SFTP 跟随问题用
-ipcRenderer.on('ssh-followcwd-mode', (event, m) => {
-    console.log(`[followcwd] tab=${m.tabId} mode=${m.mode}`);
-});
-
 // ── SFTP 拖拽上传（拖文件到面板即上传到当前远程目录）──
 (() => {
     const win = document.querySelector('#overlay-sftp .sftp-window');
