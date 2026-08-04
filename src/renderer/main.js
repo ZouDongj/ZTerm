@@ -94,6 +94,16 @@ ipcRenderer.on('app-before-quit', async () => {
     ipcRenderer.send('quit-ready');
 });
 
+// 启动动画：窗口状态（位置/大小/最大化）恢复并显示后，主进程 emit 此事件，
+// 触发 .window 的淡入动画（克制的 220ms，避免启动突兀）
+ipcRenderer.on('window-shown', () => {
+    const winEl = document.querySelector('.window');
+    if (winEl && !winEl.classList.contains('win-in')) {
+        winEl.classList.add('win-in');
+        setTimeout(() => winEl.classList.remove('win-in'), 400);
+    }
+});
+
 // ── Settings ──
 // ── Init ──
 (async () => {

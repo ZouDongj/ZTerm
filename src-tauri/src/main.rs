@@ -107,6 +107,8 @@ async fn main() {
             }
             // 状态就绪后显示窗口（最大化/尺寸已应用，无闪现）
             let _ = window.show();
+            // 通知 renderer 播放启动动画（窗口此时已可见）
+            let _ = app.emit("window-shown", json!({}));
 
             #[cfg(debug_assertions)]
             {
