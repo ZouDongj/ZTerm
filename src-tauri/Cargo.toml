@@ -1,6 +1,6 @@
 [package]
 name = "zterm"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 description = "ZTerm - A modern terminal emulator for Windows with SSH management"
 authors = ["zoudongjie <zoudongjie96@163.com>"]
