@@ -1,6 +1,8 @@
 /* ZTerm - 全部样式（拆自 renderer.html <style>，未改） */
 :root{--accent-rgb:97,175,239;--accent-contrast:#1d1b20;--term-bg:#282c34}
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+/* 表单控件默认不继承字体（textarea 是 UA 默认 monospace），统一跟随界面字体 */
+textarea{font-family:inherit}
 html,body{background:#21252b;margin:0;padding:0;overflow:hidden;width:100vw;height:100vh}
 body{display:flex;justify-content:center;align-items:center;min-height:100vh;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
 .window{width:100vw;height:100vh;background:#21252b;display:flex;flex-direction:column;overflow:hidden}
@@ -43,7 +45,7 @@ body.tab-dragging{user-select:none}
 .tab-context-menu{position:fixed;background:#282c34;border:1px solid rgba(var(--accent-rgb),0.08);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,0.4);z-index:200;overflow:hidden;min-width:180px;padding:4px 0}
 .tab-context-item{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:8px 14px;font-size:12px;color:#abb2bf;cursor:pointer;transition:background 0.1s}
 .tab-context-item:hover{background:rgba(var(--accent-rgb),0.08)}
-.tab-context-shortcut{font-size:10px;font-family:'JetBrains Mono',monospace;color:rgba(171,178,191,0.45);background:rgba(255,255,255,0.04);padding:2px 7px;border-radius:4px;flex-shrink:0}
+.tab-context-shortcut{font-size:10px;font-family:inherit;color:rgba(171,178,191,0.45);background:rgba(255,255,255,0.04);padding:2px 7px;border-radius:4px;flex-shrink:0}
 .tab.bell-flash{animation:bellFlash 0.6s ease-in-out 3}
 /* 关闭动画：tab 元素从 180px 缩小到 0 + 淡出 + 间距归零（其他 tab 平滑填充） */
 .tab.tab-exit{max-width:0;padding-left:0;padding-right:0;margin-left:-2px;margin-right:0;opacity:0;overflow:hidden;pointer-events:none;transition:max-width 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),padding 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),margin-left 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),margin-right 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),opacity 0.2s cubic-bezier(0.05, 0.7, 0.1, 1)}
@@ -150,7 +152,7 @@ body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 /* ── Search bar ── */
 .search-bar{position:absolute;top:0;right:0;display:flex;align-items:center;gap:8px;padding:6px 14px;background:#282c34;border-radius:0 0 0 12px;border-left:1px solid rgba(var(--accent-rgb),0.08);border-bottom:1px solid rgba(var(--accent-rgb),0.08);z-index:8;opacity:0;pointer-events:none;transition:opacity 0.2s}
 .search-bar.open{opacity:1;pointer-events:auto}
-.search-bar input{background:transparent;border:none;color:#abb2bf;font-size:12.5px;font-family:'JetBrains Mono',monospace;outline:none;width:160px}
+.search-bar input{background:transparent;border:none;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none;width:160px}
 .search-bar input::placeholder{color:rgba(171,178,191,0.3)}
 .search-bar .count{font-size:11px;color:rgba(171,178,191,0.3);min-width:28px}
 .search-bar button{background:none;border:none;color:rgba(171,178,191,0.35);cursor:pointer;font-size:13px;padding:2px 6px;border-radius:4px;transition:all 0.1s}
@@ -238,10 +240,10 @@ body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 .color-picker-hue{width:100%;height:12px;border-radius:6px;cursor:pointer;position:relative;margin-bottom:12px;background:linear-gradient(to right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)}
 .color-picker-hue-dot{position:absolute;top:50%;width:16px;height:16px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 4px rgba(0,0,0,0.5);transform:translate(-50%,-50%);pointer-events:none}
 .color-picker-rgb{display:flex;gap:8px;margin-bottom:12px;width:100%}
-.color-picker-rgb input{flex:1;min-width:0;background:rgba(var(--accent-rgb),0.06);border:1.5px solid transparent;border-radius:8px;padding:8px 12px;color:#abb2bf;font-size:12.5px;font-family:'JetBrains Mono',monospace;outline:none;text-align:center;box-sizing:border-box}
+.color-picker-rgb input{flex:1;min-width:0;background:rgba(var(--accent-rgb),0.06);border:1.5px solid transparent;border-radius:8px;padding:8px 12px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none;text-align:center;box-sizing:border-box}
 .color-picker-rgb input:focus{background:rgba(var(--accent-rgb),0.1);border-color:rgba(var(--accent-rgb),0.25)}
 .color-picker-hex{display:flex;gap:8px;margin-bottom:12px}
-.color-picker-hex input{flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid transparent;border-radius:8px;padding:8px 12px;color:#abb2bf;font-size:12.5px;font-family:'JetBrains Mono',monospace;outline:none}
+.color-picker-hex input{flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid transparent;border-radius:8px;padding:8px 12px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none}
 .color-picker-hex input:focus{background:rgba(var(--accent-rgb),0.1);border-color:rgba(var(--accent-rgb),0.25)}
 .color-picker-actions{display:flex;gap:8px;justify-content:flex-end}
 .color-picker-actions button{padding:6px 14px;border-radius:6px;font-size:12px;cursor:pointer;border:none;font-family:inherit;transition:all 0.15s}
@@ -269,7 +271,7 @@ body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 .kb-table th,.kb-table td{padding:10px 14px;text-align:left;font-size:12.5px}
 .kb-table th{color:rgba(171,178,191,0.35);font-weight:550;font-size:11px;border-bottom:1px solid rgba(var(--accent-rgb),0.06)}
 .kb-table td{color:#abb2bf;border-bottom:1px solid rgba(var(--accent-rgb),0.03)}
-.kb-table td kbd{background:rgba(var(--accent-rgb),0.08);padding:3px 8px;border-radius:6px;color:rgba(171,178,191,0.6);font-family:'JetBrains Mono',monospace;font-size:11px}
+.kb-table td kbd{background:rgba(var(--accent-rgb),0.08);padding:3px 8px;border-radius:6px;color:rgba(171,178,191,0.6);font-family:inherit;font-size:11px}
 .kb-table tr:hover td{background:rgba(var(--accent-rgb),0.03)}
 .shortcut-edit-btn,.shortcut-reset-btn{font-size:11px;padding:3px 10px;border-radius:12px}
 .shortcut-reset-btn{margin-left:6px;padding:3px 8px}
@@ -298,7 +300,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .menu-item.disabled:hover{background:none;color:rgba(171,178,191,0.78)}
 .menu-icon{font-size:15px;width:18px;text-align:center;flex-shrink:0;line-height:1}
 .menu-label{flex:1;min-width:0;white-space:nowrap;font-weight:450}
-.menu-shortcut{font-size:11px;font-family:'JetBrains Mono',monospace;color:rgba(171,178,191,0.5);background:rgba(255,255,255,0.04);padding:2px 7px;border-radius:5px;flex-shrink:0;line-height:1.4}
+.menu-shortcut{font-size:11px;font-family:inherit;color:rgba(171,178,191,0.5);background:rgba(255,255,255,0.04);padding:2px 7px;border-radius:5px;flex-shrink:0;line-height:1.4}
 
 /* ── Overlay system ── */
 .overlay{position:fixed;inset:0;z-index:30;display:none;align-items:center;justify-content:center;background:rgba(20,18,24,0.62);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
@@ -323,7 +325,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .qc-item:hover{background:rgba(var(--accent-rgb),0.04)}
 .qc-item[data-selected]{background:rgba(var(--accent-rgb),0.08);border-left-color:rgb(var(--accent-rgb))}
 .qc-item-name{width:120px;font-size:13px;color:#abb2bf;font-weight:500;flex-shrink:0}
-.qc-item-cmd{flex:1;min-width:0;font-size:11px;color:rgba(171,178,191,0.35);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace}
+.qc-item-cmd{flex:1;min-width:0;font-size:11px;color:rgba(171,178,191,0.35);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:inherit}
 .qc-item-group{font-size:10px;padding:2px 6px;border-radius:6px;background:rgba(var(--accent-rgb),0.08);color:rgba(171,178,191,0.4);flex-shrink:0;margin-left:8px}
 .qc-footer{display:flex;align-items:center;gap:12px;padding:10px 16px;font-size:10px;color:rgba(171,178,191,0.3);flex-shrink:0}
 /* Command Palette（比 QC 更高，容纳全部 15 项操作） */
@@ -362,7 +364,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .sftp-breadcrumb span:hover{background:rgba(var(--accent-rgb),0.08);color:#abb2bf}
 .sftp-breadcrumb .sep{color:rgba(171,178,191,0.2);cursor:default}
 .sftp-breadcrumb .sep:hover{background:none;color:rgba(171,178,191,0.2)}
-.sftp-path-input{flex:1;width:100%;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12px;font-family:'JetBrains Mono',monospace;outline:none}
+.sftp-path-input{flex:1;width:100%;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12px;font-family:inherit;outline:none}
 .sftp-actions{display:flex;gap:4px;flex-shrink:0;align-items:center}
 .sftp-actions button{width:26px;height:26px;border-radius:6px;border:none;background:transparent;color:rgba(171,178,191,0.3);cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all 0.15s;line-height:1;padding:0}
 .sftp-actions button:hover{background:rgba(var(--accent-rgb),0.1);color:#abb2bf}
