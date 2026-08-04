@@ -832,13 +832,9 @@ async fn detect_shell(sftp: &russh_sftp::client::SftpSession, username: &str) ->
     None
 }
 
-/// Prepare followCwd RC wrapper via SFTP. Returns exec command (bash/zsh) or None to fall back.
-async fn prepare_cwd_wrapper(
-    sftp: &russh_sftp::client::SftpSession,
-    username: &str,
-) -> Option<String> {
-    let shell = detect_shell(sftp, username).await?;
-    let stamp = format!("{}-{}", std::process::id(), rand_suffix());
+/// 生成 followCwd RC wrapper 文件（纯函数，便于单测）。
+/// 返回 (文件列表 [(远程路径, 内容)], exec 命令)；非 bash/zsh 返回 None。
+fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>, String)> {
     if shell.ends_with("/bash") {
         let rc_path = format!("/tmp/.zterm-rc-{}", stamp);
         let rc = format!(
@@ -848,13 +844,12 @@ async fn prepare_cwd_wrapper(
              rm -f {}\n",
             rc_path
         );
-        match sftp_write_file(sftp, &rc_path, rc.as_bytes()).await {
-            Ok(_) => Some(format!("exec bash --rcfile {} -i", rc_path)),
-            Err(_) => None,
-        }
+        Some((
+            vec![(rc_path.clone(), rc.into_bytes())],
+            format!("exec bash --rcfile {} -i", rc_path),
+        ))
     } else if shell.ends_with("/zsh") {
         let dir = format!("/tmp/.zterm-zdot-{}", stamp);
-        let _ = sftp.create_dir(&dir).await;
         let zshrc = format!(
             "[ -f ~/.zshrc ] && . ~/.zshrc\n\
              _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }}\n\
@@ -862,13 +857,41 @@ async fn prepare_cwd_wrapper(
              rm -rf {}\n",
             dir
         );
-        let zprofile = "[ -f ~/.zprofile ] && . ~/.zprofile\n";
-        let _ = sftp_write_file(sftp, &format!("{}/.zshrc", dir), zshrc.as_bytes()).await;
-        let _ = sftp_write_file(sftp, &format!("{}/.zprofile", dir), zprofile.as_bytes()).await;
-        Some(format!("exec env ZDOTDIR={} zsh -il", dir))
+        Some((
+            vec![
+                (format!("{}/.zshrc", dir), zshrc.into_bytes()),
+                (
+                    format!("{}/.zprofile", dir),
+                    b"[ -f ~/.zprofile ] && . ~/.zprofile\n".to_vec(),
+                ),
+            ],
+            format!("exec env ZDOTDIR={} zsh -il", dir),
+        ))
     } else {
         None
     }
+}
+
+/// Prepare followCwd RC wrapper via SFTP. Returns exec command (bash/zsh) or None to fall back.
+async fn prepare_cwd_wrapper(
+    sftp: &russh_sftp::client::SftpSession,
+    username: &str,
+) -> Option<String> {
+    let shell = detect_shell(sftp, username).await?;
+    let stamp = format!("{}-{}", std::process::id(), rand_suffix());
+    let (files, exec) = cwd_wrapper_files(&shell, &stamp)?;
+    for (path, content) in &files {
+        // zsh 需要先建目录
+        if let Some(dir) = path.rsplit_once('/').map(|(d, _)| d) {
+            if dir != "/tmp" {
+                let _ = sftp.create_dir(dir).await;
+            }
+        }
+        if sftp_write_file(sftp, path, content).await.is_err() {
+            return None;
+        }
+    }
+    Some(exec)
 }
 
 fn rand_suffix() -> String {
@@ -1160,6 +1183,13 @@ pub async fn ssh_connect(
     // FollowCwd typed injection: fallback when RC wrapper unavailable
     let inject = follow_cwd && exec_cmd.is_none();
     let track_cwd = follow_cwd; // OSC 7 parsing active for both rc wrapper and typed injection
+    // 诊断：记录 followCwd 实际走哪条路径（wrapper / injection / off），renderer console 可见
+    if follow_cwd {
+        let _ = app.emit(
+            "ssh-followcwd-mode",
+            json!({ "tabId": tab_id, "mode": if exec_cmd.is_some() { "wrapper" } else { "injection" } }),
+        );
+    }
                                 // 注入过滤标志：注入发送时才激活，避免吞掉登录脚本的输出
     let filtering = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let filtering_inject = Arc::clone(&filtering);
@@ -3511,6 +3541,64 @@ mod tests {
         assert_eq!(parse_osc7_cwd("plain text"), None);
         assert_eq!(parse_osc7_cwd("\x1b]7;file://host"), None, "无终止符不匹配");
         assert_eq!(parse_osc7_cwd(""), None);
+    }
+
+    #[test]
+    fn bash_rc_wrapper_end_to_end() {
+        // 用真实 bash 执行 RC wrapper（本机无 bash 则跳过）：验证生成的 rc 文件
+        // 能让 shell 输出可解析的 OSC 7 cwd。隔离 HOME 避免污染测试机用户配置。
+        let bash = ["bash", "D:/Program Files/Git/bin/bash.exe", "C:/Program Files/Git/bin/bash.exe"]
+            .iter()
+            .find(|p| {
+                std::process::Command::new(p)
+                    .arg("--version")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            });
+        let Some(bash) = bash else {
+            eprintln!("skip: no bash on this machine");
+            return;
+        };
+        let (files, exec) = cwd_wrapper_files("/bin/bash", "e2e-test").expect("bash wrapper");
+        assert_eq!(files.len(), 1);
+        assert!(exec.contains("exec bash --rcfile"), "exec 命令: {exec}");
+        let (_, rc_content) = &files[0];
+        let dir = std::env::temp_dir().join("zterm-cwd-wrapper-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let win_rc = dir.join("rcfile");
+        std::fs::write(&win_rc, rc_content).expect("write rc");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let mut child = std::process::Command::new(bash)
+            .arg("--rcfile")
+            .arg(&win_rc)
+            .arg("-i")
+            .env("HOME", &home)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn bash");
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"exit\n")
+            .expect("feed stdin");
+        let out = child.wait_with_output().expect("wait bash");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("\x1b]7;file://"),
+            "bash 未输出 OSC 7：{}",
+            text.escape_debug().take(300).collect::<String>()
+        );
+        let cwd = parse_osc7_cwd(&text).expect("解析 OSC 7 失败");
+        assert!(cwd.starts_with('/'), "cwd 应为绝对路径: {cwd}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
