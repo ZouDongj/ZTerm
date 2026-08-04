@@ -586,6 +586,7 @@ function persistSettings() {
         defaultShell: config.defaultShell,
         startupDir: config.startupDir,
         hiddenProfiles: config.hiddenProfiles,
+        qcAutoEnter: config.qcAutoEnter,
     });
 }
 

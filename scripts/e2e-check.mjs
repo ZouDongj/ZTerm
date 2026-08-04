@@ -258,6 +258,25 @@ async function main() {
     check('SSH 连接失败被处理且前端存活', sshTabAlive && appAlive && sshErrCount > 0,
       `sshTab=${sshTabAlive}, alive=${appAlive}, ssh-error 事件=${sshErrCount}`);
 
+    // 11b. 快捷命令“末尾回车自动执行”开关：UI 存在、toggle 生效、注入语义正确
+    await cdp.eval(`openSettings('quickcommands')`);
+    await sleep(1000);
+    const qcToggleExists = await cdp.eval(`!!document.getElementById('qc-auto-enter')`);
+    const qcToggleDefault = await cdp.eval(`document.getElementById('qc-auto-enter').classList.contains('on')`);
+    check('快捷命令开关存在且默认关闭', qcToggleExists && !qcToggleDefault, `exists=${qcToggleExists}, defaultOn=${qcToggleDefault}`);
+    await cdp.eval(`toggleQCAutoEnter()`);
+    await sleep(500);
+    const qcToggleOn = await cdp.eval(`document.getElementById('qc-auto-enter').classList.contains('on')`);
+    const qcSetting = await cdp.eval(`_settingsConfig.qcAutoEnter`);
+    check('开关 toggle 生效', qcToggleOn === true && qcSetting === true, `classOn=${qcToggleOn}, config=${qcSetting}`);
+    // 注入语义：关闭时剥末尾回车，开启时保留
+    const stripOff = await cdp.eval(`_settingsConfig.qcAutoEnter = false; stripTrailingNewline('echo hi\\n')`);
+    const stripOn = await cdp.eval(`_settingsConfig.qcAutoEnter = true; 'echo hi\\n'`);
+    check('注入语义：关剥开保', stripOff === 'echo hi' && stripOn === 'echo hi\n', JSON.stringify({ stripOff, stripOn }));
+    // 恢复默认（关闭）并关闭设置页
+    await cdp.eval(`_settingsConfig.qcAutoEnter = false; document.getElementById('qc-auto-enter').classList.remove('on'); closeSettingsTab()`);
+    await sleep(600);
+
     // 12. SFTP 面板：打开 → 面板可见 → 关闭
     await cdp.eval(`SFTP.open('e2e-dummy-tab')`);
     await sleep(800);

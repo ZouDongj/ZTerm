@@ -11,6 +11,12 @@ function filterQuickCommands(commands, query) {
     );
 }
 
+// “末尾回车自动执行”开关关闭时：注入前剥掉末尾一个换行（只剥一个，
+// 多行命令中间的换行保留；命令无末尾换行时原样返回）
+function stripTrailingNewline(text) {
+    return text.replace(/\n$/, '');
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { filterQuickCommands };
+    module.exports = { filterQuickCommands, stripTrailingNewline };
 }

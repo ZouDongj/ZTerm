@@ -449,6 +449,13 @@
                 <button class="btn-primary" style="font-size:11px;padding:5px 12px" onclick="openQCEdit(true)">+ 添加命令</button>
               </div>
             </div>
+            <div class="toggle-row" style="margin-bottom:10px">
+              <div class="toggle-info">
+                <div class="toggle-label">末尾回车自动执行</div>
+                <div class="toggle-desc">开启：命令末尾的回车会发送到终端（自动执行）；关闭：仅注入命令文本</div>
+              </div>
+              <div class="toggle-switch" id="qc-auto-enter" onclick="toggleQCAutoEnter()"></div>
+            </div>
             <div id="qc-commands-list"></div>
           </div>
           <!-- Shortcuts page -->
