@@ -277,6 +277,24 @@ async function main() {
     await cdp.eval(`_settingsConfig.qcAutoEnter = false; document.getElementById('qc-auto-enter').classList.remove('on'); closeSettingsTab()`);
     await sleep(600);
 
+    // 11c. 字体：枚举无 @ 竖排变体；界面字体设置项存在且应用生效
+    const fontList = await cdp.eval(`window.electron.ipcRenderer.invoke('get-system-fonts').then(f => f).catch(e => 'ERR: ' + e)`);
+    check('字体枚举可用', Array.isArray(fontList), String(fontList).slice(0, 60));
+    const atFonts = (Array.isArray(fontList) ? fontList : []).filter(f => f.startsWith('@'));
+    const systemFonts = (Array.isArray(fontList) ? fontList : []).filter(f => ['System', 'Terminal', 'Fixedsys'].includes(f));
+    check('字体列表无 @ 竖排变体/系统保留字体', atFonts.length === 0 && systemFonts.length === 0,
+      `@字体=${atFonts.length}, 保留字体=${systemFonts.length}, 总数=${Array.isArray(fontList) ? fontList.length : '?'}`);
+    await cdp.eval(`openSettings('appearance')`);
+    await sleep(1000);
+    const uiFontSelect = await cdp.eval(`!!document.getElementById('set-ui-font')`);
+    const uiFontOptions = await cdp.eval(`document.getElementById('set-ui-font')?.options.length || 0`);
+    check('界面字体设置项存在且有选项', uiFontSelect && uiFontOptions > 0, `options=${uiFontOptions}`);
+    const fontBefore = await cdp.eval(`document.body.style.fontFamily || '(css默认)'`);
+    const setResult = await cdp.eval(`document.getElementById('set-ui-font').value = "'Consolas',sans-serif"; saveAppearance(); document.body.style.fontFamily`);
+    check('界面字体选择应用生效', setResult.includes('Consolas'), `before=${fontBefore}, after=${setResult}`);
+    await cdp.eval(`_settingsConfig.uiFont = ''; applyUiFont(); closeSettingsTab()`);
+    await sleep(500);
+
     // 12. SFTP 面板：打开 → 面板可见 → 关闭
     await cdp.eval(`SFTP.open('e2e-dummy-tab')`);
     await sleep(800);

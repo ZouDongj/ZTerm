@@ -107,6 +107,7 @@ ipcRenderer.on('app-before-quit', async () => {
     loadHighlightRules();
     applyAccentColor(_settingsConfig.accentColor || '#61afef');
     applyTerminalScheme();
+    applyUiFont();
     // 顶栏菜单的快捷键提示需反映用户自定义：loadSettings 之后立刻填
     if (typeof updateMenuShortcuts === 'function') updateMenuShortcuts();
     const _winEl = document.querySelector('.window');
