@@ -304,6 +304,11 @@ async function main() {
     check('关闭跟随后面临字体行显示', uiRowShown === true, `rowShown=${uiRowShown}`);
     const setResult = await cdp.eval(`document.getElementById('set-ui-font').value = "'Consolas',sans-serif"; saveAppearance(); document.body.style.fontFamily`);
     check('界面字体选择应用生效', setResult.includes('Consolas'), `after=${setResult.slice(0, 60)}`);
+    // 输入框跟随界面字体：强调色输入框/快捷命令命令框的计算字体应含界面字体
+    const accentFont = await cdp.eval(`getComputedStyle(document.getElementById('set-accent')).fontFamily`);
+    const qcFont = await cdp.eval(`getComputedStyle(document.getElementById('qc-edit-command')).fontFamily`);
+    check('输入框跟随界面字体', accentFont.includes('Consolas') && qcFont.includes('Consolas'),
+      `accent=${accentFont.slice(0, 40)}, qc=${qcFont.slice(0, 40)}`);
     // 恢复默认（跟随开）
     await cdp.eval(`_settingsConfig.uiFollowTerminal = true; syncUiFollowUI(); applyUiFont(); closeSettingsTab()`);
     await sleep(500);
