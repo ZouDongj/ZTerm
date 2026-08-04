@@ -23,6 +23,8 @@ russh = { version = "0.60", features = ["aws-lc-rs"] }
 anyhow = "1"
 winapi = { version = "0.3", features = ["dpapi", "minwindef", "ntdef", "winbase", "wincrypt", "wingdi", "winnt", "winreg", "winuser"] }
 arboard = "3"
+# Electron safeStorage 兼容（OSCrypt AES-GCM 解密）
+aes-gcm = "0.10"
 
 # PoC 2: 验证 portable-pty 本地 shell + Tauri Channel 通信
 # russh 0.60 re-exports russh_keys as russh::key, 不需要单独依赖 russh-keys

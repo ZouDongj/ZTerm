@@ -2091,7 +2091,53 @@ fn dpapi_decrypt(data: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-// 解密已加密的密码值: dpapi:<b64> → DPAPI 解密; tauri:<b64> / 纯 b64 → base64 解码 (Electron 旧数据兼容)
+// ── Electron safeStorage (OSCrypt) 兼容 ──
+// Electron 的 safeStorage 在 Windows 上使用 Chromium OSCrypt：
+// 输出 = "v10"/"v11" 3 字节版本头 + nonce(12) + AES-256-GCM 密文；
+// AES 密钥由 DPAPI 加密后存在 Electron userData 的 Local State
+// （os_crypt.encrypted_key = base64("DPAPI" + DPAPI 密文)）。
+
+// AES-256-GCM 解密 payload（nonce 12 字节 + 密文，AAD 为空）
+fn aes_gcm_decrypt_payload(key: &[u8], payload: &[u8]) -> Option<Vec<u8>> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    if key.len() != 32 || payload.len() < 12 + 16 {
+        return None;
+    }
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(key).ok()?;
+    cipher
+        .decrypt(aes_gcm::Nonce::from_slice(&payload[..12]), &payload[12..])
+        .ok()
+}
+
+// 读取 Electron Local State 中的 OSCrypt AES key（DPAPI 解密）
+fn load_oscrypt_key() -> Option<Vec<u8>> {
+    let appdata = std::env::var("APPDATA").ok()?;
+    let path = std::path::Path::new(&appdata)
+        .join("ZTerm")
+        .join("Local State");
+    let content = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&content).ok()?;
+    let enc = v.get("os_crypt")?.get("encrypted_key")?.as_str()?;
+    let all = base64_decode_raw(enc);
+    // 前 5 字节是 "DPAPI" 标记，其余为 DPAPI 加密的 AES key
+    if all.len() < 6 || &all[..5] != b"DPAPI" {
+        return None;
+    }
+    dpapi_decrypt(&all[5..]).ok()
+}
+
+// Electron OSCrypt blob 解密（v10/v11 头 + nonce + AES-GCM）
+fn electron_oscrypt_decrypt(blob: &[u8]) -> Option<String> {
+    let key = load_oscrypt_key()?;
+    let plain = aes_gcm_decrypt_payload(&key, &blob[3..])?;
+    Some(String::from_utf8_lossy(&plain).to_string())
+}
+
+// 解密已加密的密码值，兼容三种格式：
+// 1) "dpapi:<b64>" — Tauri 当前格式（DPAPI 加密）
+// 2) Electron safeStorage（Windows = OSCrypt）："v10"/"v11" 头 + nonce + AES-GCM
+//    —— 老 Electron 用户升级后 config 里保存的密码（纯 base64，无前缀）
+// 3) 早期 Tauri 的明文 base64（"tauri:" 前缀或无前缀）
 fn decrypt_password_value(value: &str) -> Option<String> {
     if let Some(rest) = value.strip_prefix("dpapi:") {
         return dpapi_decrypt(&base64_decode_raw(rest))
@@ -2099,7 +2145,24 @@ fn decrypt_password_value(value: &str) -> Option<String> {
             .map(|plain| String::from_utf8_lossy(&plain).to_string());
     }
     let rest = value.strip_prefix("tauri:").unwrap_or(value);
-    Some(String::from_utf8_lossy(&base64_decode_raw(rest)).to_string())
+    let bytes = base64_decode_raw(rest);
+    // Electron OSCrypt 格式探测：3 字节版本头 "v10"/"v11"
+    if bytes.len() >= 3 && (&bytes[0..3] == b"v10" || &bytes[0..3] == b"v11") {
+        // 优先 AES-GCM（Local State key）；失败回退剥头 DPAPI（部分实现/早期变体）。
+        // 两者都失败不降级为明文——带版本头说明是密文，降级只会把乱码当密码
+        if let Some(plain) = electron_oscrypt_decrypt(&bytes) {
+            return Some(plain);
+        }
+        return dpapi_decrypt(&bytes[3..])
+            .ok()
+            .map(|plain| String::from_utf8_lossy(&plain).to_string());
+    }
+    // 无版本头：先试纯 DPAPI（Electron 早期 safeStorage 直接 DPAPI），
+    // 失败回退明文（早期 Tauri 的明文 base64）
+    if let Ok(plain) = dpapi_decrypt(&bytes) {
+        return Some(String::from_utf8_lossy(&plain).to_string());
+    }
+    Some(String::from_utf8_lossy(&bytes).to_string())
 }
 
 #[tauri::command]
@@ -2740,6 +2803,85 @@ mod tests {
     }
 
     #[test]
+    fn decrypt_password_plain_base64_no_prefix() {
+        // 早期 Tauri 无前缀明文 base64
+        let plain = "pw-明文-🔑";
+        let enc = base64_encode_bytes(plain.as_bytes());
+        assert_eq!(decrypt_password_value(&enc).as_deref(), Some(plain));
+    }
+
+    #[test]
+    fn decrypt_password_electron_v10_format() {
+        // Electron OSCrypt："v10" 头 + nonce(12) + AES-GCM 密文（Local State 的 AES key）
+        // 本机存在 Electron 的 Local State 时验证完整链路；否则跳过
+        let Some(key) = load_oscrypt_key() else {
+            eprintln!("skip: no Electron Local State on this machine");
+            return;
+        };
+        let plain = "electron-secret-密码";
+        let blob = build_oscrypt_blob(b"v10", &key, plain);
+        let enc = base64_encode_bytes(&blob);
+        assert_eq!(decrypt_password_value(&enc).as_deref(), Some(plain));
+    }
+
+    #[test]
+    fn decrypt_password_electron_v11_format() {
+        let Some(key) = load_oscrypt_key() else {
+            eprintln!("skip: no Electron Local State on this machine");
+            return;
+        };
+        let plain = "electron-v11-secret";
+        let blob = build_oscrypt_blob(b"v11", &key, plain);
+        let enc = base64_encode_bytes(&blob);
+        assert_eq!(decrypt_password_value(&enc).as_deref(), Some(plain));
+    }
+
+    #[test]
+    fn decrypt_password_electron_format_corrupt_not_fallback() {
+        // 带 v10 头但密文损坏：不降级为明文（避免把乱码当密码）
+        let enc = base64_encode_bytes(b"v10garbage-not-valid-cipher");
+        assert_eq!(decrypt_password_value(&enc), None);
+    }
+
+    #[test]
+    fn aes_gcm_payload_roundtrip() {
+        // 纯函数级验证：AES-256-GCM 加密 → 解密 roundtrip
+        use aes_gcm::aead::{Aead, KeyInit};
+        let key = [7u8; 32];
+        let plain = b"roundtrip payload";
+        let nonce = [1u8; 12];
+        let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).unwrap();
+        let ct = cipher
+            .encrypt(aes_gcm::Nonce::from_slice(&nonce), plain.as_slice())
+            .expect("encrypt");
+        let mut payload = nonce.to_vec();
+        payload.extend_from_slice(&ct);
+        let dec = aes_gcm_decrypt_payload(&key, &payload).expect("decrypt");
+        assert_eq!(dec, plain);
+        // 错误 key 解密失败
+        let bad_key = [8u8; 32];
+        assert!(aes_gcm_decrypt_payload(&bad_key, &payload).is_none());
+        // 非法输入
+        assert!(aes_gcm_decrypt_payload(&key, &[]).is_none());
+        assert!(aes_gcm_decrypt_payload(&[1u8; 16], &payload).is_none());
+    }
+
+    #[test]
+    fn oscrypt_key_from_local_state() {
+        // 本机存在 Electron Local State 时：DPAPI 解出的 AES key 应为 32 字节
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let ls = std::path::Path::new(&appdata)
+            .join("ZTerm")
+            .join("Local State");
+        if !ls.exists() {
+            eprintln!("skip: no Electron Local State on this machine");
+            return;
+        }
+        let key = load_oscrypt_key().expect("load oscrypt key");
+        assert_eq!(key.len(), 32);
+    }
+
+    #[test]
     fn known_hosts_id_format() {
         // known_hosts 键格式：host:port
         let id = format!("{}:{}", "example.com", 2222);
@@ -2869,6 +3011,20 @@ mod tests {
             is_regex: false,
             optional: false,
         }
+    }
+
+    // 测试辅助：构造 Electron OSCrypt blob（版本头 + nonce(12) + AES-GCM 密文）
+    fn build_oscrypt_blob(version: &[u8], key: &[u8], plaintext: &str) -> Vec<u8> {
+        use aes_gcm::aead::{Aead, KeyInit};
+        let nonce = [3u8; 12];
+        let cipher = aes_gcm::Aes256Gcm::new_from_slice(key).unwrap();
+        let ct = cipher
+            .encrypt(aes_gcm::Nonce::from_slice(&nonce), plaintext.as_bytes())
+            .unwrap();
+        let mut blob = version.to_vec();
+        blob.extend_from_slice(&nonce);
+        blob.extend_from_slice(&ct);
+        blob
     }
 
     #[test]
