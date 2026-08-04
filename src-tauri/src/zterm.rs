@@ -549,6 +549,15 @@ pub fn get_profiles(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
 
 // ── Command: pty_create (local shell, emits pty-created) ──
 
+/// 解析 OSC 7 cwd（`ESC]7;file://host/pathESC\`，见 _zt_cwd 的 printf 输出）。
+/// 纯函数便于单测；返回路径（含前导 /），未匹配返回 None。
+fn parse_osc7_cwd(text: &str) -> Option<String> {
+    let re = regex::Regex::new(r"\x1b\]7;file://[^/\x07\x1b\\]*(\/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)")
+        .ok()?;
+    let m = re.captures(text)?;
+    m.get(1).map(|g| g.as_str().to_string())
+}
+
 /// 增量 UTF-8 解码：把新字节接到 carry 上，解码出所有完整字符并返回；
 /// 块尾不完整的多字节序列（error_len 为 None）留在 carry 等下一块补齐，
 /// 避免单块 from_utf8_lossy 把跨块字符（中文/emoji 等）替换成 U+FFFD（�）。
@@ -1186,6 +1195,8 @@ pub async fn ssh_connect(
         // 跨块字符 carry：SSH channel 数据可切在 UTF-8 多字节序列中间，
         // 单块 from_utf8_lossy 会把半截字符变成 U+FFFD（�）
         let mut utf8_carry: Vec<u8> = Vec::new();
+        // OSC 7 跨块窗口：序列被数据块切开时拼接匹配
+        let mut osc7_window = String::new();
         // Inject state machine: filter output until ZTERM_INJECTED marker.
         // Filtering only activates when the injection task sets the flag.
         let mut inject_buffer = String::new();
@@ -1230,20 +1241,27 @@ pub async fn ssh_connect(
                             } else {
                                 // Parse OSC 7 for cwd tracking (active for both rc wrapper and typed injection)
                                 if track_cwd {
-                                    let re = regex::Regex::new(r"\x1b\]7;file://[^/\x07\x1b\\]*(\/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)").unwrap();
-                                    if let Some(caps) = re.captures(&text) {
-                                        if let Some(m) = caps.get(1) {
-                                            let new_cwd = m.as_str().to_string();
-                                            let changed = {
-                                                let mut c = cwd_reader.lock();
-                                                if c.as_ref() != Some(&new_cwd) {
-                                                    *c = Some(new_cwd.clone());
-                                                    true
-                                                } else { false }
-                                            };
-                                            if changed {
-                                                let _ = app2.emit("sftp-cwd-changed", json!({ "tabId": tid, "cwd": new_cwd }));
-                                            }
+                                    // OSC 7 序列可能被 SSH 数据块切开：保留上一块尾部文本拼接匹配，
+                                    // 否则跨块序列被逐块正则静默丢弃（cwd 永远跟踪不到）
+                                    osc7_window.push_str(&text);
+                                    if osc7_window.chars().count() > 1024 {
+                                        let keep = osc7_window
+                                            .char_indices()
+                                            .nth(osc7_window.chars().count() - 512)
+                                            .map(|(i, _)| i)
+                                            .unwrap_or(0);
+                                        osc7_window.drain(..keep);
+                                    }
+                                    if let Some(new_cwd) = parse_osc7_cwd(&osc7_window) {
+                                        let changed = {
+                                            let mut c = cwd_reader.lock();
+                                            if c.as_ref() != Some(&new_cwd) {
+                                                *c = Some(new_cwd.clone());
+                                                true
+                                            } else { false }
+                                        };
+                                        if changed {
+                                            let _ = app2.emit("sftp-cwd-changed", json!({ "tabId": tid, "cwd": new_cwd }));
                                         }
                                     }
                                 }
@@ -3451,6 +3469,48 @@ mod tests {
         let out = drain_utf8(&mut carry, b"");
         assert_eq!(out, "");
         assert_eq!(carry, vec![0xE4], "空输入不得动 carry");
+    }
+
+    #[test]
+    fn parse_osc7_bash_rc_wrapper_format() {
+        // bash rc wrapper：_zt_cwd() { printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "$PWD"; }
+        // 输出 = ESC]7;file://myserver/home/userESC\
+        let out = format!("\x1b]7;file://myserver/home/user\x1b\\");
+        assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/home/user"));
+        // 根目录
+        let out = format!("\x1b]7;file://myserver/\x1b\\");
+        assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/"));
+        // 带空格/特殊字符的路径
+        let out = format!("\x1b]7;file://srv/opt/my app/logs\x1b\\");
+        assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/opt/my app/logs"));
+    }
+
+    #[test]
+    fn parse_osc7_with_bel_terminator() {
+        // 部分终端/OSC 实现以 BEL 结尾
+        let out = format!("\x1b]7;file://host/var/log\x07");
+        assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/var/log"));
+    }
+
+    #[test]
+    fn parse_osc7_split_across_chunks() {
+        // 序列被 SSH 数据块切开：单块匹配必然失败，拼接窗口后必须成功
+        let head = "\x1b]7;file://myserver/home/use";
+        let tail = "r/project\x1b\\";
+        assert_eq!(parse_osc7_cwd(head), None, "半截序列单独匹配必须失败");
+        assert_eq!(parse_osc7_cwd(tail), None, "半截序列尾部单独匹配必须失败");
+        let combined = format!("{head}{tail}");
+        assert_eq!(parse_osc7_cwd(&combined).as_deref(), Some("/home/user/project"));
+        // 前有大量输出（大文本场景）时同样能匹配
+        let noisy = format!("ls output line\nanother\n{combined}");
+        assert_eq!(parse_osc7_cwd(&noisy).as_deref(), Some("/home/user/project"));
+    }
+
+    #[test]
+    fn parse_osc7_no_match_returns_none() {
+        assert_eq!(parse_osc7_cwd("plain text"), None);
+        assert_eq!(parse_osc7_cwd("\x1b]7;file://host"), None, "无终止符不匹配");
+        assert_eq!(parse_osc7_cwd(""), None);
     }
 
     #[test]
