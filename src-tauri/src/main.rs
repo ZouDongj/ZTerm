@@ -90,6 +90,9 @@ async fn main() {
             // 先隐藏，恢复窗口状态后再显示——否则窗口先以默认尺寸闪现，
             // 最大化状态变成"先窗口化再最大化"的跳跃
             .visible(false)
+            // 禁用 WebView2 表单自动补全（输入时弹出的白底建议列表），
+            // 终端软件不需要浏览器式 autofill
+            .general_autofill_enabled(false)
             // 窗口/WebView 背景色与主题一致（#21252b）：resize 拖拽期间
             // WebView 内容未覆盖到的边缘露出默认白色会形成闪烁
             .background_color(tauri::window::Color(33, 37, 43, 255))
