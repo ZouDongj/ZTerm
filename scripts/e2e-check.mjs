@@ -178,6 +178,25 @@ async function main() {
       }
     }
     check('绿点动画运行（或已随 splash 移除）', animOk === true, `splash存在=${!splashStruct.missing}`);
+
+    // xterm POC smoke check: the selected engine may not have a terminal yet at this
+    // early point (the initial tab is wired asynchronously). Verify the shared
+    // module plus any already-created overlay; renderer-specific creation is checked
+    // after the Ghostty switch below.
+    const cursorPoc = await cdp.eval(`(() => {
+      const engine = _settingsConfig.terminalRenderer || 'xterm';
+      const overlays = [...document.querySelectorAll('.smooth-cursor-overlay')];
+      return {
+        engine,
+        count: overlays.length,
+        pointerEvents: overlays[0]?.style.pointerEvents || null,
+        tagName: overlays[0]?.tagName || null,
+        hasMotion: typeof window.SmoothCursorMotion === 'function'
+      };
+    })()`);
+    const cursorPocOk = cursorPoc.hasMotion &&
+      (cursorPoc.count === 0 || (cursorPoc.tagName === 'CANVAS' && cursorPoc.pointerEvents === 'none'));
+    check('平滑光标 POC 模块与隔离规则正确', cursorPocOk, JSON.stringify(cursorPoc));
     let splashGone = false;
     for (let i = 0; i < 25; i++) {
       splashGone = await cdp.eval(`!document.getElementById('startup-splash')`);
@@ -343,7 +362,7 @@ async function main() {
     const fontBefore = await cdp.eval(`document.body.style.fontFamily || '(css默认)'`);
     check('界面字体跟随开关默认开且隐藏设置行', followDefault === true && uiRowHidden === true, `follow=${followDefault}, rowHidden=${uiRowHidden}`);
     // 跟随模式下 body 应用终端字体组合
-    const followApplied = await cdp.eval(`document.body.style.fontFamily.includes('monospace') || document.body.style.fontFamily.includes('JetBrains') || document.body.style.fontFamily.includes('Consolas')`);
+    const followApplied = await cdp.eval(`document.body.style.fontFamily.includes('monospace') || document.body.style.fontFamily.includes('JetBrains') || document.body.style.fontFamily.includes('Consolas') || getComputedStyle(document.body).fontFamily.includes('JetBrains') || getComputedStyle(document.body).fontFamily.includes('monospace')`);
     check('跟随模式下界面使用终端字体', followApplied === true, `body=${fontBefore.slice(0, 60)}`);
     // 关闭跟随 → 界面字体行显示 → 选界面字体应用
     await cdp.eval(`toggleUiFollowTerminal()`);

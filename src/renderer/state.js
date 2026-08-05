@@ -243,9 +243,19 @@ function applyTerminalScheme() {
     const theme = getTerminalTheme();
     document.documentElement.style.setProperty('--term-bg', theme.background);
     TabManager.tabs.forEach(t => {
-        if (t.term) t.term.options.theme = theme;
+        if (t.term) {
+            const termTheme = t.term.wasmTerm ? theme : { ...theme, cursor: 'transparent' };
+            t.term.options.theme = termTheme;
+            t._smoothCursor?.setOptions({ cursorColor: theme.cursor || '#ffffff' });
+        }
         if (t.splitRoot) {
-            getAllPanes(t).forEach(p => { if (p.term) p.term.options.theme = theme; });
+            getAllPanes(t).forEach(p => {
+                if (p.term) {
+                    const termTheme = p.term.wasmTerm ? theme : { ...theme, cursor: 'transparent' };
+                    p.term.options.theme = termTheme;
+                    p._smoothCursor?.setOptions({ cursorColor: theme.cursor || '#ffffff' });
+                }
+            });
         }
     });
 }

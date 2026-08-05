@@ -592,6 +592,7 @@ function saveAppearance() {
             t.term.options.fontWeight = fontWeight;
             t.term.options.fontWeightBold = fontWeightBold;
             t.term.options.minimumContrastRatio = minimumContrastRatio;
+            if (t._smoothCursor) t._smoothCursor.setOptions({ animations });
         }
         if (t.splitRoot) {
             getAllPanes(t).forEach(p => {
@@ -602,6 +603,7 @@ function saveAppearance() {
                     p.term.options.fontWeight = fontWeight;
                     p.term.options.fontWeightBold = fontWeightBold;
                     p.term.options.minimumContrastRatio = minimumContrastRatio;
+                    if (p._smoothCursor) p._smoothCursor.setOptions({ animations });
                 }
             });
         }
@@ -634,6 +636,7 @@ function saveTerminal() {
             t.term.options.cursorBlink = cursorBlink;
             t.term.options.cursorStyle = cursor;
             t.term.options.scrollback = scrollback;
+            if (t._smoothCursor) t._smoothCursor.setOptions({ cursorBlink, cursorStyle: cursor });
         }
         if (t.splitRoot) {
             getAllPanes(t).forEach(p => {
@@ -641,6 +644,7 @@ function saveTerminal() {
                     p.term.options.cursorBlink = cursorBlink;
                     p.term.options.cursorStyle = cursor;
                     p.term.options.scrollback = scrollback;
+                    if (p._smoothCursor) p._smoothCursor.setOptions({ cursorBlink, cursorStyle: cursor });
                 }
             });
         }

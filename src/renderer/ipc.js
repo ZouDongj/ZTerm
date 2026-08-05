@@ -189,7 +189,7 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
             if (pane) {
                 if (pane.tabId) ipcRenderer.send('ssh-disconnect', { tabId: pane.tabId, rendererId: tab.id });
                 // 保留模式（clearOnConnect=false）不销毁终端，内容接在后面
-                if (_clearOnConnect(tab, pane) && pane.term) { try { pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
+                if (_clearOnConnect(tab, pane) && pane.term) { try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
                 pane.tabId = null;
                 setTimeout(() => {
                     if (!TabManager.tabs.includes(tab)) return;
@@ -197,7 +197,7 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
                 }, 500);
             } else {
                 if (tab.tabId) ipcRenderer.send('ssh-disconnect', { tabId: tab.tabId, rendererId: tab.id });
-                if (_clearOnConnect(tab, null) && tab.term) { try { tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
+                if (_clearOnConnect(tab, null) && tab.term) { try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
                 tab.tabId = null;
                 setTimeout(() => {
                     if (!TabManager.tabs.includes(tab)) return;
