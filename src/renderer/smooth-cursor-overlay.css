@@ -1,0 +1,2 @@
+  /* Independent canvas cursor layer used only by the xterm POC. */
+.smooth-cursor-overlay{position:absolute;inset:0;display:block;pointer-events:none;z-index:11;opacity:0;will-change:contents}

@@ -338,7 +338,7 @@ const TabManager = {
             if (tab.splitRoot) {
                 getAllPanes(tab).forEach(p => {
                     if (p.tabId) { this._markClosed(p.tabId); ipcRenderer.send('pty-destroy', { tabId: p.tabId, rendererId: id }); delete ptyBuffers[p.tabId]; }
-                    if (p.term) try { p.term.dispose(); } catch(e) {}
+                    if (p.term) try { p._smoothCursor?.dispose(); p._smoothCursor = null; p.term.dispose(); } catch(e) {}
                 });
                 const split = document.getElementById('split_' + id);
                 if (split) split.remove();
@@ -347,7 +347,7 @@ const TabManager = {
                 const el = document.getElementById('wrap_' + id);
                 if (el) el.remove();
                 if (tab.tabId) { this._markClosed(tab.tabId); ipcRenderer.send('pty-destroy', { tabId: tab.tabId, rendererId: id }); delete ptyBuffers[tab.tabId]; }
-                if (tab.term) try { tab.term.dispose(); } catch(e) {}
+                if (tab.term) try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}
             }
             this.render();
             // 修复：200ms 动画期间快速关两个 tab 第二个 closeTab 的 switchTo(next) 会
@@ -385,7 +385,7 @@ const TabManager = {
 
         if (tab.tabId) ipcRenderer.send('ssh-disconnect', { tabId: tab.tabId, rendererId: id });
         if (_clearOnConnect(tab, null)) {
-            if (tab.term) { try { tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
+            if (tab.term) { try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
             const wrap = document.getElementById('wrap_' + id);
             if (wrap) wrap.remove();
             // 显式释放 ptyBuffers（旧 tabId 永远不会再被新连接复用，否则累积 1MB+）
@@ -412,7 +412,7 @@ const TabManager = {
         if (!pane) return;
         if (pane.tabId) ipcRenderer.send('ssh-disconnect', { tabId: pane.tabId, rendererId: tabId });
         if (_clearOnConnect(tab, pane)) {
-            if (pane.term) { try { pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
+            if (pane.term) { try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
             const body = document.getElementById('pane-body_' + pane.id);
             if (body) body.innerHTML = '';
             // 显式释放 ptyBuffers
@@ -593,6 +593,7 @@ const TabManager = {
             const existing = this._newPaneData(tab);
             existing.term = tab.term;
             existing.fitAddon = tab.fitAddon;
+            existing._smoothCursor = tab._smoothCursor;
             existing.tabId = tab.tabId;
             existing.focused = false;
             // 重新绑定 onData：terminal 已搬到 pane，需用 pane.tabId 而非已清空的 tab.tabId
@@ -1123,7 +1124,7 @@ const TabManager = {
             ipcRenderer.send('pty-destroy', { tabId: pane.tabId, rendererId: tabId });
             delete ptyBuffers[pane.tabId]; // 防止 buffer 永久泄漏（pane 关闭后不会再 wire）
         }
-        if (pane.term) try { pane.term.dispose(); } catch(e) {}
+        if (pane.term) try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}
         // Exit animation: fade + shrink, then remove from tree and re-render
         const rootEl = document.getElementById('split_' + tab.id);
         const paneEl = rootEl ? rootEl.querySelector('.split-pane[data-pane="' + paneId + '"]') : null;
@@ -1342,6 +1343,7 @@ const TabManager = {
                         if (rp._onDataDisp) { rp._onDataDisp.dispose(); rp._onDataDisp = null; }
                         sourceTab.term = rp.term;
                         sourceTab.fitAddon = rp.fitAddon;
+                        sourceTab._smoothCursor = rp._smoothCursor;
                         sourceTab.tabId = rp.tabId;
                         sourceTab.splitRoot = null;
                         sourceTab.name = rp.name || sourceTab.name;
@@ -1395,6 +1397,7 @@ const TabManager = {
             const fp = this._newPaneData(targetTab);
             fp.term = targetTab.term;
             fp.fitAddon = targetTab.fitAddon;
+            fp._smoothCursor = targetTab._smoothCursor;
             fp.tabId = targetTab.tabId;
             fp.focused = false;
             // terminal 从 targetTab 搬到 fp pane，onData 需用 fp.tabId
@@ -1415,7 +1418,7 @@ const TabManager = {
         const np = {
             id: 'p_' + (this._paneCounter++),
             requestId: 'p_' + (this._paneCounter - 1),
-            term: mt, fitAddon: mf, tabId: mid, focused: true,
+            term: mt, fitAddon: mf, _smoothCursor: sourceTab._smoothCursor, tabId: mid, focused: true,
             name: paneName, type: paneType,
             connected: !!mid, // 有 backend tabId 说明在线
             _sshHost: sshHost, _sshPort: sshPort, _sshUser: sshUser,
@@ -1454,7 +1457,7 @@ const TabManager = {
                 this._markClosed(p.tabId);
                 ipcRenderer.send('pty-destroy', { tabId: p.tabId, rendererId: tab.id });
             }
-            if (i > 0 && p.term) try { p.term.dispose(); } catch(e) {}
+            if (i > 0 && p.term) try { p._smoothCursor?.dispose(); p._smoothCursor = null; p.term.dispose(); } catch(e) {}
         });
         // 同步 tab 全部字段到剩余 pane——否则 tab.type/host/user 等仍带原 tab 类型
         // （例如原 SSH tab 退 split 留 local pane，但 tab 仍标 SSH，重启后真连 SSH，pane 名却错配）

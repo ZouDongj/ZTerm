@@ -203,7 +203,9 @@ function _buildTerminalOptions() {
         scrollback: c.scrollback || 10000,
         minimumContrastRatio: c.minimumContrastRatio || 4,
         drawBoldTextInBrightColors: false,
-        theme: getTerminalTheme(),
+        // SmoothCursorOverlay draws the xterm cursor in a separate layer.
+        // Keeping the terminal's cursor transparent avoids double painting.
+        theme: { ...getTerminalTheme(), cursor: 'transparent' },
         allowProposedApi: true,
         customGlyphs: true,
         overviewRuler: { width: 6 },
@@ -273,6 +275,12 @@ function wireTerminal(tab, tabId) {
     term.attachCustomKeyEventHandler(e => { return _shortcutPassthrough(term, e); });
     tab.term = term;
     tab.fitAddon = fitAddon;
+    tab._smoothCursor = new SmoothCursorOverlay(term, term.element, {
+        cursorBlink: _settingsConfig.cursorBlink === true,
+        cursorStyle: _settingsConfig.cursor || 'bar',
+        cursorColor: getTerminalTheme().cursor || '#ffffff',
+        animations: _settingsConfig.animations !== false,
+    });
 
     function applyFit() {
         if (_spannerDrag || TabManager._maximizing) return;
@@ -489,6 +497,12 @@ function _wireXtermFallback(tab, tabId, wrap, inner) {
     term.attachCustomKeyEventHandler(e => { return _shortcutPassthrough(term, e); });
     tab.term = term;
     tab.fitAddon = fitAddon;
+    tab._smoothCursor = new SmoothCursorOverlay(term, term.element, {
+        cursorBlink: _settingsConfig.cursorBlink === true,
+        cursorStyle: _settingsConfig.cursor || 'bar',
+        cursorColor: getTerminalTheme().cursor || '#ffffff',
+        animations: _settingsConfig.animations !== false,
+    });
     function applyFit() {
         if (_spannerDrag || TabManager._maximizing) return;
         _fitWithScroll(tab.term, fitAddon, inner);
@@ -584,6 +598,12 @@ function wireTerminalToPane(tab, pane) {
     term.attachCustomKeyEventHandler(e => { return _shortcutPassthrough(term, e); });
     pane.term = term;
     pane.fitAddon = fitAddon;
+    pane._smoothCursor = new SmoothCursorOverlay(term, term.element, {
+        cursorBlink: _settingsConfig.cursorBlink === true,
+        cursorStyle: _settingsConfig.cursor || 'bar',
+        cursorColor: getTerminalTheme().cursor || '#ffffff',
+        animations: _settingsConfig.animations !== false,
+    });
 
     function applyFit(retries = 10) {
         if (_spannerDrag || TabManager._maximizing) return;
@@ -851,6 +871,12 @@ function _wireGhosttyTerminalToPane(tab, pane, bodyEl) {
             term.attachCustomKeyEventHandler(e => { return _shortcutPassthrough(term, e); });
             pane.term = term;
             pane.fitAddon = fitAddon;
+            pane._smoothCursor = new SmoothCursorOverlay(term, term.element, {
+                cursorBlink: _settingsConfig.cursorBlink === true,
+                cursorStyle: _settingsConfig.cursor || 'bar',
+                cursorColor: getTerminalTheme().cursor || '#ffffff',
+                animations: _settingsConfig.animations !== false,
+            });
             setTimeout(() => applyFitFallback(), 300);
             function applyFitFallback(retries = 10) {
                 if (_spannerDrag || TabManager._maximizing) return;
