@@ -232,6 +232,16 @@ function _createClipboardAddon() {
     return new ClipboardAddon(undefined, provider);
 }
 
+// 快捷键放行处理器（统一入口）：Ctrl+P（命令面板）/ Ctrl+Shift+P（快捷命令）交给 shortcuts.js 调度。
+// 注意两引擎语义相反：xterm 返回 false 停止处理（true 继续）；ghostty 返回 true 阻止处理（false 继续）。
+// 按 term.wasmTerm 区分引擎（回退到 xterm 时同样适用）
+function _shortcutPassthrough(term, e) {
+    const isShortcut =
+        (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') ||
+        (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'P' || e.key === 'p'));
+    return term.wasmTerm ? isShortcut : !isShortcut;
+}
+
 // ── Terminal wiring (shared by PTY and SSH) ──
 function wireTerminal(tab, tabId) {
     tab.tabId = tabId;
@@ -260,12 +270,7 @@ function wireTerminal(tab, tabId) {
     });
 
     term.open(inner);
-    term.attachCustomKeyEventHandler(e => {
-        // 放行快捷键到 shortcuts.js 调度：Ctrl+P（命令面板）、Ctrl+Shift+P（快捷命令）
-        if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') return false;
-        if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'P' || e.key === 'p')) return false;
-        return true;
-    });
+    term.attachCustomKeyEventHandler(e => { return _shortcutPassthrough(term, e); });
     tab.term = term;
     tab.fitAddon = fitAddon;
 
@@ -376,12 +381,7 @@ function _wireGhosttyTerminal(tab, tabId, wrap, inner) {
         try { term.registerLinkProvider(new gw.UrlRegexProvider(term)); } catch(e) { console.warn('UrlRegexProvider init failed:', e); }
 
         term.open(inner);
-        term.attachCustomKeyEventHandler(e => {
-            // 放行快捷键到 shortcuts.js 调度：Ctrl+P（命令面板）、Ctrl+Shift+P（快捷命令）
-            if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') return false;
-            if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'P' || e.key === 'p')) return false;
-            return true;
-        });
+        term.attachCustomKeyEventHandler(e => { return _shortcutPassthrough(term, e); });
         tab.term = term;
         tab.fitAddon = fitAddon;
         tab._searchAddon = searchAddon;
@@ -486,11 +486,7 @@ function _wireXtermFallback(tab, tabId, wrap, inner) {
         document.getElementById('search-count').textContent = r?.resultCount ? `${r.resultIndex+1}/${r.resultCount}` : '';
     });
     term.open(inner);
-    term.attachCustomKeyEventHandler(e => {
-        if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') return false;
-        if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'P' || e.key === 'p')) return false;
-        return true;
-    });
+    term.attachCustomKeyEventHandler(e => { return _shortcutPassthrough(term, e); });
     tab.term = term;
     tab.fitAddon = fitAddon;
     function applyFit() {
@@ -585,12 +581,7 @@ function wireTerminalToPane(tab, pane) {
     });
 
     term.open(bodyEl);
-    term.attachCustomKeyEventHandler(e => {
-        // 放行快捷键到 shortcuts.js 调度：Ctrl+P（命令面板）、Ctrl+Shift+P（快捷命令）
-        if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') return false;
-        if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'P' || e.key === 'p')) return false;
-        return true;
-    });
+    term.attachCustomKeyEventHandler(e => { return _shortcutPassthrough(term, e); });
     pane.term = term;
     pane.fitAddon = fitAddon;
 
@@ -733,11 +724,7 @@ function _wireGhosttyTerminalToPane(tab, pane, bodyEl) {
         try { term.registerLinkProvider(new gw.UrlRegexProvider(term)); } catch(e) { console.warn('UrlRegexProvider init failed:', e); }
 
         term.open(bodyEl);
-        term.attachCustomKeyEventHandler(e => {
-            if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') return false;
-            if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'P' || e.key === 'p')) return false;
-            return true;
-        });
+        term.attachCustomKeyEventHandler(e => { return _shortcutPassthrough(term, e); });
         pane.term = term;
         pane.fitAddon = fitAddon;
         pane._searchAddon = searchAddon;
@@ -861,11 +848,7 @@ function _wireGhosttyTerminalToPane(tab, pane, bodyEl) {
                 document.getElementById('search-count').textContent = r?.resultCount ? `${r.resultIndex+1}/${r.resultCount}` : '';
             });
             term.open(bodyEl);
-            term.attachCustomKeyEventHandler(e => {
-                if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') return false;
-                if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'P' || e.key === 'p')) return false;
-                return true;
-            });
+            term.attachCustomKeyEventHandler(e => { return _shortcutPassthrough(term, e); });
             pane.term = term;
             pane.fitAddon = fitAddon;
             setTimeout(() => applyFitFallback(), 300);

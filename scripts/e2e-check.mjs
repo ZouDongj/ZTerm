@@ -422,6 +422,32 @@ async function main() {
       })`).catch(() => 'diag-fail');
     }
     check('Ghostty 引擎：wasm 加载并渲染 canvas', ghosttyOk === true, ghosttyDetail);
+    // 输入链路：合成按键 → ghostty onData 编码（引擎级验证；IPC→PTY→回显为 xterm 同路径，
+    // 已在手动冒烟中验证）。防回归点：attachCustomKeyEventHandler 语义——ghostty 返回 true 阻止处理，
+    // xterm 相反（语义写反会吞掉所有按键）
+    let inputOk = false, inputDetail = 'no-run';
+    if (ghosttyOk) {
+      inputDetail = await cdp.eval(`(() => {
+        const t = TabManager.tabs.find(x => x.name === '${gtName}');
+        const ta = t?.term?.textarea;
+        if (!ta) return 'no-textarea';
+        window.__inData = '';
+        t.term.onData(d => { window.__inData += d; });
+        ta.focus();
+        const fire = (key, code, keyCode) => {
+          ta.dispatchEvent(new KeyboardEvent('keydown', { key, code, keyCode, bubbles: true, cancelable: true }));
+        };
+        fire('x', 'KeyX', 88);
+        fire('y', 'KeyY', 89);
+        fire('Enter', 'Enter', 13);
+        return 'fired';
+      })()`).catch(() => 'fire-fail');
+      await sleep(800);
+      const got = await cdp.eval(`window.__inData || ''`).catch(() => '');
+      inputOk = got.includes('x') && got.includes('y') && got.includes('\r');
+      inputDetail = inputOk ? `onData=${JSON.stringify(got)}` : `no-data:${JSON.stringify(got)}`;
+    }
+    check('Ghostty 引擎：输入链路（按键→onData 编码）', inputOk === true, inputDetail);
     // 清理：关掉测试 tab，渲染引擎还原 xterm
     await cdp.eval(`(() => { const t = TabManager.tabs.find(x => x.name === '${gtName}'); if (t) TabManager.closeTab(t.id); })()`);
     await cdp.eval(`openSettings('appearance')`);
