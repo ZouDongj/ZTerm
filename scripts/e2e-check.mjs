@@ -384,7 +384,54 @@ async function main() {
     const sftpClosed = await cdp.eval(`!document.getElementById('overlay-sftp').classList.contains('open')`);
     check('SFTP 面板关闭', sftpClosed === true, `overlay-sftp.open=${!sftpClosed}`);
 
-    // 13. 窗口状态恢复：写入 config 的 window 字段 → 重启 → 验证最大化/尺寸恢复
+    // 13.5 Ghostty 渲染引擎冒烟：切换设置 → 新建终端 → wasm 加载 + canvas 首帧
+    // 注意：标签名带时间戳，避免与 config 恢复出的历史同名标签混淆（周期保存会把
+    // 测试标签写入 lastTabs，下次启动恢复出旧 xterm 标签，find 会命中错误对象）
+    const gtName = 'GhosttyTest_' + Date.now();
+    await cdp.eval(`openSettings('appearance')`);
+    await sleep(600);
+    const rendererSet = await cdp.eval(`(() => {
+      const el = document.getElementById('set-renderer');
+      if (!el) return 'no-select';
+      el.value = 'ghostty'; saveAppearance();
+      return _settingsConfig.terminalRenderer;
+    })()`);
+    await sleep(300);
+    await cdp.eval(`closeSettingsTab()`);
+    await sleep(300);
+    // 新建本地终端（ghostty 懒加载 script + wasm，异步接线；慢机 init 可达 20s+）
+    await cdp.eval(`TabManager.createTab({ name: '${gtName}', type: 'local', command: 'powershell.exe', args: [] })`);
+    let ghosttyOk = false, ghosttyDetail = '';
+    for (let i = 0; i < 60; i++) {
+      ghosttyDetail = await cdp.eval(`(() => {
+        const t = TabManager.tabs.find(x => x.name === '${gtName}');
+        if (!t || !t.term) return 'no-term';
+        if (!t.term.wasmTerm) return 'no-wasm';
+        const canvas = t.term.element ? t.term.element.querySelector('canvas') : null;
+        return canvas && canvas.width > 0 ? 'ok' : 'no-canvas';
+      })()`).catch(() => 'eval-fail');
+      if (ghosttyDetail === 'ok') { ghosttyOk = true; break; }
+      await sleep(500);
+    }
+    if (!ghosttyOk) {
+      ghosttyDetail += ' | ' + await cdp.eval(`JSON.stringify({
+        renderer: _settingsConfig.terminalRenderer,
+        ghosttyState: window.__ghosttyState || null,
+        ghosttyErr: window.__ghosttyErr || null,
+        kids: (() => { const t = TabManager.tabs.find(x => x.name === '${gtName}'); return t?.term?.element ? [...t.term.element.children].map(c => c.tagName + ':' + c.className) : 'no-element'; })(),
+      })`).catch(() => 'diag-fail');
+    }
+    check('Ghostty 引擎：wasm 加载并渲染 canvas', ghosttyOk === true, ghosttyDetail);
+    // 清理：关掉测试 tab，渲染引擎还原 xterm
+    await cdp.eval(`(() => { const t = TabManager.tabs.find(x => x.name === '${gtName}'); if (t) TabManager.closeTab(t.id); })()`);
+    await cdp.eval(`openSettings('appearance')`);
+    await sleep(300);
+    await cdp.eval(`document.getElementById('set-renderer').value = 'xterm'; saveAppearance();`);
+    await sleep(200);
+    await cdp.eval(`closeSettingsTab()`);
+    await sleep(300);
+
+    // 14. 窗口状态恢复：写入 config 的 window 字段 → 重启 → 验证最大化/尺寸恢复
     async function writeWindowState(state) {
       // 读现有 config（若存在）并注入 window 字段
       let cfg = {};

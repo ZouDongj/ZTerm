@@ -37,8 +37,21 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+
+## ghostty-web
+
+- `ghostty-web.js` (UMD bundle) — Ghostty's VT engine compiled to WASM with an xterm.js-compatible API
+- Distributed under the MIT License (see `ghostty-web-LICENSE`)
+
+`
+Copyright (c) 2025 Coder Technologies Inc.
+`
+
+Ghostty is (c) Mitchell Hashimoto and the Ghostty contributors.
+
 ## Other Rust dependencies
 
 All Rust crates used by `src-tauri/` are listed in `src-tauri/Cargo.toml` /
 `Cargo.lock` and are distributed under their respective open-source licenses
 (MIT, Apache-2.0, BSD-3-Clause, ISC).
+

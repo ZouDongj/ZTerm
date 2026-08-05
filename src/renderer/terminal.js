@@ -1,8 +1,116 @@
 // ZTerm - 终端创建/接线/搜索/同步输入（拆自 renderer.html，纯代码搬运，未改逻辑）
+
+// ── 渲染引擎选择：xterm.js（默认）或 Ghostty (libghostty WASM 移植) ──
+function _getRendererEngine() {
+    return _settingsConfig.terminalRenderer === 'ghostty' ? 'ghostty' : 'xterm';
+}
+let _ghosttyReady = null;
+function _loadGhostty() {
+    if (!_ghosttyReady) {
+        window.__ghosttyState = 'loading:' + Date.now();
+        _ghosttyReady = new Promise((resolve, reject) => {
+            // ESM 构建：动态 import（相对 renderer.html 解析），wasm 走 ./ghostty-vt.wasm
+            // 相对模块路径由 Tauri asset 协议提供（'self'，CSP 允许）。
+            // 注意不能用 UMD 构建：其内嵌 data: URL wasm 会被 Tauri 协议拦截返回 500。
+            import('/vendor/ghostty-web.esm.js')
+                .then(mod => mod.init().then(() => { window.__ghosttyState = 'resolved'; resolve(); }).catch(e => { window.__ghosttyState = 'init-fail:' + e; reject(e); }))
+                .catch(e => { window.__ghosttyState = 'import-fail:' + e; reject(e); });
+        });
+        // 加载失败后允许重试
+        _ghosttyReady.catch(() => { _ghosttyReady = null; });
+    }
+    return _ghosttyReady;
+}
+function _buildGhosttyOptions() {
+    const c = _settingsConfig;
+    return {
+        cursorBlink: c.cursorBlink === true,
+        cursorStyle: c.cursor || 'bar',
+        fontSize: c.fontSize || 13.5,
+        fontFamily: _normalizeFontFamily(
+            c.fontFamily || '"JetBrains Mono","Cascadia Code",Consolas,monospace',
+            c.fallbackFont
+        ),
+        scrollback: c.scrollback || 10000,
+        theme: getTerminalTheme(),
+        smoothScrollDuration: 80,
+    };
+}
+// Ghostty 引擎搜索 shim（xterm SearchAddon 接口兼容）：
+// 基于 scrollback 逐行扫描 + select/scrollToLine 定位，未命中返回空
+function _createGhosttySearch(term) {
+    const listeners = [];
+    let count = 0, idx = 0;
+    const notify = () => listeners.forEach(fn => { try { fn({ resultCount: count, resultIndex: count ? idx : 0 }); } catch(e) {} });
+    const cellsToText = (cells) => {
+        let s = '';
+        for (const cell of cells || []) {
+            if (cell.codepoint) s += String.fromCodePoint(cell.codepoint);
+        }
+        return s;
+    };
+    const find = (q, backwards) => {
+        count = 0; idx = 0;
+        if (!q || !term.wasmTerm) { notify(); return; }
+        const total = term.getScrollbackLength();
+        const rows = term.rows || 24;
+        const ql = q.toLowerCase();
+        const matches = [];
+        // 回滚区：getScrollbackLine(i)，绝对行号 = i
+        for (let i = 0; i < total; i++) {
+            const cells = term.getScrollbackLine(i);
+            if (!cells) continue;
+            const text = cellsToText(cells).toLowerCase();
+            let from = 0;
+            for (;;) {
+                const at = text.indexOf(ql, from);
+                if (at < 0) break;
+                matches.push({ line: i, col: at });
+                from = at + 1;
+            }
+        }
+        // 屏幕区：wasmTerm.getLine(row)，绝对行号 = total + row
+        for (let r = 0; r < rows; r++) {
+            const cells = term.wasmTerm.getLine(r);
+            if (!cells) continue;
+            const text = cellsToText(cells).toLowerCase();
+            let from = 0;
+            for (;;) {
+                const at = text.indexOf(ql, from);
+                if (at < 0) break;
+                matches.push({ line: total + r, col: at });
+                from = at + 1;
+            }
+        }
+        count = matches.length;
+        if (!count) { notify(); return; }
+        const m = backwards ? matches[matches.length - 1] : matches[0];
+        term.scrollToLine(m.line);
+        const screenRow = m.line - total;
+        if (screenRow >= 0 && screenRow < rows) term.select(m.col, screenRow, q.length);
+        notify();
+    };
+    return {
+        onDidChangeResults: fn => listeners.push(fn),
+        findNext: q => find(q, false),
+        findPrevious: q => find(q, true),
+        clearDecorations: () => { count = 0; idx = 0; notify(); },
+    };
+}
+
 // ── Shared: fit terminal + preserve scroll-to-bottom ──
 function _fitWithScroll(term, fitAddon, parentEl) {
     if (!term || !fitAddon || !parentEl) return;
     if (parentEl.clientWidth === 0 || parentEl.clientHeight === 0) return;
+    if (term.wasmTerm) {
+        // Ghostty 引擎：无 .xterm-viewport，底部判定用 viewportY（0 = 底部）
+        const wasAtBottom = term.viewportY < 1;
+        fitAddon.fit();
+        if (wasAtBottom) {
+            requestAnimationFrame(() => { try { term.scrollToBottom(); } catch(e) {} });
+        }
+        return;
+    }
     const vp = parentEl.querySelector('.xterm-viewport');
     const dist = vp ? (vp.scrollHeight - vp.scrollTop - vp.clientHeight) : 0;
     const rowH = vp && term.rows ? (vp.clientHeight / term.rows) : 20;
@@ -131,6 +239,11 @@ function wireTerminal(tab, tabId) {
     const { wrap, inner } = createTermWrap(tab);
     document.getElementById('main-area').appendChild(wrap);
 
+    if (_getRendererEngine() === 'ghostty') {
+        _wireGhosttyTerminal(tab, tabId, wrap, inner);
+        return;
+    }
+
     const term = new Terminal(_buildTerminalOptions());
     let fitAddon, searchAddon;
     try { fitAddon = new FitAddon(); term.loadAddon(fitAddon); } catch(e) { console.warn('FitAddon init failed:', e); }
@@ -251,6 +364,166 @@ function wireTerminal(tab, tabId) {
     }
 }
 
+// ── Ghostty 引擎接线（单 tab）：镜像 wireTerminal 的行为 ──
+function _wireGhosttyTerminal(tab, tabId, wrap, inner) {
+    _loadGhostty().then(async () => {
+        if (!TabManager.tabs.includes(tab)) return; // 加载期间 tab 已关闭
+        const gw = await import('/vendor/ghostty-web.esm.js');
+        const term = new gw.Terminal(_buildGhosttyOptions());
+        let fitAddon;
+        try { fitAddon = new gw.FitAddon(); term.loadAddon(fitAddon); } catch(e) { console.warn('Ghostty FitAddon init failed:', e); }
+        const searchAddon = _createGhosttySearch(term);
+        try { term.registerLinkProvider(new gw.UrlRegexProvider(term)); } catch(e) { console.warn('UrlRegexProvider init failed:', e); }
+
+        term.open(inner);
+        term.attachCustomKeyEventHandler(e => {
+            // 放行快捷键到 shortcuts.js 调度：Ctrl+P（命令面板）、Ctrl+Shift+P（快捷命令）
+            if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') return false;
+            if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'P' || e.key === 'p')) return false;
+            return true;
+        });
+        tab.term = term;
+        tab.fitAddon = fitAddon;
+        tab._searchAddon = searchAddon;
+        searchAddon.onDidChangeResults(r => {
+            document.getElementById('search-count').textContent = r?.resultCount ? `${r.resultIndex+1}/${r.resultCount}` : '';
+        });
+
+        function applyFit() {
+            if (_spannerDrag || TabManager._maximizing) return;
+            _fitWithScroll(tab.term, fitAddon, inner);
+        }
+        setTimeout(applyFit, 50);
+        setupWrapResizeObserver(wrap, tab);
+
+        let _resizeDebounce = null;
+        term.onResize(({ cols, rows }) => {
+            if (TabManager._maximizing) return;
+            if (TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300) return;
+            clearTimeout(_resizeDebounce);
+            _resizeDebounce = setTimeout(() => {
+                if (tab.tabId) ipcRenderer.send('pty-resize', { tabId: tab.tabId, cols, rows });
+            }, 150);
+        });
+
+        setTimeout(() => {
+            if (tab.term && tab.term.cols && tab.term.rows && tab.tabId) {
+                ipcRenderer.send('pty-resize', { tabId: tab.tabId, cols: tab.term.cols, rows: tab.term.rows });
+            }
+        }, 1000);
+
+        tab._onDataDisp = term.onData(data => {
+            _sendPaneInput(tab, { tabId: tab.tabId }, data);
+        });
+        _bindSyncExitOnClick(tab, term.element);
+
+        term.onBell(() => {
+            const bell = _settingsConfig.bell || 'off';
+            if (bell === 'off') return;
+            if (bell !== 'flash') showToast('🔔 ' + (tab.name || '终端') + ' 响铃');
+            if (bell === 'flash' || bell === 'notification+flash') {
+                const tabEl = document.querySelector(`.tab[data-tab="${tab.id}"]`);
+                if (tabEl) { tabEl.classList.add('bell-flash'); setTimeout(() => tabEl.classList.remove('bell-flash'), 2000); }
+            }
+        });
+
+        // 选中复制：Ghostty 引擎自带 mouseup 复制（含双击选词），此处不再重复复制；
+        // 富文本/智能换行等仅 xterm 生效
+        term.onSelectionChange(() => {
+            if (_settingsConfig.autoCopy === false) return;
+            const sel = term.getSelection();
+            if (sel) {
+                try {
+                    const clipboard = require('electron').clipboard;
+                    clipboard.writeText(sel);
+                } catch(e) {}
+            }
+        });
+
+        // 右键粘贴
+        term.element.addEventListener('contextmenu', async (e) => {
+            e.preventDefault();
+            if (_settingsConfig.rightClickPaste === false) return;
+            try {
+                const clipboard = require('electron').clipboard;
+                const text = clipboard.readTextAsync ? await clipboard.readTextAsync() : clipboard.readText();
+                if (text) _sendPaneInput(tab, { tabId: tab.tabId }, text);
+            } catch(e) {}
+        });
+
+        if (ptyBuffers[tabId]) {
+            term.write(ptyBuffers[tabId]);
+            delete ptyBuffers[tabId];
+        }
+
+        if (_settingsConfig.restoreLocalContent && tab._contentBuffer && tab._contentBuffer.length > 0) {
+            term.write(tab._contentBuffer.join('\r\n') + '\r\n');
+        }
+
+        if (TabManager.activeId === tab.id) {
+            setTimeout(() => term.focus(), 150);
+        }
+    }).catch(err => { window.__ghosttyErr = String((err && err.stack) || err);
+        console.error('[ghostty] init failed, falling back to xterm:', err);
+        // 加载失败回退 xterm
+        if (TabManager.tabs.includes(tab)) _wireXtermFallback(tab, tabId, wrap, inner);
+    });
+}
+
+// Ghostty 初始化失败时的 xterm 回退（重建 xterm 终端，不重复创建 wrap）
+function _wireXtermFallback(tab, tabId, wrap, inner) {
+    const term = new Terminal(_buildTerminalOptions());
+    let fitAddon, searchAddon;
+    try { fitAddon = new FitAddon(); term.loadAddon(fitAddon); } catch(e) {}
+    try { term.loadAddon(new WebglAddon()); } catch(e) {}
+    try { searchAddon = new SearchAddon(); term.loadAddon(searchAddon); } catch(e) {}
+    if (_settingsConfig.osc52 !== false) {
+        try { term.loadAddon(_createClipboardAddon()); } catch(e) {}
+    }
+    try { term.loadAddon(_createWebLinksAddon()); } catch(e) {}
+    tab._searchAddon = searchAddon;
+    searchAddon.onDidChangeResults(r => {
+        document.getElementById('search-count').textContent = r?.resultCount ? `${r.resultIndex+1}/${r.resultCount}` : '';
+    });
+    term.open(inner);
+    term.attachCustomKeyEventHandler(e => {
+        if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') return false;
+        if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'P' || e.key === 'p')) return false;
+        return true;
+    });
+    tab.term = term;
+    tab.fitAddon = fitAddon;
+    function applyFit() {
+        if (_spannerDrag || TabManager._maximizing) return;
+        _fitWithScroll(tab.term, fitAddon, inner);
+    }
+    setTimeout(applyFit, 50);
+    setupWrapResizeObserver(wrap, tab);
+    let _resizeDebounce = null;
+    term.onResize(({ cols, rows }) => {
+        if (TabManager._maximizing) return;
+        if (TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300) return;
+        clearTimeout(_resizeDebounce);
+        _resizeDebounce = setTimeout(() => {
+            if (tab.tabId) ipcRenderer.send('pty-resize', { tabId: tab.tabId, cols, rows });
+        }, 150);
+    });
+    tab._onDataDisp = term.onData(data => {
+        _sendPaneInput(tab, { tabId: tab.tabId }, data);
+    });
+    _bindSyncExitOnClick(tab, term.element);
+    if (ptyBuffers[tabId]) {
+        term.write(ptyBuffers[tabId]);
+        delete ptyBuffers[tabId];
+    }
+    if (_settingsConfig.restoreLocalContent && tab._contentBuffer && tab._contentBuffer.length > 0) {
+        term.write(tab._contentBuffer.join('\r\n') + '\r\n');
+    }
+    if (TabManager.activeId === tab.id) {
+        setTimeout(() => term.focus(), 150);
+    }
+}
+
 // 分屏同步输入：syncInput 开启时输入广播到该 tab 的所有 pane
 function _sendPaneInput(tab, pane, data) {
     if (tab.syncInput && tab.splitRoot) {
@@ -290,6 +563,11 @@ function _bindSyncExitOnClick(tab, element) {
 function wireTerminalToPane(tab, pane) {
     const bodyEl = document.getElementById('pane-body_' + pane.id);
     if (!bodyEl) return;
+
+    if (_getRendererEngine() === 'ghostty') {
+        _wireGhosttyTerminalToPane(tab, pane, bodyEl);
+        return;
+    }
 
     const term = new Terminal(_buildTerminalOptions());
     let fitAddon, searchAddon;
@@ -441,6 +719,201 @@ function wireTerminalToPane(tab, pane) {
     }
     // 接线完成后再挂一次尺寸结算兜底（覆盖 onResize 被抑制/未变的场景）
     if (tab.splitRoot) _scheduleSettleResize(tab);
+}
+
+// ── Ghostty 引擎接线（分屏 pane）：镜像 wireTerminalToPane 的行为 ──
+function _wireGhosttyTerminalToPane(tab, pane, bodyEl) {
+    _loadGhostty().then(async () => {
+        if (!TabManager.tabs.includes(tab) || !findPane(tab, pane.id)) return; // 加载期间 pane 已关闭
+        const gw = await import('/vendor/ghostty-web.esm.js');
+        const term = new gw.Terminal(_buildGhosttyOptions());
+        let fitAddon;
+        try { fitAddon = new gw.FitAddon(); term.loadAddon(fitAddon); } catch(e) { console.warn('Ghostty FitAddon init failed:', e); }
+        const searchAddon = _createGhosttySearch(term);
+        try { term.registerLinkProvider(new gw.UrlRegexProvider(term)); } catch(e) { console.warn('UrlRegexProvider init failed:', e); }
+
+        term.open(bodyEl);
+        term.attachCustomKeyEventHandler(e => {
+            if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') return false;
+            if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'P' || e.key === 'p')) return false;
+            return true;
+        });
+        pane.term = term;
+        pane.fitAddon = fitAddon;
+        pane._searchAddon = searchAddon;
+        searchAddon.onDidChangeResults(r => {
+            document.getElementById('search-count').textContent = r?.resultCount ? `${r.resultIndex+1}/${r.resultCount}` : '';
+        });
+
+        function applyFit(retries = 10) {
+            if (_spannerDrag || TabManager._maximizing) return;
+            if (retries <= 0) return;
+            if (bodyEl.clientWidth === 0 || bodyEl.clientHeight === 0) {
+                setTimeout(() => applyFit(retries - 1), 50);
+                return;
+            }
+            _fitWithScroll(pane.term, fitAddon, bodyEl);
+            const suppressed = TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300;
+            if (pane.tabId && pane.term.cols && pane.term.rows && !suppressed) {
+                ipcRenderer.send('pty-resize', { tabId: pane.tabId, cols: pane.term.cols, rows: pane.term.rows });
+            }
+        }
+        setTimeout(() => applyFit(), 300);
+
+        if (bodyEl._resizeObserver) { bodyEl._resizeObserver.disconnect(); }
+        let rafPending = false;
+        const observer = new ResizeObserver(() => {
+            if (rafPending) return;
+            rafPending = true;
+            requestAnimationFrame(() => {
+                applyFit();
+                rafPending = false;
+            });
+        });
+        observer.observe(bodyEl);
+        bodyEl._resizeObserver = observer;
+
+        let _resizeDebounce = null;
+        term.onResize(({ cols, rows }) => {
+            if (TabManager._maximizing) return;
+            if (TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300) return;
+            clearTimeout(_resizeDebounce);
+            _resizeDebounce = setTimeout(() => {
+                ipcRenderer.send('pty-resize', { tabId: pane.tabId, cols, rows });
+            }, 150);
+        });
+
+        pane._onDataDisp = term.onData(data => {
+            _sendPaneInput(tab, pane, data);
+        });
+        _bindSyncExitOnClick(tab, term.element);
+
+        term.onBell(() => {
+            const bell = _settingsConfig.bell || 'off';
+            if (bell === 'off') return;
+            if (bell !== 'flash') showToast('🔔 ' + (tab.name || '终端') + ' 响铃');
+            if (bell === 'flash' || bell === 'notification+flash') {
+                const tabEl = document.querySelector(`.tab[data-tab="${tab.id}"]`);
+                if (tabEl) { tabEl.classList.add('bell-flash'); setTimeout(() => tabEl.classList.remove('bell-flash'), 2000); }
+            }
+        });
+
+        // 选中复制：Ghostty 自带 mouseup 复制，这里只做设置开关的兜底（不重复写剪贴板）
+        term.onSelectionChange(() => {
+            if (_settingsConfig.autoCopy === false) return;
+            const sel = term.getSelection();
+            if (sel) {
+                try {
+                    const clipboard = require('electron').clipboard;
+                    clipboard.writeText(sel);
+                } catch(e) {}
+            }
+        });
+
+        term.element.addEventListener('contextmenu', async (e) => {
+            e.preventDefault();
+            if (_settingsConfig.rightClickPaste === false) return;
+            try {
+                const clipboard = require('electron').clipboard;
+                const text = clipboard.readTextAsync ? await clipboard.readTextAsync() : clipboard.readText();
+                if (text) _sendPaneInput(tab, pane, text);
+            } catch(e) {}
+        });
+
+        // Pane 焦点视觉同步（ghostty 无 onFocus 事件，用 textarea focus 兜底）
+        const syncFocus = () => {
+            if (TabManager._maximizedPaneId) return;
+            const ownerTab = TabManager.tabs.find(t => t.splitRoot && getAllPanes(t).some(pp => pp.id === pane.id));
+            if (!ownerTab) return;
+            getAllPanes(ownerTab).forEach(p => p.focused = (p.id === pane.id));
+            const container = document.getElementById('split_' + ownerTab.id);
+            if (container) {
+                container.querySelectorAll('.split-pane').forEach(el => {
+                    el.classList.toggle('active', el.getAttribute('data-pane') === pane.id);
+                });
+            }
+        };
+        term.textarea?.addEventListener('focus', syncFocus);
+
+        if (ptyBuffers[pane.tabId]) {
+            term.write(ptyBuffers[pane.tabId]);
+            delete ptyBuffers[pane.tabId];
+        }
+
+        if (TabManager.activeId === tab.id && pane.focused) {
+            setTimeout(() => term.focus(), 150);
+        }
+        if (tab.splitRoot) _scheduleSettleResize(tab);
+    }).catch(err => { window.__ghosttyErr = String((err && err.stack) || err);
+        console.error('[ghostty] init failed, pane fallback to xterm:', err);
+        if (TabManager.tabs.includes(tab) && findPane(tab, pane.id)) {
+            const term = new Terminal(_buildTerminalOptions());
+            let fitAddon, searchAddon;
+            try { fitAddon = new FitAddon(); term.loadAddon(fitAddon); } catch(e) {}
+            try { term.loadAddon(new WebglAddon()); } catch(e) {}
+            try { searchAddon = new SearchAddon(); term.loadAddon(searchAddon); } catch(e) {}
+            if (_settingsConfig.osc52 !== false) {
+                try { term.loadAddon(_createClipboardAddon()); } catch(e) {}
+            }
+            try { term.loadAddon(_createWebLinksAddon()); } catch(e) {}
+            pane._searchAddon = searchAddon;
+            searchAddon.onDidChangeResults(r => {
+                document.getElementById('search-count').textContent = r?.resultCount ? `${r.resultIndex+1}/${r.resultCount}` : '';
+            });
+            term.open(bodyEl);
+            term.attachCustomKeyEventHandler(e => {
+                if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') return false;
+                if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'P' || e.key === 'p')) return false;
+                return true;
+            });
+            pane.term = term;
+            pane.fitAddon = fitAddon;
+            setTimeout(() => applyFitFallback(), 300);
+            function applyFitFallback(retries = 10) {
+                if (_spannerDrag || TabManager._maximizing) return;
+                if (retries <= 0) return;
+                if (bodyEl.clientWidth === 0 || bodyEl.clientHeight === 0) { setTimeout(() => applyFitFallback(retries - 1), 50); return; }
+                _fitWithScroll(pane.term, fitAddon, bodyEl);
+            }
+            if (bodyEl._resizeObserver) { bodyEl._resizeObserver.disconnect(); }
+            let rafPending = false;
+            const observer = new ResizeObserver(() => {
+                if (rafPending) return;
+                rafPending = true;
+                requestAnimationFrame(() => { applyFitFallback(); rafPending = false; });
+            });
+            observer.observe(bodyEl);
+            bodyEl._resizeObserver = observer;
+            let _resizeDebounce = null;
+            term.onResize(({ cols, rows }) => {
+                if (TabManager._maximizing) return;
+                if (TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300) return;
+                clearTimeout(_resizeDebounce);
+                _resizeDebounce = setTimeout(() => {
+                    ipcRenderer.send('pty-resize', { tabId: pane.tabId, cols, rows });
+                }, 150);
+            });
+            pane._onDataDisp = term.onData(data => { _sendPaneInput(tab, pane, data); });
+            _bindSyncExitOnClick(tab, term.element);
+            term.element.addEventListener('contextmenu', async (e) => {
+                e.preventDefault();
+                if (_settingsConfig.rightClickPaste === false) return;
+                try {
+                    const clipboard = require('electron').clipboard;
+                    const text = clipboard.readTextAsync ? await clipboard.readTextAsync() : clipboard.readText();
+                    if (text) _sendPaneInput(tab, pane, text);
+                } catch(e) {}
+            });
+            if (ptyBuffers[pane.tabId]) {
+                term.write(ptyBuffers[pane.tabId]);
+                delete ptyBuffers[pane.tabId];
+            }
+            if (TabManager.activeId === tab.id && pane.focused) {
+                setTimeout(() => term.focus(), 150);
+            }
+            if (tab.splitRoot) _scheduleSettleResize(tab);
+        }
+    });
 }
 
 // ── Terminal search ──

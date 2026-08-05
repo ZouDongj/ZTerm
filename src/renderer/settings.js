@@ -222,6 +222,8 @@ function loadSettingsIntoForm() {
     if (fallbackEl && config.fallbackFont) fallbackEl.value = config.fallbackFont;
     const schemeEl = document.getElementById('set-terminal-scheme');
     if (schemeEl) populateTerminalSchemeSelect(schemeEl, config.terminalScheme || 'onedark');
+    const rendererEl = document.getElementById('set-renderer');
+    if (rendererEl) rendererEl.value = config.terminalRenderer || 'xterm';
     const accentInput = document.getElementById('set-accent');
     if (accentInput && config.accentColor) {
         accentInput.value = config.accentColor;
@@ -561,9 +563,10 @@ function saveAppearance() {
     const animations = getToggle('toggle-animations');
     const showStatusDot = getToggle('toggle-statusdot');
     const terminalScheme = document.getElementById('set-terminal-scheme')?.value || 'onedark';
+    const terminalRenderer = document.getElementById('set-renderer')?.value || 'xterm';
     const minimumContrastRatio = parseFloat(document.getElementById('set-contrast')?.value) || 4;
 
-    const config = { fontFamily, uiFont, uiFallbackFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, terminalScheme, minimumContrastRatio, theme: 'dark' };
+    const config = { fontFamily, uiFont, uiFallbackFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, terminalScheme, terminalRenderer, minimumContrastRatio, theme: 'dark' };
     _settingsConfig = { ..._settingsConfig, ...config };
     persistSettings();
     applyUiFont();
