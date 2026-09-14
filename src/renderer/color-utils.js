@@ -43,6 +43,43 @@ function hsvToRgb(h, s, v) {
     return { r: Math.round(r * 255), g: Math.round(g * 255), b: Math.round(b * 255) };
 }
 
+// '#rrggbb' → {h: 0-360, s: 0-1, l: 0-1}; invalid input returns null.
+// HSL (not HSV) because the surface-derivation targets are tuned in HSL
+// lightness — the axis that matches perceived surface elevation.
+function hexToHsl(hex) {
+    const rgb = hexToRgb(hex);
+    if (!rgb) return null;
+    const r = rgb.r / 255, g = rgb.g / 255, b = rgb.b / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    const d = max - min;
+    let h = 0, s = 0;
+    if (d !== 0) {
+        s = d / (1 - Math.abs(2 * l - 1));
+        if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+        else if (max === g) h = ((b - r) / d + 2) / 6;
+        else h = ((r - g) / d + 4) / 6;
+        h *= 360;
+    }
+    return { h, s, l };
+}
+
+// {h: 0-360, s: 0-1, l: 0-1} → '#rrggbb'
+function hslToHex(h, s, l) {
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const hp = ((h % 360) + 360) % 360 / 60;
+    const x = c * (1 - Math.abs((hp % 2) - 1));
+    let r = 0, g = 0, b = 0;
+    if (hp < 1) { r = c; g = x; }
+    else if (hp < 2) { r = x; g = c; }
+    else if (hp < 3) { g = c; b = x; }
+    else if (hp < 4) { g = x; b = c; }
+    else if (hp < 5) { r = x; b = c; }
+    else { r = c; b = x; }
+    const m = l - c / 2;
+    return rgbToHex(Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255));
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { hexToRgb, rgbToHex, rgbToHsv, hsvToRgb };
+    module.exports = { hexToRgb, rgbToHex, rgbToHsv, hsvToRgb, hexToHsl, hslToHex };
 }

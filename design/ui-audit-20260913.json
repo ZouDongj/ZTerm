@@ -1,0 +1,596 @@
+{
+ "generatedAt": "2026-09-14T04:02:54.723Z",
+ "sources": {
+  "app.css": 56034,
+  "xterm.css(ours)": 5777,
+  "renderer.html inline style attrs": 101,
+  "JS style assignments": 35
+ },
+ "stats": {
+  "colors": {
+   "total": 235,
+   "unique": 50,
+   "uniqueGrays": 2,
+   "topGrays": [
+    [
+     "#0a0c12",
+     1
+    ],
+    [
+     "#282c34",
+     1
+    ]
+   ],
+   "accentLike": [
+    [
+     "rgba(var(--accent-rgb)",
+     100
+    ],
+    [
+     "rgb(var(--accent-rgb)",
+     13
+    ],
+    [
+     "#8fc1ee",
+     11
+    ],
+    [
+     "rgba(255,255,255,0.045)",
+     11
+    ],
+    [
+     "#abb2bf",
+     11
+    ],
+    [
+     "#9cc8ee",
+     8
+    ],
+    [
+     "rgba(255,255,255,0.04)",
+     7
+    ],
+    [
+     "#7dd58a",
+     6
+    ],
+    [
+     "#fff",
+     5
+    ],
+    [
+     "#f19b92",
+     4
+    ],
+    [
+     "#ffb74d",
+     4
+    ],
+    [
+     "rgba(255,255,255,0.05)",
+     4
+    ],
+    [
+     "#000",
+     3
+    ],
+    [
+     "rgba(255,255,255,0.06)",
+     3
+    ],
+    [
+     "rgba(255,255,255,0.25)",
+     2
+    ]
+   ]
+  },
+  "tokens": {
+   "varUses": 293,
+   "varDefs": [
+    "--accent-rgb",
+    "--accent-contrast",
+    "--term-bg",
+    "--surface-win",
+    "--surface-float",
+    "--surface-card",
+    "--text-1",
+    "--text-2",
+    "--text-3",
+    "--shadow-pane",
+    "--shadow-float"
+   ]
+  },
+  "radius": {
+   "unique": 19,
+   "values": [
+    [
+     "12px",
+     14
+    ],
+    [
+     "10px",
+     13
+    ],
+    [
+     "6px",
+     12
+    ],
+    [
+     "50%",
+     11
+    ],
+    [
+     "9px",
+     11
+    ],
+    [
+     "8px",
+     10
+    ],
+    [
+     "5px",
+     7
+    ],
+    [
+     "14px",
+     5
+    ],
+    [
+     "7px",
+     4
+    ],
+    [
+     "16px",
+     4
+    ],
+    [
+     "2px",
+     3
+    ],
+    [
+     "8px 0 0 8px",
+     3
+    ]
+   ]
+  },
+  "shadows": {
+   "unique": 11,
+   "values": [
+    [
+     "var(--shadow-float)",
+     11
+    ],
+    [
+     "inset 0 0 0 1px rgba(255,255,255,0.06)",
+     4
+    ],
+    [
+     "0 0 4px rgba(0,0,0,0.6)",
+     2
+    ],
+    [
+     "inset 2px 0 0 0 rgba(var(--accent-rgb),0.6)",
+     1
+    ],
+    [
+     "inset -2px 0 0 0 rgba(var(--accent-rgb),0.6)",
+     1
+    ],
+    [
+     "inset 0 0 0 1px rgba(var(--accent-rgb),0.12)",
+     1
+    ],
+    [
+     "inset 0 0 0 1px rgba(var(--accent-rgb),0.4)",
+     1
+    ],
+    [
+     "inset 0 0 0 2px currentColor",
+     1
+    ],
+    [
+     "0 1px 3px rgba(0,0,0,0.4)",
+     1
+    ],
+    [
+     "0 0 6px rgba(125,213,138,0.4)",
+     1
+    ]
+   ]
+  },
+  "fontSizes": {
+   "unique": 15,
+   "values": [
+    [
+     "12px",
+     42
+    ],
+    [
+     "13px",
+     15
+    ],
+    [
+     "11px",
+     13
+    ],
+    [
+     "14px",
+     12
+    ],
+    [
+     "10px",
+     9
+    ],
+    [
+     "10.5px",
+     4
+    ],
+    [
+     "15px",
+     3
+    ],
+    [
+     "11.5px",
+     3
+    ],
+    [
+     "9px",
+     2
+    ],
+    [
+     "12.5px",
+     1
+    ],
+    [
+     "16px",
+     1
+    ],
+    [
+     "18px",
+     1
+    ]
+   ]
+  },
+  "fontFamily": {
+   "unique": 4,
+   "values": [
+    [
+     "inherit",
+     28
+    ],
+    [
+     "'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif",
+     1
+    ],
+    [
+     "'Segoe MDL2 Assets','Segoe Fluent Icons',sans-serif",
+     1
+    ],
+    [
+     "'Cascadia Code',Consolas,monospace",
+     1
+    ]
+   ]
+  },
+  "weights": {
+   "unique": 4,
+   "values": [
+    [
+     "600",
+     17
+    ],
+    [
+     "500",
+     13
+    ],
+    [
+     "400",
+     2
+    ],
+    [
+     "450",
+     1
+    ]
+   ]
+  },
+  "spacing": {
+   "unique": 26,
+   "offGrid": [
+    [
+     "10px",
+     24
+    ],
+    [
+     "6px",
+     13
+    ],
+    [
+     "7px",
+     8
+    ],
+    [
+     "2px",
+     7
+    ],
+    [
+     "18px",
+     7
+    ],
+    [
+     "14px",
+     6
+    ],
+    [
+     "9px",
+     5
+    ],
+    [
+     "5px",
+     3
+    ],
+    [
+     "13px",
+     3
+    ],
+    [
+     "3px",
+     3
+    ],
+    [
+     "30px",
+     2
+    ],
+    [
+     "26px",
+     2
+    ]
+   ],
+   "topValues": [
+    [
+     "10px",
+     24
+    ],
+    [
+     "0",
+     20
+    ],
+    [
+     "12px",
+     20
+    ],
+    [
+     "8px",
+     13
+    ],
+    [
+     "6px",
+     13
+    ],
+    [
+     "4px",
+     9
+    ],
+    [
+     "7px",
+     8
+    ],
+    [
+     "2px",
+     7
+    ],
+    [
+     "18px",
+     7
+    ],
+    [
+     "16px",
+     6
+    ],
+    [
+     "14px",
+     6
+    ],
+    [
+     "20px",
+     6
+    ]
+   ]
+  },
+  "transitions": {
+   "unique": 26,
+   "values": [
+    [
+     "all 0.12s",
+     36
+    ],
+    [
+     "background 0.12s",
+     12
+    ],
+    [
+     "opacity 0.12s",
+     6
+    ],
+    [
+     "none!important",
+     3
+    ],
+    [
+     "opacity 0.2s,transform 0.2s",
+     3
+    ],
+    [
+     "none",
+     2
+    ],
+    [
+     "background 0.12s,color 0.12s",
+     2
+    ],
+    [
+     "background 0.25s",
+     2
+    ],
+    [
+     "background 0.2s",
+     2
+    ],
+    [
+     "transform 0.2s",
+     2
+    ]
+   ],
+   "durations": [
+    [
+     "0.12s",
+     65
+    ],
+    [
+     "0.2s",
+     37
+    ],
+    [
+     "0.25s",
+     4
+    ],
+    [
+     "0.4s",
+     3
+    ],
+    [
+     "0.05s",
+     1
+    ],
+    [
+     "0.3s",
+     1
+    ],
+    [
+     "0.45s",
+     1
+    ],
+    [
+     "0.6s",
+     1
+    ]
+   ]
+  },
+  "zIndex": {
+   "values": [
+    [
+     "20",
+     6
+    ],
+    [
+     "9999",
+     3
+    ],
+    [
+     "10",
+     3
+    ],
+    [
+     "5",
+     2
+    ],
+    [
+     "300",
+     2
+    ],
+    [
+     "50",
+     2
+    ],
+    [
+     "1",
+     2
+    ],
+    [
+     "9998",
+     1
+    ],
+    [
+     "200",
+     1
+    ],
+    [
+     "15",
+     1
+    ],
+    [
+     "299",
+     1
+    ],
+    [
+     "30",
+     1
+    ],
+    [
+     "0",
+     1
+    ],
+    [
+     "100",
+     1
+    ],
+    [
+     "-5",
+     1
+    ],
+    [
+     "6",
+     1
+    ],
+    [
+     "7",
+     1
+    ],
+    [
+     "8",
+     1
+    ],
+    [
+     "2",
+     1
+    ]
+   ]
+  },
+  "interaction": {
+   "hover": 67,
+   "focus": 20,
+   "focusVisible": 8,
+   "active": 8,
+   "disabled": 3
+  },
+  "jsStyleByFile": [
+   [
+    "tabs.js",
+    16
+   ],
+   [
+    "ssh.js",
+    10
+   ],
+   [
+    "command-palette.js",
+    2
+   ],
+   [
+    "highlight.js",
+    2
+   ],
+   [
+    "quick-commands.js",
+    2
+   ],
+   [
+    "settings.js",
+    2
+   ],
+   [
+    "sftp.js",
+    1
+   ]
+  ]
+ }
+}

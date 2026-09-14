@@ -340,10 +340,26 @@ const TransferManager = {
     _transfers: [],
     _nextId: 1,
     _history: [],
+    _collapsedGroups: new Set(),
+
+    // Session display name for a transfer owner (snapshotted at add/complete
+    // time so closed sessions still group correctly afterwards).
+    _sessionLabel(tabId) {
+        for (const tab of (TabManager.tabs || [])) {
+            if (tab.tabId === tabId) {
+                if (tab.splitRoot) {
+                    const pane = getAllPanes(tab).find(p => p.tabId === tabId);
+                    if (pane) return pane.name || tab.name || tab.host || tabId;
+                }
+                return tab.name || tab.host || tabId;
+            }
+        }
+        return '已关闭会话';
+    },
 
     add(name, type, tabId, localPath) {
         const id = this._nextId++;
-        this._transfers.push({ id, name, type, tabId, localPath, transferred: 0, total: 0, done: false, cancelled: false, startTime: Date.now(), _lastUpdate: Date.now(), _lastBytes: 0, _speed: 0 });
+        this._transfers.push({ id, name, type, tabId, localPath, sessionLabel: this._sessionLabel(tabId), transferred: 0, total: 0, done: false, cancelled: false, startTime: Date.now(), _lastUpdate: Date.now(), _lastBytes: 0, _speed: 0 });
         this._render();
         this._showButton();
         showToast(type === 'download' ? '开始下载: ' + name : '开始上传: ' + name);
@@ -369,8 +385,9 @@ const TransferManager = {
         const t = this._transfers.find(x => x.id === id);
         if (!t) return;
         t.done = true;
-        // Save to in-memory history (lost on app restart, kept during session)
-        this._history.unshift({ name: t.name, type: t.type, total: t.total, localPath: t.localPath, completedAt: Date.now() });
+        // Save to in-memory history (lost on app restart, kept during session);
+        // tabId + label snapshot keeps the session grouping intact after close
+        this._history.unshift({ name: t.name, type: t.type, total: t.total, localPath: t.localPath, tabId: t.tabId, sessionLabel: t.sessionLabel, completedAt: Date.now() });
         if (this._history.length > 50) this._history.length = 50;
         this._render();
         showToast((t.type === 'download' ? '下载完成: ' : '上传完成: ') + t.name);
@@ -393,19 +410,21 @@ const TransferManager = {
     },
 
     _render() {
-        // 更新状态栏按钮的计数
+        // Top-bar button: count badge + activity dot (dot shows while
+        // transfers are running and the flyout is closed — Flutter parity).
         const btn = document.getElementById('transfer-btn');
         if (btn) {
             const active = this._transfers.filter(t => !t.done && !t.cancelled).length;
             const countEl = btn.querySelector('.transfer-count');
             const prevCount = countEl.textContent;
             countEl.textContent = active > 0 ? active : '';
-            // Pulse animation when count changes
             if (active > 0 && String(active) !== prevCount) {
                 countEl.classList.remove('pulse');
                 void countEl.offsetWidth;
                 countEl.classList.add('pulse');
             }
+            const panelOpen = document.getElementById('transfer-panel')?.classList.contains('open');
+            btn.classList.toggle('has-active', active > 0 && !panelOpen);
         }
         // 更新面板内容
         const panel = document.getElementById('transfer-panel');
@@ -427,77 +446,158 @@ const TransferManager = {
 
     openPanel() {
         this._renderPanel();
-        document.getElementById('transfer-panel').classList.add('open');
+        const panel = document.getElementById('transfer-panel');
+        const win = document.getElementById('transfer-window');
+        panel.classList.add('open');
+        // Flyout anchors below its titlebar button (bottom-left aligned,
+        // WinUI MenuFlyout style), not centered like the old status-bar panel.
+        const btn = document.getElementById('transfer-btn');
+        if (btn && win) {
+            const r = btn.getBoundingClientRect();
+            win.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 380)) + 'px';
+            win.style.right = 'auto';
+        }
+        btn?.classList.remove('has-active'); // dot hides while the flyout is open
     },
 
     closePanel() {
         document.getElementById('transfer-panel').classList.remove('open');
+        this._render(); // re-evaluate the activity dot now that the flyout closed
+    },
+
+    toggleGroup(tabId) {
+        if (!this._collapsedGroups.delete(tabId)) this._collapsedGroups.add(tabId);
+        this._renderPanel();
+    },
+
+    expandAll() { this._collapsedGroups.clear(); this._renderPanel(); },
+    collapseAll() { this._groups().forEach(g => this._collapsedGroups.add(g.tabId)); this._renderPanel(); },
+
+    // Group transfers by owning session, first-seen order (active entries
+    // establish group order; history-only groups follow). Order never jumps
+    // while transfers progress — ported from the Flutter flyout semantics.
+    _groups() {
+        const order = [];
+        const activeBy = new Map();
+        const historyBy = new Map();
+        const owner = (tabId, label) => {
+            if (!activeBy.has(tabId)) { order.push(tabId); activeBy.set(tabId, []); historyBy.set(tabId, []); }
+        };
+        for (const t of this._transfers) { owner(t.tabId); activeBy.get(t.tabId).push(t); }
+        for (const h of this._history) { owner(h.tabId || 'history'); historyBy.get(h.tabId || 'history').push(h); }
+        return order.map(tabId => {
+            const active = activeBy.get(tabId);
+            const rate = active.reduce((sum, t) => sum + (t.done || t.cancelled ? 0 : (t._speed || 0)), 0);
+            const uploads = active.filter(t => t.type === 'upload' && !t.done && !t.cancelled).length;
+            const running = active.filter(t => !t.done && !t.cancelled).length;
+            const glyph = running === 0 ? '' : uploads === 0 ? '↓' : uploads === running ? '↑' : '⇅';
+            return {
+                tabId,
+                label: (active[0] || historyBy.get(tabId)[0] || {}).sessionLabel || '已关闭会话',
+                active, history: historyBy.get(tabId), rate, glyph, running,
+            };
+        });
     },
 
     _renderPanel() {
         const body = document.getElementById('transfer-panel-body');
-        let html = '';
-        // Active transfers
-        this._transfers.forEach(t => {
-            const pct = t.total > 0 ? Math.round(t.transferred / t.total * 100) : 0;
-            const icon = t.type === 'download'
-                ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
-                : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
-            const barClass = t.cancelled ? 'cancelled' : t.done ? 'done' : '';
-            const btn = t.done
-                ? '<button class="transfer-item-btn" onclick="TransferManager.remove(' + t.id + ')">✓</button>'
-                : '<button class="transfer-item-btn" onclick="TransferManager.cancel(' + t.id + ')">×</button>';
-            const now = Date.now();
-            // 速度用 EMA 平滑（最近窗口的瞬时速率），替代全程平均值：
-            // 平均值在传输中单调漂移、字节突发时跳变，是文字抽搐的主要来源
-            let speed = t._speed || 0;
-            if (!t.done && !t.cancelled) {
-                const dt = (now - t._lastUpdate) / 1000;
-                if (dt > 0.05) {
-                    const inst = Math.max(0, t.transferred - t._lastBytes) / dt;
-                    t._speed = t._speed > 0 ? t._speed * 0.6 + inst * 0.4 : inst;
-                    t._lastUpdate = now;
-                    t._lastBytes = t.transferred;
-                    speed = t._speed;
-                }
-            }
-            const speedText = t.done ? '完成' : (speed > 0 ? formatSize(speed) + '/s' : '0 B/s');
-            html += '<div class="transfer-item">' +
-                '<span class="transfer-item-icon">' + icon + '</span>' +
-                '<div class="transfer-item-main">' +
-                    '<div class="transfer-item-name">' + escHtml(t.name) + '</div>' +
-                    '<div class="transfer-item-bar"><div class="transfer-item-bar-fill ' + barClass + '" style="width:' + pct + '%"></div></div>' +
-                    '<div class="transfer-item-meta">' +
-                        '<span>' + formatSize(t.transferred) + ' / ' + formatSize(t.total) + '</span>' +
-                        '<span class="speed">' + speedText + '</span>' +
-                    '</div>' +
-                '</div>' +
-                btn +
-            '</div>';
-        });
-        // History (completed transfers, in-memory only — lost on app restart)
-        if (this._history.length > 0) {
-            if (html) html += '<div style="padding:8px 8px 4px;font-size:11px;color:rgba(171,178,191,0.3);border-top:1px solid rgba(var(--accent-rgb),0.06);margin-top:4px">历史记录</div>';
-            this._history.forEach((h, i) => {
-                const icon = h.type === 'download'
-                    ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
-                    : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
-                const canOpen = h.type === 'download' && h.localPath;
-                html += '<div class="transfer-item"' + (canOpen ? ' style="cursor:pointer" onclick="TransferManager.openInExplorer(' + i + ')"' : '') + '>' +
-                    '<span class="transfer-item-icon">' + icon + '</span>' +
-                    '<div class="transfer-item-main">' +
-                        '<div class="transfer-item-name">' + escHtml(h.name) + '</div>' +
-                        '<div class="transfer-item-meta">' +
-                            '<span>' + formatSize(h.total) + '</span>' +
-                            '<span class="speed">' + formatDate(h.completedAt) + '</span>' +
-                        '</div>' +
-                    '</div>' +
-                    (canOpen ? '<button class="transfer-item-btn" onclick="event.stopPropagation();TransferManager.openInExplorer(' + i + ')" title="打开所在文件夹">→</button>' : '') +
-                    '<button class="transfer-item-btn" onclick="event.stopPropagation();TransferManager.removeHistory(' + i + ')" title="删除记录">×</button>' +
-                '</div>';
-            });
+        const countEl = document.getElementById('transfer-header-count');
+        const actionsEl = document.getElementById('transfer-header-actions');
+        const groups = this._groups();
+        const activeTotal = groups.reduce((s, g) => s + g.running, 0);
+        if (countEl) {
+            countEl.textContent = String(activeTotal);
+            countEl.classList.toggle('live', activeTotal > 0);
         }
-        body.innerHTML = html || '<div class="transfer-empty">暂无传输任务</div>';
+        if (actionsEl) {
+            actionsEl.innerHTML = groups.length > 1
+                ? '<button class="transfer-group-btn" onclick="TransferManager.expandAll()">全部展开</button>' +
+                  '<button class="transfer-group-btn" onclick="TransferManager.collapseAll()">全部折叠</button>'
+                : '';
+        }
+        let html = '';
+        for (const g of groups) {
+            const collapsed = this._collapsedGroups.has(g.tabId);
+            const rateText = g.running > 0 && g.rate > 0 ? g.glyph + ' ' + formatSize(g.rate) + '/s' : '';
+            html += '<div class="transfer-group">' +
+                '<div class="transfer-group-header" onclick="TransferManager.toggleGroup(\'' + escHtml(g.tabId) + '\')">' +
+                    '<span class="transfer-group-caret">' + (collapsed ? '▸' : '▾') + '</span>' +
+                    '<span class="transfer-group-name">' + escHtml(g.label) + '</span>' +
+                    '<span class="transfer-group-count">' + (g.active.length + g.history.length) + '</span>' +
+                    (rateText ? '<span class="transfer-group-rate">' + rateText + '</span>' : '') +
+                '</div>';
+            if (!collapsed) {
+                html += '<div class="transfer-group-body">';
+                for (const t of g.active) html += this._activeItemHtml(t);
+                for (let i = 0; i < g.history.length; i++) {
+                    // history index is global (removeHistory splices by it)
+                    const globalIdx = this._history.indexOf(g.history[i]);
+                    html += this._historyItemHtml(g.history[i], globalIdx);
+                }
+                html += '</div>';
+            }
+            html += '</div>';
+        }
+        body.innerHTML = html || '<div class="transfer-empty">暂无传输记录</div>';
+    },
+
+    _activeItemHtml(t) {
+        const pct = t.total > 0 ? Math.min(100, (t.transferred / t.total) * 100) : 0;
+        const icon = t.type === 'download'
+            ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
+            : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
+        const barClass = t.cancelled ? 'cancelled' : t.done ? 'done' : '';
+        const btn = t.done
+            ? '<button class="transfer-item-btn" onclick="TransferManager.remove(' + t.id + ')">✓</button>'
+            : '<button class="transfer-item-btn" onclick="TransferManager.cancel(' + t.id + ')">×</button>';
+        // 速度用 EMA 平滑（最近窗口的瞬时速率），替代全程平均值：
+        // 平均值在传输中单调漂移、字节突发时跳变，是文字抽搐的主要来源
+        const now = Date.now();
+        let speed = t._speed || 0;
+        if (!t.done && !t.cancelled) {
+            const dt = (now - t._lastUpdate) / 1000;
+            if (dt > 0.05) {
+                const inst = Math.max(0, t.transferred - t._lastBytes) / dt;
+                t._speed = t._speed > 0 ? t._speed * 0.6 + inst * 0.4 : inst;
+                t._lastUpdate = now;
+                t._lastBytes = t.transferred;
+                speed = t._speed;
+            }
+        }
+        const speedText = t.done ? '完成' : t.cancelled ? '已取消' : (speed > 0 ? formatSize(speed) + '/s' : '0 B/s');
+        // 4px bar with eased width transitions (Flutter TransferProgressBar:
+        // 0.001-equivalent dead zone is covered by the 300ms render throttle)
+        return '<div class="transfer-item">' +
+            '<span class="transfer-item-icon">' + icon + '</span>' +
+            '<div class="transfer-item-main">' +
+                '<div class="transfer-item-name">' + escHtml(t.name) + '</div>' +
+                '<div class="transfer-item-bar"><div class="transfer-item-bar-fill ' + barClass + '" style="width:' + pct.toFixed(1) + '%"></div></div>' +
+                '<div class="transfer-item-meta">' +
+                    '<span>' + formatSize(t.transferred) + ' / ' + formatSize(t.total) + '</span>' +
+                    '<span class="speed">' + speedText + '</span>' +
+                '</div>' +
+            '</div>' +
+            btn +
+        '</div>';
+    },
+
+    _historyItemHtml(h, globalIdx) {
+        const icon = h.type === 'download'
+            ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
+            : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
+        const canOpen = h.type === 'download' && h.localPath;
+        return '<div class="transfer-item"' + (canOpen ? ' style="cursor:pointer" onclick="TransferManager.openInExplorer(' + globalIdx + ')"' : '') + '>' +
+            '<span class="transfer-item-icon">' + icon + '</span>' +
+            '<div class="transfer-item-main">' +
+                '<div class="transfer-item-name">' + escHtml(h.name) + '</div>' +
+                '<div class="transfer-item-meta">' +
+                    '<span>' + formatSize(h.total) + '</span>' +
+                    '<span class="speed">' + formatDate(h.completedAt) + '</span>' +
+                '</div>' +
+            '</div>' +
+            (canOpen ? '<button class="transfer-item-btn" onclick="event.stopPropagation();TransferManager.openInExplorer(' + globalIdx + ')" title="打开所在文件夹">→</button>' : '') +
+            '<button class="transfer-item-btn" onclick="event.stopPropagation();TransferManager.removeHistory(' + globalIdx + ')" title="删除记录">×</button>' +
+        '</div>';
     },
 
     removeHistory(index) {

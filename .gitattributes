@@ -1,0 +1,2 @@
+# byte-stream captures: keep exact line endings for the caret-filter tests
+tests/fixtures/*.jsonl -text

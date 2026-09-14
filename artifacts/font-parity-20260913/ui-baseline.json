@@ -1,0 +1,147 @@
+{
+ "tokens": {
+  "text1": "#abb2bf",
+  "text2": "#a2aab7",
+  "text3": "#6a7280",
+  "surfaceWin": "#0e1013",
+  "surfaceFloat": "#292d35",
+  "surfaceCard": "#353b45"
+ },
+ "samples": [
+  {
+   "sel": "#tabbar .tab",
+   "fontSize": "12.5px",
+   "weight": "400",
+   "color": "rgb(162, 170, 183)",
+   "effFg": "rgb(162,170,183)",
+   "bg": "rgb(14,16,19)",
+   "contrast": 8.14
+  },
+  {
+   "sel": "#tabbar .tab.active",
+   "fontSize": "12.5px",
+   "weight": "400",
+   "color": "rgb(171, 178, 191)",
+   "effFg": "rgb(171,178,191)",
+   "bg": "rgb(14,16,19)",
+   "contrast": 8.94
+  },
+  {
+   "sel": ".statusbar",
+   "fontSize": "12px",
+   "weight": "400",
+   "color": "rgb(162, 170, 183)",
+   "effFg": "rgb(162,170,183)",
+   "bg": "rgb(14,16,19)",
+   "contrast": 8.14
+  },
+  {
+   "sel": "#sb-conn",
+   "fontSize": "12px",
+   "weight": "400",
+   "color": "rgb(162, 170, 183)",
+   "effFg": "rgb(162,170,183)",
+   "bg": "rgb(14,16,19)",
+   "contrast": 8.14
+  },
+  {
+   "sel": ".settings-sidebar-item",
+   "fontSize": "14px",
+   "weight": "600",
+   "color": "rgb(171, 178, 191)",
+   "effFg": "rgb(171,178,191)",
+   "bg": "rgb(40,44,52)",
+   "contrast": 6.57
+  },
+  {
+   "sel": ".settings-sidebar-item.active",
+   "fontSize": "14px",
+   "weight": "600",
+   "color": "rgb(171, 178, 191)",
+   "effFg": "rgb(171,178,191)",
+   "bg": "rgb(40,44,52)",
+   "contrast": 6.57
+  },
+  {
+   "sel": ".settings-card-title",
+   "fontSize": "14px",
+   "weight": "500",
+   "color": "rgb(171, 178, 191)",
+   "effFg": "rgb(171,178,191)",
+   "bg": "rgb(53,59,69)",
+   "contrast": 5.29
+  },
+  {
+   "sel": ".settings-card-desc",
+   "fontSize": "12px",
+   "weight": "400",
+   "color": "rgb(162, 170, 183)",
+   "effFg": "rgb(162,170,183)",
+   "bg": "rgb(53,59,69)",
+   "contrast": 4.82
+  },
+  {
+   "sel": ".settings-card-control select",
+   "fontSize": "14px",
+   "weight": "400",
+   "color": "rgb(171, 178, 191)",
+   "effFg": "rgb(171,178,191)",
+   "bg": "rgb(53,59,69)",
+   "contrast": 5.29
+  },
+  {
+   "sel": ".settings-card-control input",
+   "fontSize": "14px",
+   "weight": "400",
+   "color": "rgb(171, 178, 191)",
+   "effFg": "rgb(171,178,191)",
+   "bg": "rgb(53,59,69)",
+   "contrast": 5.29
+  },
+  {
+   "sel": ".toggle-label",
+   "fontSize": "14px",
+   "weight": "400",
+   "color": "rgb(171, 178, 191)",
+   "effFg": "rgb(171,178,191)",
+   "bg": "rgb(40,44,52)",
+   "contrast": 6.57
+  },
+  {
+   "sel": ".toggle-desc",
+   "fontSize": "12px",
+   "weight": "400",
+   "color": "rgb(162, 170, 183)",
+   "effFg": "rgb(162,170,183)",
+   "bg": "rgb(40,44,52)",
+   "contrast": 5.98
+  },
+  {
+   "sel": ".menu-item",
+   "fontSize": "14px",
+   "weight": "400",
+   "color": "rgb(162, 170, 183)",
+   "effFg": "rgb(162,170,183)",
+   "bg": "rgb(41,45,53)",
+   "contrast": 5.9
+  },
+  {
+   "sel": ".menu-label",
+   "fontSize": "14px",
+   "weight": "500",
+   "color": "rgb(162, 170, 183)",
+   "effFg": "rgb(162,170,183)",
+   "bg": "rgb(41,45,53)",
+   "contrast": 5.9
+  },
+  {
+   "sel": ".menu-shortcut",
+   "fontSize": "12px",
+   "weight": "400",
+   "color": "rgb(162, 170, 183)",
+   "effFg": "rgb(162,170,183)",
+   "bg": "rgb(41,45,53)",
+   "contrast": 5.9
+  }
+ ]
+}

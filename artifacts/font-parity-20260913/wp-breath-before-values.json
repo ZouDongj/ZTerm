@@ -1,0 +1,38 @@
+{
+ "sshName": {
+  "sel": ".ssh-item-name",
+  "fontSize": "13px",
+  "fontWeight": "500",
+  "color": "rgb(224, 108, 117)"
+ },
+ "sshDetail": {
+  "sel": ".ssh-item-detail",
+  "fontSize": "12px",
+  "fontWeight": "400",
+  "color": "rgb(162, 170, 183)"
+ },
+ "ddTrigger": {
+  "sel": ".cust-dropdown .dd-trigger",
+  "fontSize": "14px"
+ },
+ "ddOption": {
+  "sel": ".cust-dropdown .dd-option",
+  "fontSize": "14px"
+ },
+ "settingsDesc": {
+  "sel": ".settings-card-desc",
+  "fontSize": "12px",
+  "marginTop": "4px"
+ },
+ "shellRowDesc": {
+  "sel": "#shell-visibility-list .settings-card-desc",
+  "fontSize": "12px",
+  "marginTop": "12px"
+ },
+ "tab": {
+  "sel": "#tabbar .tab",
+  "fontSize": "12.5px",
+  "fontWeight": "400",
+  "color": "rgb(162, 170, 183)"
+ }
+}

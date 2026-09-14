@@ -97,6 +97,14 @@ async fn main() {
             // WebView 内容未覆盖到的边缘露出默认白色会形成闪烁
             .background_color(tauri::window::Color(33, 37, 43, 255))
             .enable_clipboard_access()
+            // Disable LCD subpixel text antialiasing so every piece of UI text
+            // (tabs, menus, settings, status bar) renders with grayscale AA —
+            // matching the terminal canvas, whose glyph atlas is an alpha
+            // canvas and therefore already grayscale. Keeps Tauri's default
+            // WebView2 feature disables (explicit args replace the defaults).
+            .additional_browser_args(
+                "--disable-lcd-text --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+            )
             .build()?;
 
             // 窗口状态恢复 + show 移到 renderer_ready command：

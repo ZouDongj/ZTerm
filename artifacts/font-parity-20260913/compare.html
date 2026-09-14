@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><title>ZTerm vs Tabby font parity</title>
+<style>body{background:#1e1e1e;color:#ccc;font-family:system-ui;margin:24px}h3{color:#9CA3FF}img{background:#282a36;border:1px solid #444;image-rendering:auto;max-width:100%}.row{display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap}.col{flex:1;min-width:280px}p{color:#888;font-size:13px}</style>
+<h2>ZTerm（本构建实测） vs Tabby 参照（prototype 2026-09-08 采集）</h2>
+<p>格度量已逐格一致：css cell 9×21（fontSize 16 / lineHeight 1 / 400-600 / JetBrainsMonoNL NF + HarmonyOS Sans SC，同源 xterm+WebGL bundle）。下面左右对比字形观感。</p>
+<div class="row">
+  <div class="col"><h3>ZTerm live</h3><img src="zterm-render.png"></div>
+  <div class="col"><h3>Tabby ref: regular</h3><img src="tabby-ref-study-z-regular-warm1.png"><h3>bold</h3><img src="tabby-ref-study-z-bold-warm1.png"></div>
+  <div class="col"><h3>Tabby ref: CJK regular</h3><img src="tabby-ref-cjk-regular-warm1.png"><h3>CJK bold</h3><img src="tabby-ref-cjk-bold-warm1.png"></div>
+</div>

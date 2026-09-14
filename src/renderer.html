@@ -31,6 +31,14 @@
 <div class="window">
   <div class="titlebar" data-tauri-drag-region>
     <div id="tabbar"></div>
+    <!-- Global transfer flyout entry: shown only while records exist; the
+         badge dot appears while transfers are active and the flyout is
+         closed (ported from the ZTerm Flutter workspace top bar). -->
+    <div class="transfer-btn" id="transfer-btn" onclick="TransferManager.openPanel()" title="传输任务">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg>
+      <span class="transfer-count"></span>
+      <span class="transfer-badge-dot"></span>
+    </div>
     <div class="win-controls">
       <button class="win-ctrl" id="win-minimize" onclick="window.electronAPI.minimize()" title="最小化"></button>
       <button class="win-ctrl" id="win-maximize" onclick="window.electronAPI.maximize()" title="最大化"></button>
@@ -73,10 +81,11 @@
 
   <!-- Transfer Panel Overlay -->
   <div class="overlay" id="transfer-panel" onclick="TransferManager.closePanel()">
-    <div class="transfer-window" onclick="event.stopPropagation()">
+    <div class="transfer-window" id="transfer-window" onclick="event.stopPropagation()">
       <div class="transfer-header">
-        <h2>传输任务</h2>
-        <div style="flex:1"></div>
+        <h2>全部传输</h2>
+        <span class="transfer-header-count" id="transfer-header-count"></span>
+        <div class="transfer-header-actions" id="transfer-header-actions"></div>
         <button class="transfer-close" onclick="TransferManager.closePanel()">×</button>
       </div>
       <div class="transfer-panel-body" id="transfer-panel-body"></div>
@@ -174,6 +183,7 @@
             </div>
 
             <div class="settings-section">新建会话列表</div>
+            <div class="settings-section-desc">控制在新建标签页的会话选择列表中显示哪些终端</div>
             <div class="settings-card" id="shell-visibility-list"></div>
 
             <div class="settings-section">光标</div>
@@ -314,23 +324,11 @@
               </div>
               <div class="settings-row">
                 <div class="settings-card-label">
-                  <div class="settings-card-title">终端渲染引擎</div>
-                  <div class="settings-card-desc">Ghostty 为 libghostty 的 WASM 移植（xterm.js 兼容 API）。行距/字重等高级文本项仅 xterm 生效；切换后对新标签页生效</div>
-                </div>
-                <div class="settings-card-control">
-                  <select class="styled-select" id="set-renderer" onchange="saveAppearance()">
-                    <option value="xterm">xterm.js（默认）</option>
-                    <option value="ghostty">Ghostty (libghostty)</option>
-                  </select>
-                </div>
-              </div>
-              <div class="settings-row">
-                <div class="settings-card-label">
                   <div class="settings-card-title">强调色</div>
                   <div class="settings-card-desc">界面高亮和焦点颜色</div>
                 </div>
                 <div class="settings-card-control" style="display:flex;gap:0;align-items:center">
-                  <input type="text" id="set-accent" value="#61afef" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid transparent;border-radius:8px 0 0 8px;padding:6px 10px;color:#abb2bf;font-size:12px;outline:none;border-right:none" onchange="updateAccentDot();saveAppearance()">
+                  <input type="text" id="set-accent" value="#61afef" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid transparent;border-radius:8px 0 0 8px;padding:7px 10px;color:#abb2bf;font-size:14px;outline:none;border-right:none" onchange="updateAccentDot();saveAppearance()">
                   <div id="accent-dot" style="width:28px;height:28px;background:rgb(var(--accent-rgb));border-radius:0 8px 8px 0;border:1.5px solid rgba(var(--accent-rgb),0.2);border-left:none;flex-shrink:0;cursor:pointer;box-sizing:border-box" onclick="openColorPicker()"></div>
                 </div>
               </div>
@@ -460,9 +458,9 @@
             <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:4px">
               <div><h2>SSH 配置管理</h2><p class="desc">管理远程服务器连接。密码使用 Windows DPAPI 加密存储。</p></div>
               <div style="display:flex;gap:6px;flex-shrink:0">
-                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="collapseAllGroups()">折叠全部</button>
-                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="expandAllGroups()">展开全部</button>
-                <button class="btn-primary" style="font-size:11px;padding:5px 14px" onclick="openSSHEdit(true)">+ 添加连接</button>
+                <button class="btn-outline" style="font-size:12px;padding:5px 12px" onclick="collapseAllGroups()">折叠全部</button>
+                <button class="btn-outline" style="font-size:12px;padding:5px 12px" onclick="expandAllGroups()">展开全部</button>
+                <button class="btn-primary" style="font-size:12px;padding:5px 14px" onclick="openSSHEdit(true)">+ 添加连接</button>
               </div>
             </div>
             <div id="settings-ssh-list"></div>
@@ -472,7 +470,7 @@
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
               <div><h2>高亮</h2><p class="desc">自定义终端输出高亮规则。</p></div>
               <div style="display:flex;gap:6px;flex-shrink:0">
-                <button class="btn-primary" style="font-size:11px;padding:5px 12px" onclick="openHighlightEdit(true)">+ 添加规则</button>
+                <button class="btn-primary" style="font-size:12px;padding:5px 12px" onclick="openHighlightEdit(true)">+ 添加规则</button>
               </div>
             </div>
 
@@ -504,9 +502,9 @@
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
               <div><h2>快捷命令</h2><p class="desc">保存常用命令，通过 Ctrl+Shift+P 快速执行。</p></div>
               <div style="display:flex;gap:6px;flex-shrink:0">
-                <button class="btn-outline" style="font-size:11px;padding:4px 10px" onclick="expandAllQC()">展开全部</button>
-                <button class="btn-outline" style="font-size:11px;padding:4px 10px" onclick="collapseAllQC()">折叠全部</button>
-                <button class="btn-primary" style="font-size:11px;padding:5px 12px" onclick="openQCEdit(true)">+ 添加命令</button>
+                <button class="btn-outline" style="font-size:12px;padding:4px 10px" onclick="expandAllQC()">展开全部</button>
+                <button class="btn-outline" style="font-size:12px;padding:4px 10px" onclick="collapseAllQC()">折叠全部</button>
+                <button class="btn-primary" style="font-size:12px;padding:5px 12px" onclick="openQCEdit(true)">+ 添加命令</button>
               </div>
             </div>
             <div class="toggle-row" style="margin-bottom:10px">
@@ -523,7 +521,7 @@
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
               <div><h2>快捷键</h2><p class="desc">点击「修改」后按下新的快捷键组合，Esc 取消。</p></div>
               <div style="display:flex;gap:6px;flex-shrink:0">
-                <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="resetAllShortcuts()">全部重置</button>
+                <button class="btn-outline" style="font-size:12px;padding:5px 12px" onclick="resetAllShortcuts()">全部重置</button>
               </div>
             </div>
             <table class="kb-table" id="shortcuts-table"></table>
@@ -554,8 +552,8 @@
                   <div class="settings-card-desc" id="data-dir-path" style="color:rgba(171,178,191,0.6);font-size:11px;margin-top:4px">…</div>
                 </div>
                 <div class="settings-card-control" style="display:flex;gap:6px;flex-shrink:0">
-                  <button class="btn-outline" style="font-size:11px;padding:5px 12px" onclick="changeDataDir()">更改…</button>
-                  <button class="btn-outline" style="font-size:11px;padding:5px 12px;display:none" id="data-dir-reset" onclick="resetDataDir()">恢复默认</button>
+                  <button class="btn-outline" style="font-size:12px;padding:5px 12px" onclick="changeDataDir()">更改…</button>
+                  <button class="btn-outline" style="font-size:12px;padding:5px 12px;display:none" id="data-dir-reset" onclick="resetDataDir()">恢复默认</button>
                 </div>
               </div>
             </div>
@@ -566,10 +564,6 @@
   </div>
   <div class="statusbar">
     <span id="sb-conn">⊞ PowerShell</span>
-    <div class="transfer-btn" id="transfer-btn" onclick="TransferManager.openPanel()" title="传输任务">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg>
-      <span class="transfer-count"></span>
-    </div>
     <span style="margin-left:auto">UTF-8</span>
   </div>
 </div>
@@ -886,13 +880,20 @@
 </div>
 
   <!-- Tauri 迁移: 在 14 个 renderer/*.js 之前注入 polyfill + require shim + xterm UMD -->
-  <!-- 1. xterm UMD bundle (挂 window.Terminal / window.FitAddon 等) -->
+  <!-- 1. xterm UMD bundle. The xterm/webgl bundles are mechanically extracted
+       from the user's Tabby install (see vendor/PROVENANCE.json) so terminal
+       text renders identically to Tabby; they attach TabbyXterm/TabbyWebgl
+       globals, aliased here to the legacy Terminal/WebglAddon names. -->
   <script src="vendor/xterm.js"></script>
   <script src="vendor/addon-fit.js"></script>
   <script src="vendor/addon-webgl.js"></script>
   <script src="vendor/addon-search.js"></script>
   <script src="vendor/addon-clipboard.js"></script>
   <script src="vendor/addon-web-links.js"></script>
+  <script>
+    window.Terminal = window.TabbyXterm.Terminal;
+    window.WebglAddon = window.TabbyWebgl;
+  </script>
 
   <!-- 2. ipcRenderer polyfill (同步暴露 window.ipcRenderer, 异步加载 Tauri API) -->
   <script src="ipc-polyfill.js"></script>
@@ -988,10 +989,12 @@
   <script src="renderer/tab-serialize.js"></script>
   <script src="renderer/color-utils.js"></script>
   <script src="renderer/smooth-cursor-overlay.js"></script>
+  <script src="renderer/xterm-smooth-cursor.js"></script>
   <script src="renderer/session-items.js"></script>
   <script src="renderer/tabs.js"></script>
   <script src="renderer/split.js"></script>
   <script src="renderer/terminal.js"></script>
+  <script src="renderer/conpty-caret.js"></script>
   <script src="renderer/ipc.js"></script>
   <script src="renderer/ssh.js"></script>
   <script src="renderer/sftp.js"></script>

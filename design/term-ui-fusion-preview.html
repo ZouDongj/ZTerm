@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Term-UI Fusion Preview · 终端与界面融合派生方案</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { background: #0a0a0d; color: #ccc; font-family: system-ui, sans-serif; padding: 24px; }
+  h1 { font-size: 18px; color: #eee; margin-bottom: 6px; }
+  p.desc { font-size: 13px; color: #999; margin-bottom: 18px; max-width: 900px; line-height: 1.6; }
+  .schemes { display: flex; gap: 8px; margin-bottom: 20px; }
+  .schemes button { padding: 6px 14px; border-radius: 8px; border: 1px solid #444; background: #1a1a22; color: #ccc; font-size: 13px; cursor: pointer; }
+  .schemes button.on { border-color: #9CA3FF; color: #fff; }
+  .row { display: flex; gap: 24px; flex-wrap: wrap; }
+  .col { flex: 1; min-width: 380px; }
+  .col h2 { font-size: 14px; margin-bottom: 8px; }
+  .col h2 .tag { font-weight: 400; color: #888; font-size: 12px; }
+  /* mini window mock */
+  .win { border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.08); height: 380px; display: flex; flex-direction: column; }
+  .titlebar { height: 30px; display: flex; align-items: center; padding: 0 10px; font-size: 11px; gap: 8px; }
+  .titlebar .dot { width: 9px; height: 9px; border-radius: 50%; }
+  .tabbar { height: 32px; display: flex; align-items: end; padding: 0 8px; gap: 4px; }
+  .tab { padding: 5px 12px; font-size: 11px; border-radius: 7px 7px 0 0; }
+  .tab.on { font-weight: 600; }
+  .main { flex: 1; position: relative; padding: 10px; }
+  .term { position: absolute; inset: 10px; border-radius: 12px; padding: 10px; font-family: 'JetBrains Mono', Consolas, monospace; font-size: 11.5px; line-height: 1.55; }
+  .term .p { color: var(--accent-demo); }
+  .float-card { position: absolute; right: 18px; bottom: 18px; border-radius: 10px; padding: 10px 14px; font-size: 11px; width: 180px; box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
+  .float-card b { display: block; margin-bottom: 4px; font-size: 11.5px; }
+  .legend { margin-top: 10px; font-size: 12px; color: #888; line-height: 1.7; }
+  .legend code { background: #16161d; padding: 1px 6px; border-radius: 4px; color: #c9b3ff; }
+</style>
+</head>
+<body>
+<h1>终端 ↔ 界面 融合方案预览</h1>
+<p class="desc">
+左：现状 —— UI 底座/浮层是固定蓝灰（#12141b / #2a303e / #343b4b），终端背景跟配色方案走，亮度倒挂（终端比底座亮一倍、与浮层同级），色相无关联。<br>
+右：派生方案 —— 以终端配色背景为一级输入：底座 = 压暗（同色相），浮层 = 提亮 8%，卡片 = 提亮 14%，tab 栏跟随底座。切换下方配色方案，观察两侧差异。
+</p>
+<div class="schemes" id="schemes"></div>
+<div class="row">
+  <div class="col"><h2>现状 <span class="tag">固定 surface × 各自为政的 term-bg</span></h2><div class="win" id="winNow"></div>
+    <div class="legend">底座 <code>#12141b</code>（固定蓝灰）· 终端 <code id="termBgNow"></code> · 浮层 <code>#2a303e</code>（固定）</div></div>
+  <div class="col"><h2>派生方案 <span class="tag">term-bg 派生 surface 阶梯</span></h2><div class="win" id="winDer"></div>
+    <div class="legend">底座 <code id="winDerV"></code> · 终端 <code id="termBgDer"></code> · 浮层 <code id="floatDerV"></code> —— 全部同色相</div></div>
+</div>
+<script>
+const SCHEMES = {
+  'OneHalfDark': { bg: '#282c34', fg: '#abb2bf', accent: '#61afef' },
+  'Snazzy':      { bg: '#282a36', fg: '#eff0eb', accent: '#ff6ac1' },
+  'TokyoNight':  { bg: '#1a1b26', fg: '#c0caf5', accent: '#7aa2f7' },
+  'Catppuccin':  { bg: '#1e1e2e', fg: '#cdd6f4', accent: '#f5c2e7' },
+};
+const hex2hsl = (hex) => {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0;
+  if (d) { if (mx === r) h = ((g - b) / d + 6) % 6; else if (mx === g) h = (b - r) / d + 2; else h = (r - g) / d + 4; h *= 60; }
+  const l = (mx + mn) / 2, s = d ? d / (1 - Math.abs(2 * l - 1)) : 0;
+  return [h, s, l];
+};
+const hsl2hex = (h, s, l) => {
+  const f = (n) => {
+    const k = (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+    const v = l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    return Math.round(v * 255).toString(16).padStart(2, '0');
+  };
+  return '#' + f(0) + f(8) + f(4);
+};
+// derivation: same hue+sat as term bg; L targets fixed
+const derive = (bg, lTarget) => { const [h, s] = hex2hsl(bg); return hsl2hex(h, Math.max(s, 0.06), lTarget); };
+
+const FIXED = { win: '#12141b', float: '#2a303e', card: '#343b4b', tab: '#1b1e27' };
+
+function renderMock(el, colors, derived) {
+  const s = SCHEMES[cur];
+  const winBg   = derived ? derive(s.bg, 0.065) : FIXED.win;
+  const tabBg   = derived ? derive(s.bg, 0.10)  : FIXED.tab;
+  const termBg  = s.bg;
+  const floatBg = derived ? derive(s.bg, 0.185) : FIXED.float;
+  const accent  = derived ? s.accent : '#9CA3FF';
+  el.style.background = winBg;
+  el.innerHTML = `
+    <div class="titlebar" style="background:${winBg};color:${s.fg}aa">
+      <span class="dot" style="background:${accent}"></span>
+      <span>ZTerm — ${cur}${derived ? ' · derived' : ''}</span>
+    </div>
+    <div class="tabbar" style="background:${winBg}">
+      <span class="tab ${derived?'':'x'}" style="background:${termBg};color:${s.fg}">${cur === 'OneHalfDark' ? 'git bash' : 'ssh rig'}</span>
+      <span class="tab" style="background:${tabBg};color:${s.fg}99">settings</span>
+    </div>
+    <div class="main" style="background:${winBg}">
+      <div class="term" style="background:${termBg};color:${s.fg};--accent-demo:${accent};box-shadow:inset 0 1px 0 rgba(255,255,255,0.05)">
+        <div><span class="p">➜</span> ~/Code ls -la</div>
+        <div>src/  design/  tests/  README.md</div>
+        <div><span class="p">➜</span> echo "fusion check"</div>
+        <div>fusion check</div>
+        <div><span class="p">➜</span> ▌</div>
+      </div>
+      <div class="float-card" style="background:${floatBg};color:${s.fg}">
+        <b>SFTP 会话</b>
+        <span style="opacity:.8">192.168.41.88 · 已连接</span>
+      </div>
+    </div>`;
+}
+let cur = 'OneHalfDark';
+function renderAll() {
+  renderMock(document.getElementById('winNow'), null, false);
+  renderMock(document.getElementById('winDer'), null, true);
+  document.getElementById('termBgNow').textContent = SCHEMES[cur].bg;
+  document.getElementById('termBgDer').textContent = SCHEMES[cur].bg;
+  document.getElementById('winDerV').textContent = derive(SCHEMES[cur].bg, 0.065);
+  document.getElementById('floatDerV').textContent = derive(SCHEMES[cur].bg, 0.185);
+  for (const b of document.querySelectorAll('.schemes button')) b.classList.toggle('on', b.dataset.s === cur);
+}
+const bar = document.getElementById('schemes');
+for (const name of Object.keys(SCHEMES)) {
+  const b = document.createElement('button');
+  b.textContent = name; b.dataset.s = name;
+  b.onclick = () => { cur = name; renderAll(); };
+  bar.appendChild(b);
+}
+renderAll();
+</script>
+</body>
+</html>

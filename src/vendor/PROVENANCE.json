@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "source": "Installed Tabby terminal bundle; mechanical extraction only",
+  "package": "tabby-terminal",
+  "packageVersion": "1.0.231-nightly.0",
+  "pluginPath": "D:/Program Files/Tabby/resources/builtin-plugins/tabby-terminal/dist/index.js",
+  "pluginSha256": "3069124e72181d6305224e9216e6f58c0329c89032eff079a65ab3094fb2572c",
+  "sourceCssPath": "D:/Program Files/Tabby/resources/builtin-plugins/tabby-terminal/src/frontends/xterm.css",
+  "sourceCssSha256": "f342f434086927e73820a324e370acb5659b6e214b3b1a348f0a005caebd1ece",
+  "fullCssSource": "D:\\Code\\MyTerm\\tauri-terminal-prototype\\artifacts\\xterm-target-20260908-repaired\\installed-xterm-full.css",
+  "fullCssSha256": "b4c263bbbcb6a986fc9a66b1eec7f36ee0e6296f4f08fc5dedc5a5eb36c90cd1",
+  "extracted": {
+    "xtermFile": "xterm.js",
+    "xtermBundleLines": "4730..12409",
+    "xtermSha256": "9f7b10efa8b6c96c5d0c5702befdf5ddca004822da7244a4f5fe5cbaed62013e",
+    "webglFile": "webgl-addon.js",
+    "webglBundleLines": "703..4066",
+    "webglSha256": "62476a96dfc4326f0c988c911a98eb48fc05dd1ca3f0ea97cc9e60ff3d4ace70",
+    "cssFile": "xterm.css",
+    "cssSha256": "b4c263bbbcb6a986fc9a66b1eec7f36ee0e6296f4f08fc5dedc5a5eb36c90cd1"
+  },
+  "license": "xterm.js and official addon code are distributed under the MIT license; see NOTICE.md.",
+  "note": "No npm dependency or user Tabby profile is used by the candidate page."
+}

@@ -10,12 +10,44 @@ function _updatePaneDot(pane, connected) {
     }
 }
 
+// ConPTY rewrites the app's trailing `ESC[?25h` into `ESC[?25l` and paints its
+// own reverse-video caret cell, which permanently hides the real cursor and
+// kills smooth-cursor animations inside TUI apps (herdr etc.). The filter is
+// per-tab/per-pane because it carries cross-chunk state (sync blocks, UTF-8).
+function _conPtyCaretFix(owner, data) {
+    const factory = typeof createConPtyCaretFilter === 'function'
+        ? createConPtyCaretFilter
+        : window.createConPtyCaretFilter;
+    if (!factory) return data;
+    if (!owner._caretFilter) owner._caretFilter = factory({ mode: 'fix' });
+    const out = owner._caretFilter.push(data);
+    return typeof out === 'string' ? out : data;
+}
+
+// Drop the caret filter at session boundaries. If a TUI left the filter in
+// the middle of a synchronized-output block (inSync=true, e.g. the SSH
+// connection died mid-frame), the filter would swallow every byte of the
+// next session's output into its block buffer — the terminal would look
+// frozen until some other TUI happened to open and close a sync block.
+function _resetCaretFilterById(tabId) {
+    for (const tab of TabManager.tabs) {
+        if (tab.splitRoot) {
+            const pane = getAllPanes(tab).find(p => p.tabId === tabId);
+            if (pane) { delete pane._caretFilter; return; }
+        }
+        if (tab.tabId === tabId) { delete tab._caretFilter; return; }
+    }
+}
+
 ipcRenderer.on('pty-output', (event, { tabId, data }) => {
     for (const tab of TabManager.tabs) {
         if (tab.splitRoot) {
             const pane = getAllPanes(tab).find(p => p.tabId === tabId);
             if (pane) {
                 if (!tab._contentBuffer) tab._contentBuffer = [];
+                // ConPTY caret fix must run before buffering so the filter sees
+                // the full stream in order; ptyBuffers then holds repaired bytes.
+                if (typeof data === 'string' && data) data = _conPtyCaretFix(pane, data);
                 if (pane.term) {
                     pane.term.write(applyHighlight(data, tabId));
                 } else {
@@ -26,6 +58,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
         }
         if (tab.tabId === tabId) {
             if (!tab._contentBuffer) tab._contentBuffer = [];
+            if (typeof data === 'string' && data) data = _conPtyCaretFix(tab, data);
             // Track alternate screen (nvim, less, etc.) — don't save TUI content
             if (data.includes('\x1b[?1049h')) tab._altScreen = true;
             if (data.includes('\x1b[?1049l')) tab._altScreen = false;
@@ -54,6 +87,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
 
 // ── IPC: PTY created (local) ──
 ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
+    _resetCaretFilterById(tabId);
     if (requestId) {
         for (const tab of TabManager.tabs) {
             if (tab.splitRoot) {
@@ -135,6 +169,7 @@ function _sshDisplayName(tab, pane) {
 }
 
 ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
+    _resetCaretFilterById(tabId);
     for (const tab of TabManager.tabs) {
         if (tab.splitRoot) {
             const pane = getAllPanes(tab).find(p => p.tabId === tabId || p.requestId === rendererId);
@@ -236,6 +271,9 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
 
 // ── IPC: SSH disconnected ──
 ipcRenderer.on('ssh-disconnected', (event, { tabId, rendererId }) => {
+    // The filter may be stuck mid-sync-block from the dead session; drop it so
+    // a reconnect cannot inherit a filter that swallows all fresh output.
+    _resetCaretFilterById(tabId);
     clearAlternateScreen(tabId);
     if (TabManager._consumeClosed(tabId)) {
         return;
@@ -263,6 +301,7 @@ ipcRenderer.on('ssh-disconnected', (event, { tabId, rendererId }) => {
 
 // ── IPC: PTY exit ──
 ipcRenderer.on('pty-exit', (event, { tabId }) => {
+    _resetCaretFilterById(tabId);
     clearAlternateScreen(tabId);
     if (TabManager._consumeClosed(tabId)) {
         return;

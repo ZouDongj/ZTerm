@@ -558,6 +558,35 @@ fn parse_osc7_cwd(text: &str) -> Option<String> {
     m.get(1).map(|g| g.as_str().to_string())
 }
 
+/// ConPTY emits local echo as ~6 tiny (~9 byte) blocks per keystroke; emitting
+/// each read as its own IPC message starves the WebView renderer frame budget
+/// (visible as per-keystroke stutter). The PTY reader therefore only appends
+/// to a shared outbox and a single flusher thread coalesces it into one
+/// message per tick.
+const PTY_FLUSH_INTERVAL_MS: u64 = 4;
+/// A/B switch (default off): `ZTERM_PTY_COALESCE=loose` widens the flush
+/// window to wait out ConPTY's 27-36ms twin-wave output splits. Costs up to
+/// PTY_LOOSE_FLUSH_WINDOW_MS of added local typing latency. An explicit
+/// `ZTERM_PTY_FLUSH_MS=<n>` always wins, so both settings stay scriptable.
+const PTY_LOOSE_FLUSH_WINDOW_MS: u64 = 40;
+const PTY_MAX_FLUSH_WINDOW_MS: u64 = 200;
+
+fn pty_flush_interval_ms(loose: bool) -> u64 {
+    pty_flush_interval_from(std::env::var("ZTERM_PTY_FLUSH_MS").ok().as_deref(), loose)
+}
+
+fn pty_flush_interval_from(explicit: Option<&str>, loose: bool) -> u64 {
+    if let Some(raw) = explicit {
+        if let Ok(ms) = raw.trim().parse::<u64>() {
+            return ms.min(PTY_MAX_FLUSH_WINDOW_MS);
+        }
+    }
+    if loose {
+        return PTY_LOOSE_FLUSH_WINDOW_MS;
+    }
+    PTY_FLUSH_INTERVAL_MS
+}
+
 /// 增量 UTF-8 解码：把新字节接到 carry 上，解码出所有完整字符并返回；
 /// 块尾不完整的多字节序列（error_len 为 None）留在 carry 等下一块补齐，
 /// 避免单块 from_utf8_lossy 把跨块字符（中文/emoji 等）替换成 U+FFFD（�）。
@@ -681,19 +710,61 @@ pub async fn pty_create(
     let app2 = app.clone();
     let tid = tab_id.clone();
     tokio::task::spawn_blocking(move || {
-        let mut buf = [0u8; 4096];
+        // Reader thread: blocking reads only append to the shared outbox.
+        let loose = std::env::var("ZTERM_PTY_COALESCE")
+            .map(|v| v.trim() == "loose")
+            .unwrap_or(false);
+        let flush_ms = pty_flush_interval_ms(loose);
+        let outbox: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let outbox = Arc::clone(&outbox);
+            let finished = Arc::clone(&finished);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    use std::io::Read;
+                    match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => outbox.lock().extend_from_slice(&buf[..n]),
+                        Err(_) => break,
+                    }
+                }
+                finished.store(true, std::sync::atomic::Ordering::Release);
+            });
+        }
+
+        // Flusher thread: the only emitter. Coalesces micro-blocks into one
+        // IPC message per tick and preserves output ordering. The UTF-8 carry
+        // lives here so multi-byte characters split across reads survive.
         // 跨块字符 carry：read 块边界可能切在 UTF-8 多字节序列中间，
         // 单块 from_utf8_lossy 会把半截字符变成 U+FFFD（�）
         let mut utf8_carry: Vec<u8> = Vec::new();
+        let mut last_seen_len = 0usize;
         loop {
-            use std::io::Read;
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let text = drain_utf8(&mut utf8_carry, &buf[..n]);
-                    let _ = app2.emit("pty-output", json!({ "tabId": tid, "data": text }));
+            std::thread::sleep(std::time::Duration::from_millis(flush_ms));
+            let taken = {
+                let mut guard = outbox.lock();
+                if guard.is_empty() {
+                    if finished.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    continue;
                 }
-                Err(_) => break,
+                // Wide-window mode: only drain once the source has gone quiet,
+                // or the extra latency would split the burst anyway.
+                if flush_ms > PTY_FLUSH_INTERVAL_MS
+                    && !finished.load(std::sync::atomic::Ordering::Acquire)
+                    && guard.len() == last_seen_len
+                {
+                    continue;
+                }
+                last_seen_len = guard.len();
+                std::mem::take(&mut *guard)
+            };
+            if !taken.is_empty() {
+                let text = drain_utf8(&mut utf8_carry, &taken);
+                let _ = app2.emit("pty-output", json!({ "tabId": tid, "data": text }));
             }
         }
         let _ = app2.emit("pty-exit", json!({ "tabId": tid }));
@@ -3429,6 +3500,23 @@ mod tests {
         let s = window_state_from_config(&json!({"window": {"x": 1, "y": 2, "width": 3, "height": 4}}))
             .unwrap();
         assert!(!s.maximized);
+    }
+
+    #[test]
+    fn pty_flush_interval_pure_branches() {
+        // Env parsing is isolated in pty_flush_interval_from so the matrix is
+        // testable without mutating process-global env (cargo test is parallel).
+        assert_eq!(pty_flush_interval_from(None, false), PTY_FLUSH_INTERVAL_MS);
+        assert_eq!(pty_flush_interval_from(None, true), PTY_LOOSE_FLUSH_WINDOW_MS);
+        // Explicit value always wins over the loose toggle, clamped at max.
+        assert_eq!(pty_flush_interval_from(Some("56"), true), 56);
+        assert_eq!(
+            pty_flush_interval_from(Some("999999"), false),
+            PTY_MAX_FLUSH_WINDOW_MS
+        );
+        // Unparsable explicit value falls through to the toggle-based default.
+        assert_eq!(pty_flush_interval_from(Some("abc"), false), PTY_FLUSH_INTERVAL_MS);
+        assert_eq!(pty_flush_interval_from(Some("  80  "), true), 80);
     }
 
     #[test]

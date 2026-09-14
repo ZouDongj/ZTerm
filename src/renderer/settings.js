@@ -186,7 +186,9 @@ function loadSettingsIntoForm() {
     }
     const sdEl = document.getElementById('set-startup-dir');
     if (sdEl) sdEl.value = config.startupDir || '';
-    // Shell visibility in session selector（每个本地终端一行开关）
+    // Shell visibility in session selector: one toggle row per local shell.
+    // The group-level hint is static markup under the section title in
+    // renderer.html (.settings-section-desc), not injected here.
     const svEl = document.getElementById('shell-visibility-list');
     if (svEl) {
         const hidden = config.hiddenProfiles || [];
@@ -194,7 +196,6 @@ function loadSettingsIntoForm() {
               <div class="settings-row">
                 <div class="settings-card-label">
                   <div class="settings-card-title">${escHtml(p.name)}</div>
-                  <div class="settings-card-desc">在新建会话列表中显示</div>
                 </div>
                 <div class="toggle-switch ${hidden.includes(p.id) ? '' : 'on'}" id="toggle-shell-${p.id}" onclick="toggleSwitch(this);saveTerminal()"></div>
               </div>`).join('');
@@ -211,19 +212,17 @@ function loadSettingsIntoForm() {
         if (match) fontEl.value = firstFont;
     }
     const fontSizeEl = document.getElementById('set-font-size');
-    if (fontSizeEl && config.fontSize) fontSizeEl.value = config.fontSize;
+    if (fontSizeEl) fontSizeEl.value = config.fontSize || 16;
     const lhEl = document.getElementById('set-line-height');
-    if (lhEl && config.lineHeight) lhEl.value = config.lineHeight;
+    if (lhEl) lhEl.value = config.lineHeight || 1.125;
     const fwEl = document.getElementById('set-font-weight');
     if (fwEl) fwEl.value = config.fontWeight || '400';
     const fwbEl = document.getElementById('set-font-weight-bold');
-    if (fwbEl) fwbEl.value = config.fontWeightBold || '700';
+    if (fwbEl) fwbEl.value = config.fontWeightBold || '600';
     const fallbackEl = document.getElementById('set-fallback-font');
     if (fallbackEl && config.fallbackFont) fallbackEl.value = config.fallbackFont;
     const schemeEl = document.getElementById('set-terminal-scheme');
     if (schemeEl) populateTerminalSchemeSelect(schemeEl, config.terminalScheme || 'onedark');
-    const rendererEl = document.getElementById('set-renderer');
-    if (rendererEl) rendererEl.value = config.terminalRenderer || 'xterm';
     const accentInput = document.getElementById('set-accent');
     if (accentInput && config.accentColor) {
         accentInput.value = config.accentColor;
@@ -553,20 +552,19 @@ function saveAppearance() {
     const fontFamily = document.getElementById('set-font')?.value || '';
     const uiFont = document.getElementById('set-ui-font')?.value || _settingsConfig.uiFont || '';
     const uiFallbackFont = document.getElementById('set-ui-fallback-font')?.value || _settingsConfig.uiFallbackFont || '';
-    const fontSize = parseFloat(document.getElementById('set-font-size')?.value) || 13.5;
-    const lineHeight = parseFloat(document.getElementById('set-line-height')?.value) || 1.6;
+    const fontSize = parseFloat(document.getElementById('set-font-size')?.value) || 16;
+    const lineHeight = parseFloat(document.getElementById('set-line-height')?.value) || 1.125;
     const fontWeight = _clampFontWeight(document.getElementById('set-font-weight')?.value, '400');
-    const fontWeightBold = _clampFontWeight(document.getElementById('set-font-weight-bold')?.value, '700');
+    const fontWeightBold = _clampFontWeight(document.getElementById('set-font-weight-bold')?.value, '600');
     const accentColor = document.getElementById('set-accent')?.value || '#61afef';
     const fallbackFont = document.getElementById('set-fallback-font')?.value || '';
     updateAccentDot();
     const animations = getToggle('toggle-animations');
     const showStatusDot = getToggle('toggle-statusdot');
     const terminalScheme = document.getElementById('set-terminal-scheme')?.value || 'onedark';
-    const terminalRenderer = document.getElementById('set-renderer')?.value || 'xterm';
     const minimumContrastRatio = parseFloat(document.getElementById('set-contrast')?.value) || 4;
 
-    const config = { fontFamily, uiFont, uiFallbackFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, terminalScheme, terminalRenderer, minimumContrastRatio, theme: 'dark' };
+    const config = { fontFamily, uiFont, uiFallbackFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, terminalScheme, minimumContrastRatio, theme: 'dark' };
     _settingsConfig = { ..._settingsConfig, ...config };
     persistSettings();
     applyUiFont();
@@ -700,6 +698,6 @@ async function loadSettings() {
             return;
         }
     } catch(e) { console.error('[loadSettings]', e); }
-    _settingsConfig = { cursor: 'bar', scrollback: 10000, bell: 'off', cursorBlink: true, autoCopy: true, rightClickPaste: true, fontFamily: '"JetBrains Mono","Cascadia Code",Consolas,monospace', fontSize: 14, lineHeight: 1.6, fontWeight: '450', fontWeightBold: '700', accentColor: '#61afef', theme: 'dark', animations: true, showStatusDot: true, restoreLocalContent: false, smartCopy: true, osc52: true, richTextCopy: false };
+    _settingsConfig = { cursor: 'bar', scrollback: 10000, bell: 'off', cursorBlink: true, autoCopy: true, rightClickPaste: true, fontFamily: '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace', fontSize: 16, lineHeight: 1.125, fontWeight: '400', fontWeightBold: '600', accentColor: '#61afef', theme: 'dark', animations: true, showStatusDot: true, restoreLocalContent: false, smartCopy: true, osc52: true, richTextCopy: false };
 }
 
