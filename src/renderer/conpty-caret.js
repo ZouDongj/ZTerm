@@ -48,6 +48,19 @@
     let inSync = false;
     let visibleBefore = true;
     let block = null;
+    // Painted-caret detection: some TUI frameworks (ink-style diffs) NEVER
+    // issue a cursor-show and park+hide the real cursor between frames,
+    // drawing their own caret as a styled cell instead. Over SSH (no ConPTY
+    // consolidation) those between-frame hides sit OUTSIDE sync blocks and
+    // permanently defeat the block-end repair, so the real cursor stays
+    // hidden and the painted caret can only teleport. Signature: a
+    // synchronized-output TUI that has hidden repeatedly but never once
+    // shown. Apps that emit ?25h (nvim, shells, opencode) and apps without
+    // sync blocks (htop) never trigger this.
+    let hidesSeen = 0;
+    let showsSeen = 0;
+    let blocksSeen = 0;
+    let paintedCaret = false;
 
     // Plain text is buffered too, so the trailing-cell rewrite can see it.
     function emit(text) {
@@ -73,6 +86,7 @@
         const buffered = block || [];
         block = null;
         inSync = false;
+        blocksSeen += 1;
         let out = buffered.join('');
         if (mode === 'fix') {
           // Order matters: the painted-caret signature ENDS with the block's
@@ -85,15 +99,40 @@
           // churn cancels the cursor animation on every key (the "choppy
           // caret" in dsh-tui/kimi-style agents). Frames that started hidden
           // (nvim normal mode) keep their hides untouched.
-          if (visibleBefore) out = out.split(HIDE).join('');
+          if (visibleBefore || paintedCaret) out = out.split(HIDE).join('');
         }
         out += text;
-        visible = visibleBefore;
-        if (visibleBefore) out += SHOW; // ConPTY dropped the app's own `?25h`
+        visible = paintedCaret ? true : visibleBefore;
+        if (visible) out += SHOW; // ConPTY dropped the app's own `?25h`
         return out;
       }
-      if (text === HIDE) visible = false;
-      else if (text === SHOW) visible = true;
+      if (text === HIDE) {
+        hidesSeen += 1;
+        // Painted-caret engagement: a hide OUTSIDE any sync block, from a
+        // stream that has produced sync-block frames but never once a show,
+        // is the app actively re-hiding after our block-end repair — an
+        // ink-style TUI that paints its own caret and parks the real cursor
+        // between frames. From here on every hide is swallowed and the real
+        // cursor stays visible exactly on the painted cell, so the adapter
+        // animates it. Apps that emit ?25h (nvim, shells, opencode) and
+        // streams without sync blocks never reach this.
+        if (mode === 'fix' && !paintedCaret && !inSync && blocksSeen >= 1 && showsSeen === 0) {
+          paintedCaret = true;
+          visible = true;
+          return '';
+        }
+        if (paintedCaret) return ''; // keep the real cursor on the painted cell
+        visible = false;
+        return emit(text);
+      }
+      if (text === SHOW) {
+        showsSeen += 1;
+        // A real show ends painted-caret mode: the app does manage cursor
+        // visibility after all.
+        paintedCaret = false;
+        visible = true;
+        return emit(text);
+      }
       return emit(text);
     }
 
@@ -174,7 +213,7 @@
       push,
       setMode,
       mode: function () { return mode; },
-      state: function () { return { mode, inSync, visible, buffered: block ? block.length : 0 }; },
+      state: function () { return { mode, inSync, visible, buffered: block ? block.length : 0, paintedCaret, hidesSeen, showsSeen, blocksSeen }; },
     };
   }
 
