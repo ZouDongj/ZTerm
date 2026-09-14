@@ -45,7 +45,11 @@ for (const size of [1, 7, 64, 1 << 20]) {
     if (!out.includes(`39;49m${ch}`)) throw new Error(`size ${size}: typed char ${ch} lost`);
   }
   if (!f.state().paintedCaret) throw new Error(`size ${size}: painted-caret mode never engaged`);
-  console.log(`size ${String(size).padStart(7)}: ok (${blocks} blocks, ${shows} SHOWs, ${hidesOut} hides)`);
+  // the app's own painted caret (styled-space glyph) must be removed from
+  // every post-engagement frame — only the two warm-up frames keep theirs
+  const painted = count(/48;2;220;223;228/g, out);
+  if (painted > 2) throw new Error(`size ${size}: painted glyph survived (${painted})`); // 2 warm-up frames
+  console.log(`size ${String(size).padStart(7)}: ok (${blocks} blocks, ${shows} SHOWs, ${hidesOut} hides, ${painted} painted)`);
 }
 
 // One-off stray hides separated by shows (nvim-style mode changes) must NOT
