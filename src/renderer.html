@@ -48,10 +48,10 @@
   <!-- Menu popup -->
   <div class="menu-backdrop" id="menu-backdrop" onclick="closeMenuPopup()"></div>
   <div class="menu-popup" id="menu-popup">
-    <div class="menu-item" onclick="closeMenuPopup();openQC()"><span class="menu-icon">⌘</span><span class="menu-label">快捷命令</span><span class="menu-shortcut" data-action="quickCommands"></span></div>
-    <div class="menu-item" data-action="sftp" onclick="closeMenuPopup();openSFTPFromMenu()"><span class="menu-icon">📁</span><span class="menu-label">SFTP 文件传输</span><span class="menu-shortcut" data-action="sftp"></span></div>
-    <div class="menu-item" onclick="closeMenuPopup();openPalette()"><span class="menu-icon">⌘</span><span class="menu-label">命令面板</span><span class="menu-shortcut" data-action="commandPalette"></span></div>
-    <div class="menu-item" onclick="closeMenuPopup();openSettings()"><span class="menu-icon">⚙</span><span class="menu-label">设置</span><span class="menu-shortcut" data-action="openSettings"></span></div>
+    <div class="menu-item" onclick="closeMenuPopup();openQC()"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg></span><span class="menu-label">快捷命令</span><span class="menu-shortcut" data-action="quickCommands"></span></div>
+    <div class="menu-item" data-action="sftp" onclick="closeMenuPopup();openSFTPFromMenu()"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span><span class="menu-label">SFTP 文件传输</span><span class="menu-shortcut" data-action="sftp"></span></div>
+    <div class="menu-item" onclick="closeMenuPopup();openPalette()"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg></span><span class="menu-label">命令面板</span><span class="menu-shortcut" data-action="commandPalette"></span></div>
+    <div class="menu-item" onclick="closeMenuPopup();openSettings()"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span><span class="menu-label">设置</span><span class="menu-shortcut" data-action="openSettings"></span></div>
   </div>
 
   <!-- SFTP Overlay -->
@@ -73,8 +73,8 @@
       </div>
       <div class="sftp-body" id="sftp-body"></div>
       <div class="sftp-footer">
-        <button onclick="SFTP.upload()">⬆ 上传文件</button>
-        <button onclick="SFTP.mkdir()">📂 新建目录</button>
+        <button onclick="SFTP.upload()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> 上传文件</button>
+        <button onclick="SFTP.mkdir()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> 新建目录</button>
       </div>
     </div>
   </div>
@@ -86,7 +86,7 @@
         <h2>全部传输</h2>
         <span class="transfer-header-count" id="transfer-header-count"></span>
         <div class="transfer-header-actions" id="transfer-header-actions"></div>
-        <button class="transfer-close" onclick="TransferManager.closePanel()">×</button>
+        <button class="transfer-close" onclick="TransferManager.closePanel()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
       <div class="transfer-panel-body" id="transfer-panel-body"></div>
     </div>
@@ -134,7 +134,7 @@
     <span class="count" id="search-count"></span>
     <button onclick="searchPrev()" title="上一个 (Shift+Enter)">↑</button>
     <button onclick="searchNext()" title="下一个 (Enter)">↓</button>
-    <button onclick="closeSearch()">×</button>
+    <button onclick="closeSearch()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
   </div>
 
   <!-- Settings pane (rendered inline, not as overlay) -->
@@ -563,7 +563,7 @@
     </div>
   </div>
   <div class="statusbar">
-    <span id="sb-conn">⊞ PowerShell</span>
+    <span id="sb-conn"><span class="sb-conn-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>PowerShell</span>
     <span style="margin-left:auto">UTF-8</span>
   </div>
 </div>
@@ -576,7 +576,7 @@
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(171,178,191,0.4)" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
       <h3>新建会话</h3>
       <div class="spacer"></div>
-      <button class="panel-close" onclick="closeOverlay('overlay-sessions')">×</button>
+      <button class="panel-close" onclick="closeOverlay('overlay-sessions')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div class="panel-search">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
@@ -599,7 +599,7 @@
     <div class="panel-header">
       <h3>SSH 连接管理</h3>
       <div class="spacer"></div>
-      <button class="panel-close" onclick="closeOverlay('overlay-ssh-manager')">×</button>
+      <button class="panel-close" onclick="closeOverlay('overlay-ssh-manager')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div class="ssh-manager-actions">
       <button onclick="collapseAllGroups()">折叠全部</button>
@@ -622,7 +622,7 @@
     <div class="panel-header">
       <h3 id="ssh-edit-title">添加 SSH 连接</h3>
       <div class="spacer"></div>
-      <button class="panel-close" onclick="closeSSHEdit()">×</button>
+      <button class="panel-close" onclick="closeSSHEdit()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div class="panel-tabs" id="ssh-edit-tabs">
       <div class="panel-tab-slider" id="panel-tab-slider"></div>
@@ -672,7 +672,7 @@
           <div class="form-group">
             <label>密码</label>
             <div id="ssh-pwd-status" class="ssh-pwd-status" style="display:none">
-              <span class="ssh-pwd-status-text">🔒 密码已加密保存</span>
+              <span class="ssh-pwd-status-text"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> 密码已加密保存</span>
               <button type="button" id="ssh-pwd-edit-btn" class="btn-outline">修改</button>
             </div>
             <div style="position:relative;display:inline-block;width:100%">
@@ -738,7 +738,7 @@
     <div class="panel-header">
       <h3 id="qc-edit-title">添加命令</h3>
       <div class="spacer"></div>
-      <button class="panel-close" onclick="closeQCEdit()">×</button>
+      <button class="panel-close" onclick="closeQCEdit()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div style="padding:0 20px 20px;display:flex;flex-direction:column;gap:12px">
       <div class="form-row">
@@ -775,7 +775,7 @@
     <div class="panel-header">
       <h3 id="highlight-edit-title">添加高亮规则</h3>
       <div class="spacer"></div>
-      <button class="panel-close" onclick="closeHighlightEdit()">×</button>
+      <button class="panel-close" onclick="closeHighlightEdit()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div style="padding:0 20px 20px;display:flex;flex-direction:column;gap:12px">
       <div class="form-row">
@@ -980,6 +980,7 @@
     };
   </script>
 
+  <script src="renderer/icons.js"></script>
   <script src="renderer/utils.js"></script>
   <script src="renderer/state.js"></script>
   <script src="renderer/split-layout.js"></script>

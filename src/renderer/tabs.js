@@ -460,7 +460,7 @@ const TabManager = {
             div.onmousedown = (e) => this._onTabPointerDown(e, t.id);
             let inner;
             if (t.type === 'settings') {
-                inner = `<span style="font-size:14px">⚙</span> ${t.name}`;
+                inner = `<span style="font-size:14px">${Icons.iconSvg('settings', 14)}</span> ${t.name}`;
             } else {
                 let dotClass = t.connected ? 'connected' : 'disconnected';
                 const showDot = _settingsConfig.showStatusDot !== false;
@@ -469,10 +469,10 @@ const TabManager = {
                 if (t.type === 'ssh' && !t.splitRoot) {
                     const rcClass = t.connected ? 'tab-reconnect-normal' : 'tab-reconnect';
                     const rcTitle = t.connected ? '强制重连' : '重新连接';
-                    inner += `<span class="${rcClass}" title="${rcTitle}" onclick="event.stopPropagation();TabManager.reconnectTab('${t.id}')">↻</span>`;
+                    inner += `<span class="${rcClass}" title="${rcTitle}" onclick="event.stopPropagation();TabManager.reconnectTab('${t.id}')">${Icons.iconSvg('rotate-cw', 12)}</span>`;
                 }
             }
-            inner += `<span class="tab-close" onclick="event.stopPropagation();TabManager.closeTab('${t.id}')">×</span>`;
+            inner += `<span class="tab-close" onclick="event.stopPropagation();TabManager.closeTab('${t.id}')">${Icons.iconSvg('x', 13)}</span>`;
             div.innerHTML = inner;
             bar.insertBefore(div, addBtn);
         });
@@ -493,18 +493,20 @@ const TabManager = {
     updateStatus() {
         const t = this.getActive();
         if (!t) return;
+        // innerHTML swap (no listeners involved); `info` contains user data and
+        // must stay escaped, the SVG icon is a static string
         if (t.type === 'settings') {
-            document.getElementById('sb-conn').textContent = '⚙ 设置';
+            document.getElementById('sb-conn').innerHTML = `<span class="sb-conn-icon">${Icons.iconSvg('settings', 12)}</span>设置`;
             return;
         }
-        let icon = '⊞';
+        let iconName = 'terminal';
         let info = t.name;
         if (t.type === 'ssh') {
-            icon = '⚡';
+            iconName = 'zap';
             info = t.user ? `${t.user}@${t.host}` : t.name;
             if (!t.connected) info += ' (已断开)';
         }
-        document.getElementById('sb-conn').textContent = `${icon} ${info}`;
+        document.getElementById('sb-conn').innerHTML = `<span class="sb-conn-icon">${Icons.iconSvg(iconName, 12)}</span>${escHtml(info)}`;
     },
 
     // ── Split pane support (Tabby-aligned absolute model) ──
@@ -707,15 +709,15 @@ const TabManager = {
             const hdr = document.createElement('div');
             hdr.className = 'pane-header';
             // 只在 SSH pane 中显示 SFTP 和重连按钮
-            const sftpBtn = pane.type === 'ssh' ? '<button title="SFTP" onclick="event.stopPropagation();TabManager._openSFTP(\'' + tab.id + '\',\'' + pane.id + '\')">📁</button>' : '';
-            const reconnectPaneBtn = pane.type === 'ssh' ? '<button title="强制重连" onclick="event.stopPropagation();TabManager._reconnectPane(\'' + tab.id + '\',\'' + pane.id + '\')">↻</button>' : '';
+            const sftpBtn = pane.type === 'ssh' ? '<button title="SFTP" onclick="event.stopPropagation();TabManager._openSFTP(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('folder', 13) + '</button>' : '';
+            const reconnectPaneBtn = pane.type === 'ssh' ? '<button title="强制重连" onclick="event.stopPropagation();TabManager._reconnectPane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('rotate-cw', 12) + '</button>' : '';
             hdr.innerHTML = (showDot ? '<span class="dot ' + dc + '"></span>' : '') +
                 '<span class="label">' + escHtml(pane.name || tab.name) + '</span>' +
                 sftpBtn +
                 reconnectPaneBtn +
-                '<button title="extract" onclick="event.stopPropagation();TabManager._extractPaneToTab(\'' + tab.id + '\',\'' + pane.id + '\')">&#11023;</button>' +
-                '<button title="maximize" onclick="event.stopPropagation();TabManager._maximizePane(\'' + tab.id + '\',\'' + pane.id + '\')">⛶</button>' +
-                '<button title="close" onclick="event.stopPropagation();TabManager._closePane(\'' + tab.id + '\',\'' + pane.id + '\')">×</button>';
+                '<button title="extract" onclick="event.stopPropagation();TabManager._extractPaneToTab(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('external-link', 12) + '</button>' +
+                '<button title="maximize" onclick="event.stopPropagation();TabManager._maximizePane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('maximize', 13) + '</button>' +
+                '<button title="close" onclick="event.stopPropagation();TabManager._closePane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('x', 13) + '</button>';
             el.appendChild(hdr);
             // 拖拽重排：Tabby 同款指针拖拽（mousedown 跟踪，不用 HTML5 draggable）
             hdr.addEventListener('mousedown', (e) => this._onPaneHeaderMouseDown(e, tab, pane));

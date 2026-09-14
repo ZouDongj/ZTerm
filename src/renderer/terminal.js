@@ -292,7 +292,7 @@ function wireTerminal(tab, tabId) {
     term.onBell(() => {
         const bell = _settingsConfig.bell || 'off';
         if (bell === 'off') return;
-        if (bell !== 'flash') showToast('🔔 ' + (tab.name || '终端') + ' 响铃');
+        if (bell !== 'flash') showToast((tab.name || '终端') + ' 响铃');
         if (bell === 'flash' || bell === 'notification+flash') {
             const tabEl = document.querySelector(`.tab[data-tab="${tab.id}"]`);
             if (tabEl) { tabEl.classList.add('bell-flash'); setTimeout(() => tabEl.classList.remove('bell-flash'), 2000); }
@@ -465,7 +465,7 @@ function wireTerminalToPane(tab, pane) {
     term.onBell(() => {
         const bell = _settingsConfig.bell || 'off';
         if (bell === 'off') return;
-        if (bell !== 'flash') showToast('🔔 ' + (tab.name || '终端') + ' 响铃');
+        if (bell !== 'flash') showToast((tab.name || '终端') + ' 响铃');
         if (bell === 'flash' || bell === 'notification+flash') {
             const tabEl = document.querySelector(`.tab[data-tab="${tab.id}"]`);
             if (tabEl) { tabEl.classList.add('bell-flash'); setTimeout(() => tabEl.classList.remove('bell-flash'), 2000); }

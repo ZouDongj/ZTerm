@@ -23,11 +23,11 @@ test('buildSessionItems 本地 profile 构造', () => {
     assert.equal(items.length, 2);
     assert.deepEqual(items[0], {
         id: 'local_powershell', name: 'PowerShell', detail: 'powershell.exe',
-        type: 'local', badge: '', icon: '⊞', profile: LOCAL[0],
+        type: 'local', badge: '', icon: 'terminal', profile: LOCAL[0],
     });
     // 带 args 的 profile：detail 用短路径 + args
     assert.equal(items[1].detail, 'bash.exe --login -i');
-    assert.equal(items[1].icon, '>_');
+    assert.equal(items[1].icon, 'terminal');
 });
 
 test('buildSessionItems hidden 过滤', () => {
@@ -40,6 +40,7 @@ test('buildSessionItems SSH profile 构造与默认端口', () => {
     assert.equal(items.length, 2);
     assert.equal(items[0].id, 'ssh_s1');
     assert.equal(items[0].type, 'ssh');
+    assert.equal(items[0].icon, 'zap');
     assert.equal(items[0].detail, 'root@example.com:22');
     assert.equal(items[0].badge, '生产');
     assert.equal(items[1].detail, 'dev@dev.example.com:22', '缺端口默认 22');

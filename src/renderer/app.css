@@ -188,6 +188,10 @@ body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 .search-bar button{background:none;border:none;color:var(--text-3);cursor:pointer;font-size:13px;padding:2px 7px;border-radius:6px;transition:all 0.12s}
 .search-bar button:hover{color:var(--text-1);background:rgba(var(--accent-rgb),0.14)}
 
+/* Status bar current-session icon: inline svg optically centered against
+   the 12px status text */
+.sb-conn-icon{display:inline-flex;align-items:center;margin-right:6px;vertical-align:-1.5px}
+
 /* Statusbar */
 .statusbar{height:26px;background:var(--surface-win);display:flex;align-items:center;padding:0 14px;gap:16px;font-size:12px;color:var(--text-2);flex-shrink:0}
 .statusbar span{display:flex;align-items:center;gap:5px}
@@ -268,7 +272,10 @@ body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 /* Accent color swatches */
 .accent-swatch{width:26px;height:26px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:all 0.12s;flex-shrink:0}
 .accent-swatch:hover{transform:scale(1.15)}
-.accent-swatch.active{box-shadow:inset 0 0 0 2px currentColor}
+/* Selection ring must be VISIBLE: the old inset ring drew in currentColor on
+   a background of the same color. Outer gap ring (card-colored 2px gap +
+   swatch-colored 4px ring) reads clearly on the settings card. */
+.accent-swatch.active{box-shadow:0 0 0 2px var(--surface-card),0 0 0 4px currentColor}
 
 /* Custom color picker */
 .color-picker-overlay{position:fixed;inset:0;z-index:300;display:none;align-items:center;justify-content:center;background:rgba(8,9,12,0.55);backdrop-filter:blur(6px)}
@@ -300,7 +307,9 @@ body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 .toggle-switch.small{width:32px;height:18px}
 .toggle-switch.small::after{width:14px;height:14px}
 .toggle-switch.small.on::after{transform:translateX(14px)}
-.toggle-switch.on{background:rgba(var(--accent-rgb),0.6)}
+/* ON state uses the full accent color: a dimmed rgba(accent, 0.6) diverged
+   from every other accent-bearing control (dots, focus rings, inputs). */
+.toggle-switch.on{background:rgb(var(--accent-rgb))}
 .toggle-switch::after{content:'';position:absolute;top:2px;left:2px;width:19px;height:19px;border-radius:50%;background:#fff;transition:transform 0.2s,background 0.2s}
 .toggle-switch.on::after{transform:translateX(19px);background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.4)}
 
@@ -372,7 +381,9 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .v3-item:hover{background:rgba(255,255,255,0.04)}
 .v3-item.sel,.v3-item[data-selected]{background:rgba(var(--accent-rgb),0.16)}
 .v3-name{flex:1;min-width:0;font-size:13px;color:var(--text-1);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.v3-cmd{font-size:12px;color:var(--text-2);font-family:'Cascadia Code',Consolas,monospace;max-width:55%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* No hardcoded font stack: the command text inherits the UI font, which in
+   follow mode IS the configured terminal font. */
+.v3-cmd{font-size:12px;color:var(--text-2);max-width:55%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .v3-kbd{font-size:10px;color:#9cc8ee;background:rgba(var(--accent-rgb),0.1);padding:2px 7px;border-radius:5px;flex-shrink:0;font-family:inherit}
 
 /* Search */
@@ -489,7 +500,9 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ssh-group-items.collapsed{display:none}
 .ssh-item{display:flex;align-items:center;gap:9px;padding:7px 12px;border-radius:9px;transition:background 0.12s}
 .ssh-item:hover{background:rgba(255,255,255,0.04)}
-.ssh-item-icon{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0;background:rgba(255,183,77,0.14);color:#ffb74d}
+/* line-height:1 kills the inherited 1.6 line box so the glyph/SVG centers
+   optically against the two-line text block next to it */
+.ssh-item-icon{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:12px;line-height:1;flex-shrink:0;background:rgba(255,183,77,0.14);color:#ffb74d}
 .ssh-item-info{flex:1;min-width:0}
 .ssh-item-name{font-size:13px;color:var(--text-1);font-weight:500}
 .ssh-item-detail{font-size:12px;font-weight:400;color:var(--text-2)}
