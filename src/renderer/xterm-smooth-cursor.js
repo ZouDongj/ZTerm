@@ -440,6 +440,18 @@
           visual: instrumentation.visual ? { ...instrumentation.visual } : null,
           animationActive: motion.animating,
           frameId: instrumentation.frameId,
+          // Frame-pacing evidence: ms gaps between the most recent cursor
+          // draw passes. Sustained gaps > ~16ms during typing = dropped
+          // animation frames — the difference between "animating" and
+          // "animating smoothly" on the user's display.
+          recentDrawGapMs: (() => {
+            const ts = instrumentation.drawTimestamps;
+            const gaps = [];
+            for (let i = Math.max(1, ts.length - 30); i < ts.length; i += 1) {
+              gaps.push(+(ts[i] - ts[i - 1]).toFixed(1));
+            }
+            return gaps;
+          })(),
           counters: {
             baseDrawPasses: instrumentation.baseDrawPasses,
             cursorDrawPasses: instrumentation.cursorDrawPasses,

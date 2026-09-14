@@ -450,7 +450,10 @@ const TabManager = {
             const div = document.createElement('div');
             div.className = 'tab';
             div.setAttribute('data-tab', t.id);
-            div.title = t.name;
+            // no native title attribute: the OS tooltip delay is ~1s, which
+            // reads as lag when sweeping across tabs. The shared low-latency
+            // tooltip below (delegated on #tabbar) replaces it.
+            div.dataset.tip = t.name;
             div.onclick = () => this.switchTo(t.id);
             div.ondblclick = (e) => { if (t.type !== 'settings') { e.stopPropagation(); this.startRenameTab(t.id); } };
             div.oncontextmenu = (e) => { if (t.type !== 'settings') { e.preventDefault(); this.showTabContextMenu(e, t.id); } };
@@ -2263,3 +2266,44 @@ const TabManager = {
     },
 
 };
+
+// ── Shared low-latency tab tooltip ──
+// Native title attributes carry a ~1s OS delay, which reads as lag when the
+// pointer sweeps across tabs. One delegated listener + one shared element.
+(() => {
+    const bar = document.getElementById('tabbar');
+    if (!bar) return;
+    let tip = null, timer = null, current = null;
+    const ensure = () => {
+        if (!tip) {
+            tip = document.createElement('div');
+            tip.className = 'zt-tip';
+            document.body.appendChild(tip);
+        }
+        return tip;
+    };
+    const hide = () => {
+        if (timer) { clearTimeout(timer); timer = null; }
+        if (tip) tip.classList.remove('show');
+        current = null;
+    };
+    bar.addEventListener('mouseover', (e) => {
+        const el = e.target.closest('.tab');
+        if (!el || el === current) return;
+        hide();
+        current = el;
+        timer = setTimeout(() => {
+            const name = (el.dataset.tip || el.querySelector('.tab-name')?.textContent || '').trim();
+            if (!name) return;
+            const t = ensure();
+            t.textContent = name;
+            t.classList.add('show');
+            const r = el.getBoundingClientRect();
+            t.style.left = Math.min(Math.max(8, r.left), window.innerWidth - t.offsetWidth - 8) + 'px';
+            t.style.top = (r.bottom + 6) + 'px';
+        }, 120);
+    });
+    bar.addEventListener('mouseleave', hide);
+    bar.addEventListener('click', hide, true);
+    bar.addEventListener('mousedown', hide, true);
+})();
