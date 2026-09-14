@@ -31,6 +31,7 @@ const DEFAULT_SHORTCUTS = {
     commandPalette: 'Ctrl+P',
     cloneTab: 'Ctrl+Shift+T',
     'toggle-statusbar': 'Ctrl+Shift+B',
+    perfCapture: 'Ctrl+Shift+D',
 };
 
 function _getShortcutBindings() {
@@ -166,6 +167,53 @@ const SHORTCUT_ACTIONS = {
         const combo = _comboDisplay(_getShortcutBindings()['toggle-statusbar'] || 'Ctrl+Shift+B');
         showToast(on ? '状态栏已显示' : `状态栏已隐藏（${combo} 恢复）`);
     },
+    perfCapture: () => {
+        // 4-second self-service performance sample for cursor-motion triage:
+        // records compositor rAF timestamps (presented-frame proxy) plus the
+        // smooth-cursor adapter's retargets/draw gaps, then copies the JSON to
+        // the clipboard for the user to paste back. Lets us measure on the
+        // user's real display (DPI/scale) without any remote control.
+        if (window.__perfCapturing) { showToast('采样已在进行中', true); return; }
+        window.__perfCapturing = true;
+        showToast('性能采样中（4 秒）—— 请继续在终端里打字');
+        const t0 = performance.now();
+        const raf = [];
+        const loop = (t) => { raf.push(t); if (t - t0 < 4000) requestAnimationFrame(loop); else finish(); };
+        const tab = TabManager.getActive();
+        const adapter = tab && tab._smoothCursor && tab._smoothCursor._adapter;
+        const before = adapter && adapter.snapshot ? adapter.snapshot().counters : null;
+        const startRetargets = adapter && adapter.snapshot ? adapter.snapshot().retargets.length : 0;
+        requestAnimationFrame(loop);
+        function finish() {
+            window.__perfCapturing = false;
+            const gaps = [];
+            for (let i = 1; i < raf.length; i++) gaps.push(+(raf[i] - raf[i - 1]).toFixed(1));
+            gaps.sort((a, b) => a - b);
+            const q = (p) => (gaps.length ? gaps[Math.min(gaps.length - 1, Math.floor(p * gaps.length))] : null);
+            const after = adapter && adapter.snapshot ? adapter.snapshot() : null;
+            const report = {
+                at: new Date().toISOString(),
+                durationMs: +(performance.now() - t0).toFixed(0),
+                display: { dpr: window.devicePixelRatio, w: window.innerWidth, h: window.innerHeight },
+                raf: { count: raf.length, p50: q(0.5), p95: q(0.95), max: gaps[gaps.length - 1] || null },
+                cursor: after ? {
+                    countersDelta: before ? {
+                        cursorDrawPasses: after.counters.cursorDrawPasses - before.cursorDrawPasses,
+                        baseDrawPasses: after.counters.baseDrawPasses - before.baseDrawPasses,
+                    } : null,
+                    recentDrawGapMs: after.recentDrawGapMs,
+                    retargets: after.retargets.slice(Math.max(0, startRetargets - 40)).map(r => ({ at: Math.round(r.at), from: r.from.x + ',' + r.from.y, to: r.target.x + ',' + r.target.y })),
+                    drawPassStatus: after.drawPassStatus,
+                } : 'no-adapter',
+            };
+            const text = JSON.stringify(report);
+            navigator.clipboard.writeText(text).then(
+                () => showToast('采样完成：数据已复制到剪贴板，直接粘贴给开发者'),
+                () => showToast('采样完成（剪贴板写入失败，见控制台）', true),
+            );
+            console.log('[perf-sample]', text);
+        }
+    },
 };
 
 // ── Shortcut customization (settings page) ──
@@ -191,6 +239,7 @@ const SHORTCUT_LABELS = {
     commandPalette: '命令面板',
     cloneTab: '克隆标签页',
     'toggle-statusbar': '显示/隐藏状态栏',
+    perfCapture: '性能采样（4秒，复制到剪贴板）',
 };
 
 function _comboDisplay(combo) {
