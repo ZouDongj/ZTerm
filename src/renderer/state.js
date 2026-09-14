@@ -297,3 +297,17 @@ function applyAccentColor(hex) {
     document.documentElement.style.setProperty('--accent-contrast', contrast);
 }
 
+// ── Statusbar visibility（Ctrl+Shift+B 切换；持久化在 appearance 配置里）──
+// Default is visible: only an explicit `false` hides the bar, so old configs
+// written before this field existed keep the status bar.
+function applyStatusbarVisibility() {
+    document.body.classList.toggle('hide-statusbar', _settingsConfig.showStatusbar === false);
+}
+
+function toggleStatusbar() {
+    _settingsConfig.showStatusbar = _settingsConfig.showStatusbar === false;
+    applyStatusbarVisibility();
+    persistSettings();
+    return _settingsConfig.showStatusbar;
+}
+

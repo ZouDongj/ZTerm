@@ -74,7 +74,19 @@
         block = null;
         inSync = false;
         let out = buffered.join('');
-        if (mode === 'fix') out = removePaintedCaret(out);
+        if (mode === 'fix') {
+          // Order matters: the painted-caret signature ENDS with the block's
+          // trailing ?25l, so strip it before dropping transient hides.
+          out = removePaintedCaret(out);
+          // Transient-hide churn: a frame that started from the visible state
+          // is one we repair with a block-end SHOW anyway; forwarding the
+          // in-frame ?25l toggles the caret hide->show once per sync block.
+          // TUI input boxes redraw in ~10 sync blocks per keystroke, so that
+          // churn cancels the cursor animation on every key (the "choppy
+          // caret" in dsh-tui/kimi-style agents). Frames that started hidden
+          // (nvim normal mode) keep their hides untouched.
+          if (visibleBefore) out = out.split(HIDE).join('');
+        }
         out += text;
         visible = visibleBefore;
         if (visibleBefore) out += SHOW; // ConPTY dropped the app's own `?25h`

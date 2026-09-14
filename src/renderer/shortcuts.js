@@ -30,6 +30,7 @@ const DEFAULT_SHORTCUTS = {
     quickCommands: 'Ctrl+Shift+P',
     commandPalette: 'Ctrl+P',
     cloneTab: 'Ctrl+Shift+T',
+    'toggle-statusbar': 'Ctrl+Shift+B',
 };
 
 function _getShortcutBindings() {
@@ -158,6 +159,13 @@ const SHORTCUT_ACTIONS = {
             TabManager.cloneTab(tab.id);
         }
     },
+    'toggle-statusbar': () => {
+        // Show/hide bottom status bar; feedback toast names the CURRENT binding
+        // (the user may have customized the combo).
+        const on = toggleStatusbar();
+        const combo = _comboDisplay(_getShortcutBindings()['toggle-statusbar'] || 'Ctrl+Shift+B');
+        showToast(on ? '状态栏已显示' : `状态栏已隐藏（${combo} 恢复）`);
+    },
 };
 
 // ── Shortcut customization (settings page) ──
@@ -182,6 +190,7 @@ const SHORTCUT_LABELS = {
     quickCommands: '快捷命令',
     commandPalette: '命令面板',
     cloneTab: '克隆标签页',
+    'toggle-statusbar': '显示/隐藏状态栏',
 };
 
 function _comboDisplay(combo) {

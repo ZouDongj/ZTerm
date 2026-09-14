@@ -666,6 +666,7 @@ function persistSettings() {
         theme: 'dark',
         animations: config.animations,
         showStatusDot: config.showStatusDot,
+        showStatusbar: config.showStatusbar,
         minimumContrastRatio: config.minimumContrastRatio,
     });
     ipcRenderer.send('save-terminal-settings', {
@@ -695,9 +696,12 @@ async function loadSettings() {
                 ...(full.appearance || {}),
                 shortcuts: full.shortcuts || {},
             };
+            // Restore persisted statusbar visibility as soon as config is in
+            applyStatusbarVisibility();
             return;
         }
     } catch(e) { console.error('[loadSettings]', e); }
     _settingsConfig = { cursor: 'bar', scrollback: 10000, bell: 'off', cursorBlink: true, autoCopy: true, rightClickPaste: true, fontFamily: '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace', fontSize: 16, lineHeight: 1.125, fontWeight: '400', fontWeightBold: '600', accentColor: '#61afef', theme: 'dark', animations: true, showStatusDot: true, restoreLocalContent: false, smartCopy: true, osc52: true, richTextCopy: false };
+    applyStatusbarVisibility();
 }
 

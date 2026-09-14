@@ -106,7 +106,42 @@ test('real detach stream passes through intact (alt-screen exit never freezes)',
     assert.ok(out.includes('\u001b[?1049l'), 'leaves alt screen');
     assert.ok(out.includes('\u001b[?25h'), 'restores caret');
     assert.ok(out.includes('\u001b[0 q'), 'DECSCUSR survives intact');
-    assert.ok(out.length >= reads.map(l => l.s).join('').length, 'nothing swallowed');
+    // fix mode intentionally swallows TRANSIENT ?25l inside repaired frames
+    // (anti-churn); nothing else may shrink the stream. Compare in string
+    // units — byte length differs on multi-byte content.
+    const inStr = reads.map(l => l.s).join('');
+    const hidesIn = (inStr.match(/\x1b\[\?25l/g) || []).length;
+    assert.ok(out.length >= inStr.length - 6 * hidesIn,
+        `nothing swallowed beyond transient hides (out=${out.length}, in=${inStr.length}, hides=${hidesIn})`);
+});
+
+test('dsh-tui capture: hide churn eliminated, caret continuously visible (real bytes)', () => {
+    // Real pre-filter capture of typing 5 keys into dsh-tui inside herdr
+    // (local PTY). The TUI redraws in ~10 sync blocks per keystroke and only
+    // ever hides the caret (?25h count 0 in the raw stream — ConPTY rewrote
+    // every app show to hide). Old filter behavior: 96 hide/show flickers ->
+    // animation cancelled on every key = the reported "choppy caret".
+    const s = readFileSync(join(here, 'fixtures', 'dshtui-input.txt'), 'latin1');
+    const count = (re, t) => (t.match(re) || []).length;
+    const blocks = count(/\x1b\[\?2026h/g, s);
+    assert.ok(blocks > 0, 'fixture has sync blocks');
+
+    for (const size of [1, 3, 17, 64, 1 << 20]) {
+        const f = createConPtyCaretFilter({ mode: 'fix' });
+        let out = '';
+        for (let i = 0; i < s.length; i += size) out += f.push(s.slice(i, i + size));
+        assert.equal(count(/\x1b\[\?25l/g, out), 0, `size ${size}: no transient hides forwarded`);
+        assert.equal(count(/\x1b\[\?25h/g, out), blocks, `size ${size}: one SHOW per repaired frame`);
+        assert.ok(out.includes('\u001b[52;'), `size ${size}: caret park position preserved`);
+    }
+    // off mode stays bit-exact on the same fixture
+    const fo = createConPtyCaretFilter({ mode: 'off' });
+    assert.equal(fo.push(s), s, 'off mode bit-exact');
+    // repair mode still forwards hides (minimal semantics; only fix anti-churns)
+    const fr = createConPtyCaretFilter({ mode: 'repair' });
+    let outr = '';
+    for (let i = 0; i < s.length; i += 64) outr += fr.push(s.slice(i, i + 64));
+    assert.equal(count(/\x1b\[\?25l/g, outr), count(/\x1b\[\?25l/g, s), 'repair forwards hides');
 });
 
 test('host_cursor=native stream is enhanced, not corrupted', () => {

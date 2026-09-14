@@ -558,6 +558,56 @@ fn parse_osc7_cwd(text: &str) -> Option<String> {
     m.get(1).map(|g| g.as_str().to_string())
 }
 
+/// 解析 iTerm2 OSC 1337 CurrentDir（`ESC]1337;CurrentDir=<path>BEL` 或 `ST`）。
+/// fish ≥3.x 每次提示符原生输出该序列（无需任何 shell 集成），是 fish 下
+/// follow-cwd 的主来源；iTerm2 风格工具链也常发 `file://host/path` 变体。
+/// 纯函数便于单测；返回不含 scheme/host 的绝对路径，未匹配返回 None。
+fn parse_1337_currentdir(text: &str) -> Option<String> {
+    // path 段：到终止符为止；允许 file://[host] 前缀（取首个 / 之后）
+    let re = regex::Regex::new(
+        r"\x1b\]1337;CurrentDir=(?:file://[^/\x07\x1b\\]*)?(/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)",
+    )
+    .ok()?;
+    let m = re.captures(text)?;
+    let raw = m.get(1)?.as_str();
+    // fish 原样输出 $PWD（空格不转义）；iTerm2 变体可能 %XX 编码，尽量还原
+    let decoded = percent_decode_loose(raw);
+    if decoded.starts_with('/') {
+        Some(decoded)
+    } else {
+        None
+    }
+}
+
+/// 宽松 %XX 解码：仅还原合法的百分号转义，非法序列保持原样（路径里裸 % 很常见）。
+fn percent_decode_loose(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = |b: u8| -> Option<u8> {
+                match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                }
+            };
+            if i + 2 < bytes.len() {
+                if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                    out.push(hi * 16 + lo);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
 /// ConPTY emits local echo as ~6 tiny (~9 byte) blocks per keystroke; emitting
 /// each read as its own IPC message starves the WebView renderer frame budget
 /// (visible as per-keystroke stutter). The PTY reader therefore only appends
@@ -1346,7 +1396,23 @@ pub async fn ssh_connect(
                                             .unwrap_or(0);
                                         osc7_window.drain(..keep);
                                     }
-                                    if let Some(new_cwd) = parse_osc7_cwd(&osc7_window) {
+                                    // 两类 cwd 序列可能同时出现在窗口里（登录时
+                                    // wrapper 的 OSC 7 + fish 每个提示符的 1337）：
+                                    // 取窗口中出现位置更靠后的那个，避免陈旧的
+                                    // OSC 7 压住新路径
+                                    let osc7_cwd = parse_osc7_cwd(&osc7_window);
+                                    let c1337_cwd = parse_1337_currentdir(&osc7_window);
+                                    let new_cwd: Option<String> = match (&osc7_cwd, &c1337_cwd) {
+                                        (Some(a), Some(b)) => {
+                                            let pa = osc7_window.find("\x1b]7;file://").unwrap_or(0);
+                                            let pb = osc7_window.find("\x1b]1337;CurrentDir=").unwrap_or(0);
+                                            Some(if pb >= pa { b.clone() } else { a.clone() })
+                                        }
+                                        (Some(a), None) => Some(a.clone()),
+                                        (None, Some(b)) => Some(b.clone()),
+                                        (None, None) => None,
+                                    };
+                                    if let Some(new_cwd) = new_cwd {
                                         let changed = {
                                             let mut c = cwd_reader.lock();
                                             if c.as_ref() != Some(&new_cwd) {
@@ -3615,6 +3681,69 @@ mod tests {
         // 前有大量输出（大文本场景）时同样能匹配
         let noisy = format!("ls output line\nanother\n{combined}");
         assert_eq!(parse_osc7_cwd(&noisy).as_deref(), Some("/home/user/project"));
+    }
+
+    #[test]
+    fn parse_1337_currentdir_fish_native() {
+        // fish ≥3.x 每个提示符原生输出（实测 rig 192.168.41.88 的捕获流）
+        assert_eq!(
+            parse_1337_currentdir("\u{1b}]1337;CurrentDir=/root\u{7}"),
+            Some("/root".to_string())
+        );
+        assert_eq!(
+            parse_1337_currentdir("\u{1b}]1337;CurrentDir=/tmp\u{1b}\\"),
+            Some("/tmp".to_string())
+        );
+        // 路径含空格：fish 原样输出，不转义
+        assert_eq!(
+            parse_1337_currentdir("\u{1b}]1337;CurrentDir=/opt/my app/logs\u{7}"),
+            Some("/opt/my app/logs".to_string())
+        );
+        // iTerm2 file:// 变体：剥掉 scheme+host
+        assert_eq!(
+            parse_1337_currentdir("\u{1b}]1337;CurrentDir=file://box.local/var/log\u{7}"),
+            Some("/var/log".to_string())
+        );
+        // %XX 编码变体：解码
+        assert_eq!(
+            parse_1337_currentdir("\u{1b}]1337;CurrentDir=/home/my%20dir\u{7}"),
+            Some("/home/my dir".to_string())
+        );
+        // 裸 % 不做解码（真实路径常见）
+        assert_eq!(
+            parse_1337_currentdir("\u{1b}]1337;CurrentDir=/data/100%load\u{7}"),
+            Some("/data/100%load".to_string())
+        );
+        // 噪声中匹配
+        assert_eq!(
+            parse_1337_currentdir(&format!("prompt ❯ some output\n\u{1b}]1337;CurrentDir=/srv\u{7}\nmore")),
+            Some("/srv".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_1337_currentdir_no_match() {
+        // 无终止符（跨块时上游窗口拼接后才会匹配，单块必须返回 None）
+        assert_eq!(parse_1337_currentdir("\u{1b}]1337;CurrentDir=/root"), None);
+        // 相对路径/空路径不接受
+        assert_eq!(parse_1337_currentdir("\u{1b}]1337;CurrentDir=relative\u{7}"), None);
+        assert_eq!(parse_1337_currentdir("\u{1b}]1337;CurrentDir=\u{7}"), None);
+        assert_eq!(parse_1337_currentdir("plain text"), None);
+        assert_eq!(parse_1337_currentdir(""), None);
+    }
+
+    #[test]
+    fn mixed_cwd_sequences_prefer_latest_position() {
+        // 登录时 wrapper 的 OSC 7 (/root) + 之后 fish 每个提示符的 1337 (/tmp)：
+        // 窗口里两者并存时，位置靠后的 1337 必须赢（or_else 短路会永远卡在旧值）
+        let window = "\u{1b}]7;file://host/root\u{1b}\\\u{1b}]0;title\u{7}prompt\u{1b}]1337;CurrentDir=/tmp\u{7}";
+        let osc7 = parse_osc7_cwd(window);
+        let c1337 = parse_1337_currentdir(window);
+        assert_eq!(osc7.as_deref(), Some("/root"));
+        assert_eq!(c1337.as_deref(), Some("/tmp"));
+        let pa = window.find("\u{1b}]7;file://").unwrap_or(0);
+        let pb = window.find("\u{1b}]1337;CurrentDir=").unwrap_or(0);
+        assert!(pb > pa, "1337 必须出现在更靠后的位置");
     }
 
     #[test]
