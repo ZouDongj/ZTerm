@@ -81,6 +81,12 @@ function _wireSmoothCursorWebgl(term, webglAddon) {
         duration: 90,
         jumpDistance: 8,
         cursorStyle: term.options.cursorStyle === 'block' ? 'block' : 'bar',
+        // Narrow scope: continuation frames re-render only the rows the caret
+        // spans (1-2) instead of the whole viewport. 'full' multiplied every
+        // animation frame by a full-viewport WebGL pass — on content-heavy
+        // TUIs (ink input boxes redraw ~15KB/keystroke) that stacked dozens
+        // of full-screen passes per key and read as severe jank.
+        renderScope: 'cursor',
     });
     try {
         adapter = create();
