@@ -103,6 +103,13 @@
           // caret" in dsh-tui/kimi-style agents). Frames that started hidden
           // (nvim normal mode) keep their hides untouched.
           if (visibleBefore || paintedCaret) out = out.split(HIDE).join('');
+          // In painted-caret mode the app draws its own caret as a
+          // truecolor-fg+bg styled SPACE parked right where it then moves the
+          // real cursor — with the real cursor now visible and animating, the
+          // painted one shows up as a second, teleporting caret. Drop the
+          // LAST styled-space-before-a-CUP write in the frame; the app
+          // rewrites the vacated cell with real content on the next edit.
+          if (paintedCaret) out = removePaintedGlyph(out);
         }
         out += text;
         visible = paintedCaret ? true : visibleBefore;
@@ -246,6 +253,24 @@
       PAINTED_CARET_TAIL,
       PLAIN_CARET_SGR + '$1\u001b[0m$2\u001b[?25l'
     );
+  }
+
+  // The ink-style painted caret glyph: a single space carrying both a
+  // truecolor foreground and background (fg = text color, bg = caret fill),
+  // immediately followed by a cursor-position move. Only the LAST occurrence
+  // in a frame is removed — engagement already proved the app paints its
+  // caret right where it parks the real cursor, and the vacated cell gets
+  // rewritten with real content on the next edit.
+  const PAINTED_GLYPH_RE =
+    /\u001b\[0;38;2;\d+;\d+;\d+;48;2;\d+;\d+;\d+m \u001b\[0m(?=\u001b\[\d+;\d+[Hf])/g;
+
+  function removePaintedGlyph(text) {
+    if (typeof text !== 'string' || text.length === 0) return text;
+    // matchAll clones the regex, so the shared global regex stays stateless
+    const matches = [...text.matchAll(PAINTED_GLYPH_RE)];
+    if (matches.length === 0) return text;
+    const last = matches[matches.length - 1];
+    return text.slice(0, last.index) + text.slice(last.index + last[0].length);
   }
 
   // Not an escape sequence at all: emit the ESC by itself so the stream keeps
