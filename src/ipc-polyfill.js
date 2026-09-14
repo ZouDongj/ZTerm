@@ -35,9 +35,16 @@
     return Promise.resolve(function() {});
   }
 
-  // 事件队列: on() 可能在 __TAURI__ 注入前调用, 先入队
+  // Event queue: on() may run before __TAURI__ is injected — enqueue first,
+  // dispatch later on flush.
   var eventQueue = new Map();
   var flushed = false;
+  // channel -> Map(original callback -> unlisten fn). removeListener must
+  // map the ORIGINAL callback back to Tauri's unlisten handle (on() wraps it,
+  // so identity comparison against wrappers is impossible). If an event fires
+  // before the unlisten promise settles, the handle is missing and the
+  // listener lingers as an inert no-op (callers guard done() idempotently).
+  var liveListeners = new Map();
 
   function flushQueue() {
     if (flushed) return;
@@ -58,16 +65,40 @@
     }
   }
 
+  function trackListener(channel, callback, unlisten) {
+    var m = liveListeners.get(channel);
+    if (!m) { m = new Map(); liveListeners.set(channel, m); }
+    m.set(callback, unlisten);
+  }
+
   var ipcRenderer = {
     on: function(channel, callback) {
       if (getTauri()) {
-        return doListen(channel, function(event) {
+        var p = doListen(channel, function(event) {
           try { callback({}, event.payload); } catch (e) { console.error('[ipc-polyfill] on', channel, e); }
         });
+        p.then(function(u) { if (typeof u === 'function') trackListener(channel, callback, u); });
+        return p;
       }
       if (!eventQueue.has(channel)) eventQueue.set(channel, []);
       eventQueue.get(channel).push({ callback: callback, once: false });
       return Promise.resolve(function() {});
+    },
+
+    // Remove a callback registered via on()/once(). Handles both phases:
+    // queued (pre-__TAURI__) entries are filtered from the dispatch list;
+    // live Tauri listeners are detached through the tracked unlisten handle.
+    removeListener: function(channel, callback) {
+      var q = eventQueue.get(channel);
+      if (q) eventQueue.set(channel, q.filter(function(x) { return x.callback !== callback; }));
+      var m = liveListeners.get(channel);
+      if (m) {
+        var u = m.get(callback);
+        if (u) {
+          m.delete(callback);
+          try { u(); } catch (e) { console.error('[ipc-polyfill] removeListener', channel, e); }
+        }
+      }
     },
 
     once: function(channel, callback) {

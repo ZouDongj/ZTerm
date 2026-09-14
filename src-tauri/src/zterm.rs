@@ -1138,11 +1138,15 @@ pub async fn ssh_connect(
             if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 return "cancelled".to_string();
             }
+            // Phase tag: russh's bare Error::Disconnect ("Disconnected") is
+            // indistinguishable between TCP drops, handshake failures and
+            // auth rejections once wrapped; the phase narrows server-side
+            // vs credential-side causes on the first report.
             let _ = app.emit(
                 "ssh-error",
-                json!({ "tabId": tab_id, "rendererId": renderer_id, "error": format!("SSH connect: {e}") }),
+                json!({ "tabId": tab_id, "rendererId": renderer_id, "error": format!("SSH connect (tcp/handshake {addr}): {e}") }),
             );
-            format!("SSH connect: {e}")
+            format!("SSH connect (tcp/handshake {addr}): {e}")
         })?;
     cancelled!(handle);
 
