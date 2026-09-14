@@ -140,14 +140,14 @@ function renderSSHManagerInSettings() {
           <div class="ssh-group-items">`;
         items.forEach(p => {
             html += `<div class="ssh-item">
-              <div class="ssh-item-icon">⚡</div>
+              <div class="ssh-item-icon">${Icons.iconSvg('zap', 14)}</div>
               <div class="ssh-item-info" style="cursor:pointer" onclick="openSSHEdit(false,'${p.id}')">
                 <div class="ssh-item-name">${escHtml(p.name)}</div>
-                <div class="ssh-item-detail">${escHtml(p.username)}@${escHtml(p.host)}:${p.port||22} ${p.authType==='key'?'🔑':''}</div>
+                <div class="ssh-item-detail">${escHtml(p.username)}@${escHtml(p.host)}:${p.port||22} ${p.authType==='key'?Icons.iconSvg('key', 11):''}</div>
               </div>
               <button class="ssh-item-btn connect" title="连接" onclick="event.stopPropagation();connectSSHProfile('${p.id}')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
               <button class="ssh-item-btn" title="编辑" onclick="openSSHEdit(false,'${p.id}')"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-              <button class="ssh-item-btn danger" title="删除" onclick="deleteSSHProfile('${p.id}')">×</button>
+              <button class="ssh-item-btn danger" title="删除" onclick="deleteSSHProfile('${p.id}')">${Icons.iconSvg('x', 13)}</button>
             </div>`;
         });
         html += '</div></div>';

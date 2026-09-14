@@ -147,10 +147,10 @@ function renderQCCommandsList() {
           <div class="ssh-group-items">`;
         groups[g].forEach(c => {
             html += `<div class="ssh-item">
-              <div class="ssh-item-icon" style="background:rgba(var(--accent-rgb),0.08);color:rgb(var(--accent-rgb))">⌘</div>
+              <div class="ssh-item-icon" style="background:rgba(var(--accent-rgb),0.08);color:rgb(var(--accent-rgb))">${Icons.iconSvg('command', 14)}</div>
               <div class="ssh-item-info" style="cursor:pointer" onclick="openQCEdit(false,'${c.id}')">
                 <div class="ssh-item-name">${escHtml(c.name)}</div>
-                <div class="ssh-item-detail" style="font-family:'JetBrains Mono',monospace">${escHtml(c.command)}</div>
+                <div class="ssh-item-detail">${escHtml(c.command)}</div>
               </div>
               <button class="ssh-item-btn" title="编辑" onclick="openQCEdit(false,'${c.id}')"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
               <button class="ssh-item-btn danger" title="删除" onclick="deleteQC('${c.id}')">×</button>

@@ -201,12 +201,12 @@ async navigate(path) {
         if (this._path !== '/') {
             const up = document.createElement('div');
             up.className = 'sftp-item';
-            up.innerHTML = '<span class="sftp-item-icon">📁</span><span class="sftp-item-name">..</span>';
+            up.innerHTML = '<span class="sftp-item-icon">' + Icons.iconSvg('folder', 14) + '</span><span class="sftp-item-name">..</span>';
             up.addEventListener('click', () => this.goUp());
             body.appendChild(up);
         }
         this._files.forEach(f => {
-            const icon = f.isDir ? '📁' : '📄';
+            const icon = f.isDir ? Icons.iconSvg('folder', 14) : Icons.iconSvg('file', 14);
             const size = f.isDir ? '' : formatSize(f.size);
             const date = formatDate(f.mtime);
             const fullPath = (this._path === '/' ? '' : this._path) + '/' + f.name;
@@ -302,7 +302,7 @@ async navigate(path) {
         const row = document.createElement('div');
         row.className = 'sftp-item';
         row.id = 'sftp-mkdir-row';
-        row.innerHTML = '<span class="sftp-item-icon">📁</span><input class="inline-edit" placeholder="新建目录名称，Enter 确认 / Esc 取消" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none">';
+        row.innerHTML = '<span class="sftp-item-icon">' + Icons.iconSvg('folder', 14) + '</span><input class="inline-edit" placeholder="新建目录名称，Enter 确认 / Esc 取消" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none">';
         body.insertBefore(row, body.firstChild);
         const input = row.querySelector('input');
         input.focus();
@@ -490,11 +490,12 @@ const TransferManager = {
             const rate = active.reduce((sum, t) => sum + (t.done || t.cancelled ? 0 : (t._speed || 0)), 0);
             const uploads = active.filter(t => t.type === 'upload' && !t.done && !t.cancelled).length;
             const running = active.filter(t => !t.done && !t.cancelled).length;
-            const glyph = running === 0 ? '' : uploads === 0 ? '↓' : uploads === running ? '↑' : '⇅';
+            // Transfer direction indicator (download / upload / mixed) as inline SVG
+            const dirIcon = running === 0 ? '' : uploads === 0 ? Icons.iconSvg('arrow-down', 12) : uploads === running ? Icons.iconSvg('arrow-up', 12) : Icons.iconSvg('arrow-up-down', 12);
             return {
                 tabId,
                 label: (active[0] || historyBy.get(tabId)[0] || {}).sessionLabel || '已关闭会话',
-                active, history: historyBy.get(tabId), rate, glyph, running,
+                active, history: historyBy.get(tabId), rate, dirIcon, running,
             };
         });
     },
@@ -518,7 +519,7 @@ const TransferManager = {
         let html = '';
         for (const g of groups) {
             const collapsed = this._collapsedGroups.has(g.tabId);
-            const rateText = g.running > 0 && g.rate > 0 ? g.glyph + ' ' + formatSize(g.rate) + '/s' : '';
+            const rateText = g.running > 0 && g.rate > 0 ? g.dirIcon + ' ' + formatSize(g.rate) + '/s' : '';
             html += '<div class="transfer-group">' +
                 '<div class="transfer-group-header" onclick="TransferManager.toggleGroup(\'' + escHtml(g.tabId) + '\')">' +
                     '<span class="transfer-group-caret">' + (collapsed ? '▸' : '▾') + '</span>' +
@@ -548,8 +549,8 @@ const TransferManager = {
             : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
         const barClass = t.cancelled ? 'cancelled' : t.done ? 'done' : '';
         const btn = t.done
-            ? '<button class="transfer-item-btn" onclick="TransferManager.remove(' + t.id + ')">✓</button>'
-            : '<button class="transfer-item-btn" onclick="TransferManager.cancel(' + t.id + ')">×</button>';
+            ? '<button class="transfer-item-btn" onclick="TransferManager.remove(' + t.id + ')">' + Icons.iconSvg('check', 12) + '</button>'
+            : '<button class="transfer-item-btn" onclick="TransferManager.cancel(' + t.id + ')">' + Icons.iconSvg('x', 12) + '</button>';
         // 速度用 EMA 平滑（最近窗口的瞬时速率），替代全程平均值：
         // 平均值在传输中单调漂移、字节突发时跳变，是文字抽搐的主要来源
         const now = Date.now();
@@ -596,7 +597,7 @@ const TransferManager = {
                 '</div>' +
             '</div>' +
             (canOpen ? '<button class="transfer-item-btn" onclick="event.stopPropagation();TransferManager.openInExplorer(' + globalIdx + ')" title="打开所在文件夹">→</button>' : '') +
-            '<button class="transfer-item-btn" onclick="event.stopPropagation();TransferManager.removeHistory(' + globalIdx + ')" title="删除记录">×</button>' +
+            '<button class="transfer-item-btn" onclick="event.stopPropagation();TransferManager.removeHistory(' + globalIdx + ')" title="删除记录">' + Icons.iconSvg('x', 12) + '</button>' +
         '</div>';
     },
 

@@ -87,7 +87,7 @@ const SHORTCUT_ACTIONS = {
         tab.syncInput = !tab.syncInput;
         const rootEl = document.getElementById('split_' + tab.id);
         if (rootEl) rootEl.classList.toggle('sync-input', tab.syncInput);
-        showToast(tab.syncInput ? '⇶ 同步输入已开启（输入广播到所有窗格）' : '同步输入已关闭');
+        showToast(tab.syncInput ? '同步输入已开启（输入广播到所有窗格）' : '同步输入已关闭');
     },
     maximizePane: () => {
         if (document.querySelector('.overlay.open')) return;
@@ -202,7 +202,7 @@ function renderShortcutsList() {
         html += `<tr><td>${SHORTCUT_LABELS[id]}</td><td><kbd>${escHtml(_comboDisplay(combo))}</kbd></td>`
             + `<td style="white-space:nowrap;text-align:right">`
             + `<button class="btn-outline shortcut-edit-btn" onclick="startShortcutCapture('${id}',this)">修改</button>`
-            + (overridden ? `<button class="btn-outline shortcut-reset-btn" title="恢复默认（${escHtml(_comboDisplay(DEFAULT_SHORTCUTS[id]))}）" onclick="resetShortcut('${id}')">↺</button>` : '')
+            + (overridden ? `<button class="btn-outline shortcut-reset-btn" title="恢复默认（${escHtml(_comboDisplay(DEFAULT_SHORTCUTS[id]))}）" onclick="resetShortcut('${id}')">${Icons.iconSvg('rotate-ccw', 11)}</button>` : '')
             + `</td></tr>`;
     });
     html += `<tr><td>关闭面板 / 退出最大化 / 关闭搜索</td><td><kbd>Esc</kbd></td><td></td></tr>`;

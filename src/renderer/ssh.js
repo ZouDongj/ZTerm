@@ -106,7 +106,7 @@ function renderSessionList(filter) {
             lastType = item.type;
         }
         html += `<div class="panel-item" data-index="${i}" data-session-id="${item.id}" onclick="selectSession('${item.id}')" onmouseenter="selectPanelItem(this)">
-          <div class="panel-item-icon ${item.type === 'ssh' ? 'ssh' : 'loc'}">${item.icon}</div>
+          <div class="panel-item-icon ${item.type === 'ssh' ? 'ssh' : 'loc'}">${Icons.iconSvg(item.icon, 14)}</div>
           <div class="panel-item-info">
             <div class="panel-item-name">${escHtml(item.name)}</div>
             <div class="panel-item-detail">${escHtml(item.detail)}</div>
@@ -206,14 +206,14 @@ function renderSSHManager() {
           <div class="ssh-group-items">`;
         items.forEach(p => {
             html += `<div class="ssh-item">
-              <div class="ssh-item-icon">⚡</div>
+              <div class="ssh-item-icon">${Icons.iconSvg('zap', 14)}</div>
               <div class="ssh-item-info" style="cursor:pointer" onclick="openSSHEdit(false,'${p.id}')">
                 <div class="ssh-item-name">${escHtml(p.name)}</div>
-                <div class="ssh-item-detail">${escHtml(p.username)}@${escHtml(p.host)}:${p.port||22} ${p.authType==='key'?'🔑':''}</div>
+                <div class="ssh-item-detail">${escHtml(p.username)}@${escHtml(p.host)}:${p.port||22} ${p.authType==='key'?Icons.iconSvg('key', 11):''}</div>
               </div>
               <button class="ssh-item-btn connect" title="连接" onclick="event.stopPropagation();connectSSHProfile('${p.id}')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
               <button class="ssh-item-btn" title="编辑" onclick="openSSHEdit(false,'${p.id}')"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-              <button class="ssh-item-btn danger" title="删除" onclick="deleteSSHProfile('${p.id}')">×</button>
+              <button class="ssh-item-btn danger" title="删除" onclick="deleteSSHProfile('${p.id}')">${Icons.iconSvg('x', 13)}</button>
             </div>`;
         });
         html += '</div></div>';
@@ -527,7 +527,8 @@ function initGroupCombo() {
         if (q && !groups.some(g => g.toLowerCase() === q)) {
             const div = document.createElement('div');
             div.className = 'dd-option create';
-            div.textContent = '✚ 创建分组 "' + filter + '"';
+            // filter is user input: escape it now that the row is HTML, not plain text
+            div.innerHTML = Icons.iconSvg('plus', 11) + ' 创建分组 "' + escHtml(filter) + '"';
             div.addEventListener('mousedown', (e) => {
                 e.preventDefault();
                 menu.classList.remove('open');
@@ -633,7 +634,7 @@ function addLoginScriptRow(expect, send, isRegex, optional) {
         '<input class="ls-send" placeholder="Send" value="' + escHtml(send || '') + '">' +
         '<span class="ls-toggle' + (isRegex ? ' on' : '') + '" title="正则匹配" onclick="this.classList.toggle(\'on\')">正则</span>' +
         '<span class="ls-toggle' + (optional ? ' on' : '') + '" title="可选匹配" onclick="this.classList.toggle(\'on\')">可选</span>' +
-        '<button class="ls-del" onclick="deleteLoginScriptRow(this)">×</button>';
+        '<button class="ls-del" onclick="deleteLoginScriptRow(this)">' + Icons.iconSvg('x', 12) + '</button>';
     container.appendChild(row);
     _updateLSBadge();
 }
