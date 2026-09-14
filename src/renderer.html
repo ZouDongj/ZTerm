@@ -52,6 +52,7 @@
     <div class="menu-item" data-action="sftp" onclick="closeMenuPopup();openSFTPFromMenu()"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span><span class="menu-label">SFTP 文件传输</span><span class="menu-shortcut" data-action="sftp"></span></div>
     <div class="menu-item" onclick="closeMenuPopup();openPalette()"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/></svg></span><span class="menu-label">命令面板</span><span class="menu-shortcut" data-action="commandPalette"></span></div>
     <div class="menu-item" onclick="closeMenuPopup();openSettings()"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span><span class="menu-label">设置</span><span class="menu-shortcut" data-action="openSettings"></span></div>
+    <div class="menu-item" onclick="closeMenuPopup();openSettings('about')"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg></span><span class="menu-label">关于</span></div>
   </div>
 
   <!-- SFTP Overlay -->
@@ -73,8 +74,8 @@
       </div>
       <div class="sftp-body" id="sftp-body"></div>
       <div class="sftp-footer">
-        <button onclick="SFTP.upload()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> 上传文件</button>
-        <button onclick="SFTP.mkdir()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> 新建目录</button>
+        <button onclick="SFTP.upload()"><span class="ic-accent"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span> 上传文件</button>
+        <button onclick="SFTP.mkdir()"><span class="ic-amber"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span> 新建目录</button>
       </div>
     </div>
   </div>
@@ -328,8 +329,8 @@
                   <div class="settings-card-desc">界面高亮和焦点颜色</div>
                 </div>
                 <div class="settings-card-control" style="display:flex;gap:0;align-items:center">
-                  <input type="text" id="set-accent" value="#61afef" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid transparent;border-radius:8px 0 0 8px;padding:7px 10px;color:#abb2bf;font-size:14px;outline:none;border-right:none" onchange="updateAccentDot();saveAppearance()">
-                  <div id="accent-dot" style="width:28px;height:28px;background:rgb(var(--accent-rgb));border-radius:0 8px 8px 0;border:1.5px solid rgba(var(--accent-rgb),0.2);border-left:none;flex-shrink:0;cursor:pointer;box-sizing:border-box" onclick="openColorPicker()"></div>
+                  <input type="text" id="set-accent" value="#61afef" style="background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:8px 0 0 8px;padding:7px 10px;color:#abb2bf;font-size:14px;outline:none;border-right:none;width:100%;max-width:186px;box-sizing:border-box" onchange="updateAccentDot();saveAppearance()">
+                  <div id="accent-dot" style="align-self:stretch;width:34px;background:rgb(var(--accent-rgb));border-radius:0 8px 8px 0;border:1.5px solid rgba(var(--accent-rgb),0.2);border-left:none;flex-shrink:0;cursor:pointer;box-sizing:border-box" onclick="openColorPicker()"></div>
                 </div>
               </div>
               <div class="settings-row">
@@ -350,15 +351,6 @@
                 </div>
                 <div class="settings-card-control">
                   <select class="styled-select" id="set-font" onchange="saveAppearance()"></select>
-                </div>
-              </div>
-              <div class="settings-row">
-                <div class="settings-card-label">
-                  <div class="settings-card-title">界面字体跟随终端</div>
-                  <div class="settings-card-desc">开启时界面使用终端字体（含回退），隐藏下方界面字体设置</div>
-                </div>
-                <div class="settings-card-control">
-                  <div class="toggle-switch on" id="toggle-ui-follow" onclick="toggleUiFollowTerminal()"></div>
                 </div>
               </div>
               <div class="settings-row" id="row-ui-font" style="display:none">
@@ -430,7 +422,16 @@
                   <div class="settings-card-desc">终端文本与背景的最低对比度，1=关闭，4=默认，7=AAA，最大 21。支持小数如 4.5</div>
                 </div>
                 <div class="settings-card-control">
-                  <input type="number" id="set-contrast" value="4" min="1" max="21" step="0.5" onchange="saveAppearance()" style="width:80px">
+                  <input type="number" id="set-contrast" value="4" min="1" max="21" step="0.5" onchange="saveAppearance()">
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">界面字体跟随终端</div>
+                  <div class="settings-card-desc">开启时界面使用终端字体（含回退），隐藏界面字体设置</div>
+                </div>
+                <div class="settings-card-control">
+                  <div class="toggle-switch on" id="toggle-ui-follow" onclick="toggleUiFollowTerminal()"></div>
                 </div>
               </div>
             </div>
@@ -541,6 +542,17 @@
               <div class="ssh-card-row">
                 <div class="ssh-card-field"><label>SSH 库</label><span style="font-size:12px;color:#abb2bf" id="about-ssh">…</span></div>
                 <div class="ssh-card-field"><label>平台</label><span style="font-size:12px;color:#abb2bf" id="about-platform">Windows 10+ (x64)</span></div>
+              </div>
+            </div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">检查更新</div>
+                  <div class="settings-card-desc">后续版本提供在线检查更新功能</div>
+                </div>
+                <div class="settings-card-control">
+                  <button class="btn-outline" style="font-size:12px;padding:6px 14px" disabled>检查更新</button>
+                </div>
               </div>
             </div>
             <div class="settings-section">数据</div>

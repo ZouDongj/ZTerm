@@ -53,6 +53,15 @@ body.no-animations .startup-splash .cell{transition:none}
 .tab:hover{background:rgba(255,255,255,0.05);color:var(--text-2)}
 .tab.active{background:rgba(var(--accent-rgb),0.16);color:var(--text-1)}
 .tab-icon{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+/* Leading icon in a tab (settings gear): flex child so it centers against
+   .tab-name; inline svg + raw text in one node baseline-aligns too high */
+.tab-lead-icon{display:inline-flex;align-items:center;flex-shrink:0}
+
+/* Semantic icon tints: folders share the file-system amber family with the
+   SSH bolt; transfer directions use accent (up) / success green (down) */
+.ic-accent{color:rgb(var(--accent-rgb))}
+.ic-amber{color:#ffb74d}
+.ic-green{color:#7dd58a}
 .tab-icon.connected{background:#7dd58a}
 .tab-icon.disconnected{background:rgba(255,255,255,0.25)}
 .tab-close{font-size:13px;line-height:1;color:var(--text-3);margin-left:2px;cursor:pointer;opacity:0;transition:opacity 0.12s;flex-shrink:0}
@@ -188,12 +197,22 @@ body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 .search-bar button{background:none;border:none;color:var(--text-3);cursor:pointer;font-size:13px;padding:2px 7px;border-radius:6px;transition:all 0.12s}
 .search-bar button:hover{color:var(--text-1);background:rgba(var(--accent-rgb),0.14)}
 
+/* Global icon optical alignment: an inline <svg> sits ON the text baseline,
+   which reads ~1-2px high against CJK text whose optical center sits below
+   the baseline. The negative shift centers 12-16px icons against text;
+   flex-centered icon boxes are unaffected (vertical-align is ignored there).
+   Every icon+text pairing in the app must rely on this or on flex centering
+   — do not hand-tune per-site offsets. */
+svg{vertical-align:-0.16em}
+
 /* Status bar current-session icon: inline svg optically centered against
    the 12px status text */
-.sb-conn-icon{display:inline-flex;align-items:center;margin-right:6px;vertical-align:-1.5px}
+.sb-conn-icon{display:inline-flex;align-items:center;margin-right:6px}
 
 /* Statusbar */
 .statusbar{height:26px;background:var(--surface-win);display:flex;align-items:center;padding:0 14px;gap:16px;font-size:12px;color:var(--text-2);flex-shrink:0}
+/* Ctrl+Shift+B toggle: persisted via appearance.showStatusbar */
+body.hide-statusbar .statusbar{display:none}
 .statusbar span{display:flex;align-items:center;gap:5px}
 
 /* Scrollbar (from prototype) */
@@ -272,10 +291,9 @@ body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 /* Accent color swatches */
 .accent-swatch{width:26px;height:26px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:all 0.12s;flex-shrink:0}
 .accent-swatch:hover{transform:scale(1.15)}
-/* Selection ring must be VISIBLE: the old inset ring drew in currentColor on
-   a background of the same color. Outer gap ring (card-colored 2px gap +
-   swatch-colored 4px ring) reads clearly on the settings card. */
-.accent-swatch.active{box-shadow:0 0 0 2px var(--surface-card),0 0 0 4px currentColor}
+/* Selection: luminous halo only (user preference — a crisp ring reads as a
+   second frame). The 2px card-colored gap keeps neighboring glow readable. */
+.accent-swatch.active{box-shadow:0 0 0 2px var(--surface-card),0 0 14px 2px currentColor}
 
 /* Custom color picker */
 .color-picker-overlay{position:fixed;inset:0;z-index:300;display:none;align-items:center;justify-content:center;background:rgba(8,9,12,0.55);backdrop-filter:blur(6px)}

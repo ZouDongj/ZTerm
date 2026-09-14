@@ -201,12 +201,12 @@ async navigate(path) {
         if (this._path !== '/') {
             const up = document.createElement('div');
             up.className = 'sftp-item';
-            up.innerHTML = '<span class="sftp-item-icon">' + Icons.iconSvg('folder', 14) + '</span><span class="sftp-item-name">..</span>';
+            up.innerHTML = '<span class="sftp-item-icon ic-amber">' + Icons.iconSvg('folder', 14) + '</span><span class="sftp-item-name">..</span>';
             up.addEventListener('click', () => this.goUp());
             body.appendChild(up);
         }
         this._files.forEach(f => {
-            const icon = f.isDir ? Icons.iconSvg('folder', 14) : Icons.iconSvg('file', 14);
+            const icon = f.isDir ? '<span class="ic-amber">' + Icons.iconSvg('folder', 14) + '</span>' : Icons.iconSvg('file', 14);
             const size = f.isDir ? '' : formatSize(f.size);
             const date = formatDate(f.mtime);
             const fullPath = (this._path === '/' ? '' : this._path) + '/' + f.name;
@@ -302,7 +302,7 @@ async navigate(path) {
         const row = document.createElement('div');
         row.className = 'sftp-item';
         row.id = 'sftp-mkdir-row';
-        row.innerHTML = '<span class="sftp-item-icon">' + Icons.iconSvg('folder', 14) + '</span><input class="inline-edit" placeholder="新建目录名称，Enter 确认 / Esc 取消" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none">';
+        row.innerHTML = '<span class="sftp-item-icon ic-amber">' + Icons.iconSvg('folder', 14) + '</span><input class="inline-edit" placeholder="新建目录名称，Enter 确认 / Esc 取消" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none">';
         body.insertBefore(row, body.firstChild);
         const input = row.querySelector('input');
         input.focus();
@@ -491,7 +491,7 @@ const TransferManager = {
             const uploads = active.filter(t => t.type === 'upload' && !t.done && !t.cancelled).length;
             const running = active.filter(t => !t.done && !t.cancelled).length;
             // Transfer direction indicator (download / upload / mixed) as inline SVG
-            const dirIcon = running === 0 ? '' : uploads === 0 ? Icons.iconSvg('arrow-down', 12) : uploads === running ? Icons.iconSvg('arrow-up', 12) : Icons.iconSvg('arrow-up-down', 12);
+            const dirIcon = running === 0 ? '' : uploads === 0 ? '<span class="ic-green">' + Icons.iconSvg('arrow-down', 12) + '</span>' : uploads === running ? '<span class="ic-accent">' + Icons.iconSvg('arrow-up', 12) + '</span>' : '<span class="ic-accent">' + Icons.iconSvg('arrow-up-down', 12) + '</span>';
             return {
                 tabId,
                 label: (active[0] || historyBy.get(tabId)[0] || {}).sessionLabel || '已关闭会话',
@@ -522,7 +522,7 @@ const TransferManager = {
             const rateText = g.running > 0 && g.rate > 0 ? g.dirIcon + ' ' + formatSize(g.rate) + '/s' : '';
             html += '<div class="transfer-group">' +
                 '<div class="transfer-group-header" onclick="TransferManager.toggleGroup(\'' + escHtml(g.tabId) + '\')">' +
-                    '<span class="transfer-group-caret">' + (collapsed ? '▸' : '▾') + '</span>' +
+                    '<span class="transfer-group-caret">' + (collapsed ? Icons.iconSvg('chevron-right', 12) : Icons.iconSvg('chevron-down', 12)) + '</span>' +
                     '<span class="transfer-group-name">' + escHtml(g.label) + '</span>' +
                     '<span class="transfer-group-count">' + (g.active.length + g.history.length) + '</span>' +
                     (rateText ? '<span class="transfer-group-rate">' + rateText + '</span>' : '') +
@@ -596,7 +596,7 @@ const TransferManager = {
                     '<span class="speed">' + formatDate(h.completedAt) + '</span>' +
                 '</div>' +
             '</div>' +
-            (canOpen ? '<button class="transfer-item-btn" onclick="event.stopPropagation();TransferManager.openInExplorer(' + globalIdx + ')" title="打开所在文件夹">→</button>' : '') +
+            (canOpen ? '<button class="transfer-item-btn" onclick="event.stopPropagation();TransferManager.openInExplorer(' + globalIdx + ')" title="打开所在文件夹">' + Icons.iconSvg('folder-open', 13) + '</button>' : '') +
             '<button class="transfer-item-btn" onclick="event.stopPropagation();TransferManager.removeHistory(' + globalIdx + ')" title="删除记录">' + Icons.iconSvg('x', 12) + '</button>' +
         '</div>';
     },

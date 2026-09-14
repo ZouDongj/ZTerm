@@ -460,7 +460,7 @@ const TabManager = {
             div.onmousedown = (e) => this._onTabPointerDown(e, t.id);
             let inner;
             if (t.type === 'settings') {
-                inner = `<span style="font-size:14px">${Icons.iconSvg('settings', 14)}</span> ${t.name}`;
+                inner = `<span class="tab-lead-icon">${Icons.iconSvg('settings', 14)}</span><span class="tab-name">${escHtml(t.name)}</span>`;
             } else {
                 let dotClass = t.connected ? 'connected' : 'disconnected';
                 const showDot = _settingsConfig.showStatusDot !== false;
