@@ -242,18 +242,28 @@ function getTerminalTheme() {
 function applyTerminalScheme() {
     const theme = getTerminalTheme();
     document.documentElement.style.setProperty('--term-bg', theme.background);
+    // Surface derivation: the terminal scheme background is the primary input;
+    // the whole UI surface ladder (window base / floats / cards) is derived in
+    // the same hue so the terminal canvas never looks pasted onto a foreign
+    // frame. Elevation = HSL lightness steps (tonal), not shadows.
+    const hsl = hexToHsl(theme.background);
+    if (hsl) {
+        const sat = Math.max(hsl.s, 0.06);
+        const root = document.documentElement.style;
+        root.setProperty('--surface-win', hslToHex(hsl.h, sat, 0.065));
+        root.setProperty('--surface-float', hslToHex(hsl.h, sat, 0.185));
+        root.setProperty('--surface-card', hslToHex(hsl.h, sat, 0.24));
+    }
     TabManager.tabs.forEach(t => {
         if (t.term) {
-            const termTheme = t.term.wasmTerm ? theme : { ...theme, cursor: 'transparent' };
-            t.term.options.theme = termTheme;
-            t._smoothCursor?.setOptions({ cursorColor: theme.cursor || '#ffffff' });
+            // xterm caret must stay visible: the WebGL smooth-cursor adapter
+            // animates the real caret (overlay-era transparent hack removed).
+            t.term.options.theme = { ...theme, cursor: theme.cursor || '#ffffff' };
         }
         if (t.splitRoot) {
             getAllPanes(t).forEach(p => {
                 if (p.term) {
-                    const termTheme = p.term.wasmTerm ? theme : { ...theme, cursor: 'transparent' };
-                    p.term.options.theme = termTheme;
-                    p._smoothCursor?.setOptions({ cursorColor: theme.cursor || '#ffffff' });
+                    p.term.options.theme = { ...theme, cursor: theme.cursor || '#ffffff' };
                 }
             });
         }

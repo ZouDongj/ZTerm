@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { hexToRgb, rgbToHex, rgbToHsv, hsvToRgb } =
+const { hexToRgb, rgbToHex, rgbToHsv, hsvToRgb, hexToHsl, hslToHex } =
     require('../src/renderer/color-utils.js');
 
 // ── hexToRgb ──
@@ -78,4 +78,23 @@ test('rgb → hsv → rgb roundtrip 近似保真', () => {
         assert.ok(Math.abs(back.g - g) <= 2, `g ${back.g} vs ${g}`);
         assert.ok(Math.abs(back.b - b) <= 2, `b ${back.b} vs ${b}`);
     }
+});
+
+
+// ── hexToHsl / hslToHex（surface 派生用） ──
+
+test('hexToHsl ↔ hslToHex 往返无损（含终端配色背景）', () => {
+    for (const hex of ['#282c34', '#282a36', '#1a1b26', '#1e1e2e', '#ffffff', '#000000']) {
+        const { h, s, l } = hexToHsl(hex);
+        assert.equal(hslToHex(h, s, l).toLowerCase(), hex);
+    }
+});
+
+test('surface 派生值锁定（Snazzy 底座/浮层，防 UI 阶梯漂移）', () => {
+    // These values are shown in design/term-ui-fusion-preview.html; changing
+    // them is a visual decision, not a refactor.
+    const derive = (bg, l) => { const { h, s } = hexToHsl(bg); return hslToHex(h, Math.max(s, 0.06), l); };
+    assert.equal(derive('#282a36', 0.065), '#0e0f13'); // Snazzy --surface-win
+    assert.equal(derive('#282a36', 0.185), '#282a36'); // Snazzy --surface-float
+    assert.equal(derive('#282c34', 0.065), '#0e1013'); // OneHalfDark --surface-win
 });

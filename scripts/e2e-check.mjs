@@ -48,9 +48,16 @@ function restoreConfig() {
   configBackup = null;
 }
 
+// /T is mandatory: plain /F kills only zterm.exe and orphans the PTY children
+// (bash.exe + ConPTY OpenConsole.exe). Orphaned MSYS2 processes keep holding
+// cygwin console slots, and past ~128 of them new Git Bash sessions die with
+// "console device allocation failure".
 function killExisting() {
-  try { execSync('taskkill /IM zterm.exe /F', { stdio: 'ignore' }); } catch {}
+  try { execSync('taskkill /IM zterm.exe /T /F', { stdio: 'ignore' }); } catch {}
 }
+// Safety net for exit paths that skip the explicit killExisting() calls
+// (unexpected early throw, unhandled rejection): never leave a PTY tree behind.
+process.on('exit', () => killExisting());
 
 function startApp() {
   const child = spawn(EXE, [], {
@@ -107,7 +114,11 @@ class Cdp {
   }
   async eval(expression) {
     const r = await this.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
-    if (r.exceptionDetails) throw new Error(`JS 异常: ${r.exceptionDetails.text}`);
+    if (r.exceptionDetails) {
+      const d = r.exceptionDetails;
+      const desc = d.exception?.description || d.text || 'unknown';
+      throw new Error(`JS 异常: ${String(desc).split('\n').slice(0, 3).join(' | ')}`);
+    }
     return r.result?.value;
   }
   close() { try { this.ws.close(); } catch {} }
@@ -145,8 +156,11 @@ async function main() {
 
   try {
     // 等页面完全加载（CDP 页面一出现即可连，但此时网络栈可能未就绪，
-    // 立即 fetch 自身会 Failed to fetch——先等 readyState=complete 再开始检查）
-    await waitForValue(cdp, `document.readyState`, 'complete', 15000);
+    // 立即 fetch 自身会 Failed to fetch——先等 readyState=complete 再开始检查）。
+    // WebView2 启动期间页面会 reload 一次：complete 状态下旧文档仍在时
+    // renderer/*.js 尚未执行，_settingsConfig 未定义——以 settings 就绪
+    // （loadSettings 已跑）作为"脚本已执行"的硬标志，防止 eval 打在旧文档上。
+    await waitForValue(cdp, `document.readyState === 'complete' && typeof _settingsConfig === 'object' && !!TabManager`, true, 20000);
 
     // 0. 启动界面：结构正确（只显示图标 + 绿点动画）+ 首帧渲染后自动淡出（最多等 5s）；兜底主动隐藏防遮挡后续检查
     const splashExists = await cdp.eval(`!!document.getElementById('startup-splash')`);
@@ -290,6 +304,39 @@ async function main() {
     const panesAfterV = await waitForValue(cdp, `getAllPanes(TabManager.getActive()).length`, 3);
     check('垂直分割产生 3 个 pane', panesAfterV === 3, `panes=${panesAfterV}`);
 
+    // 9.5 本地 PTY 数据全链路：pty-input → ConPTY 回显 → 4ms flusher →
+    //     pty-output → xterm buffer。Rust flusher 回归（不 emit/死锁）时回显丢失，
+    //     这条会假死——它是本地 tab 内容唯一的自动化失败信号。
+    //     注入层用 pty-input 而非合成 KeyboardEvent：xterm 5 对合成 keydown
+    //     大面积丢字（实测 echo 后仅个别字符产生 onData），键盘→onData 半截
+    //     属于 xterm 自身代码，由 Ghostty 输入链路检查另行覆盖。
+    const MARKER = 'ZTERM-E2E-42';
+    const chainProbe = await cdp.eval(`(() => {
+      const tab = TabManager.getActive();
+      const pane = getAllPanes(tab)[0];
+      if (!pane?.term) return { ok: false, why: 'no-term' };
+      ipcRenderer.send('pty-input', { tabId: pane.tabId, data: 'echo ${MARKER}\\r' });
+      return { ok: true, hasAdapter: !!pane._smoothCursor?._adapter, engine: _settingsConfig.terminalRenderer || 'xterm' };
+    })()`).catch(() => ({ ok: false, why: 'eval-fail' }));
+    let markerFound = false;
+    for (let i = 0; i < 15; i++) {
+      const buf = await cdp.eval(`(() => {
+        const tab = TabManager.getActive();
+        const pane = getAllPanes(tab)[0];
+        const b = pane.term?.buffer?.active;
+        if (!b) return '';
+        let s = '';
+        for (let i = 0; i < b.length; i++) s += (b.getLine(i)?.translateToString(true) || '') + '\\n';
+        return s;
+      })()`).catch(() => '');
+      if (buf.includes(MARKER)) { markerFound = true; break; }
+      await sleep(400);
+    }
+    check('本地 PTY 全链路：按键回显进入 buffer（flusher+IPC）', markerFound === true, markerFound ? 'echoed' : (chainProbe.why || 'marker-not-found'));
+    // 平滑光标 adapter 真实挂载断言：bind 失败只 console.warn，旧检查（overlay DOM
+    // count===0）对 adapter 恒真，无法区分"动画在跑"和"静默降级到原生光标"。
+    check('WebGL 平滑光标 adapter 已挂载', chainProbe.ok === true && chainProbe.hasAdapter === true, JSON.stringify(chainProbe));
+
     // 10. 设置页：打开 → settings tab 出现；页面切换
     await cdp.eval(`openSettings()`);
     await sleep(1000);
@@ -403,78 +450,27 @@ async function main() {
     const sftpClosed = await cdp.eval(`!document.getElementById('overlay-sftp').classList.contains('open')`);
     check('SFTP 面板关闭', sftpClosed === true, `overlay-sftp.open=${!sftpClosed}`);
 
-    // 13.5 Ghostty 渲染引擎冒烟：切换设置 → 新建终端 → wasm 加载 + canvas 首帧
-    // 注意：标签名带时间戳，避免与 config 恢复出的历史同名标签混淆（周期保存会把
-    // 测试标签写入 lastTabs，下次启动恢复出旧 xterm 标签，find 会命中错误对象）
-    const gtName = 'GhosttyTest_' + Date.now();
-    await cdp.eval(`openSettings('appearance')`);
-    await sleep(600);
-    const rendererSet = await cdp.eval(`(() => {
-      const el = document.getElementById('set-renderer');
-      if (!el) return 'no-select';
-      el.value = 'ghostty'; saveAppearance();
-      return _settingsConfig.terminalRenderer;
-    })()`);
-    await sleep(300);
-    await cdp.eval(`closeSettingsTab()`);
-    await sleep(300);
-    // 新建本地终端（ghostty 懒加载 script + wasm，异步接线；慢机 init 可达 20s+）
-    await cdp.eval(`TabManager.createTab({ name: '${gtName}', type: 'local', command: 'powershell.exe', args: [] })`);
-    let ghosttyOk = false, ghosttyDetail = '';
-    for (let i = 0; i < 60; i++) {
-      ghosttyDetail = await cdp.eval(`(() => {
-        const t = TabManager.tabs.find(x => x.name === '${gtName}');
-        if (!t || !t.term) return 'no-term';
-        if (!t.term.wasmTerm) return 'no-wasm';
-        const canvas = t.term.element ? t.term.element.querySelector('canvas') : null;
-        return canvas && canvas.width > 0 ? 'ok' : 'no-canvas';
-      })()`).catch(() => 'eval-fail');
-      if (ghosttyDetail === 'ok') { ghosttyOk = true; break; }
-      await sleep(500);
-    }
-    if (!ghosttyOk) {
-      ghosttyDetail += ' | ' + await cdp.eval(`JSON.stringify({
-        renderer: _settingsConfig.terminalRenderer,
-        ghosttyState: window.__ghosttyState || null,
-        ghosttyErr: window.__ghosttyErr || null,
-        kids: (() => { const t = TabManager.tabs.find(x => x.name === '${gtName}'); return t?.term?.element ? [...t.term.element.children].map(c => c.tagName + ':' + c.className) : 'no-element'; })(),
-      })`).catch(() => 'diag-fail');
-    }
-    check('Ghostty 引擎：wasm 加载并渲染 canvas', ghosttyOk === true, ghosttyDetail);
-    // 输入链路：合成按键 → ghostty onData 编码（引擎级验证；IPC→PTY→回显为 xterm 同路径，
-    // 已在手动冒烟中验证）。防回归点：attachCustomKeyEventHandler 语义——ghostty 返回 true 阻止处理，
-    // xterm 相反（语义写反会吞掉所有按键）
-    let inputOk = false, inputDetail = 'no-run';
-    if (ghosttyOk) {
-      inputDetail = await cdp.eval(`(() => {
-        const t = TabManager.tabs.find(x => x.name === '${gtName}');
-        const ta = t?.term?.textarea;
-        if (!ta) return 'no-textarea';
-        window.__inData = '';
-        t.term.onData(d => { window.__inData += d; });
-        ta.focus();
-        const fire = (key, code, keyCode) => {
-          ta.dispatchEvent(new KeyboardEvent('keydown', { key, code, keyCode, bubbles: true, cancelable: true }));
-        };
-        fire('x', 'KeyX', 88);
-        fire('y', 'KeyY', 89);
-        fire('Enter', 'Enter', 13);
-        return 'fired';
-      })()`).catch(() => 'fire-fail');
-      await sleep(800);
-      const got = await cdp.eval(`window.__inData || ''`).catch(() => '');
-      inputOk = got.includes('x') && got.includes('y') && got.includes('\r');
-      inputDetail = inputOk ? `onData=${JSON.stringify(got)}` : `no-data:${JSON.stringify(got)}`;
-    }
-    check('Ghostty 引擎：输入链路（按键→onData 编码）', inputOk === true, inputDetail);
-    // 清理：关掉测试 tab，渲染引擎还原 xterm
-    await cdp.eval(`(() => { const t = TabManager.tabs.find(x => x.name === '${gtName}'); if (t) TabManager.closeTab(t.id); })()`);
-    await cdp.eval(`openSettings('appearance')`);
-    await sleep(300);
-    await cdp.eval(`document.getElementById('set-renderer').value = 'xterm'; saveAppearance();`);
-    await sleep(200);
-    await cdp.eval(`closeSettingsTab()`);
-    await sleep(300);
+    // 13.5 xterm 键盘→onData 链路（attachCustomKeyEventHandler 语义防回归：
+    // 放行逻辑返回值写反会吞掉所有按键）。合成小写字母 keydown 在 xterm 5 上可靠
+    // （大写/符号大面积丢字，勿扩展字符集）；PTY→回显→buffer 由 9.5 覆盖。
+    const inputProbe = await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(t => t.type === 'local');
+      if (!tab?.term?.textarea) return { ok: false, why: 'no-textarea' };
+      window.__inData = '';
+      tab.term.onData(d => { window.__inData += d; });
+      tab.term.textarea.focus();
+      const fire = (key, code, keyCode) => {
+        tab.term.textarea.dispatchEvent(new KeyboardEvent('keydown', { key, code, keyCode, bubbles: true, cancelable: true }));
+      };
+      fire('x', 'KeyX', 88);
+      fire('y', 'KeyY', 89);
+      fire('Enter', 'Enter', 13);
+      return { ok: true };
+    })()`).catch(() => ({ ok: false, why: 'eval-fail' }));
+    await sleep(800);
+    const gotInput = await cdp.eval(`window.__inData || ''`).catch(() => '');
+    const inputOk = inputProbe.ok === true && gotInput.includes('x') && gotInput.includes('y') && gotInput.includes('\r');
+    check('xterm 键盘链路：合成按键→onData 编码', inputOk === true, inputProbe.why || JSON.stringify(gotInput));
 
     // 14. 窗口状态恢复：写入 config 的 window 字段 → 重启 → 验证最大化/尺寸恢复
     async function writeWindowState(state) {

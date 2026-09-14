@@ -204,6 +204,16 @@ function armSplashHide() {
 // ── Settings ──
 // ── Init ──
 (async () => {
+    // Preload terminal fonts before any terminal opens: xterm measures cell
+    // size at open() time, and a first frame on the fallback font would both
+    // flash and poison the measurement until the next resize (Tabby parity).
+    try {
+        await Promise.all([
+            document.fonts.load('400 16px "JetBrainsMonoNL NF"', 'Study Z'),
+            document.fonts.load('600 16px "JetBrainsMonoNL NF"', 'Study Z'),
+            document.fonts.load('400 16px "HarmonyOS Sans SC"', '中文'),
+        ]);
+    } catch(e) { /* missing fonts fall back silently */ }
     // 数据目录以主进程解析为准（打包版默认安装目录/data，支持用户自定义指针）
     try {
         const info = await ipcRenderer.invoke('get-data-dir-info');
