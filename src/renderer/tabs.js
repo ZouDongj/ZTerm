@@ -19,6 +19,14 @@ function _clearOnConnect(tab, pane) {
 
 // SSH 连接（含凭据兜底）：主进程重启后 credentialId 句柄全部失效，
 // 没有有效凭据时从 SSH profile 重新注册（明文不经过 renderer）
+//
+// Connects are SERIALIZED app-wide: strict sshd configs (MaxStartups random
+// early drop, fail2ban) instantly Disconnect one of several concurrent
+// handshakes — at session restore multiple tabs connect at once and the
+// cloud VPS profile kept failing with a bare "Disconnected" while the LAN
+// box tolerated it. One-at-a-time (settled or 20s safety release) removes
+// the race entirely; single connects were verified to always succeed.
+let _sshConnectChain = Promise.resolve();
 function _sshConnectWithCredentials(tab, pane, rendererId) {
     const isPane = !!pane;
     const host = isPane ? (pane._sshHost || tab.host) : tab.host;
@@ -32,10 +40,20 @@ function _sshConnectWithCredentials(tab, pane, rendererId) {
         if (p) followCwd = !!p.followCwd;
     }
     const send = (cid) => {
-        ipcRenderer.send('ssh-connect', {
-            profile: { host, port, username: user, credentialId: cid || null, followCwd, loginScripts: _getLoginScripts(tab, pane) },
-            rendererId,
-        });
+        _sshConnectChain = _sshConnectChain.then(() => new Promise((release) => {
+            const rid = rendererId;
+            const done = () => { clearTimeout(timer); ipcRenderer.removeListener('ssh-connected', onOk); ipcRenderer.removeListener('ssh-error', onErr); release(); };
+            const matches = (d) => d && (d.rendererId === rid || d.tabId === rid);
+            const onOk = (e, d) => { if (matches(d)) done(); };
+            const onErr = (e, d) => { if (matches(d)) done(); };
+            const timer = setTimeout(done, 20000);
+            ipcRenderer.on('ssh-connected', onOk);
+            ipcRenderer.on('ssh-error', onErr);
+            ipcRenderer.send('ssh-connect', {
+                profile: { host, port, username: user, credentialId: cid || null, followCwd, loginScripts: _getLoginScripts(tab, pane) },
+                rendererId,
+            });
+        }));
     };
     if (credId) { send(credId); return; }
     const prof = pId ? (TabManager.sshProfiles || []).find(x => x.id === pId) : null;
