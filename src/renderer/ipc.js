@@ -39,6 +39,37 @@ function _resetCaretFilterById(tabId) {
     }
 }
 
+// Paced writer: a single huge term.write() (Ink-style TUIs emit ~15KB per
+// keystroke; a fast burst packs 100KB+ into one flush) blocks the main
+// thread through parse + dirty-cell render for 150-250ms — the caret freezes
+// mid-glide then jumps, perceived as "choppy cursor". Feeding the terminal
+// in frame-sized slices keeps every frame short; the burst lands
+// progressively instead of stalling. xterm's parser buffers partial escape
+// sequences across writes, so arbitrary slice boundaries are safe.
+const PACED_WRITE_CHUNK = 12288;
+const _pacedQueues = new WeakMap(); // term -> { parts: [data], running }
+function _pacedWrite(term, data) {
+    if (data.length <= PACED_WRITE_CHUNK) { term.write(data); return; }
+    let q = _pacedQueues.get(term);
+    if (!q) { q = { parts: [], running: false }; _pacedQueues.set(term, q); }
+    q.parts.push(data);
+    if (q.running) return;
+    q.running = true;
+    const drain = () => {
+        const chunk = q.parts.join('');
+        q.parts.length = 0;
+        for (let i = 0; i < chunk.length; i += PACED_WRITE_CHUNK) {
+            // one slice now, the rest on later frames
+            const later = chunk.slice(i + PACED_WRITE_CHUNK);
+            if (later) q.parts.push(later);
+            term.write(chunk.slice(0, PACED_WRITE_CHUNK));
+            break;
+        }
+        if (q.parts.length) { requestAnimationFrame(drain); } else { q.running = false; }
+    };
+    requestAnimationFrame(drain);
+}
+
 ipcRenderer.on('pty-output', (event, { tabId, data }) => {
     for (const tab of TabManager.tabs) {
         if (tab.splitRoot) {
@@ -49,7 +80,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
                 // the full stream in order; ptyBuffers then holds repaired bytes.
                 if (typeof data === 'string' && data) data = _conPtyCaretFix(pane, data);
                 if (pane.term) {
-                    pane.term.write(applyHighlight(data, tabId));
+                    _pacedWrite(pane.term, applyHighlight(data, tabId));
                 } else {
                     let _b = ptyBuffers[tabId] || ''; _b += data; if (_b.length > 1048576) _b = _b.slice(-524288); ptyBuffers[tabId] = _b;
                 }
@@ -73,10 +104,10 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
             }
             if (tab.term) {
                 if (ptyBuffers[tabId]) {
-                    tab.term.write(ptyBuffers[tabId]);
+                    _pacedWrite(tab.term, ptyBuffers[tabId]);
                     delete ptyBuffers[tabId];
                 }
-                tab.term.write(applyHighlight(data, tabId));
+                _pacedWrite(tab.term, applyHighlight(data, tabId));
             } else {
                 let _b = ptyBuffers[tabId] || ''; _b += data; if (_b.length > 1048576) _b = _b.slice(-524288); ptyBuffers[tabId] = _b;
             }
