@@ -175,16 +175,24 @@ const SHORTCUT_ACTIONS = {
         // user's real display (DPI/scale) without any remote control.
         if (window.__perfCapturing) { showToast('采样已在进行中', true); return; }
         window.__perfCapturing = true;
-        showToast('性能采样中（4 秒）—— 请继续在终端里打字');
+        showToast('性能采样中（4 秒）—— 请全程连续打字');
         const t0 = performance.now();
         const raf = [];
         const loop = (t) => { raf.push(t); if (t - t0 < 4000) requestAnimationFrame(loop); else finish(); };
         const tab = TabManager.getActive();
         const adapter = tab && tab._smoothCursor && tab._smoothCursor._adapter;
         const before = adapter && adapter.snapshot ? adapter.snapshot().counters : null;
-        const startRetargets = adapter && adapter.snapshot ? adapter.snapshot().retargets.length : 0;
+        // drawable/hidden timeline: the missing observable — 100ms samples of
+        // the adapter status reveal idle-hide cycles (ink TUIs hide the caret
+        // ~1s after the last keystroke) vs continuous animation.
+        const timeline = [];
+        const tl = setInterval(() => {
+            const s = adapter && adapter.snapshot ? adapter.snapshot() : null;
+            timeline.push({ t: Math.round(performance.now() - t0), st: s ? s.drawPassStatus : '-', anim: s ? s.animationActive : null });
+        }, 100);
         requestAnimationFrame(loop);
         function finish() {
+            clearInterval(tl);
             window.__perfCapturing = false;
             const gaps = [];
             for (let i = 1; i < raf.length; i++) gaps.push(+(raf[i] - raf[i - 1]).toFixed(1));
@@ -202,8 +210,10 @@ const SHORTCUT_ACTIONS = {
                         baseDrawPasses: after.counters.baseDrawPasses - before.baseDrawPasses,
                     } : null,
                     recentDrawGapMs: after.recentDrawGapMs,
-                    retargets: after.retargets.slice(Math.max(0, startRetargets - 40)).map(r => ({ at: Math.round(r.at), from: r.from.x + ',' + r.from.y, to: r.target.x + ',' + r.target.y })),
+                    // only retargets INSIDE the sample window (clock values >= t0)
+                    retargets: after.retargets.filter(r => r.at >= t0 - 50).slice(-40).map(r => ({ dt: Math.round(r.at - t0), from: (+r.from.x.toFixed(2)) + ',' + (+r.from.y.toFixed(2)), to: r.target.x + ',' + r.target.y })),
                     drawPassStatus: after.drawPassStatus,
+                    timeline,
                 } : 'no-adapter',
             };
             const text = JSON.stringify(report);
