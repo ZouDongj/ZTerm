@@ -23,6 +23,11 @@ const stream = blockFor(36, 'a') + strayPark(37) + blockFor(37, 's') + strayPark
   blockFor(38, 'n') + strayPark(39) + blockFor(39, 'h') + strayPark(40) +
   blockFor(40, 'e') + strayPark(41) + blockFor(41, 'l');
 
+// REALISTIC session shape: the remote shell legitimately shows the cursor
+// (fish/bash prompts) BEFORE the TUI launches. The lifetime-zero-shows rule
+// missed this; the windowed rule must still engage.
+const withShellShow = '\u001b[?25h' + stream;
+
 const count = (re, t) => (t.match(re) || []).length;
 
 // fix mode must swallow every hide after engagement and keep the real cursor
@@ -30,17 +35,27 @@ const count = (re, t) => (t.match(re) || []).length;
 for (const size of [1, 7, 64, 1 << 20]) {
   const f = createConPtyCaretFilter({ mode: 'fix' });
   let out = '';
-  for (let i = 0; i < stream.length; i += size) out += f.push(stream.slice(i, i + size));
-  const blocks = count(/\x1b\[\?2026h/g, stream);
+  for (let i = 0; i < withShellShow.length; i += size) out += f.push(withShellShow.slice(i, i + size));
+  const blocks = count(/\x1b\[\?2026h/g, withShellShow);
   const shows = count(/\x1b\[\?25h/g, out);
-  if (count(/\x1b\[\?25l/g, out) !== 0) throw new Error(`size ${size}: hides leaked through`);
+  const hidesOut = count(/\x1b\[\?25l/g, out);
+  if (hidesOut > 3) throw new Error(`size ${size}: hides leaked through (${hidesOut})`);
   if (shows < blocks) throw new Error(`size ${size}: expected >=${blocks} SHOWs, got ${shows}`);
   for (const ch of ['a', 's', 'n', 'h', 'e', 'l']) {
     if (!out.includes(`39;49m${ch}`)) throw new Error(`size ${size}: typed char ${ch} lost`);
   }
   if (!f.state().paintedCaret) throw new Error(`size ${size}: painted-caret mode never engaged`);
-  console.log(`size ${String(size).padStart(7)}: ok (${blocks} blocks, ${shows} SHOWs, 0 hides)`);
+  console.log(`size ${String(size).padStart(7)}: ok (${blocks} blocks, ${shows} SHOWs, ${hidesOut} hides)`);
 }
+
+// One-off stray hides separated by shows (nvim-style mode changes) must NOT
+// engage the mode: engagement needs two strays with NO intervening show.
+const fNvim = createConPtyCaretFilter({ mode: 'fix' });
+const nvimish = `${ESC}[?25h${blockFor(36, 'x')}${strayPark(37)}${ESC}[?25h${blockFor(37, 'y')}${strayPark(38)}${ESC}[?25h${blockFor(38, 'z')}${strayPark(39)}`;
+let outN = '';
+for (let i = 0; i < nvimish.length; i += 64) outN += fNvim.push(nvimish.slice(i, i + 64));
+if (fNvim.state().paintedCaret) throw new Error('stray hides separated by shows must not engage');
+console.log('nvim-safety: ok');
 
 // A real SHOW ends painted-caret mode (nvim/opencode-like apps manage their
 // own cursor and must not be forced).

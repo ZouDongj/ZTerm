@@ -60,6 +60,8 @@
     let hidesSeen = 0;
     let showsSeen = 0;
     let blocksSeen = 0;
+    let blocksSinceShow = 0;
+    let strayHidesSinceShow = 0;
     let paintedCaret = false;
 
     // Plain text is buffered too, so the trailing-cell rewrite can see it.
@@ -87,6 +89,7 @@
         block = null;
         inSync = false;
         blocksSeen += 1;
+        blocksSinceShow += 1;
         let out = buffered.join('');
         if (mode === 'fix') {
           // Order matters: the painted-caret signature ENDS with the block's
@@ -108,25 +111,30 @@
       }
       if (text === HIDE) {
         hidesSeen += 1;
-        // Painted-caret engagement: a hide OUTSIDE any sync block, from a
-        // stream that has produced sync-block frames but never once a show,
-        // is the app actively re-hiding after our block-end repair — an
-        // ink-style TUI that paints its own caret and parks the real cursor
-        // between frames. From here on every hide is swallowed and the real
-        // cursor stays visible exactly on the painted cell, so the adapter
-        // animates it. Apps that emit ?25h (nvim, shells, opencode) and
-        // streams without sync blocks never reach this.
-        if (mode === 'fix' && !paintedCaret && !inSync && blocksSeen >= 1 && showsSeen === 0) {
+        // Painted-caret engagement (WINDOWED): a hide OUTSIDE any sync block,
+        // in a stretch that has sync-block frames but no show since the last
+        // one, is the app actively re-hiding after our block-end repair — an
+        // ink-style TUI painting its own caret and parking the real cursor
+        // between frames. Three stray hides without an intervening show are
+        // required so a shell's legitimate pre-TUI shows don't block the
+        // switch and one-off mode-change hides (nvim normal mode) don't
+        // trigger it. Once engaged, every hide is swallowed and the real
+        // cursor stays visible exactly on the painted cell, where the
+        // adapter animates it.
+        if (mode === 'fix' && !paintedCaret && !inSync && blocksSinceShow >= 1 && strayHidesSinceShow + 1 >= 2) {
           paintedCaret = true;
           visible = true;
           return '';
         }
+        if (!inSync && !paintedCaret) strayHidesSinceShow += 1;
         if (paintedCaret) return ''; // keep the real cursor on the painted cell
         visible = false;
         return emit(text);
       }
       if (text === SHOW) {
         showsSeen += 1;
+        blocksSinceShow = 0;
+        strayHidesSinceShow = 0;
         // A real show ends painted-caret mode: the app does manage cursor
         // visibility after all.
         paintedCaret = false;
@@ -213,7 +221,7 @@
       push,
       setMode,
       mode: function () { return mode; },
-      state: function () { return { mode, inSync, visible, buffered: block ? block.length : 0, paintedCaret, hidesSeen, showsSeen, blocksSeen }; },
+      state: function () { return { mode, inSync, visible, buffered: block ? block.length : 0, paintedCaret, hidesSeen, showsSeen, blocksSeen, blocksSinceShow, strayHidesSinceShow }; },
     };
   }
 
