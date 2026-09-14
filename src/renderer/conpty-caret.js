@@ -60,8 +60,7 @@
     let hidesSeen = 0;
     let showsSeen = 0;
     let blocksSeen = 0;
-    let blocksSinceShow = 0;
-    let strayHidesSinceShow = 0;
+    let glyphRun = 0;
     let paintedCaret = false;
 
     // Plain text is buffered too, so the trailing-cell rewrite can see it.
@@ -89,12 +88,25 @@
         block = null;
         inSync = false;
         blocksSeen += 1;
-        blocksSinceShow += 1;
+
         let out = buffered.join('');
         if (mode === 'fix') {
           // Order matters: the painted-caret signature ENDS with the block's
           // trailing ?25l, so strip it before dropping transient hides.
           out = removePaintedCaret(out);
+          // Engagement by DIRECT evidence: two consecutive frames carrying
+          // the painted-glyph pattern (truecolor fg+bg styled space parked
+          // before a CUP). Works identically over SSH (stray out-of-block
+          // hides) and locally where ConPTY consolidates the hides inside
+          // blocks — glyph presence is the common fingerprint of ink-style
+          // painted carets. nvim/opencode never paint such a glyph, so they
+          // cannot engage; a real SHOW resets the run.
+          if (hasPaintedGlyph(out)) glyphRun += 1; else glyphRun = 0;
+          if (!paintedCaret && glyphRun >= 2) {
+            paintedCaret = true;
+            visible = true;
+            out = out.split(HIDE).join('');
+          }
           // Transient-hide churn: a frame that started from the visible state
           // is one we repair with a block-end SHOW anyway; forwarding the
           // in-frame ?25l toggles the caret hide->show once per sync block.
@@ -118,30 +130,16 @@
       }
       if (text === HIDE) {
         hidesSeen += 1;
-        // Painted-caret engagement (WINDOWED): a hide OUTSIDE any sync block,
-        // in a stretch that has sync-block frames but no show since the last
-        // one, is the app actively re-hiding after our block-end repair — an
-        // ink-style TUI painting its own caret and parking the real cursor
-        // between frames. Three stray hides without an intervening show are
-        // required so a shell's legitimate pre-TUI shows don't block the
-        // switch and one-off mode-change hides (nvim normal mode) don't
-        // trigger it. Once engaged, every hide is swallowed and the real
-        // cursor stays visible exactly on the painted cell, where the
-        // adapter animates it.
-        if (mode === 'fix' && !paintedCaret && !inSync && blocksSinceShow >= 1 && strayHidesSinceShow + 1 >= 2) {
-          paintedCaret = true;
-          visible = true;
-          return '';
-        }
-        if (!inSync && !paintedCaret) strayHidesSinceShow += 1;
-        if (paintedCaret) return ''; // keep the real cursor on the painted cell
+        // In painted-caret mode every hide is swallowed — the real cursor
+        // must stay visible exactly on the painted cell so the adapter can
+        // animate it (engagement itself is glyph-evidence based, see SYNC_END).
+        if (paintedCaret) return '';
         visible = false;
         return emit(text);
       }
       if (text === SHOW) {
         showsSeen += 1;
-        blocksSinceShow = 0;
-        strayHidesSinceShow = 0;
+        glyphRun = 0;
         // A real show ends painted-caret mode: the app does manage cursor
         // visibility after all.
         paintedCaret = false;
@@ -228,7 +226,7 @@
       push,
       setMode,
       mode: function () { return mode; },
-      state: function () { return { mode, inSync, visible, buffered: block ? block.length : 0, paintedCaret, hidesSeen, showsSeen, blocksSeen, blocksSinceShow, strayHidesSinceShow }; },
+      state: function () { return { mode, inSync, visible, buffered: block ? block.length : 0, paintedCaret, hidesSeen, showsSeen, blocksSeen, glyphRun }; },
     };
   }
 
@@ -264,9 +262,18 @@
   const PAINTED_GLYPH_RE =
     /\u001b\[0;38;2;\d+;\d+;\d+;48;2;\d+;\d+;\d+m \u001b\[0m(?=\u001b\[\d+;\d+[Hf])/g;
 
+  function hasPaintedGlyph(text) {
+    if (typeof text !== 'string' || text.length === 0) return false;
+    PAINTED_GLYPH_RE.lastIndex = 0;
+    return PAINTED_GLYPH_RE.test(text);
+  }
+
   function removePaintedGlyph(text) {
     if (typeof text !== 'string' || text.length === 0) return text;
-    // matchAll clones the regex, so the shared global regex stays stateless
+    // matchAll clones the regex but COPIES its lastIndex — hasPaintedGlyph's
+    // test() advanced it past the match, which made every later matchAll scan
+    // start too late and find nothing. Reset before scanning.
+    PAINTED_GLYPH_RE.lastIndex = 0;
     const matches = [...text.matchAll(PAINTED_GLYPH_RE)];
     if (matches.length === 0) return text;
     const last = matches[matches.length - 1];
