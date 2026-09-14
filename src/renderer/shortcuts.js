@@ -181,6 +181,17 @@ const SHORTCUT_ACTIONS = {
         const loop = (t) => { raf.push(t); if (t - t0 < 4000) requestAnimationFrame(loop); else finish(); };
         const tab = TabManager.getActive();
         const adapter = tab && tab._smoothCursor && tab._smoothCursor._adapter;
+        // one-time write hook on this tab: keep the raw byte tail so the
+        // report can show exactly which hide/show sequences the app emits
+        if (tab && tab.term && !tab.__lastWrittenHooked) {
+            const origWrite = tab.term.write.bind(tab.term);
+            tab.__lastWritten = '';
+            tab.term.write = function (d) {
+                tab.__lastWritten = (tab.__lastWritten + String(d)).slice(-800);
+                return origWrite(d);
+            };
+            tab.__lastWrittenHooked = true;
+        }
         const before = adapter && adapter.snapshot ? adapter.snapshot().counters : null;
         // drawable/hidden timeline: the missing observable — 100ms samples of
         // the adapter status reveal idle-hide cycles (ink TUIs hide the caret
@@ -188,7 +199,15 @@ const SHORTCUT_ACTIONS = {
         const timeline = [];
         const tl = setInterval(() => {
             const s = adapter && adapter.snapshot ? adapter.snapshot() : null;
-            timeline.push({ t: Math.round(performance.now() - t0), st: s ? s.drawPassStatus : '-', anim: s ? s.animationActive : null });
+            // direct xterm flags: WHY the cursor is (not) drawable
+            const core = tab && tab.term && tab.term._core;
+            const flags = core ? {
+                hidden: core.coreService ? core.coreService.isCursorHidden : null,
+                initialized: core.coreService ? core.coreService.isCursorInitialized : null,
+                cx: core.buffer ? core.buffer.active.cursorX : null,
+                cy: core.buffer ? core.buffer.active.cursorY : null,
+            } : null;
+            timeline.push({ t: Math.round(performance.now() - t0), st: s ? s.drawPassStatus : '-', anim: s ? s.animationActive : null, flags });
         }, 100);
         requestAnimationFrame(loop);
         function finish() {
@@ -213,6 +232,11 @@ const SHORTCUT_ACTIONS = {
                     // only retargets INSIDE the sample window (clock values >= t0)
                     retargets: after.retargets.filter(r => r.at >= t0 - 50).slice(-40).map(r => ({ dt: Math.round(r.at - t0), from: (+r.from.x.toFixed(2)) + ',' + (+r.from.y.toFixed(2)), to: r.target.x + ',' + r.target.y })),
                     drawPassStatus: after.drawPassStatus,
+                    tabType: tab ? tab.type : null,
+                    // raw tail of what this terminal received (last 400
+                    // chars, escape sequences as \\x1b) — shows exactly which
+                    // hide/show bytes the app is emitting
+                    streamTail: tab && tab.__lastWritten ? tab.__lastWritten.slice(-400) : null,
                     timeline,
                 } : 'no-adapter',
             };

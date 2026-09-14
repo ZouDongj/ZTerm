@@ -171,6 +171,7 @@ function _sshDisplayName(tab, pane) {
 ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
     _resetCaretFilterById(tabId);
     for (const tab of TabManager.tabs) {
+        tab._sshRetried = 0; // connected: re-arm the handshake retry budget
         if (tab.splitRoot) {
             const pane = getAllPanes(tab).find(p => p.tabId === tabId || p.requestId === rendererId);
             if (pane) {
@@ -215,11 +216,16 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
     // M6：按 russh 错误文本类别判断瞬时性错误（超时/连接被断/密钥交换失败）才自动重试一次；
     // 认证失败、未知主机密钥等确定性错误不重试。原正则 /handshake|lost before/ 是给
     // Electron ssh2 错误写的，russh 常规错误不命中导致瞬时失败从不重试
-    const isHandshakeErr = /timeout|timed out|connection (closed|refused|reset)|key exchange|network|eof/i.test(error);
-    if (isHandshakeErr && !tab._sshRetried) {
-        tab._sshRetried = true;
+    // Handshake-class failures include the bare russh "Disconnected" that
+    // strict sshd configs (MaxStartups-style random early drop, fail2ban)
+    // produce while several connections arrive close together — retry with
+    // backoff rides out the server-side drop instead of surfacing it.
+    const isHandshakeErr = /timeout|timed out|connection (closed|refused|reset)|key exchange|network|eof|tcp\/handshake.*disconnected/i.test(error);
+    const retryCount = (tab._sshRetried || 0);
+    if (isHandshakeErr && retryCount < 3) {
+        tab._sshRetried = retryCount + 1;
+        const backoffMs = [2000, 5000, 10000][Math.min(retryCount, 2)];
         setTimeout(() => {
-            delete tab._sshRetried;
             if (!TabManager.tabs.includes(tab)) return; // 重试时 tab 可能已关闭
             if (pane) {
                 if (pane.tabId) ipcRenderer.send('ssh-disconnect', { tabId: pane.tabId, rendererId: tab.id });
