@@ -17,16 +17,56 @@ function _clearOnConnect(tab, pane) {
     return !profile || profile.clearOnConnect !== false;
 }
 
-// SSH 连接（含凭据兜底）：主进程重启后 credentialId 句柄全部失效，
-// 没有有效凭据时从 SSH profile 重新注册（明文不经过 renderer）
-//
-// Connects are SERIALIZED app-wide: strict sshd configs (MaxStartups random
-// early drop, fail2ban) instantly Disconnect one of several concurrent
-// handshakes — at session restore multiple tabs connect at once and the
-// cloud VPS profile kept failing with a bare "Disconnected" while the LAN
-// box tolerated it. One-at-a-time (settled or 20s safety release) removes
-// the race entirely; single connects were verified to always succeed.
+// SSH connect with credential fallback: after a main-process restart all
+// credentialId handles are dead, so re-register from the SSH profile when no
+// valid credential is at hand (plaintext never passes through the renderer).
+// ALL outbound ssh-connect traffic must go through _enqueueSshConnect's
+// app-wide serial queue (session restore, splits, interactive creation,
+// reconnects) so concurrent handshakes can never race strict sshd configs.
 let _sshConnectChain = Promise.resolve();
+
+// Is anything still listening for this rendererId (tab id or pane requestId)?
+// Queue slots can run long after their consumer was closed; sending then
+// would open a backend session nobody will ever claim or destroy.
+function _rendererIdAlive(rendererId) {
+    for (const tab of TabManager.tabs) {
+        if (tab.id === rendererId) return true;
+        if (tab.splitRoot) {
+            if (getAllPanes(tab).some(p => p.requestId === rendererId || p.tabId === rendererId)) return true;
+        }
+    }
+    return false;
+}
+
+function _enqueueSshConnect(profile, rendererId) {
+    // Rust's early validation (missing host/username) rejects the invoke
+    // WITHOUT emitting ssh-error, which would stall a queue slot for 20s and
+    // freeze every connect behind it. Drop invalid payloads up front.
+    if (!profile || !profile.host || !profile.username) {
+        console.warn('[ssh] dropping connect with missing host/username, rendererId=' + rendererId);
+        return;
+    }
+    _sshConnectChain = _sshConnectChain.then(() => new Promise((release) => {
+        if (!_rendererIdAlive(rendererId)) { release(); return; }
+        let released = false;
+        const done = () => {
+            if (released) return;
+            released = true;
+            clearTimeout(timer);
+            // release() FIRST: the queue must never wedge on listener cleanup.
+            release();
+            ipcRenderer.removeListener('ssh-connected', onOk);
+            ipcRenderer.removeListener('ssh-error', onErr);
+        };
+        const matches = (d) => d && (d.rendererId === rendererId || d.tabId === rendererId);
+        const onOk = (e, d) => { if (matches(d)) done(); };
+        const onErr = (e, d) => { if (matches(d)) done(); };
+        const timer = setTimeout(done, 20000);
+        ipcRenderer.on('ssh-connected', onOk);
+        ipcRenderer.on('ssh-error', onErr);
+        ipcRenderer.send('ssh-connect', { profile, rendererId });
+    }));
+}
 function _sshConnectWithCredentials(tab, pane, rendererId) {
     const isPane = !!pane;
     const host = isPane ? (pane._sshHost || tab.host) : tab.host;
@@ -40,20 +80,10 @@ function _sshConnectWithCredentials(tab, pane, rendererId) {
         if (p) followCwd = !!p.followCwd;
     }
     const send = (cid) => {
-        _sshConnectChain = _sshConnectChain.then(() => new Promise((release) => {
-            const rid = rendererId;
-            const done = () => { clearTimeout(timer); ipcRenderer.removeListener('ssh-connected', onOk); ipcRenderer.removeListener('ssh-error', onErr); release(); };
-            const matches = (d) => d && (d.rendererId === rid || d.tabId === rid);
-            const onOk = (e, d) => { if (matches(d)) done(); };
-            const onErr = (e, d) => { if (matches(d)) done(); };
-            const timer = setTimeout(done, 20000);
-            ipcRenderer.on('ssh-connected', onOk);
-            ipcRenderer.on('ssh-error', onErr);
-            ipcRenderer.send('ssh-connect', {
-                profile: { host, port, username: user, credentialId: cid || null, followCwd, loginScripts: _getLoginScripts(tab, pane) },
-                rendererId,
-            });
-        }));
+        _enqueueSshConnect({
+            host, port: port || 22, username: user, credentialId: cid || null,
+            followCwd, loginScripts: _getLoginScripts(tab, pane),
+        }, rendererId);
     };
     if (credId) { send(credId); return; }
     const prof = pId ? (TabManager.sshProfiles || []).find(x => x.id === pId) : null;
@@ -101,8 +131,8 @@ const TabManager = {
             if (!document.getElementById('btn-add-tab')) {
                 const addBtn = document.createElement('div');
                 addBtn.id = 'btn-add-tab';
-                addBtn.title = '新建标签页（默认终端），Ctrl+Shift+N 选择会话';
-                addBtn.textContent = '+';
+                addBtn.dataset.tip = '新建标签页（默认终端），Ctrl+Shift+N 选择会话';
+                addBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
                 addBtn.onclick = () => {
                     const p = getDefaultLocalProfile();
                     TabManager.createTab({ name: p.name, type: 'local', command: p.command, args: p.args });
@@ -112,7 +142,7 @@ const TabManager = {
             if (!document.getElementById('btn-menu')) {
                 const menuBtn = document.createElement('div');
                 menuBtn.id = 'btn-menu';
-                menuBtn.title = '菜单';
+                menuBtn.dataset.tip = '菜单';
                 menuBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>';
                 menuBtn.onclick = (e) => { e.stopPropagation(); toggleMenuPopup(); };
                 bar.appendChild(menuBtn);
@@ -160,8 +190,13 @@ const TabManager = {
 
                 if (sshOpts && sshOpts._encryptedPwd) {
                     const capturedId = tid;
-                    const capturedOpts = sshOpts;
-                    // 注册凭据到主进程，拿 credentialId；明文密码不回传 renderer
+                    // Register the credential with the main process for a
+                    // credentialId; the plaintext password never reaches the
+                    // renderer. The connect itself goes through the app-wide
+                    // serial queue — at restore several SSH tabs connect at
+                    // once and strict sshd configs randomly drop concurrent
+                    // handshakes, whose retry churn used to trigger the
+                    // zombie-wrap bug.
                     ipcRenderer.invoke('register-credential', {
                         encryptedPassword: sshOpts._encryptedPwd,
                         privateKeyPath: sshOpts.privateKey,
@@ -174,10 +209,7 @@ const TabManager = {
                             return;
                         }
                         reTab._credId = credId;
-                        ipcRenderer.send('ssh-connect', {
-                            profile: { host: capturedOpts.host, port: capturedOpts.port || 22, username: capturedOpts.user, credentialId: credId, followCwd: capturedOpts.followCwd, loginScripts: capturedOpts.loginScripts || [] },
-                            rendererId: capturedId,
-                        });
+                        _sshConnectWithCredentials(reTab, null, capturedId);
                     });
                 }
             });
@@ -214,8 +246,11 @@ const TabManager = {
         }
         this.tabs.push(tab);
         if (isSSH) {
-            if (sshOpts && sshOpts.host && (sshOpts.credId || sshOpts.privateKey)) {
-                ipcRenderer.send('ssh-connect', { profile: { host: sshOpts.host, port: sshOpts.port || 22, username: sshOpts.user, credentialId: sshOpts.credId, followCwd: sshOpts.followCwd, loginScripts: sshOpts.loginScripts || [] }, rendererId: id });
+            // Enqueue here only when the restore callback won't: profiles with
+            // BOTH a password and a key would otherwise connect twice (the
+            // first session succeeds and is orphaned by the second).
+            if (sshOpts && sshOpts.host && (sshOpts.credId || sshOpts.privateKey) && !sshOpts._encryptedPwd) {
+                _sshConnectWithCredentials(tab, null, id);
             }
         } else {
             ipcRenderer.send('pty-create', { shell: tab.command, args: tab.args, cwd: _settingsConfig.startupDir || undefined, requestId: id });
@@ -245,7 +280,7 @@ const TabManager = {
                 const p = (TabManager.sshProfiles || []).find(x => x.id === sshProfileId);
                 if (p) followCwd = !!p.followCwd;
             }
-            ipcRenderer.send('ssh-connect', { profile: { host, port, username: user, credentialId: credId, followCwd, loginScripts: _getLoginScripts(tab) }, rendererId: id });
+            _enqueueSshConnect({ host, port: port || 22, username: user, credentialId: credId || null, followCwd, loginScripts: _getLoginScripts(tab) }, id);
         } else {
             ipcRenderer.send('pty-create', { shell: tab.command, args: tab.args, cwd: _settingsConfig.startupDir || undefined, requestId: id });
         }
@@ -394,6 +429,9 @@ const TabManager = {
     reconnectTab(id) {
         const tab = this.tabs.find(t => t.id === id);
         if (!tab || tab.type !== 'ssh') return;
+        // Supersede any pending ssh-error retry timer for this tab (both
+        // would enqueue a connect; the loser's session gets orphaned).
+        tab._sshRetryToken = (tab._sshRetryToken || 0) + 1;
 
         if (tab.splitRoot) {
             const focused = getAllPanes(tab).find(p => p.focused);
@@ -426,6 +464,8 @@ const TabManager = {
     _reconnectPane(tabId, paneId) {
         const tab = this.tabs.find(t => t.id === tabId);
         if (!tab) return;
+        // Same supersede as reconnectTab: cancel a pending retry for this pane.
+        tab._sshRetryToken = (tab._sshRetryToken || 0) + 1;
         const pane = findPane(tab, paneId);
         if (!pane) return;
         if (pane.tabId) ipcRenderer.send('ssh-disconnect', { tabId: pane.tabId, rendererId: tabId });
@@ -560,39 +600,8 @@ const TabManager = {
     },
 
     _spawnBackendForPane(pane, tab) {
-        const host = pane._sshHost || tab.host;
-        const port = pane._sshPort || tab.port;
-        const user = pane._sshUser || tab.user;
-        let credId = pane._sshCredId || tab._credId;
-        if (pane.type === 'ssh' && host) {
-            const doConnect = (cid) => {
-                let followCwd = false;
-                const pId = pane._sshProfileId || tab.sshProfileId;
-                if (pId) {
-                    const p = (TabManager.sshProfiles || []).find(x => x.id === pId);
-                    if (p) followCwd = !!p.followCwd;
-                }
-                ipcRenderer.send('ssh-connect', {
-                    profile: { host, port, username: user, credentialId: cid || null, followCwd, loginScripts: _getLoginScripts(tab, pane) },
-                    rendererId: pane.requestId,
-                });
-            };
-            // 没有凭据时从 SSH profile 重新注册
-            if (!credId) {
-                const pId = pane._sshProfileId || tab.sshProfileId;
-                const prof = pId ? (TabManager.sshProfiles || []).find(x => x.id === pId) : null;
-                if (prof && (prof.encryptedPassword || prof.privateKeyPath)) {
-                    ipcRenderer.invoke('register-credential', {
-                        encryptedPassword: prof.encryptedPassword || '',
-                        privateKeyPath: prof.privateKeyPath || '',
-                    }).then(({ credId: newCredId }) => {
-                        if (newCredId) pane._sshCredId = newCredId;
-                        doConnect(newCredId);
-                    }).catch(() => doConnect(null));
-                    return;
-                }
-            }
-            doConnect(credId);
+        if (pane.type === 'ssh' && (pane._sshHost || tab.host)) {
+            _sshConnectWithCredentials(tab, pane, pane.requestId);
         } else {
             ipcRenderer.send('pty-create', { shell: pane._command || tab.command || 'powershell.exe', args: pane._args || tab.args || [], cwd: _settingsConfig.startupDir || undefined, requestId: pane.requestId });
         }
@@ -2131,22 +2140,7 @@ const TabManager = {
             const { wrap: w, inner: wInner } = createTermWrap(tab);
             document.getElementById('main-area').appendChild(w);
             if (tabData.type === 'ssh' && tabData.host) {
-                const prof = (this.sshProfiles || []).find(x => x.id === tabData.sshProfileId);
-                const doConnect = (credId) => {
-                    if (credId) tab._credId = credId;
-                    ipcRenderer.send('ssh-connect', {
-                        profile: { host: tabData.host, port: tabData.port, username: tabData.user, credentialId: credId, followCwd: !!prof?.followCwd, loginScripts: prof?.loginScripts || [] },
-                        rendererId: tab.id,
-                    });
-                };
-                if (prof && (prof.encryptedPassword !== undefined || prof.privateKeyPath)) {
-                    ipcRenderer.invoke('register-credential', {
-                        encryptedPassword: prof.encryptedPassword,
-                        privateKeyPath: prof.privateKeyPath,
-                    }).then(({ credId }) => doConnect(credId)).catch(() => doConnect(null));
-                } else {
-                    doConnect(null);
-                }
+                _sshConnectWithCredentials(tab, null, tab.id);
             } else {
                 ipcRenderer.send('pty-create', { shell: tab.command, args: tab.args || [], requestId: tab.id });
             }
@@ -2306,7 +2300,8 @@ const TabManager = {
         current = null;
     };
     bar.addEventListener('mouseover', (e) => {
-        const el = e.target.closest('.tab');
+        // 覆盖 tab + tab 栏两个 chrome 按钮（dataset.tip 共用低延迟 tooltip）
+        const el = e.target.closest('.tab, #btn-add-tab, #btn-menu');
         if (!el || el === current) return;
         hide();
         current = el;

@@ -171,10 +171,10 @@ function _sshDisplayName(tab, pane) {
 ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
     _resetCaretFilterById(tabId);
     for (const tab of TabManager.tabs) {
-        tab._sshRetried = 0; // connected: re-arm the handshake retry budget
         if (tab.splitRoot) {
             const pane = getAllPanes(tab).find(p => p.tabId === tabId || p.requestId === rendererId);
             if (pane) {
+                tab._sshRetried = 0; // connected: re-arm THIS tab's handshake retry budget
                 if (!pane.term) wireTerminalToPane(tab, pane);
                 if (pane.term) pane.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
                 tab.connected = true;
@@ -188,6 +188,7 @@ ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
                 return;
             }
         } else if (tab.tabId === tabId || tab.id === rendererId) {
+            tab._sshRetried = 0; // connected: re-arm THIS tab's handshake retry budget
             tab.connected = true;
             if (!tab.term) wireTerminal(tab, tabId);
             if (tab.term) tab.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
@@ -220,32 +221,61 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
     // strict sshd configs (MaxStartups-style random early drop, fail2ban)
     // produce while several connections arrive close together — retry with
     // backoff rides out the server-side drop instead of surfacing it.
-    const isHandshakeErr = /timeout|timed out|connection (closed|refused|reset)|key exchange|network|eof|tcp\/handshake.*disconnected/i.test(error);
+    // Windows io errors localize ("由于目标计算机积极拒绝" on zh-CN), so the
+    // WSA codes are matched directly: 10054 reset / 10060 timeout /
+    // 10061 refused.
+    const isHandshakeErr = /timeout|timed out|connection (closed|refused|reset)|key exchange|network|eof|tcp\/handshake.*disconnected|os error 100(54|60|61)/i.test(error);
     const retryCount = (tab._sshRetried || 0);
     if (isHandshakeErr && retryCount < 3) {
         tab._sshRetried = retryCount + 1;
         const backoffMs = [2000, 5000, 10000][Math.min(retryCount, 2)];
+        // A manual reconnect (reconnectTab / clicking a down tab) supersedes
+        // this scheduled retry: both would enqueue a connect for the same
+        // rendererId and the loser's session gets orphaned. reconnectTab
+        // bumps the token, making superseded timers no-op. Pane liveness is
+        // checked separately — closing the pane (not the tab) during the
+        // backoff must not spawn a backend for a dead pane.
+        const token = (tab._sshRetryToken = (tab._sshRetryToken || 0) + 1);
+        const stillWanted = () => tab._sshRetryToken === token && TabManager.tabs.includes(tab)
+            && (!pane || TabManager.tabs.some(t => t.id === tab.id && getAllPanes(t).some(p => p.id === pane.id)));
         setTimeout(() => {
-            if (!TabManager.tabs.includes(tab)) return; // 重试时 tab 可能已关闭
+            if (!stillWanted()) return; // superseded / tab or pane closed
             if (pane) {
                 if (pane.tabId) ipcRenderer.send('ssh-disconnect', { tabId: pane.tabId, rendererId: tab.id });
                 // 保留模式（clearOnConnect=false）不销毁终端，内容接在后面
-                if (_clearOnConnect(tab, pane) && pane.term) { try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
+                if (_clearOnConnect(tab, pane) && pane.term) {
+                    try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {};
+                    pane.term = null; pane.fitAddon = null;
+                    // Mirror _reconnectPane: clear the destroyed xterm's DOM
+                    const bodyEl = document.getElementById('pane-body_' + pane.id);
+                    if (bodyEl) bodyEl.innerHTML = '';
+                }
+                if (pane.tabId) delete ptyBuffers[pane.tabId];
                 pane.tabId = null;
                 setTimeout(() => {
-                    if (!TabManager.tabs.includes(tab)) return;
+                    if (!stillWanted()) return;
                     _sshConnectWithCredentials(tab, pane, pane.requestId);
                 }, 500);
             } else {
                 if (tab.tabId) ipcRenderer.send('ssh-disconnect', { tabId: tab.tabId, rendererId: tab.id });
-                if (_clearOnConnect(tab, null) && tab.term) { try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
+                if (_clearOnConnect(tab, null) && tab.term) {
+                    try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {};
+                    tab.term = null; tab.fitAddon = null;
+                    // The dead session's wrap must go with its terminal: a
+                    // surviving duplicate keeps switchTo() toggling the stale
+                    // first match while the reconnect-created wrap holds
+                    // 'active' forever, covering every tab.
+                    const wrapEl = document.getElementById('wrap_' + tab.id);
+                    if (wrapEl) wrapEl.remove();
+                }
+                if (tab.tabId) delete ptyBuffers[tab.tabId];
                 tab.tabId = null;
                 setTimeout(() => {
-                    if (!TabManager.tabs.includes(tab)) return;
+                    if (!stillWanted()) return;
                     _sshConnectWithCredentials(tab, null, tab.id);
                 }, 500);
             }
-        }, 2000);
+        }, backoffMs);
         return;
     }
     if (pane) {

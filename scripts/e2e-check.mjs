@@ -295,6 +295,27 @@ async function main() {
     await sleep(2000);
     const tabCountAfter = await cdp.eval(`document.querySelectorAll('#tabbar .tab').length`);
     check('点击 + 新增标签页', tabCountAfter === tabCountBefore + 1, `${tabCountBefore} -> ${tabCountAfter}`);
+    // 8.5 Wrap-layer integrity: SSH retries used to leave the previous wrap
+    //     mounted (duplicate id) while the retry-created wrap kept 'active'
+    //     forever — a full-viewport layer covering every tab. Wrap ids must
+    //     stay unique and exactly one wrap may be active, owned by the active
+    //     tab. Poll for the new tab's wrap first (slow ConPTY spawn would
+    //     otherwise make this flake with zero active wraps).
+    const newWrapCount = await waitForValue(cdp, `document.querySelectorAll('.term-wrap').length`, tabCountAfter, 8000);
+    check('+ 新增 tab 后 wrap 已挂载', newWrapCount === tabCountAfter, `wraps=${newWrapCount}, tabs=${tabCountAfter}`);
+    const wrapAudit = await cdp.eval(`(() => {
+      const wraps = [...document.querySelectorAll('.term-wrap')];
+      const ids = wraps.map(w => w.id);
+      const dup = ids.filter((v, i) => ids.indexOf(v) !== i);
+      const activeWraps = wraps.filter(w => w.classList.contains('active'));
+      return { total: wraps.length, dup, activeIds: activeWraps.map(w => w.id), expect: 'wrap_' + TabManager.activeId };
+    })()`);
+    check('wrap 层无重复 id', wrapAudit.dup.length === 0, JSON.stringify(wrapAudit));
+    check('active wrap 唯一且属于当前 tab', wrapAudit.activeIds.length === 1 && wrapAudit.activeIds[0] === wrapAudit.expect, JSON.stringify(wrapAudit));
+    // 8.6 The '+' button must be an SVG icon (a text '+' rendered oddly under
+    //     some font fallbacks)
+    const addBtnSvg = await cdp.eval(`!!document.querySelector('#btn-add-tab svg')`);
+    check('新建标签按钮为 SVG 图标', addBtnSvg === true, `svg=${addBtnSvg}`);
 
     // 9. 分屏：水平分割 → 2 个 pane；再垂直分割 → 3 个 pane（轮询等待，防 pty 未 attach 假失败）
     await cdp.eval(`TabManager.splitHorizontal()`);
@@ -371,6 +392,22 @@ async function main() {
     const appAlive = await cdp.eval(`typeof TabManager.getActive === 'function'`);
     check('SSH 连接失败被处理且前端存活', sshTabAlive && appAlive && sshErrCount > 0,
       `sshTab=${sshTabAlive}, alive=${appAlive}, ssh-error 事件=${sshErrCount}`);
+    // 11a. Re-audit the wrap layers after the SSH failure path: the retry
+    //      cycle (dispose xterm → reconnect → wireTerminal) is exactly where
+    //      duplicate/zombie wraps used to appear, and section 8.5 runs before
+    //      any retry has happened. Retries may still be in flight (backoff
+    //      2s/5s/10s) — the invariant must hold at every moment regardless.
+    const wrapAudit2 = await cdp.eval(`(() => {
+      const wraps = [...document.querySelectorAll('.term-wrap')];
+      const ids = wraps.map(w => w.id);
+      const dup = ids.filter((v, i) => ids.indexOf(v) !== i);
+      const activeWraps = wraps.filter(w => w.classList.contains('active'));
+      const activeTab = TabManager.getActive();
+      const ownerOk = activeWraps.length === 0 ? activeTab?.splitRoot === true || activeTab?.type === 'settings'
+        : activeWraps.length === 1 && activeWraps[0].id === 'wrap_' + TabManager.activeId;
+      return { total: wraps.length, dup, activeIds: activeWraps.map(w => w.id), ownerOk };
+    })()`);
+    check('SSH 重试后 wrap 层仍无重复且 active 归属正确', wrapAudit2.dup.length === 0 && wrapAudit2.ownerOk === true, JSON.stringify(wrapAudit2));
 
     // 11b. 快捷命令“末尾回车自动执行”开关：UI 存在、toggle 生效、注入语义正确
     await cdp.eval(`openSettings('quickcommands')`);

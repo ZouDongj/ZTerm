@@ -233,6 +233,13 @@ function wireTerminal(tab, tabId) {
     tab.tabId = tabId;
 
     const { wrap, inner } = createTermWrap(tab);
+    // Self-heal duplicate wraps: an SSH retry disposes the xterm but can leave
+    // the previous wrap mounted. Two elements sharing 'wrap_<id>' break
+    // switchTo()'s getElementById (first match wins), and a retry-created wrap
+    // keeps its 'active' class forever — a full-viewport absolute layer that
+    // covers every tab (the restore "all tabs show one session" bug). Drop
+    // any survivor before mounting the new one.
+    document.getElementById('wrap_' + tab.id)?.remove();
     document.getElementById('main-area').appendChild(wrap);
 
     const term = new Terminal(_buildTerminalOptions());
