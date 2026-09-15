@@ -4,23 +4,33 @@
 // modifies bytes and never touches the xterm buffer; candidates only become
 // a drawn cursor after the adapter's watermark/generation checks pass.
 //
-// Verified client grammar (real pre-filter captures, herdr+dsh-tui and
-// herdr+kimi on 41.88, tests/fixtures/*b0*): inside a synchronized-output
-// unit the app writes the input line as
-//   CUP(row;col) SGR(0;39;49) <plain char(s)> SGR(0;38;2;FG;48;2;BG) <char> SGR(0) CUP(...) ?25l
-// The caret cell is the truecolor fg+bg styled single character written at
-// the CURRENT cursor position (a space at end-of-line, the underlying
-// character during navigation/deletion); the app's own non-caret convention
-// for the same cells is SGR(0;39;49) — that verified convention is the only
-// "recoverable appearance" evidence used. The trailing CUP may point at the
-// caret cell or past it and is deliberately NOT used for coordinates
-// (ADR C5: never fake the software position from the protocol park).
+// Two verified client grammars (real pre-filter captures on 41.88):
+//
+// 1. Sync-unit form (2026-09-15 B0 fixtures, older dsh-tui/kimi builds via
+//    herdr): inside a synchronized-output unit (?2026h … ?2026l) the app
+//    writes the input line as
+//      CUP(row;col) SGR(0;39;49) <plain char(s)> SGR(0;38;2;FG;48;2;BG) <char> SGR(0) CUP(...) ?25l
+//    The caret cell is the truecolor fg+bg styled single character written
+//    at the CURRENT cursor position. The trailing CUP may point at the
+//    caret cell or past it and is deliberately NOT used for coordinates
+//    (ADR C5: never fake the software position from the protocol park).
+//
+// 2. Frame form (2026-09-15 gap captures — the CURRENT dsh-tui/kimi builds,
+//    SSH-direct, local and herdr-relayed alike): the app emits one minimal
+//    frame per keystroke:
+//      SGR(0) OSC8-end HOME <relative moves> SGR(7) <char> SGR(27) [plain] CUP(24;1) CUP(row;col)
+//    The caret is the REVERSE-VIDEO single character (SGR 7 … 27) written at
+//    its exact write position. The frame is delimited by the literal prefix
+//    SGR(0)+OSC8-end+HOME and completes at the first absolute CUP AFTER the
+//    caret write (the app's park); the park position itself is never used
+//    for coordinates. Mouse/DA/DECRQM query bursts (incl. ?1049$p, ESC[c)
+//    appear between/after frames and are tolerated as non-movement queries.
 //
 // Decidability limits: any unit containing a genuine SHOW, an unmodeled
-// cursor-movement sequence, multiple caret cells, or plain writes whose
-// attributes do not match the verified convention produces NO candidate —
-// the adapter then shows raw display. Per ADR 4.4 this module is the ONLY
-// place pattern knowledge lives; it gates nothing by process name.
+// cursor-movement sequence, MULTIPLE styled caret candidates, or plain
+// writes whose attributes contradict the verified convention produces NO
+// candidate — the adapter then shows raw display. Per ADR 4.4 this module
+// is the ONLY place pattern knowledge lives; it gates nothing by name.
 (function installInkCaretObserver(root) {
   'use strict';
 
@@ -28,6 +38,10 @@
   const SYNC_BEGIN = '\u001b[?2026h';
   const SYNC_END = '\u001b[?2026l';
   const SHOW = '\u001b[?25h';
+  const SGR_RESET = '\u001b[0m';
+  const HOME = '\u001b[H';
+  const OSC8_END_BEL = '\u001b]8;;\u0007';
+  const OSC8_END_ST = '\u001b]8;;\u001b\\';
   // Bounded state: a unit longer than this is not an input-line update.
   const MAX_UNIT_BYTES = 262144;
 
@@ -54,32 +68,67 @@
 
     let buffer = '';
     let inSync = false;
+    let unitMode = null;    // 'sync' | 'frame' while a unit is open
     let unitSeq = 0;        // completed units
     let chunkSeq = 0;       // chunks fed (watermark binding granularity)
+    let frameUnits = 0;     // completed frame-form units (diagnostics)
     // Cursor model inside the current unit (1-based row/col like CUP).
     let row = 1, col = 1;
+    // Screen geometry for VT scroll/wrap semantics (the ConPTY sync form
+    // addresses units RELATIVELY, so its rows depend on bottom-stick
+    // scrolling and autowrap actually being modeled). Defaults are replaced
+    // by the live terminal size at wiring time (ipc.js).
+    let rows = Math.max(2, Math.floor(options?.rows) || 24);
+    let cols = Math.max(2, Math.floor(options?.cols) || 80);
+    let pendingWrap = false;
     // Per-unit recognition state.
     let unit = null;
+    // Last two escape sequences, for the frame-form prefix pattern
+    // (SGR0 + OSC8-end + HOME must be adjacent; printables break it).
+    let seqBack1 = '';
+    let seqBack2 = '';
+
+    function lineFeed() {
+      // LF at the bottom row scrolls the viewport: the cursor STICKS to the
+      // bottom instead of moving past it.
+      row = row >= rows ? rows : row + 1;
+      pendingWrap = false;
+    }
+
+    function clampMove() {
+      if (row > rows) row = rows;
+      if (row < 1) row = 1;
+      if (col > cols) col = cols;
+      if (col < 1) col = 1;
+      pendingWrap = false;
+    }
 
     function resetUnit() {
       unit = null;
+      unitMode = null;
     }
 
-    function beginUnit() {
-      inSync = true;
-      row = 1; col = 1;
+    function beginUnit(mode) {
+      inSync = mode === 'sync';
+      unitMode = mode;
+      // NOTE: row/col are NOT reset here — cursor position is continuous
+      // stream state. Absolute anchors (CUP/HOME) realign it; the ConPTY
+      // sync form (verified 2026-09-15 local kimi capture) addresses its
+      // units purely relatively (\r + EL + writes).
       unit = {
         sawShow: false,
         ambiguous: false,
         plainAttrOk: true,
         sawPlain: false,
-        caret: null,          // {row, col, ch, width, fg, bg}
+        caret: null,          // {row, col, ch, width, fg, bg, rev}
         writes: [],           // [row, col] per printable cell (bounded)
         bytes: 0,
       };
     }
 
     function finishUnit(text) {
+      const mode = unitMode;
+      if (mode === 'frame') frameUnits += 1;
       inSync = false;
       unitSeq += 1;
       const info = {
@@ -89,7 +138,13 @@
         sawShow: unit ? unit.sawShow : false,
         wrote: unit ? unit.writes : [], // cells this unit wrote (keep/revoke evidence)
       };
-      if (unit && !unit.ambiguous && !unit.sawShow && unit.caret && unit.sawPlain && unit.plainAttrOk) {
+      if (unit && !unit.ambiguous && !unit.sawShow && unit.caret && unit.sawPlain
+        // The plain-attr convention gate applies to the TRUECOLOR grammar
+        // only (its restore evidence is the default-attr convention). The
+        // reverse-caret grammars (SSH frame form, ConPTY sync form) carry
+        // verified fg-only decorations (borders, hints) in the same unit;
+        // those never masquerade as carets, so they do not void the unit.
+        && (unit.caret.rev || unit.plainAttrOk)) {
         info.hadCandidate = true;
         const c = unit.caret;
         const cand = {
@@ -101,7 +156,8 @@
           width: c.width,
           fg: c.fg,
           bg: c.bg,
-          restoreSgr: '0;39;49', // verified app convention (same-unit evidence)
+          style: c.rev ? 'reverse' : 'truecolor',
+          restoreSgr: c.rev ? '0' : '0;39;49', // verified app convention (same-unit evidence)
         };
         if (onCandidate) onCandidate(cand);
       }
@@ -111,22 +167,25 @@
     }
 
     // Minimal SGR tracker: we only need "truecolor fg AND bg both set" for
-    // the caret signature and "default colors" for the plain convention.
-    let sgr = { fg: null, bg: null, isDefault: true, any: false };
+    // the sync-form caret signature, SGR 7/27 reverse for the frame-form
+    // signature, and "default colors" for the plain convention.
+    let sgr = { fg: null, bg: null, isDefault: true, rev: false };
 
     function applySgr(params) {
       const ps = params === '' ? [] : params.split(';').map(p => parseInt(p, 10) || 0);
       let i = 0;
-      const next = { fg: sgr.fg, bg: sgr.bg, isDefault: sgr.isDefault, any: true };
+      const next = { fg: sgr.fg, bg: sgr.bg, isDefault: sgr.isDefault, rev: sgr.rev };
       while (i < ps.length) {
         const p = ps[i];
-        if (p === 0) { next.fg = null; next.bg = null; next.isDefault = true; }
+        if (p === 0) { next.fg = null; next.bg = null; next.isDefault = true; next.rev = false; }
         else if (p === 38 && ps[i + 1] === 2) {
           next.fg = `${ps[i + 2]};${ps[i + 3]};${ps[i + 4]}`; next.isDefault = false; i += 4;
         } else if (p === 48 && ps[i + 1] === 2) {
           next.bg = `${ps[i + 2]};${ps[i + 3]};${ps[i + 4]}`; next.isDefault = false; i += 4;
         } else if (p === 39) { next.fg = null; }           // default fg selector
         else if (p === 49) { next.bg = null; }             // default bg selector
+        else if (p === 7) { next.rev = true; }           // reverse video: tracked separately
+        else if (p === 27) { next.rev = false; }         // reverse off restores the plain convention
         else { next.isDefault = false; }                    // any other attribute
         i += 1;
       }
@@ -134,8 +193,28 @@
     }
 
     function handleSequence(seq) {
-      // seq is the full escape sequence text starting with ESC.
-      if (seq === SYNC_BEGIN) { beginUnit(); return; }
+      // Frame-form prefix detection first: HOME directly after an OSC8-end
+      // that directly follows SGR0 opens a new frame unit (closing whatever
+      // unit was still open — a boundary is a boundary).
+      const frameStart = seq === HOME
+        && (seqBack1 === OSC8_END_BEL || seqBack1 === OSC8_END_ST)
+        && seqBack2 === SGR_RESET;
+      seqBack2 = seqBack1;
+      seqBack1 = seq;
+      if (frameStart) {
+        if (unit) finishUnit(seq);
+        // The HOME of the frame prefix also POSITIONS the cursor (its
+        // assignment is skipped by this early return, and units no longer
+        // reset coordinates).
+        row = 1; col = 1;
+        beginUnit('frame');
+        return;
+      }
+      if (seq === SYNC_BEGIN) {
+        if (unit) finishUnit(seq);
+        beginUnit('sync');
+        return;
+      }
       if (seq === SYNC_END) { finishUnit(seq); return; }
       if (seq === SHOW) { if (unit) unit.sawShow = true; return; }
       // String sequences (OSC/DCS/etc., e.g. the OSC8 hyperlinks every ink
@@ -144,73 +223,112 @@
       const second = seq.charAt(1);
       if (second !== '[') {
         if (seq === '\u001b7' || seq === '\u001b8') {
-          if (inSync && unit) unit.ambiguous = true;
+          if (unit) unit.ambiguous = true;
+        } else if (seq === '\u001bM') {
+          // RI: one row up, clamped at the top (no scroll) — modeled because
+          // position is continuous state; a stray unmodeled move would skew
+          // every later candidate row.
+          row = Math.max(1, row - 1); pendingWrap = false;
+        } else if (seq === '\u001bD') {
+          lineFeed(); // IND: one row down with bottom-stick scroll
+        } else if (seq === '\u001bE') {
+          lineFeed(); col = 1; // NEL: next line
         }
         return;
       }
-      if (!inSync || !unit) return; // between units: not modeled, fine
-      // CSI params may include private markers (0x3C-0x3F: ? < = >), e.g.
-      // the ?25l inside every ink unit — excluding them marked all real
-      // units ambiguous. Private 'h'/'l' modes never move the cursor.
-      const m = /^\u001b\[([0-9;?<=>]*)([A-Za-z])$/.exec(seq);
-      if (!m) { unit.ambiguous = true; return; }
+      // SGR is STREAM-GLOBAL state (a real terminal's attributes persist
+      // across frames): track it even between units. Without this, the
+      // frame-form prefix's SGR(0) — which arrives BEFORE the unit opens —
+      // never clears a previous frame's attribute pollution, and the next
+      // caret frame's plain restore writes then fail the plain convention.
+      const mEarly = /^\u001b\[([0-9;]*)(m)$/.exec(seq);
+      if (mEarly) { applySgr(mEarly[1]); return; }
+      // CSI params may include private markers (0x3C-0x3F: ? < = >) and the
+      // DECRQM intermediate '$' — e.g. ?25l, ?1000h or the ?1049$p query the
+      // frame form emits per keystroke. Private h/l/p never move the cursor.
+      const m = /^\u001b\[([0-9;?<=>$]*)([A-Za-z])$/.exec(seq);
+      if (!m) { if (unit) unit.ambiguous = true; return; }
       const params = m[1];
       const fin = m[2];
-      const priv = params.indexOf('?') >= 0 || params.indexOf('<') >= 0 || params.indexOf('=') >= 0 || params.indexOf('>') >= 0;
+      const priv = params.indexOf('?') >= 0 || params.indexOf('<') >= 0 || params.indexOf('=') >= 0 || params.indexOf('>') >= 0 || params.indexOf('$') >= 0;
       if (priv) {
-        if (fin === 'h' || fin === 'l') return; // DEC private modes: no movement
-        unit.ambiguous = true;
+        if (fin === 'h' || fin === 'l' || fin === 'p') return; // DEC private modes + DECRQM: no movement
+        if (unit) unit.ambiguous = true;
         return;
       }
       const n = params === '' ? 1 : (parseInt(params.split(';')[0], 10) || 1);
-      switch (fin) {
-        case 'H': case 'f': {
-          const parts = params.split(';');
-          row = parts[0] === '' ? 1 : (parseInt(parts[0], 10) || 1);
-          col = parts[1] === '' ? 1 : (parseInt(parts[1], 10) || 1);
-          return;
-        }
-        case 'A': row = Math.max(1, row - n); return;
-        case 'B': row += n; return;
-        case 'C': col += n; return;
-        case 'D': col = Math.max(1, col - n); return;
-        case 'G': col = params === '' ? 1 : (parseInt(params, 10) || 1); return;
-        case 'd': row = params === '' ? 1 : (parseInt(params, 10) || 1); return;
-        case 'J': case 'K': return; // erases do not move the cursor
-        case 'm': applySgr(params); return;
-        case 'h': case 'l': return; // mode set/reset (e.g. ?25l) — no movement
-        default:
-          unit.ambiguous = true; // any other CSI: conservative
+      // Cursor-affecting finals move the cursor REGARDLESS of unit state —
+      // position is continuous stream state, and the ConPTY sync form
+      // addresses its units purely relatively. Erases/modes/queries below
+      // this block never move the cursor.
+      if (fin === 'H' || fin === 'f') {
+        const parts = params.split(';');
+        row = parts[0] === '' ? 1 : (parseInt(parts[0], 10) || 1);
+        col = parts[1] === '' ? 1 : (parseInt(parts[1], 10) || 1);
+        clampMove();
+        // Frame-form completion: the first absolute park AFTER a caret
+        // write closes the frame (the app's park pair 24;1 → row;col).
+        // Positions were latched at write time; the park is a terminator,
+        // never a coordinate source (ADR C5).
+        if (unitMode === 'frame' && unit && unit.caret) finishUnit(seq);
+        return;
       }
+      if (fin === 'A') { row = Math.max(1, row - n); clampMove(); return; }
+      if (fin === 'B') { row += n; clampMove(); return; }
+      if (fin === 'C') { col += n; clampMove(); return; }
+      if (fin === 'D') { col = Math.max(1, col - n); clampMove(); return; }
+      if (fin === 'G') { col = params === '' ? 1 : (parseInt(params, 10) || 1); clampMove(); return; }
+      if (fin === 'd') { row = params === '' ? 1 : (parseInt(params, 10) || 1); clampMove(); return; }
+      if (!unit) return; // between units: nothing unit-scoped left to model
+      if (fin === 'J' || fin === 'K') return; // erases do not move the cursor
+      if (fin === 'h' || fin === 'l') return; // mode set/reset (e.g. ?25l) — no movement
+      if (fin === 'c') return; // DA1 query — no movement
+      unit.ambiguous = true; // any other CSI: conservative
     }
 
     function handlePrintable(text) {
-      if (!inSync || !unit) return;
-      // Feed characters one at a time: the caret signature is a SINGLE
-      // styled character; runs of text just advance the cursor.
+      // Printables break the frame-prefix adjacency window.
+      seqBack1 = '';
+      seqBack2 = '';
       for (const ch of text) {
-        if (ch === '\r') { col = 1; continue; }
-        if (ch === '\n') { row += 1; continue; }
-        if (ch === '\b') { col = Math.max(1, col - 1); continue; }
+        // Cursor-affecting control characters are stream-global (same
+        // continuity rule as the movement finals above).
+        if (ch === '\r') { col = 1; pendingWrap = false; continue; }
+        if (ch === '\n') { lineFeed(); continue; }
+        if (ch === '\b') { col = Math.max(1, col - 1); pendingWrap = false; continue; }
         if (ch === '\t' || ch === '\v' || ch === '\f') {
           // HT/VT/FF move the cursor in xterm; not modeled → ambiguous
           // (a wrong-position candidate is worse than none).
-          unit.ambiguous = true;
+          if (unit) unit.ambiguous = true;
+          pendingWrap = false;
           continue;
         }
         if (ch === '\u007f') continue; // DEL: xterm ignores it, no column advance
         if (ch < ' ') continue; // other C0 inside a unit: ignore
+        // DECAWM: a char written in the pending-wrap state wraps to the next
+        // line first (with bottom-stick scrolling).
+        if (pendingWrap) { lineFeed(); col = 1; }
+        if (!unit) { // printable outside a unit still advances the cursor
+          col += charWidth(ch);
+          if (col > cols) { col = cols; pendingWrap = true; }
+          continue;
+        }
+        // The caret signature is a SINGLE styled character; runs of text
+        // just advance the cursor.
         const w = charWidth(ch);
         if (unit.writes.length < 16384) unit.writes.push([row - 1, col - 1]); // 0-based, matches descriptor coords
-        if (sgr.fg !== null && sgr.bg !== null && !sgr.isDefault) {
+        const truecolorCaret = sgr.fg !== null && sgr.bg !== null && !sgr.isDefault;
+        const reverseCaret = sgr.rev;
+        if (truecolorCaret || reverseCaret) {
           // Caret-signature styled single char at the current position.
           if (unit.caret) unit.ambiguous = true; // multiple carets in one unit
-          else unit.caret = { row, col, ch, width: w, fg: sgr.fg, bg: sgr.bg };
+          else unit.caret = { row, col, ch, width: w, fg: sgr.fg, bg: sgr.bg, rev: reverseCaret && !truecolorCaret };
         } else {
           unit.sawPlain = true;
           if (!sgr.isDefault) unit.plainAttrOk = false; // plain writes must use the default convention
         }
         col += w;
+        if (col > cols) { col = cols; pendingWrap = true; }
       }
     }
 
@@ -276,9 +394,15 @@
 
     return {
       push,
+      // Keep the scroll/wrap model in sync with the live terminal geometry
+      // (resize also bumps the adapter generation, so stale candidates die).
+      setSize: function (nextRows, nextCols) {
+        if (Number.isFinite(nextRows) && nextRows >= 2) rows = Math.floor(nextRows);
+        if (Number.isFinite(nextCols) && nextCols >= 2) cols = Math.floor(nextCols);
+      },
       state: function () {
         return {
-          unitSeq, chunkSeq, inSync,
+          unitSeq, chunkSeq, inSync, frameUnits,
           pendingCandidate: !!(unit && unit.caret && !unit.ambiguous),
         };
       },
