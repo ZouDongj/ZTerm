@@ -2279,13 +2279,43 @@ const TabManager = {
 
 };
 
-// ── Shared low-latency tab tooltip ──
+// ── Shared low-latency tab hover services ──
 // Native title attributes carry a ~1s OS delay, which reads as lag when the
 // pointer sweeps across tabs. One delegated listener + one shared element.
+// The same hover lifecycle also drives truncated-name expansion: a tab whose
+// name cannot fully display (bar crowding or the 180px cap) expands on hover
+// to reveal the full name — clamped to the bar's free space so the '+' and
+// menu buttons always stay visible — and collapses when the pointer leaves.
+// Width animates via .tab's max-width transition; the whole bar lives on its
+// own compositing layer (see #tabbar in app.css) so the per-frame reflow
+// never touches the terminal canvases below.
 (() => {
     const bar = document.getElementById('tabbar');
     if (!bar) return;
-    let tip = null, timer = null, current = null;
+    let tip = null, timer = null, current = null, expanded = null;
+
+    const expand = (el) => {
+        if (!el || el === expanded) return;
+        const name = el.querySelector('.tab-name');
+        if (!name) return;
+        const hidden = name.scrollWidth - Math.ceil(name.getBoundingClientRect().width);
+        const slot = el.querySelector('.tab-reconnect-normal') ? 20 : 0;
+        if (hidden <= 1 && slot === 0) return; // fully shown, nothing to reveal
+        const cur = el.getBoundingClientRect().width;
+        const others = [...bar.querySelectorAll('.tab')].reduce((s, t) => s + (t === el ? 0 : t.getBoundingClientRect().width), 0);
+        // fixed chrome: '+' (26+4) + menu (26) + gaps + breathing room
+        const cap = bar.clientWidth - others - 80;
+        const target = Math.min(cur + hidden + slot + 2, cap);
+        if (target <= cur + 1) return; // no room to grow — keep resting width
+        el.style.maxWidth = target + 'px';
+        expanded = el;
+    };
+    const collapse = () => {
+        if (!expanded) return;
+        expanded.style.maxWidth = '';
+        expanded = null;
+    };
+
     const ensure = () => {
         if (!tip) {
             tip = document.createElement('div');
@@ -2304,7 +2334,9 @@ const TabManager = {
         const el = e.target.closest('.tab, #btn-add-tab, #btn-menu');
         if (!el || el === current) return;
         hide();
+        collapse();
         current = el;
+        expand(el.classList.contains('tab') ? el : null);
         timer = setTimeout(() => {
             const name = (el.dataset.tip || el.querySelector('.tab-name')?.textContent || '').trim();
             if (!name) return;
@@ -2316,7 +2348,7 @@ const TabManager = {
             t.style.top = (r.bottom + 6) + 'px';
         }, 120);
     });
-    bar.addEventListener('mouseleave', hide);
+    bar.addEventListener('mouseleave', () => { hide(); collapse(); });
     bar.addEventListener('click', hide, true);
     bar.addEventListener('mousedown', hide, true);
 })();
