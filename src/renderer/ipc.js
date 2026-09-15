@@ -53,11 +53,17 @@ function _inkFeed(owner, tab, pane, data) {
             ? createInkCaretObserver
             : window.createInkCaretObserver;
         if (!factory) return null;
+        const term = (pane || tab)?.term;
         owner._inkObserver = factory({
+            rows: term?.rows,
+            cols: term?.cols,
             onCandidate: c => port.candidate(c),
             onUnit: u => port.unit(u),
         });
     }
+    // Scroll/wrap modeling needs the live geometry (cheap no-op normally).
+    const liveTerm = (pane || tab)?.term;
+    if (liveTerm) owner._inkObserver.setSize?.(liveTerm.rows, liveTerm.cols);
     return owner._inkObserver.push(data).chunkSeq;
 }
 
