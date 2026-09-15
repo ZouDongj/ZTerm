@@ -39,9 +39,13 @@ function _getShortcutBindings() {
 }
 
 function _cycleTab(delta) {
-    const idx = TabManager.tabs.findIndex(t => t.id === TabManager.activeId);
-    if (idx === -1 || TabManager.tabs.length < 2) return;
-    const next = TabManager.tabs[(idx + delta + TabManager.tabs.length) % TabManager.tabs.length];
+    // Cycle among ALIVE tabs only — a rapid-close burst can leave dying tabs
+    // in the array for their staggered removal window; landing on one would
+    // strand activeId on a removed tab.
+    const alive = TabManager.tabs.filter(t => !TabManager._closingTabs.has(t.id));
+    const idx = alive.findIndex(t => t.id === TabManager.activeId);
+    if (idx === -1 || alive.length < 2) return;
+    const next = alive[(idx + delta + alive.length) % alive.length];
     TabManager.switchTo(next.id);
 }
 
@@ -53,8 +57,9 @@ const SHORTCUT_ACTIONS = {
     closeTab: () => {
         const tab = TabManager.getActive();
         if (!tab || tab.type === 'settings') return;
-        if (TabManager.tabs.length <= 1) {
-            // 至少保留一个标签页（ZTerm 不能全空）
+        if (TabManager.aliveCount() <= 1) {
+            // 至少保留一个标签页（ZTerm 不能全空）；用存活数而非 tabs.length，
+            // 快速连按时已有关闭中的 tab 还没 splice，长度守卫会被穿透
             showToast('至少保留一个标签页');
             return;
         }
@@ -66,9 +71,9 @@ const SHORTCUT_ACTIONS = {
         if (tab.splitRoot) {
             const focused = getAllPanes(tab).find(p => p.focused);
             if (focused) TabManager._closePane(tab.id, focused.id);
-        } else if (!document.querySelector('.overlay.open')) {
+        } else if (!document.querySelector('.overlay.open') && TabManager.aliveCount() > 1) {
             // 不在分屏（单 terminal 或刚从分屏退出只剩 1 个 pane 后）：等同 Ctrl+W 关闭当前 tab
-            // 与 tabby 行为一致
+            // 与 tabby 行为一致（存活数守卫防止连按穿透保留最后一个 tab 的约束）
             TabManager.closeTab(tab.id);
         }
     },
@@ -188,6 +193,7 @@ const SHORTCUT_ACTIONS = {
         if (tab && tab.term && !tab.__lastWrittenHooked) {
             const origWrite = tab.term.write.bind(tab.term);
             tab.__lastWritten = '';
+            tab.__origWrite = origWrite;
             tab.term.write = function (d) {
                 tab.__lastWritten = (tab.__lastWritten + String(d)).slice(-800);
                 return origWrite(d);
@@ -228,25 +234,35 @@ const SHORTCUT_ACTIONS = {
         // ~1s after the last keystroke) vs continuous animation.
         const timeline = [];
         const tl = setInterval(() => {
-            const s = adapter && adapter.snapshot ? adapter.snapshot() : null;
-            // WHY the cursor is (not) drawable — via the PUBLIC buffer API:
-            // term._core.buffer has no '.active' (that path threw every 100ms
-            // and silently emptied this timeline in the field).
-            const core = tab && tab.term ? tab.term._core : null;
-            const buf = tab && tab.term ? tab.term.buffer : null;
-            const flags = {
-                hidden: core && core.coreService ? core.coreService.isCursorHidden : null,
-                initialized: core && core.coreService ? core.coreService.isCursorInitialized : null,
-                cx: buf && buf.active ? buf.active.cursorX : null,
-                cy: buf && buf.active ? buf.active.cursorY : null,
-            };
-            timeline.push({ t: Math.round(performance.now() - t0), st: s ? s.drawPassStatus : '-', anim: s ? s.animationActive : null, flags });
+            // Mid-capture tab close disposes the adapter/term — every tick
+            // would throw into the console for the rest of the window.
+            try {
+                const s = adapter && adapter.snapshot ? adapter.snapshot() : null;
+                // WHY the cursor is (not) drawable — via the PUBLIC buffer API:
+                // term._core.buffer has no '.active' (that path threw every 100ms
+                // and silently emptied this timeline in the field).
+                const core = tab && tab.term ? tab.term._core : null;
+                const buf = tab && tab.term ? tab.term.buffer : null;
+                const flags = {
+                    hidden: core && core.coreService ? core.coreService.isCursorHidden : null,
+                    initialized: core && core.coreService ? core.coreService.isCursorInitialized : null,
+                    cx: buf && buf.active ? buf.active.cursorX : null,
+                    cy: buf && buf.active ? buf.active.cursorY : null,
+                };
+                timeline.push({ t: Math.round(performance.now() - t0), st: s ? s.drawPassStatus : '-', anim: s ? s.animationActive : null, flags });
+            } catch (e) { /* disposed mid-capture */ }
         }, 100);
         requestAnimationFrame(loop);
         function finish() {
             clearInterval(tl);
             try { ltObs && ltObs.disconnect(); } catch (e) {}
             try { etObs && etObs.disconnect(); } catch (e) {}
+            // Unhook the diagnostic write wrapper — leaving it in place made
+            // every future write on this terminal copy its full payload.
+            if (tab && tab.__lastWrittenHooked && tab.__origWrite) {
+                try { tab.term.write = tab.__origWrite; } catch (e) {}
+                tab.__lastWrittenHooked = false;
+            }
             window.__perfCapturing = false;
             const gaps = [];
             for (let i = 1; i < raf.length; i++) gaps.push(+(raf[i] - raf[i - 1]).toFixed(1));
