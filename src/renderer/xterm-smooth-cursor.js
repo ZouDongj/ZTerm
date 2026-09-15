@@ -96,6 +96,7 @@
       bufferType: null,
       active: false,
       lastRestoreRow: null,
+      latchedBg: null,          // cell bg attribute latched at first post-publish draw
     };
 
     function revokeSoftware(reason) {
@@ -151,6 +152,7 @@
         if (typeof seq === 'number' && seq > sw.watermark) sw.watermark = seq;
         if (sw.pending && sw.pending.chunkSeq <= sw.watermark && sw.candidateGeneration === sw.generation) {
           sw.published = sw.pending;
+          sw.latchedBg = null; // re-latch the style anchor on every publish
           sw.pending = null;
           if (sw.runStreak >= 2 && !sw.active) {
             sw.active = true;
@@ -365,7 +367,16 @@
             const cell = renderer._workCell;
             if (line && cell && typeof line.loadCell === 'function') {
               line.loadCell(sw.published.x, cell);
-              cellIntact = cell.getChars() === sw.published.char;
+              const charOk = cell.getChars() === sw.published.char;
+              // Style evidence (reviewer N2): compare the cell's RAW bg
+              // attribute number against the value latched at the first
+              // post-publish draw (format-agnostic — the public cell API in
+              // this build exposes no color accessors, and internal color
+              // encodings must not be guessed). A plain same-char rewrite
+              // (app removed its caret styling) changes bg and revokes.
+              if (sw.latchedBg === null) sw.latchedBg = cell.bg;
+              const styleOk = cell.bg === sw.latchedBg;
+              cellIntact = charOk && styleOk;
             }
           } catch (error) { cellIntact = false; }
         }
@@ -507,16 +518,29 @@
       }
     }
 
-    // Paint the software-caret cell's non-caret appearance: a theme-
-    // background rectangle over the app's truecolor-styled caret cell. This
-    // is the verified restore convention (the app writes the same cell with
-    // default colors when its caret is elsewhere) expressed as draw-time
-    // overlay — the buffer keeps the app's bytes untouched.
+    // Paint the software-caret cell's non-caret appearance: the app's own
+    // verified convention for the same cell is the covering character with
+    // DEFAULT colors (SGR 0;39;49) — expressed here as a draw-time overlay
+    // (theme-background rectangle + theme-foreground glyph, the same two
+    // passes the base render uses for a normal cell). The buffer keeps the
+    // app's bytes untouched. Reviewer B1: with the default 'bar' style no
+    // block glyph redraws this cell afterwards, so the covering character
+    // MUST be part of the restore itself — a background-only rect would
+    // blank the letter under the caret during navigation.
     function drawRestoreCell(cursor) {
       const rectangle = renderer._rectangleRenderer.value;
-      if (!rectangle || rectangle._gl !== renderer._gl) return;
+      const glyph = renderer._glyphRenderer.value;
+      if (!rectangle || rectangle._gl !== renderer._gl || !glyph || glyph._gl !== renderer._gl) return;
       const dimensions = renderer.dimensions.device;
       const colors = renderer._themeService.colors;
+      const line = terminal._core?.buffer?.lines?.get(cursor.absoluteY);
+      const cell = renderer._workCell;
+      const code = line && cell && typeof line.loadCell === 'function' ? (line.loadCell(cursor.x, cell), cell.getCode()) : 0;
+      const chars = cell ? cell.getChars() : '';
+      const ext = cell && cell.bg & EXTENDED_ATTR_FLAG ? cell.extended.ext : 0;
+      const restoreBg = RGB_COLOR_MODE | (colors.background.rgba >>> 8 & 0x00ffffff);
+      const restoreFg = RGB_COLOR_MODE | (colors.foreground.rgba >>> 8 & 0x00ffffff);
+
       const temporaryVertices = { attributes: new Float32Array(32), count: 1 };
       const previousVertices = rectangle._verticesCursor;
       const previousColor = rectangle._cursorFloat;
@@ -536,6 +560,34 @@
       } finally {
         rectangle._verticesCursor = previousVertices;
         rectangle._cursorFloat = previousColor;
+      }
+      if (!code || !chars) return;
+      const prevGlyphVertices = glyph._vertices;
+      const prevGlyphBuffer = glyph._activeBuffer;
+      const glyphVertices = {
+        count: 11,
+        attributes: new Float32Array(11),
+        attributesBuffers: [new Float32Array(11), new Float32Array(11)],
+      };
+      glyph._vertices = glyphVertices;
+      try {
+        glyph._updateCell(
+          glyphVertices.attributes,
+          0,
+          0,
+          code,
+          restoreBg,
+          restoreFg,
+          ext,
+          chars,
+          cell.bg,
+        );
+        glyphVertices.attributes[9] = cursor.x / terminal.cols;
+        glyphVertices.attributes[10] = cursor.y / terminal.rows;
+        glyph.render({ lineLengths: [1] });
+      } finally {
+        glyph._vertices = prevGlyphVertices;
+        glyph._activeBuffer = prevGlyphBuffer;
       }
     }
 

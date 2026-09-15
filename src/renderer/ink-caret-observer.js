@@ -192,9 +192,16 @@
         if (ch === '\r') { col = 1; continue; }
         if (ch === '\n') { row += 1; continue; }
         if (ch === '\b') { col = Math.max(1, col - 1); continue; }
+        if (ch === '\t' || ch === '\v' || ch === '\f') {
+          // HT/VT/FF move the cursor in xterm; not modeled → ambiguous
+          // (a wrong-position candidate is worse than none).
+          unit.ambiguous = true;
+          continue;
+        }
+        if (ch === '\u007f') continue; // DEL: xterm ignores it, no column advance
         if (ch < ' ') continue; // other C0 inside a unit: ignore
         const w = charWidth(ch);
-        if (unit.writes.length < 2048) unit.writes.push([row - 1, col - 1]); // 0-based, matches descriptor coords
+        if (unit.writes.length < 16384) unit.writes.push([row - 1, col - 1]); // 0-based, matches descriptor coords
         if (sgr.fg !== null && sgr.bg !== null && !sgr.isDefault) {
           // Caret-signature styled single char at the current position.
           if (unit.caret) unit.ambiguous = true; // multiple carets in one unit
