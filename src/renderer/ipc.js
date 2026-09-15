@@ -43,6 +43,11 @@ function _inkFeed(owner, tab, pane, data) {
     const adapter = (pane || tab)?._smoothCursor?._adapter;
     const port = adapter?.softwareCaretPort;
     if (!port) return null;
+    // Adapter identity changes on WebGL context loss / renderer rebuild —
+    // the observer's port closure would feed a disposed adapter. Recreate
+    // with the live port whenever the adapter changed (reviewer N5).
+    if (owner._inkObserver && owner._inkObserverAdapter !== adapter) owner._inkObserver = null;
+    owner._inkObserverAdapter = adapter;
     if (!owner._inkObserver) {
         const factory = typeof createInkCaretObserver === 'function'
             ? createInkCaretObserver
