@@ -16,7 +16,7 @@
 import { spawn, execSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
 
 const EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
 const PORT = Number(process.argv[3] ?? 9222);
@@ -93,10 +93,20 @@ function killExisting() {
 process.on('exit', () => killExisting());
 
 function startApp() {
+  // Fresh, unique browser profile per launch: WebView2 browser processes on
+  // this machine can outlive their host for a long while, and a relaunch
+  // onto the same profile attaches to the half-dead browser — the debug
+  // port then never opens (30s+ hangs). A never-used profile has no stale
+  // browser to attach to.
+  const udf = join(process.env.TEMP || '.', `zterm-e2e-udf-${Date.now()}`);
   const child = spawn(EXE, [], {
     detached: true,
     stdio: 'ignore',
-    env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}` },
+    env: {
+      ...process.env,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`,
+      WEBVIEW2_USER_DATA_FOLDER: udf,
+    },
   });
   child.unref();
 }
@@ -558,6 +568,20 @@ async function main() {
     async function restartAndConnect() {
       killExisting();
       await sleep(800);
+      // Wait out the WebView2 teardown before relaunching: taskkill /T /F
+      // signals the whole tree, but the browser processes can outlive the
+      // fixed gap while releasing the user-data-folder singleton — a new
+      // instance then attaches to the half-dead browser and its debug port
+      // never opens (deterministic 30s timeout under load). The old browser
+      // ANSWERS the debug port while alive, so poll until it goes silent.
+      const portQuiet = Date.now() + 15000;
+      while (Date.now() < portQuiet) {
+        try {
+          await fetch(`http://127.0.0.1:${PORT}/json/version`);
+          await sleep(400);
+          continue;
+        } catch { break; } // connection refused → old browser is gone
+      }
       startApp();
       const url = await waitForPage();
       const c2 = new Cdp(url);
