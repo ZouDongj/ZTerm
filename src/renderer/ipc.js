@@ -40,6 +40,9 @@ function _resetCaretFilterById(tabId) {
 }
 
 ipcRenderer.on('pty-output', (event, { tabId, data }) => {
+    // Diagnostic-only stream volume counter: armed by the perf sample /
+    // stability probes (a plain global lookup otherwise — no cost when off).
+    if (globalThis.__ztStreamBytes) globalThis.__ztStreamBytes[tabId] = (globalThis.__ztStreamBytes[tabId] || 0) + (data ? data.length : 0);
     for (const tab of TabManager.tabs) {
         if (tab.splitRoot) {
             const pane = getAllPanes(tab).find(p => p.tabId === tabId);
