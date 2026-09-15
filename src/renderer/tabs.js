@@ -113,6 +113,9 @@ const TabManager = {
     profiles: [],
     sshProfiles: [],
     _maximizedPaneId: null,
+    // Tabs whose exit animation is running and whose deferred removal is
+    // scheduled (rapid-close bookkeeping — see closeTab).
+    _closingTabs: new Set(),
     _closedTabIds: new Map(), // id → 关闭时间戳；消费后删除；超 60s 兜底清理防内存泄漏
     _markClosed(id) {
         if (id == null) return;
@@ -336,8 +339,20 @@ const TabManager = {
         this.updateStatus();
     },
 
+    // Tabs that are not currently closing (rapid-close safe count: the
+    // "keep at least one tab" guards must look through pending removals,
+    // otherwise a burst can schedule the last two tabs for removal and
+    // leave the app empty).
+    aliveCount() {
+        return this.tabs.filter(t => !this._closingTabs.has(t.id)).length;
+    },
+
     closeTab(id) {
-        if (this.tabs.length <= 1) {
+        // Idempotent: a rapid shortcut burst hits the same tab repeatedly
+        // while its exit animation runs — re-closing would re-add the exit
+        // class, re-switch tabs and stack extra deferred removals.
+        if (this._closingTabs.has(id)) return;
+        if (this.aliveCount() <= 1) {
             // 唯一 tab 不允许关闭；若其分屏已被清空（0 pane，异常路径），
             // 重置为默认本地终端，避免留下无法关闭的空分屏死 tab（P3 兜底）
             const t = this.tabs[0];
@@ -365,54 +380,69 @@ const TabManager = {
         if (tab.type === 'settings') {
             document.getElementById('settings-pane')?.classList.remove('active');
         }
+        this._closingTabs.add(id);
         // 关闭动画：tab 元素缩小淡出（200ms cubic-bezier 0.05,0.7,0.1,1，与 panel/pane 同曲线）
         const tabEl = document.querySelector(`.tab[data-tab="${id}"]`);
         if (tabEl) tabEl.classList.add('tab-exit');
-        // 算 next tab：必须在 splice 之前算（splice 后 idx 位置会被原 idx+1 占据）
-        // 优先取右侧 (idx+1)，关的是最后一个则取左侧 (idx-1)
+        // 算 next tab：必须在 splice 之前算（splice 后 idx 位置会被原 idx+1 占据）。
+        // 必须跳过正在关闭的 tab：burst 时 tabs 数组还没 splice，闭着眼睛取
+        // 邻居会把 active 切回一个 dying tab，后续按键就在两个 dying tab 之间乒乓。
         let next = null;
         if (wasActive) {
-            if (idx + 1 < this.tabs.length) {
-                next = this.tabs[idx + 1];
-            } else {
-                next = this.tabs[idx - 1];
+            for (let j = idx + 1; j < this.tabs.length; j += 1) {
+                if (!this._closingTabs.has(this.tabs[j].id)) { next = this.tabs[j]; break; }
+            }
+            if (!next) {
+                for (let j = idx - 1; j >= 0; j -= 1) {
+                    if (!this._closingTabs.has(this.tabs[j].id)) { next = this.tabs[j]; break; }
+                }
             }
         }
         // 立即切到 next（老 wrap 立即 hide，next wrap 立即 show）
         if (next) this.switchTo(next.id);
         const doRemove = () => {
-            // 按 id 重新定位 idx——200ms 动画期间用户可能已重排/删了其他 tab，
+            // 按 id 重新定位 idx——动画期间用户可能已重排/删了其他 tab，
             // 闭包里旧 idx 会切错位置
             const cur = this.tabs.findIndex(t => t.id === id);
-            if (cur < 0) return; // 该 tab 已被其他路径关闭，跳过
+            if (cur < 0) { this._closingTabs.delete(id); return; } // 已被其他路径关闭
             this.tabs.splice(cur, 1);
+            this._closingTabs.delete(id);
             // 释放主进程内存中的明文凭据（如果有）。克隆出的 tab 不拥有凭据所有权，不撤
             if (tab._credId && !tab._cloneCred) ipcRenderer.send('revoke-credential', { credId: tab._credId });
             if (tab.splitRoot) {
-                getAllPanes(tab).forEach(p => {
+                getAllPanes(tab).forEach((p, i) => {
                     if (p.tabId) { this._markClosed(p.tabId); ipcRenderer.send('pty-destroy', { tabId: p.tabId, rendererId: id }); delete ptyBuffers[p.tabId]; }
-                    if (p.term) try { p._smoothCursor?.dispose(); p._smoothCursor = null; p.term.dispose(); } catch(e) {}
+                    // Disconnect pane-body resize observers before dropping
+                    // the split subtree — Blink keeps observed nodes (and
+                    // their whole DOM subtrees, canvases included) alive.
+                    const body = document.getElementById('pane-body_' + p.id);
+                    if (body && body._resizeObserver) body._resizeObserver.disconnect();
+                    // Stagger per-pane term.dispose like the tab-level
+                    // stagger: a split tab closing must not fire N WebGL
+                    // context teardowns in one task.
+                    if (p.term) setTimeout(() => { try { p._smoothCursor?.dispose(); p._smoothCursor = null; p.term.dispose(); } catch(e) {} }, i * 80);
                 });
                 const split = document.getElementById('split_' + id);
                 if (split) split.remove();
                 tab.splitRoot = null; // 防止残留引用被后续代码误判为仍存活
             } else {
                 const el = document.getElementById('wrap_' + id);
-                if (el) el.remove();
+                if (el) { if (el._resizeObserver) el._resizeObserver.disconnect(); el.remove(); }
                 if (tab.tabId) { this._markClosed(tab.tabId); ipcRenderer.send('pty-destroy', { tabId: tab.tabId, rendererId: id }); delete ptyBuffers[tab.tabId]; }
                 if (tab.term) try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}
             }
             this.render();
-            // 修复：200ms 动画期间快速关两个 tab 第二个 closeTab 的 switchTo(next) 会
-            // 切到第一个 tab 即将被删的位置；第一个 doRemove 跑后 activeId 指向已删 tab
-            // 但 switchTo 没再被调，主区渲染老 wrap 的残留 DOM 出现空白。
-            // 这里 splice 后重新校正 activeId：如果原 active 是当前被删的，按剩下的 tabs
-            // 选一个合理目标并 switchTo。
-            if (wasActive && this.tabs.length > 0) {
-                // 找第一个未关闭的 tab 作为新的 active
-                if (this.tabs.findIndex(t => t.id === this.activeId) < 0) {
-                    const newActive = this.tabs[Math.min(cur, this.tabs.length - 1)];
-                    if (newActive) this.switchTo(newActive.id);
+            // Correct activeId regardless of wasActive: a BACKGROUND tab
+            // closed via context menu can be activated (Ctrl+Tab) during its
+            // staggered removal window — after splice nothing else would fix
+            // a dangling activeId (blank main area until a manual click).
+            if (this.tabs.length > 0) {
+                if (this.tabs.findIndex(t => t.id === this.activeId) < 0 || this._closingTabs.has(this.activeId)) {
+                    let newActive = this.tabs[Math.min(cur, this.tabs.length - 1)];
+                    if (!newActive || this._closingTabs.has(newActive.id)) {
+                        newActive = this.tabs.find(t => !this._closingTabs.has(t.id)) || newActive;
+                    }
+                    if (newActive && !this._closingTabs.has(newActive.id)) this.switchTo(newActive.id);
                 }
             } else if (this.tabs.length === 0) {
                 this.activeId = null;
@@ -420,7 +450,12 @@ const TabManager = {
             }
         };
         if (tabEl) {
-            setTimeout(doRemove, 200);
+            // Stagger deferred removals: a rapid burst must not fire N
+            // term.dispose() calls (each releasing a WebGL context) at the
+            // same instant — parallel context teardown synchronously waits
+            // on the GPU process and froze the renderer for seconds.
+            const delay = 200 + Math.max(0, this._closingTabs.size - 1) * 120;
+            setTimeout(doRemove, delay);
         } else {
             doRemove();
         }
@@ -443,7 +478,7 @@ const TabManager = {
         if (_clearOnConnect(tab, null)) {
             if (tab.term) { try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
             const wrap = document.getElementById('wrap_' + id);
-            if (wrap) wrap.remove();
+            if (wrap) { if (wrap._resizeObserver) wrap._resizeObserver.disconnect(); wrap.remove(); }
             // 显式释放 ptyBuffers（旧 tabId 永远不会再被新连接复用，否则累积 1MB+）
             if (tab.tabId) delete ptyBuffers[tab.tabId];
         } else if (tab.term) {
@@ -535,6 +570,11 @@ const TabManager = {
             }
             inner += `<button type="button" class="tab-close" onclick="event.stopPropagation();TabManager.closeTab('${t.id}');this.blur()" ondblclick="event.stopPropagation()">${Icons.iconSvg('x', 13)}</button>`;
             div.innerHTML = inner;
+            // A full re-render wipes the exit class of tabs still inside the
+            // staggered removal window — they would pop back to full width,
+            // look alive and intercept clicks. Re-apply so they stay born-
+            // collapsed (no transition, per the .tab-exit rule).
+            if (this._closingTabs.has(t.id)) div.classList.add('tab-exit');
             bar.insertBefore(div, addBtn);
         });
         this.updateActiveClass();
@@ -636,6 +676,10 @@ const TabManager = {
             tab.term = null;
             tab.fitAddon = null;
             tab.tabId = null;
+            // The smooth-cursor wrapper now belongs to the pane that received
+            // the terminal — leaving the tab-level reference alive would make
+            // _inkFeed read a disposed wrapper's null adapter forever.
+            tab._smoothCursor = null;
             const newPane = this._newPaneData(tab);
             const isH = side === 'l' || side === 'r';
             tab.splitRoot = this._createContainer(isH ? 'h' : 'v');
@@ -1444,6 +1488,7 @@ const TabManager = {
             targetTab.term = null;
             targetTab.fitAddon = null;
             targetTab.tabId = null;
+            targetTab._smoothCursor = null; // moved onto fp — same transfer rule as addPaneRelativeTo
         }
         // targetPaneId === null → add() with relative=null repacks the root
         // container, i.e. the pane is inserted around the whole split.
@@ -1513,6 +1558,10 @@ const TabManager = {
         tab.term = fp?.term || null;
         tab.fitAddon = fp?.fitAddon || null;
         tab.tabId = fp?.tabId || null;
+        // The surviving pane's smooth-cursor wrapper must come back with the
+        // terminal — otherwise the tab keeps the disposed original wrapper
+        // and the software caret silently dies for this tab's whole life.
+        tab._smoothCursor = fp?._smoothCursor ?? null;
         tab.connected = fp?.connected !== false && (fp?.connected || !!fp?.tabId); // L1：同步连接状态，否则标签点/重连按钮错误
         tab.splitRoot = null;
         tab._maximizedPaneId = null;
@@ -1528,6 +1577,9 @@ const TabManager = {
         // 退 split 后缓冲内容与剩余 pane 类型可能错配（SSH 内容算到 local 缓冲里）。
         // 简单做法：退 split 时清空 contentBuffer，避免恢复时再乱。
         tab._contentBuffer = [];
+        // Disconnect pane-body resize observers before dropping the split
+        // subtree (Blink retains observed nodes and their DOM subtrees).
+        all.forEach(p => { const body = document.getElementById('pane-body_' + p.id); if (body && body._resizeObserver) body._resizeObserver.disconnect(); });
         const os = document.getElementById('split_' + tab.id);
         if (os) os.remove();
         const sw = document.getElementById('wrap_' + tab.id);
