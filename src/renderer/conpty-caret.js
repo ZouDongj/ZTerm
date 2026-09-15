@@ -1,23 +1,25 @@
-// ConPTY caret repair filter (experiment, default off).
+// ConPTY caret visibility repair (ADR-0001 B1 scope).
 //
-// WHY THIS EXISTS
-// ---------------
-// Captured with src/bin/pty-capture.rs (artifacts/vt-capture/):
-//
-//   herdr over SSH    ?2026h ?25l OSC8 CUP(19;30) SGR(0;39;49) a SGR(0) CUP(19;31) ?25h ?2026l
+// WHY THIS EXISTS (captured with src/bin/pty-capture.rs, artifacts/vt-capture/):
 //   herdr local       ?2026h ?25l OSC8 CUP(30;70) SGR(0;39;49) a SGR(0;7;39;49) ' ' SGR(0) CUP(30;71) ?25l ?2026l
+// ConPTY consolidates the app's cursor-visibility ops inside synchronized-
+// output blocks and rewrites its trailing `?25h` (show) into `?25l` (hide),
+// so xterm parks isCursorHidden=true forever and every caret animation dies.
 //
-// Two ConPTY-specific mutations of the same frame:
-//   1. the trailing `ESC[?25h` (show caret) is re-emitted as `ESC[?25l`, so
-//      xterm.js parks `isCursorHidden = true` forever and every caret
-//      animation in this app is switched off inside herdr;
-//   2. ConPTY paints the caret itself as a reverse-video cell (SGR `0;7;..`),
-//      which no animation can smooth — it can only teleport.
+// `fix` (LOCAL CONPTY TRANSPORTS ONLY — see caretRepairAllowed):
+//   1. drops the transient in-block ?25l churn of frames that started
+//      visible, re-asserting SHOW at the block end (the 2026-09-13
+//      user-verified repair);
+//   2. strips the reverse flag of the console caret cell ConPTY itself
+//      paints (SGR 0;7;39;49) — a style-only change on a narrow signature.
 //
-// `repair` re-asserts `?25h` at the end of every synchronized-output block,
-// restoring the visibility the app asked for. `fix` additionally removes the
-// reverse-video caret cell ConPTY painted, so the animated caret is the only
-// one on screen.
+// ADR-0001 B1 REMOVED from here (unsafe heuristics, superseded by B2):
+//   - the ink painted-caret takeover (glyph-evidence engagement, swallowing
+//     every HIDE, forced SHOW while engaged). It deleted styled caret-cell
+//     writes (real captures: backspace erasure lost as `abcd` staying
+//     alive) and forced a second cursor beside the app's own caret during
+//     deletion/navigation (the user-visible double caret) — and all of that
+//     ran on SSH streams too, where no ConPTY ever consolidated anything.
 (function installConPtyCaretFilter(root) {
   'use strict';
 
@@ -37,6 +39,14 @@
   // OSC strings (hyperlinks) are legitimate, so this is a generous safety net.
   const MAX_PENDING_BYTES = 65536;
 
+  // ADR-0001 B1 transport policy: the visibility repair addresses ConPTY
+  // mutations of the byte stream, which only exist on local PTY sessions.
+  // SSH streams reach xterm exactly as the application emitted them and must
+  // pass through raw. ownerType is the owning tab/pane type.
+  function caretRepairAllowed(ownerType) {
+    return ownerType !== 'ssh';
+  }
+
   function createConPtyCaretFilter(options) {
     let mode = normalizeMode(options?.mode);
     // The PTY path feeds Uint8Array, never a string (pty.js: decodeBase64).
@@ -48,20 +58,10 @@
     let inSync = false;
     let visibleBefore = true;
     let block = null;
-    // Painted-caret detection: some TUI frameworks (ink-style diffs) NEVER
-    // issue a cursor-show and park+hide the real cursor between frames,
-    // drawing their own caret as a styled cell instead. Over SSH (no ConPTY
-    // consolidation) those between-frame hides sit OUTSIDE sync blocks and
-    // permanently defeat the block-end repair, so the real cursor stays
-    // hidden and the painted caret can only teleport. Signature: a
-    // synchronized-output TUI that has hidden repeatedly but never once
-    // shown. Apps that emit ?25h (nvim, shells, opencode) and apps without
-    // sync blocks (htop) never trigger this.
+    // Diagnostic counters only (exposed via state()).
     let hidesSeen = 0;
     let showsSeen = 0;
     let blocksSeen = 0;
-    let glyphRun = 0;
-    let paintedCaret = false;
 
     // Plain text is buffered too, so the trailing-cell rewrite can see it.
     function emit(text) {
@@ -91,58 +91,34 @@
 
         let out = buffered.join('');
         if (mode === 'fix') {
-          // Order matters: the painted-caret signature ENDS with the block's
-          // trailing ?25l, so strip it before dropping transient hides.
           out = removePaintedCaret(out);
-          // Engagement by DIRECT evidence: two consecutive frames carrying
-          // the painted-glyph pattern (truecolor fg+bg styled space parked
-          // before a CUP). Works identically over SSH (stray out-of-block
-          // hides) and locally where ConPTY consolidates the hides inside
-          // blocks — glyph presence is the common fingerprint of ink-style
-          // painted carets. nvim/opencode never paint such a glyph, so they
-          // cannot engage; a real SHOW resets the run.
-          if (hasPaintedGlyph(out)) glyphRun += 1; else glyphRun = 0;
-          if (!paintedCaret && glyphRun >= 2) {
-            paintedCaret = true;
-            visible = true;
-            out = out.split(HIDE).join('');
-          }
           // Transient-hide churn: a frame that started from the visible state
           // is one we repair with a block-end SHOW anyway; forwarding the
           // in-frame ?25l toggles the caret hide->show once per sync block.
           // TUI input boxes redraw in ~10 sync blocks per keystroke, so that
           // churn cancels the cursor animation on every key (the "choppy
-          // caret" in dsh-tui/kimi-style agents). Frames that started hidden
-          // (nvim normal mode) keep their hides untouched.
-          if (visibleBefore || paintedCaret) out = out.split(HIDE).join('');
-          // In painted-caret mode the app draws its own caret as a
-          // truecolor-fg+bg styled SPACE parked right where it then moves the
-          // real cursor — with the real cursor now visible and animating, the
-          // painted one shows up as a second, teleporting caret. Drop the
-          // LAST styled-space-before-a-CUP write in the frame; the app
-          // rewrites the vacated cell with real content on the next edit.
-          if (paintedCaret) out = removePaintedGlyph(out);
+          // caret" the user-verified 2026-09-13 repair addressed, kept for
+          // LOCAL transports only — the transport gate in ipc.js decides).
+          // Known B1 residual, fixed by B2's draw-phase takeover: during
+          // ink-TUI navigation/deletion the app paints its caret over a
+          // CHARACTER away from the park position, so the restored protocol
+          // cursor and the painted cell diverge (double caret) locally.
+          if (visibleBefore) {
+            out = out.split(HIDE).join('');
+            visible = true;
+          }
         }
         out += text;
-        visible = paintedCaret ? true : visibleBefore;
         if (visible) out += SHOW; // ConPTY dropped the app's own `?25h`
         return out;
       }
       if (text === HIDE) {
         hidesSeen += 1;
-        // In painted-caret mode every hide is swallowed — the real cursor
-        // must stay visible exactly on the painted cell so the adapter can
-        // animate it (engagement itself is glyph-evidence based, see SYNC_END).
-        if (paintedCaret) return '';
         visible = false;
         return emit(text);
       }
       if (text === SHOW) {
         showsSeen += 1;
-        glyphRun = 0;
-        // A real show ends painted-caret mode: the app does manage cursor
-        // visibility after all.
-        paintedCaret = false;
         visible = true;
         return emit(text);
       }
@@ -226,7 +202,7 @@
       push,
       setMode,
       mode: function () { return mode; },
-      state: function () { return { mode, inSync, visible, buffered: block ? block.length : 0, paintedCaret, hidesSeen, showsSeen, blocksSeen, glyphRun }; },
+      state: function () { return { mode, inSync, visible, buffered: block ? block.length : 0, hidesSeen, showsSeen, blocksSeen }; },
     };
   }
 
@@ -251,33 +227,6 @@
       PAINTED_CARET_TAIL,
       PLAIN_CARET_SGR + '$1\u001b[0m$2\u001b[?25l'
     );
-  }
-
-  // The ink-style painted caret glyph: a single space carrying both a
-  // truecolor foreground and background (fg = text color, bg = caret fill),
-  // immediately followed by a cursor-position move. Only the LAST occurrence
-  // in a frame is removed — engagement already proved the app paints its
-  // caret right where it parks the real cursor, and the vacated cell gets
-  // rewritten with real content on the next edit.
-  const PAINTED_GLYPH_RE =
-    /\u001b\[0;38;2;\d+;\d+;\d+;48;2;\d+;\d+;\d+m \u001b\[0m(?=\u001b\[\d+;\d+[Hf])/g;
-
-  function hasPaintedGlyph(text) {
-    if (typeof text !== 'string' || text.length === 0) return false;
-    PAINTED_GLYPH_RE.lastIndex = 0;
-    return PAINTED_GLYPH_RE.test(text);
-  }
-
-  function removePaintedGlyph(text) {
-    if (typeof text !== 'string' || text.length === 0) return text;
-    // matchAll clones the regex but COPIES its lastIndex — hasPaintedGlyph's
-    // test() advanced it past the match, which made every later matchAll scan
-    // start too late and find nothing. Reset before scanning.
-    PAINTED_GLYPH_RE.lastIndex = 0;
-    const matches = [...text.matchAll(PAINTED_GLYPH_RE)];
-    if (matches.length === 0) return text;
-    const last = matches[matches.length - 1];
-    return text.slice(0, last.index) + text.slice(last.index + last[0].length);
   }
 
   // Not an escape sequence at all: emit the ESC by itself so the stream keeps
@@ -326,7 +275,7 @@
     return { end: from + 2, kind: 'esc' };
   }
 
-  const api = { createConPtyCaretFilter, removePaintedCaret, readSequence };
+  const api = { createConPtyCaretFilter, caretRepairAllowed, removePaintedCaret, readSequence };
   root.createConPtyCaretFilter = createConPtyCaretFilter;
   root.__conPtyCaretInternals = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
