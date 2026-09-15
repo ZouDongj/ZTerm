@@ -15,7 +15,7 @@ const child = spawn('D:/Code/MyTerm/ZTerm/src-tauri/target/debug/zterm.exe', [],
     WEBVIEW2_USER_DATA_FOLDER: `${process.env.TEMP}\\zterm-probe-${PORT}` },
   stdio: 'ignore',
 });
-process.on('exit', () => { try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {} });
+process.on('exit', () => { try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {} });
 const hs = (args, timeout = 20000) => new Promise((resolve) => {
   execFile('herdr', ['--session', 'ztprobe3', ...args], { timeout }, (err, stdout) =>
     resolve({ err: err ? String(err.message).slice(0, 120) : null, out: String(stdout) }));
@@ -93,5 +93,5 @@ await hs(['pane', 'send-text', paneId, ` mkdir -p ${TMP} && cd ${TMP} && dsh-tui
 await sleep(7000);
 await typeKeys('dshtui-input2', ['h', 'e', 'l', 'l', 'o']);
 ws.close();
-try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {}
+try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {}
 process.exit(0);

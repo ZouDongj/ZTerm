@@ -16,7 +16,7 @@ const child = spawn('D:/Code/MyTerm/ZTerm/src-tauri/target/debug/zterm.exe', [],
     WEBVIEW2_USER_DATA_FOLDER: `${process.env.TEMP}\\zterm-probe-${PORT}` },
   stdio: 'ignore',
 });
-process.on('exit', () => { try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {} });
+process.on('exit', () => { try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {} });
 const hs = (args, timeout = 20000) => new Promise((resolve) => {
   execFile('herdr', ['--session', 'ztprobe', ...args], { timeout }, (err, stdout, stderr) =>
     resolve({ err: err ? String(err.message).slice(0, 150) : null, out: String(stdout), se: String(stderr).slice(0, 300) }));
@@ -84,5 +84,5 @@ await captureTyped('dshtui-input', 'dsh-tui', 7000, ['h', 'e', 'l', 'l', 'o']);
 await captureTyped('opencode-input', 'opencode', 9000, ['h', 'e', 'l', 'l', 'o']);
 // cleanup
 ws.close();
-try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {}
+try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {}
 process.exit(0);

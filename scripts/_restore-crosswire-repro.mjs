@@ -32,7 +32,7 @@ const child = spawn(TMP + '\\ZTerm.exe', [], {
   stdio: ['ignore', 'ignore', 'pipe'],
 });
 child.stderr.on('data', d => { const s = String(d).trim(); if (s) console.log('[exe]', s.slice(0, 180)); });
-process.on('exit', () => { try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {} });
+process.on('exit', () => { try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {} });
 
 const t0 = Date.now();
 let page = null;

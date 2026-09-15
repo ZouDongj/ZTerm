@@ -18,7 +18,7 @@ const child = spawn(EXE, [], {
   },
   stdio: 'ignore',
 });
-process.on('exit', () => { try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {} });
+process.on('exit', () => { try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {} });
 let page = null;
 while (Date.now() - t0 < 25000) {
   try {
@@ -73,5 +73,5 @@ const data = await val(`(() => {
 console.log(`=== ${LABEL} (${EXE.includes('debug') ? 'debug/new' : 'release/old'}) ===`);
 console.log(data);
 ws.close();
-try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {}
+try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {}
 process.exit(0);

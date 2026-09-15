@@ -17,7 +17,7 @@ const child = spawn('src-tauri/target/release/zterm.exe', [], {
 // zterm process tree orphans PTY bash/OpenConsole children, and orphaned
 // MSYS2 processes hold cygwin console slots until new Git Bash sessions die
 // with "console device allocation failure" (128-console cygwin limit).
-process.on('exit', () => { try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {} });
+process.on('exit', () => { try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {} });
 let page = null;
 while (Date.now() - t0 < 25000) {
   try {
@@ -89,5 +89,5 @@ console.log(dRet >= 3 && dCursor >= dRet * 4
   ? '*** HERDR SCENARIO HEALTHY: cursor animation live inside herdr (the original pain point) ***'
   : 'herdr animation still starved — caret filter or visibility issue');
 ws.close();
-try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {}
+try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {}
 process.exit(0);

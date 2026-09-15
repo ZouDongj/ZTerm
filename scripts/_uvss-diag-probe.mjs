@@ -10,7 +10,7 @@ const child = spawn('D:/Code/MyTerm/ZTerm/src-tauri/target/debug/zterm.exe', [],
     WEBVIEW2_USER_DATA_FOLDER: `${process.env.TEMP}\\zterm-probe-${PORT}` },
   stdio: 'ignore',
 });
-process.on('exit', () => { try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {} });
+process.on('exit', () => { try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {} });
 let page = null;
 while (Date.now() - t0 < 25000) {
   try { const ts = await (await fetch(`http://127.0.0.1:${PORT}/json`)).json();
@@ -47,5 +47,5 @@ for (let i = 0; i < 40; i++) {
 await sleep(2000);
 console.log('events:', await val(`JSON.stringify(window.__ev)`), `(${Date.now() - t1}ms)`);
 ws.close();
-try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {}
+try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {}
 process.exit(0);

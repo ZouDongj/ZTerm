@@ -13,7 +13,9 @@ const TMP = join(process.env.TEMP, 'zterm-stab-phase0b');
 rmSync(TMP, { recursive: true, force: true });
 mkdirSync(join(TMP, 'data'), { recursive: true });
 mkdirSync(join(TMP, 'fake-appdata'), { recursive: true });
-copyFileSync('D:/Code/MyTerm/ZTerm/src-tauri/target/release/ZTerm.exe', join(TMP, 'ZTerm.exe'));
+// unique image name: exit cleanup reaps ONLY this probe's tree by name
+const PROBE_IMG = 'zterm-probe-' + (Math.random().toString(36).slice(2, 7)) + '.exe';
+copyFileSync('D:/Code/MyTerm/ZTerm/src-tauri/target/release/ZTerm.exe', join(TMP, PROBE_IMG));
 // Storm-free variant of the real config: keep the 4 local Git Bash tabs,
 // drop the SSH ones (no server traffic needed for this measurement).
 const real = JSON.parse(await (await import('node:fs/promises')).readFile(
@@ -22,13 +24,13 @@ real.lastTabs = (real.lastTabs || []).filter(t => t.type === 'local');
 writeFileSync(join(TMP, 'data', 'config.json'), JSON.stringify(real));
 
 const PORT = 9457;
-const child = spawn(join(TMP, 'ZTerm.exe'), [], {
+const child = spawn(join(TMP, PROBE_IMG), [], {
   env: { ...process.env, APPDATA: join(TMP, 'fake-appdata'),
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`,
     WEBVIEW2_USER_DATA_FOLDER: `${TMP}-udf` },
   stdio: ['ignore', 'ignore', 'pipe'],
 });
-process.on('exit', () => { try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {} });
+process.on('exit', () => { try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {} });
 
 let page = null;
 for (let i = 0; i < 100 && !page; i++) {

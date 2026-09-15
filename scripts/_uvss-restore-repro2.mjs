@@ -30,7 +30,7 @@ const child = spawn('D:/Code/MyTerm/ZTerm/src-tauri/target/release/zterm.exe', [
 });
 child.stderr.on('data', d => { const s = String(d).trim(); if (s) console.log('[exe-stderr]', s.slice(0, 200)); });
 process.on('exit', () => {
-  try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {}
+  try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {}
   try { copyFileSync(BAK, WS); unlinkSync(BAK); console.log('workspace restored'); } catch {}
 });
 let page = null;

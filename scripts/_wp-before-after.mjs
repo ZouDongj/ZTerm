@@ -27,7 +27,7 @@ const child = spawn('D:/Code/MyTerm/ZTerm/src-tauri/target/release/zterm.exe', [
 // zterm process tree orphans PTY bash/OpenConsole children, and orphaned
 // MSYS2 processes hold cygwin console slots until new Git Bash sessions die
 // with "console device allocation failure" (128-console cygwin limit).
-process.on('exit', () => { try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {} });
+process.on('exit', () => { try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {} });
 let page = null;
 while (Date.now() - t0 < 25000) {
   try {
@@ -92,5 +92,5 @@ const data = await val(`(() => {
 console.log('live values:', data);
 writeFileSync(`${OUT}/wp-${LABEL}-values.json`, String(data));
 ws.close();
-try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {}
+try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {}
 process.exit(0);

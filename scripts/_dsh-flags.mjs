@@ -8,7 +8,7 @@ const child = spawn('D:/Code/MyTerm/ZTerm/src-tauri/target/debug/zterm.exe', [],
     WEBVIEW2_USER_DATA_FOLDER: `${process.env.TEMP}\zterm-probe-${PORT}` },
   stdio: 'ignore',
 });
-process.on('exit', () => { try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {} });
+process.on('exit', () => { try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {} });
 const hs = (args, timeout = 20000) => new Promise((resolve) => {
   execFile('herdr', ['--session', 'ztprobe4', ...args], { timeout }, (err, stdout) =>
     resolve({ err: err ? String(err.message).slice(0, 120) : null, out: String(stdout) }));
@@ -55,5 +55,5 @@ console.log('flags during dsh-tui:', await val(`(() => {
     rows: g('rows', () => t.term.rows),
   }); })()`));
 ws.close();
-try { execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: 'ignore' }); } catch {}
+try { execSync(`taskkill /IM ${PROBE_IMG} /T /F`, { stdio: 'ignore' }); } catch {}
 process.exit(0);
