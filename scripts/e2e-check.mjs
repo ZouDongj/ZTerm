@@ -164,13 +164,16 @@ function check(name, pass, detail = '') {
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}${detail ? `  (${detail})` : ''}`);
 }
 
-async function waitForValue(cdp, expression, expected, timeoutMs = 8000) {
-  // 轮询等待表达式达到期望值（分屏等异步操作在慢机上需要时间，固定 sleep 会假失败）
+async function waitForValue(cdp, expression, expected, timeoutMs = 8000, mode = 'eq') {
+  // 轮询等待表达式达到期望值（分屏等异步操作在慢机上需要时间，固定 sleep 会假失败）。
+  // mode='gt0'：等待数值 > 0（SSH 失败事件这类只增计数——串行连接队列里排在
+  // 恢复 tab 的重连退避后面时，事件可能十几秒后才出现）。
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
     last = await cdp.eval(expression).catch(() => null);
-    if (last === expected) return last;
+    const hit = mode === 'gt0' ? (typeof last === 'number' && last > 0) : last === expected;
+    if (hit) return last;
     await sleep(300);
   }
   return last;
@@ -422,8 +425,7 @@ async function main() {
         return true;
       })()
     `);
-    await sleep(4000);
-    const sshErrCount = await cdp.eval(`window.__sshErrCount`);
+    const sshErrCount = await waitForValue(cdp, `window.__sshErrCount`, (v) => v > 0, 40000, 'gt0');
     const sshTabAlive = await cdp.eval(`TabManager.tabs.some(t => t.type === 'ssh')`);
     const appAlive = await cdp.eval(`typeof TabManager.getActive === 'function'`);
     check('SSH 连接失败被处理且前端存活', sshTabAlive && appAlive && sshErrCount > 0,
