@@ -46,9 +46,9 @@ body.no-animations .startup-splash .cell{transition:none}
 .titlebar{height:38px;background:var(--surface-win);display:flex;align-items:center;padding:0 0 0 12px;flex-shrink:0}
 /* Tauri 无边框拖拽区域 */
 [data-tauri-drag-region]{-webkit-app-region:drag}
-#tabbar{display:flex;align-items:center;gap:2px;flex:1;overflow:hidden;min-width:0}
+#tabbar{display:flex;align-items:center;gap:2px;flex:1;overflow:hidden;min-width:0;contain:layout style;will-change:transform}
 #tabbar *{-webkit-app-region:no-drag}
-.tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;border-radius:12px;transition:background 0.12s,color 0.12s;white-space:nowrap;height:28px;max-width:180px;-webkit-app-region:no-drag;user-select:none}
+.tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;border-radius:12px;transition:background 0.12s,color 0.12s,max-width 0.2s cubic-bezier(0.05, 0.7, 0.1, 1);white-space:nowrap;height:28px;max-width:180px;-webkit-app-region:no-drag;user-select:none}
 .tab-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tab:hover{background:rgba(255,255,255,0.05);color:var(--text-2)}
 .tab.active{background:rgba(var(--accent-rgb),0.16);color:var(--text-1)}
@@ -101,15 +101,14 @@ body.tab-dragging{user-select:none}
 .tab-reconnect{font-size:12px;margin-left:2px;cursor:pointer;color:#ffb74d;opacity:0;transition:opacity 0.12s;flex-shrink:0}
 .tab:hover .tab-reconnect,.tab.active .tab-reconnect{opacity:0.7}
 .tab-reconnect:hover{opacity:1!important}
-/* Manual-reconnect affordance: permanently-reserved slot revealed purely by
-   opacity, mirroring .tab-reconnect. The previous max-width:0→20px hover
-   animation was a LAYOUT transition: every SSH-tab hover reflowed the whole
-   tab bar for 30 frames and, on an iGPU, stormed the compositor with
-   full-window recomposites — user-verified stutter when sweeping across any
-   SSH tab (GB↔GB smooth, anything involving SSH tabs laggy). Never animate
-   layout properties on hover; keep the width constant and fade only. */
-.tab-reconnect-normal{font-size:12px;margin-left:2px;cursor:pointer;color:var(--text-2);opacity:0;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
-.tab:hover .tab-reconnect-normal{opacity:0.5}
+/* Manual reconnect affordance: hidden (zero width) at rest, smoothly
+   extending out on tab hover. Safe to animate layout here ONLY because
+   #tabbar is promoted to its own compositing layer (contain + will-change)
+   — before that, every reflow frame recomposited the whole window on an
+   iGPU and hover crossings visibly stuttered. Do not remove the layer
+   isolation on #tabbar while this animates max-width. */
+.tab-reconnect-normal{font-size:12px;margin-left:0;cursor:pointer;color:var(--text-2);max-width:0;opacity:0;overflow:hidden;white-space:nowrap;transition:max-width 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),opacity 0.12s ease 0.05s,color 0.12s;flex-shrink:0}
+.tab:hover .tab-reconnect-normal{max-width:20px;opacity:0.5}
 .tab-reconnect-normal:hover{opacity:1!important;color:rgb(var(--accent-rgb))}
 #btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;font-size:16px;transition:all 0.12s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
 #btn-add-tab:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
