@@ -34,6 +34,28 @@ function _conPtyCaretFix(owner, data, ownerType) {
     return typeof out === 'string' ? out : data;
 }
 
+// ADR-0001 B2: feed the RAW stream (pre-filter, pre-highlight) into the
+// per-owner ink caret observer and return this chunk's ordinal. The write
+// callback in pty-output reports the ordinal back to the adapter once xterm
+// has fully parsed it (the watermark binding).
+function _inkFeed(owner, tab, pane, data) {
+    if (typeof data !== 'string' || !data) return null;
+    const adapter = (pane || tab)?._smoothCursor?._adapter;
+    const port = adapter?.softwareCaretPort;
+    if (!port) return null;
+    if (!owner._inkObserver) {
+        const factory = typeof createInkCaretObserver === 'function'
+            ? createInkCaretObserver
+            : window.createInkCaretObserver;
+        if (!factory) return null;
+        owner._inkObserver = factory({
+            onCandidate: c => port.candidate(c),
+            onUnit: u => port.unit(u),
+        });
+    }
+    return owner._inkObserver.push(data).chunkSeq;
+}
+
 // Drop the caret filter at session boundaries. If a TUI left the filter in
 // the middle of a synchronized-output block (inSync=true, e.g. the SSH
 // connection died mid-frame), the filter would swallow every byte of the
@@ -43,10 +65,17 @@ function _resetCaretFilterById(tabId) {
     for (const tab of TabManager.tabs) {
         if (tab.splitRoot) {
             const pane = getAllPanes(tab).find(p => p.tabId === tabId);
-            if (pane) { delete pane._caretFilter; return; }
+            if (pane) { _resetCaretState(pane); return; }
         }
-        if (tab.tabId === tabId) { delete tab._caretFilter; return; }
+        if (tab.tabId === tabId) { _resetCaretState(tab); return; }
     }
+}
+function _resetCaretState(owner) {
+    delete owner._caretFilter;
+    // Session reset: the ink observer's candidates belong to the dead
+    // session's coordinate space — drop them and invalidate the descriptor.
+    owner._inkObserver = null;
+    owner._smoothCursor?._adapter?.softwareCaretPort?.invalidate('session-reset');
 }
 
 ipcRenderer.on('pty-output', (event, { tabId, data }) => {
@@ -63,11 +92,15 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
             const pane = getAllPanes(tab).find(p => p.tabId === tabId);
             if (pane) {
                 if (!tab._contentBuffer) tab._contentBuffer = [];
+                // Observe the RAW bytes first (ADR B2), then the transport
+                // filter, then write with a parse-watermark callback.
+                const inkSeq = _inkFeed(pane, tab, pane, data);
                 // ConPTY caret fix must run before buffering so the filter sees
                 // the full stream in order; ptyBuffers then holds repaired bytes.
                 if (typeof data === 'string' && data) data = _conPtyCaretFix(pane, data, pane.type || tab.type);
                 if (pane.term) {
-                    pane.term.write(applyHighlight(data, tabId));
+                    pane.term.write(applyHighlight(data, tabId),
+                        inkSeq != null ? () => { pane._smoothCursor?._adapter?.softwareCaretPort?.parsed(inkSeq); } : undefined);
                 } else {
                     let _b = ptyBuffers[tabId] || ''; _b += data; if (_b.length > 1048576) _b = _b.slice(-524288); ptyBuffers[tabId] = _b;
                 }
@@ -76,6 +109,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
         }
         if (tab.tabId === tabId) {
             if (!tab._contentBuffer) tab._contentBuffer = [];
+            const inkSeq = _inkFeed(tab, tab, null, data);
             if (typeof data === 'string' && data) data = _conPtyCaretFix(tab, data, tab.type);
             // Track alternate screen (nvim, less, etc.) — don't save TUI content
             if (data.includes('\x1b[?1049h')) tab._altScreen = true;
@@ -94,7 +128,8 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
                     tab.term.write(ptyBuffers[tabId]);
                     delete ptyBuffers[tabId];
                 }
-                tab.term.write(applyHighlight(data, tabId));
+                tab.term.write(applyHighlight(data, tabId),
+                    inkSeq != null ? () => { tab._smoothCursor?._adapter?.softwareCaretPort?.parsed(inkSeq); } : undefined);
             } else {
                 let _b = ptyBuffers[tabId] || ''; _b += data; if (_b.length > 1048576) _b = _b.slice(-524288); ptyBuffers[tabId] = _b;
             }

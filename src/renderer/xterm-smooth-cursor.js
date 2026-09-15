@@ -74,6 +74,98 @@
     let lastDrawElapsedMs = null;
     let frozenElapsedMs = null;
 
+    // ── Software-caret takeover (ADR-0001 B2) ──
+    // A bypass observer on the raw stream produces per-unit caret candidates
+    // (write position + covering char + truecolor evidence). They become the
+    // SINGLE animated cursor only after: two consecutive candidate units
+    // (trust), the candidate's chunk has been fully parsed by xterm (write
+    // callback watermark), and the session generation still matches (scroll/
+    // resize/buffer switch bumps it). The protocol cursor's DECTCEM state is
+    // deliberately ignored in this mode — the app hides it and paints its own
+    // caret — while the buffer is never modified: the caret cell is visually
+    // restored (theme-background rectangle) during the same draw pass that
+    // draws our cursor, so recognition + restore + cursor are one atomic
+    // presentation.
+    const sw = {
+      pending: null,            // candidate awaiting its parse watermark
+      published: null,          // active descriptor
+      runStreak: 0,             // consecutive candidate-bearing units
+      watermark: 0,             // highest chunkSeq xterm has parsed
+      generation: 0,            // coordinate-space epoch
+      candidateGeneration: 0,
+      bufferType: null,
+      active: false,
+      lastRestoreRow: null,
+    };
+
+    function revokeSoftware(reason) {
+      if (!sw.active) return;
+      sw.active = false;
+      sw.runStreak = 0;
+      sw.published = null;
+      snapBeforeNextDraw = true;
+      instrumentation.softwareCaret = { active: false, reason };
+      // Clean the pure-visual restore overlay: re-render the row from the
+      // (unmodified) buffer so the app's own caret cell shows again.
+      const stale = sw.lastRestoreRow;
+      sw.lastRestoreRow = null;
+      if (stale !== null) {
+        try { originalRenderRows.call(renderer, stale, stale); } catch (error) { /* mid-dispose */ }
+      }
+      scheduleContinuation();
+    }
+
+    const softwareCaretPort = {
+      // Raw-stream candidate (pre-parse): queue until its watermark.
+      candidate(cand) {
+        if (disposed || !cand) return;
+        sw.runStreak += 1;
+        sw.pending = { ...cand };
+        sw.candidateGeneration = sw.generation;
+        sw.bufferType = terminal.buffer.active.type;
+      },
+      // Completed unit without a candidate: NEUTRAL unless it wrote to the
+      // candidate cell (contradiction → revoke + reset trust). Interleaved
+      // outer-TUI frames (herdr chrome, complete with its own SHOWs) are
+      // the normal case inside an ink input session — protocol-cursor
+      // gestures and software-caret existence are separate concerns
+      // (ADR 4.4), so only cell-level contradiction breaks the run.
+      unit(info) {
+        if (disposed) return;
+        if (!info.hadCandidate) {
+          const cell = sw.published || sw.pending;
+          if (cell) {
+            const hit = (info.wrote || []).some(w => w[0] === cell.y && w[1] === cell.x);
+            if (hit) {
+              if (sw.active) revokeSoftware('cell-overwritten');
+              sw.runStreak = 0;
+              sw.pending = null;
+            }
+          }
+        }
+      },
+      // xterm parsed through chunk `seq` (term.write callback): publish the
+      // pending candidate if its unit completed inside the parsed range.
+      parsed(seq) {
+        if (disposed) return;
+        if (typeof seq === 'number' && seq > sw.watermark) sw.watermark = seq;
+        if (sw.pending && sw.pending.chunkSeq <= sw.watermark && sw.candidateGeneration === sw.generation) {
+          sw.published = sw.pending;
+          sw.pending = null;
+          if (sw.runStreak >= 2 && !sw.active) {
+            sw.active = true;
+            snapBeforeNextDraw = true; // source switch never flies from the protocol anchor
+            instrumentation.softwareCaret = { active: true, since: clock() };
+          }
+          scheduleContinuation();
+        }
+      },
+      invalidate(reason) {
+        sw.generation += 1;
+        revokeSoftware('invalidate:' + (reason || 'unknown'));
+      },
+    };
+
     renderer.renderRows = function smoothCursorRenderRows(start, end) {
       if (disposed) return originalRenderRows.call(renderer, start, end);
       instrumentation.frameId += 1;
@@ -134,7 +226,8 @@
       lastDrawElapsedMs = motion.animating ? Math.max(0, at - motion.startedAt) : null;
       // Narrow scope: the caret may have been painted on a row that xterm did
       // not mark dirty this frame, so clear that row first — otherwise a ghost
-      // caret is left behind whenever the caret changes row.
+      // caret is left behind whenever the caret changes row. The software-
+      // caret restore overlay needs the same treatment for its previous row.
       if (renderScope === 'cursor' && lastDrawnRow !== null) {
         const stale = Math.floor(lastDrawnRow);
         if (stale !== Math.floor(finite(visual?.y, stale))) {
@@ -144,6 +237,20 @@
             /* mid-dispose: nothing to clear */
           }
         }
+      }
+      if (sw.active && cursorBeforeBase.software) {
+        const restoreRow = cursorBeforeBase.y;
+        if (sw.lastRestoreRow !== null && Math.floor(sw.lastRestoreRow) !== Math.floor(restoreRow)) {
+          try {
+            originalRenderRows.call(renderer, Math.floor(sw.lastRestoreRow), Math.floor(sw.lastRestoreRow));
+          } catch (error) { /* mid-dispose */ }
+        }
+        drawRestoreCell(cursorBeforeBase);
+        sw.lastRestoreRow = restoreRow;
+      } else if (sw.lastRestoreRow !== null) {
+        const stale = Math.floor(sw.lastRestoreRow);
+        sw.lastRestoreRow = null;
+        try { originalRenderRows.call(renderer, stale, stale); } catch (error) { /* mid-dispose */ }
       }
       drawCursor(cursorBeforeBase, visual);
       lastDrawnRow = Math.floor(finite(visual?.y, 0));
@@ -168,8 +275,8 @@
       if (motion.animating && !diagnostic.held) scheduleContinuation();
     };
 
-    addSubscription(terminal.onScroll?.(function () { requestSnap(); }));
-    addSubscription(terminal.onResize?.(function () { requestSnap(); }));
+    addSubscription(terminal.onScroll?.(function () { softwareCaretPort.invalidate('scroll'); requestSnap(); }));
+    addSubscription(terminal.onResize?.(function () { softwareCaretPort.invalidate('resize'); requestSnap(); }));
     addDomSubscription(terminal.element, 'focusin', requestSnap);
     addDomSubscription(terminal.element, 'focusout', requestSnap);
     if (mediaQuery?.addEventListener) {
@@ -239,6 +346,47 @@
     }
 
     function readCursor() {
+      // Software-caret source (ADR-0001 B2): when a trusted, watermark-
+      // matched descriptor exists, IT defines the drawn cursor. DECTCEM is
+      // ignored here on purpose (the app hides the protocol cursor and
+      // paints its own); eligibility is re-checked on every draw entry
+      // through this function.
+      if (sw.active && sw.published) {
+        const active = terminal.buffer.active;
+        const y = sw.published.y;
+        const focused = renderer._coreBrowserService.isFocused === true;
+        const inRange = y >= 0 && y < terminal.rows && sw.published.x >= 0 && sw.published.x < terminal.cols;
+        const viewportY = finite(active.viewportY, terminal._core?.buffer?.ydisp);
+        const absoluteY = viewportY + y;
+        let cellIntact = false;
+        if (inRange) {
+          try {
+            const line = terminal._core?.buffer?.lines?.get(absoluteY);
+            const cell = renderer._workCell;
+            if (line && cell && typeof line.loadCell === 'function') {
+              line.loadCell(sw.published.x, cell);
+              cellIntact = cell.getChars() === sw.published.char;
+            }
+          } catch (error) { cellIntact = false; }
+        }
+        const bufferOk = sw.bufferType === null || sw.bufferType === active.type;
+        if (inRange && bufferOk && cellIntact) {
+          instrumentation.lastSoftwareCursor = { x: sw.published.x, y, char: sw.published.char, width: sw.published.width, focused, drawable: focused };
+          return {
+            x: sw.published.x,
+            y,
+            absoluteY,
+            width: Math.max(1, sw.published.width),
+            initialized: true,
+            hidden: false,
+            focused,
+            drawable: focused,
+            software: true,
+          };
+        }
+        revokeSoftware(!inRange ? 'out-of-range' : !bufferOk ? 'buffer-switch' : 'cell-overwritten');
+        // fall through to the protocol cursor
+      }
       const active = terminal.buffer.active;
       const absoluteY = active.baseY + active.cursorY;
       const viewportY = finite(active.viewportY, terminal._core?.buffer?.ydisp);
@@ -359,6 +507,38 @@
       }
     }
 
+    // Paint the software-caret cell's non-caret appearance: a theme-
+    // background rectangle over the app's truecolor-styled caret cell. This
+    // is the verified restore convention (the app writes the same cell with
+    // default colors when its caret is elsewhere) expressed as draw-time
+    // overlay — the buffer keeps the app's bytes untouched.
+    function drawRestoreCell(cursor) {
+      const rectangle = renderer._rectangleRenderer.value;
+      if (!rectangle || rectangle._gl !== renderer._gl) return;
+      const dimensions = renderer.dimensions.device;
+      const colors = renderer._themeService.colors;
+      const temporaryVertices = { attributes: new Float32Array(32), count: 1 };
+      const previousVertices = rectangle._verticesCursor;
+      const previousColor = rectangle._cursorFloat;
+      rectangle._verticesCursor = temporaryVertices;
+      try {
+        rectangle._cursorFloat = rectangle._colorToFloat32Array(colors.background);
+        rectangle._addRectangleFloat(
+          temporaryVertices.attributes,
+          0,
+          cursor.x * dimensions.cell.width,
+          cursor.y * dimensions.cell.height,
+          Math.max(1, cursor.width) * dimensions.cell.width,
+          dimensions.cell.height,
+          rectangle._cursorFloat,
+        );
+        rectangle.renderCursor();
+      } finally {
+        rectangle._verticesCursor = previousVertices;
+        rectangle._cursorFloat = previousColor;
+      }
+    }
+
     function isReducedMotion() {
       return mediaQuery?.matches === true;
     }
@@ -381,6 +561,9 @@
     }
 
     const adapter = {
+      // ADR-0001 B2 port: the raw-stream observer (wired in ipc.js) reports
+      // candidates, unit completions and xterm parse watermarks here.
+      softwareCaretPort,
       setEnabled(value) {
         enabled = value !== false;
         snapBeforeNextDraw = true;
