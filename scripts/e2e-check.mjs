@@ -15,7 +15,7 @@
 
 import { spawn, execSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 
 const EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
@@ -24,28 +24,61 @@ const PORT = Number(process.argv[3] ?? 9222);
 // ── 启动 exe（带 WebView2 远程调试）──
 const DATA_CONFIG = resolve(dirname(EXE), 'data', 'config.json');
 let configBackup = null;
+// null = unknown (backup never ran or failed) — restoreConfig must NEVER
+// delete the live config in that state. This guard exists because a silent
+// backup failure used to leave configBackup null while the config was real,
+// and the else-branch below then DELETED the user's data.
+let configExistedAtStart = null;
 
 function backupConfig() {
   // E2E 创建的 tab/ssh profile 会被前端 15s 周期保存进 data/config.json，
   // 污染下次启动的标签恢复；启动前备份、结束时恢复。
   try {
-    if (existsSync(DATA_CONFIG)) {
+    configExistedAtStart = existsSync(DATA_CONFIG);
+    if (configExistedAtStart) {
       configBackup = DATA_CONFIG + '.e2e-bak';
       copyFileSync(DATA_CONFIG, configBackup);
+      // A partial backup would resurrect corrupted state on restore —
+      // verify the copy landed at the same size before trusting it.
+      if (statSync(configBackup).size !== statSync(DATA_CONFIG).size) {
+        throw new Error('partial backup copy');
+      }
     }
-  } catch {}
+  } catch (e) {
+    console.error('[e2e] config backup failed — leaving data/config.json untouched:', e.message);
+    configBackup = null;
+    configExistedAtStart = null;
+  }
 }
 
 function restoreConfig() {
   try {
-    if (configBackup) {
+    if (configBackup && existsSync(configBackup)) {
       copyFileSync(configBackup, DATA_CONFIG);
       rmSync(configBackup, { force: true });
-    } else {
+    } else if (configExistedAtStart === false) {
+      // Config genuinely absent at start: remove what the e2e app wrote.
       rmSync(DATA_CONFIG, { force: true });
     }
-  } catch {}
+    // configExistedAtStart === null → unknown state: keep what is on disk.
+  } catch (e) {
+    console.error('[e2e] config restore failed:', e.message);
+  }
   configBackup = null;
+  configExistedAtStart = null;
+}
+
+// A live zterm.exe at e2e start is usually the USER's session (the restart
+// section only relaunches e2e's own instance mid-run). Killing it via
+// killExisting would destroy their work and drop SSH sessions — abort and
+// let the operator close it instead.
+function detectRunningInstance() {
+  try {
+    const out = execSync('tasklist /FI "IMAGENAME eq zterm.exe" /FO CSV /NH', { encoding: 'utf8' });
+    return /zterm\.exe/i.test(out);
+  } catch {
+    return false;
+  }
 }
 
 // /T is mandatory: plain /F kills only zterm.exe and orphans the PTY children
@@ -145,6 +178,9 @@ async function waitForValue(cdp, expression, expected, timeoutMs = 8000) {
 
 async function main() {
   if (!existsSync(EXE)) throw new Error(`exe 不存在: ${EXE}`);
+  if (detectRunningInstance()) {
+    throw new Error('检测到正在运行的 zterm.exe（可能是用户会话）。请先手动关闭再跑 e2e——自动强杀会丢失用户终端会话');
+  }
   console.log(`E2E 检查: ${EXE}\n`);
 
   killExisting();
