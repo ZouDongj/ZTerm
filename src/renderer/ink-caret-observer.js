@@ -171,21 +171,59 @@
     // signature, and "default colors" for the plain convention.
     let sgr = { fg: null, bg: null, isDefault: true, rev: false };
 
+    // Bare reverse-caret gesture (claude code form, verified 2026-09-15 rig
+    // capture): NO sync blocks and NO frame prefix — the app just emits
+    //   <relative moves> SGR(7) <char> SGR(27) <CR/LF tail>
+    // per keystroke, addressed purely relatively. The self-terminating
+    // signature is rev-ON, EXACTLY ONE printable, rev-OFF: multi-char rev
+    // runs (menu selection, highlights) never qualify. The candidate binds
+    // to the chunk containing the gesture (that chunk parsing implies the
+    // caret cell exists in the buffer); keep/revoke evidence comes from the
+    // adapter's per-draw cell-intact check, not from unit bookkeeping.
+    let bareRev = { on: false, count: 0, char: null };
+
+    function bareRevTurnOn() {
+      bareRev = { on: true, count: 0, char: null };
+    }
+
+    function bareRevTurnOff() {
+      if (bareRev.on && !unit && bareRev.count === 1 && bareRev.char) {
+        unitSeq += 1; // pseudo-unit ordinal for this gesture
+        const c = bareRev.char;
+        if (onCandidate) onCandidate({
+          unitSeq,
+          chunkSeq,
+          x: c.col - 1,
+          y: c.row - 1,
+          char: c.ch,
+          width: c.width,
+          fg: null,
+          bg: null,
+          style: 'reverse',
+          restoreSgr: '0',
+        });
+      }
+      bareRev = { on: false, count: 0, char: null };
+    }
+
     function applySgr(params) {
       const ps = params === '' ? [] : params.split(';').map(p => parseInt(p, 10) || 0);
       let i = 0;
       const next = { fg: sgr.fg, bg: sgr.bg, isDefault: sgr.isDefault, rev: sgr.rev };
       while (i < ps.length) {
         const p = ps[i];
-        if (p === 0) { next.fg = null; next.bg = null; next.isDefault = true; next.rev = false; }
+        if (p === 0) {
+          if (sgr.rev) bareRevTurnOff();
+          next.fg = null; next.bg = null; next.isDefault = true; next.rev = false;
+        }
         else if (p === 38 && ps[i + 1] === 2) {
           next.fg = `${ps[i + 2]};${ps[i + 3]};${ps[i + 4]}`; next.isDefault = false; i += 4;
         } else if (p === 48 && ps[i + 1] === 2) {
           next.bg = `${ps[i + 2]};${ps[i + 3]};${ps[i + 4]}`; next.isDefault = false; i += 4;
         } else if (p === 39) { next.fg = null; }           // default fg selector
         else if (p === 49) { next.bg = null; }             // default bg selector
-        else if (p === 7) { next.rev = true; }           // reverse video: tracked separately
-        else if (p === 27) { next.rev = false; }         // reverse off restores the plain convention
+        else if (p === 7) { bareRevTurnOn(); next.rev = true; }  // reverse video: tracked separately
+        else if (p === 27) { bareRevTurnOff(); next.rev = false; } // reverse off restores the plain convention
         else { next.isDefault = false; }                    // any other attribute
         i += 1;
       }
@@ -309,7 +347,12 @@
         // line first (with bottom-stick scrolling).
         if (pendingWrap) { lineFeed(); col = 1; }
         if (!unit) { // printable outside a unit still advances the cursor
-          col += charWidth(ch);
+          const w0 = charWidth(ch);
+          if (bareRev.on) {
+            bareRev.count += 1;
+            if (bareRev.count === 1) bareRev.char = { row, col, ch, width: w0 };
+          }
+          col += w0;
           if (col > cols) { col = cols; pendingWrap = true; }
           continue;
         }

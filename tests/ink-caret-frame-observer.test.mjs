@@ -163,6 +163,29 @@ test('ESC M/D/E (RI/IND/NEL) are modeled as cursor moves', () => {
   assert.deepEqual([nel[0]?.x, nel[0]?.y], [0, 5]);
 });
 
+test('claude bare reverse-caret gestures (no sync, no frame prefix) are recognized', () => {
+  // Real rig capture: per keystroke the app emits relative moves + SGR(7)
+  // single char SGR(27) with no enclosing unit at all. The gesture is
+  // self-terminating: rev-ON, exactly ONE printable, rev-OFF.
+  const { cands } = collect(FIX('claude-rig-bare-rev.txt'), null, { rows: 24, cols: 80 });
+  assert.ok(cands.length >= 6, `candidates produced (got ${cands.length})`);
+  assert.ok(cands.every(c => c.style === 'reverse'));
+  // typing walks right 3..7 then nav walks left over text cells
+  const xs = cands.map(c => c.x);
+  assert.deepEqual(xs.slice(0, 5), [3, 4, 5, 6, 7]);
+  assert.deepEqual(xs.slice(-2), [6, 5]);
+});
+
+test('a multi-character reverse run is NOT a bare caret gesture', () => {
+  // Menu selection / highlighted word: rev spans several printables before
+  // turning off — must not produce a candidate (decidability: only the
+  // single-char gesture is verified as a caret).
+  const stream = '\u001b[5;10H\u001b[7mword\u001b[27m \u001b[5;12H\u001b[7mx\u001b[27m';
+  const { cands } = collect(stream, null, { rows: 24, cols: 80 });
+  assert.equal(cands.length, 1); // only the single-char gesture at (5,12)
+  assert.deepEqual([cands[0].x, cands[0].y, cands[0].char], [11, 4, 'x']);
+});
+
 test('legacy sync form still recognized (old builds)', () => {
   const { cands, state } = collect(FIX('dshtui-b0-nav-delete.txt'));
   assert.ok(cands.length >= 2, `sync candidates still produced (got ${cands.length})`);
