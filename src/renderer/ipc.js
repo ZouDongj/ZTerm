@@ -229,6 +229,35 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
     if (isHandshakeErr && retryCount < 3) {
         tab._sshRetried = retryCount + 1;
         const backoffMs = [2000, 5000, 10000][Math.min(retryCount, 2)];
+        // Keep the terminal mounted through automatic retries: write the
+        // status line into the existing xterm instead of disposing it. The
+        // old flow (dispose term + remove wrap) blanked the tab's whole
+        // display area for the entire backoff window and churned a fresh
+        // WebGL stack per attempt. Content accumulates so the user sees the
+        // full retry trail; a manual reconnect (reconnectTab) still honors
+        // clearOnConnect for a clean slate.
+        const retryTerm = pane ? pane.term : tab.term;
+        if (retryTerm) retryTerm.write(`\r\n\x1b[33m[SSH] handshake dropped, retrying in ${Math.round(backoffMs / 1000)}s (${tab._sshRetried}/3)...\x1b[0m\r\n`);
+        if (pane) {
+            if (pane.tabId) {
+                ipcRenderer.send('ssh-disconnect', { tabId: pane.tabId, rendererId: tab.id });
+                delete ptyBuffers[pane.tabId];
+                // Reset the caret filter explicitly: the ssh-disconnected
+                // event lookup happens after pane.tabId is nulled and would
+                // miss, leaving a filter stuck mid-sync-block on the KEPT
+                // term to swallow the reconnect's fresh output.
+                delete pane._caretFilter;
+            }
+            pane.tabId = null;
+        } else {
+            if (tab.tabId) {
+                ipcRenderer.send('ssh-disconnect', { tabId: tab.tabId, rendererId: tab.id });
+                delete ptyBuffers[tab.tabId];
+                delete tab._caretFilter; // same as the pane branch above
+                tab._altScreen = false;
+            }
+            tab.tabId = null;
+        }
         // A manual reconnect (reconnectTab / clicking a down tab) supersedes
         // this scheduled retry: both would enqueue a connect for the same
         // rendererId and the loser's session gets orphaned. reconnectTab
@@ -240,41 +269,7 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
             && (!pane || TabManager.tabs.some(t => t.id === tab.id && getAllPanes(t).some(p => p.id === pane.id)));
         setTimeout(() => {
             if (!stillWanted()) return; // superseded / tab or pane closed
-            if (pane) {
-                if (pane.tabId) ipcRenderer.send('ssh-disconnect', { tabId: pane.tabId, rendererId: tab.id });
-                // 保留模式（clearOnConnect=false）不销毁终端，内容接在后面
-                if (_clearOnConnect(tab, pane) && pane.term) {
-                    try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {};
-                    pane.term = null; pane.fitAddon = null;
-                    // Mirror _reconnectPane: clear the destroyed xterm's DOM
-                    const bodyEl = document.getElementById('pane-body_' + pane.id);
-                    if (bodyEl) bodyEl.innerHTML = '';
-                }
-                if (pane.tabId) delete ptyBuffers[pane.tabId];
-                pane.tabId = null;
-                setTimeout(() => {
-                    if (!stillWanted()) return;
-                    _sshConnectWithCredentials(tab, pane, pane.requestId);
-                }, 500);
-            } else {
-                if (tab.tabId) ipcRenderer.send('ssh-disconnect', { tabId: tab.tabId, rendererId: tab.id });
-                if (_clearOnConnect(tab, null) && tab.term) {
-                    try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {};
-                    tab.term = null; tab.fitAddon = null;
-                    // The dead session's wrap must go with its terminal: a
-                    // surviving duplicate keeps switchTo() toggling the stale
-                    // first match while the reconnect-created wrap holds
-                    // 'active' forever, covering every tab.
-                    const wrapEl = document.getElementById('wrap_' + tab.id);
-                    if (wrapEl) wrapEl.remove();
-                }
-                if (tab.tabId) delete ptyBuffers[tab.tabId];
-                tab.tabId = null;
-                setTimeout(() => {
-                    if (!stillWanted()) return;
-                    _sshConnectWithCredentials(tab, null, tab.id);
-                }, 500);
-            }
+            _sshConnectWithCredentials(tab, pane, pane ? pane.requestId : tab.id);
         }, backoffMs);
         return;
     }
