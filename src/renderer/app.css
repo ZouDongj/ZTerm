@@ -311,9 +311,10 @@ body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
 /* Accent color swatches */
 .accent-swatch{width:26px;height:26px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:all 0.12s;flex-shrink:0}
 .accent-swatch:hover{transform:scale(1.15)}
-/* Selection: luminous halo only (user preference — a crisp ring reads as a
-   second frame). The 2px card-colored gap keeps neighboring glow readable. */
-.accent-swatch.active{box-shadow:0 0 0 2px var(--surface-card),0 0 14px 2px currentColor}
+/* Selection: luminous halo ONLY — with the glow present, a crisp ring
+   (2px card-colored circle) read as an extra black border and the user
+   asked to drop it. */
+.accent-swatch.active{box-shadow:0 0 14px 2px currentColor}
 
 /* Custom color picker */
 .color-picker-overlay{position:fixed;inset:0;z-index:300;display:none;align-items:center;justify-content:center;background:rgba(8,9,12,0.55);backdrop-filter:blur(6px)}
