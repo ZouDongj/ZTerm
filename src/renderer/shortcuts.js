@@ -229,14 +229,17 @@ const SHORTCUT_ACTIONS = {
         const timeline = [];
         const tl = setInterval(() => {
             const s = adapter && adapter.snapshot ? adapter.snapshot() : null;
-            // direct xterm flags: WHY the cursor is (not) drawable
-            const core = tab && tab.term && tab.term._core;
-            const flags = core ? {
-                hidden: core.coreService ? core.coreService.isCursorHidden : null,
-                initialized: core.coreService ? core.coreService.isCursorInitialized : null,
-                cx: core.buffer ? core.buffer.active.cursorX : null,
-                cy: core.buffer ? core.buffer.active.cursorY : null,
-            } : null;
+            // WHY the cursor is (not) drawable — via the PUBLIC buffer API:
+            // term._core.buffer has no '.active' (that path threw every 100ms
+            // and silently emptied this timeline in the field).
+            const core = tab && tab.term ? tab.term._core : null;
+            const buf = tab && tab.term ? tab.term.buffer : null;
+            const flags = {
+                hidden: core && core.coreService ? core.coreService.isCursorHidden : null,
+                initialized: core && core.coreService ? core.coreService.isCursorInitialized : null,
+                cx: buf && buf.active ? buf.active.cursorX : null,
+                cy: buf && buf.active ? buf.active.cursorY : null,
+            };
             timeline.push({ t: Math.round(performance.now() - t0), st: s ? s.drawPassStatus : '-', anim: s ? s.animationActive : null, flags });
         }, 100);
         requestAnimationFrame(loop);
