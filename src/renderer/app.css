@@ -46,9 +46,16 @@ body.no-animations .startup-splash .cell{transition:none}
 .titlebar{height:38px;background:var(--surface-win);display:flex;align-items:center;padding:0 0 0 12px;flex-shrink:0}
 /* Tauri 无边框拖拽区域 */
 [data-tauri-drag-region]{-webkit-app-region:drag}
-#tabbar{display:flex;align-items:center;gap:2px;flex:1;overflow:hidden;min-width:0;contain:layout style;will-change:transform}
-#tabbar *{-webkit-app-region:no-drag}
-.tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;border-radius:12px;transition:background 0.12s,color 0.12s,max-width 0.2s cubic-bezier(0.05, 0.7, 0.1, 1);white-space:nowrap;height:28px;max-width:180px;-webkit-app-region:no-drag;user-select:none}
+#tabbar{display:flex;align-items:center;gap:2px;flex:1;overflow:hidden;min-width:0;contain:layout style;will-change:transform}#tabbar *{-webkit-app-region:no-drag}
+.tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;border-radius:12px;transition:background 0.12s,color 0.12s;white-space:nowrap;height:28px;max-width:180px;-webkit-app-region:no-drag;user-select:none}
+/* Semantic action buttons inside tabs: UA reset + ADR-0001 stable hit
+   regions. Every action lives in a permanently-reserved slot; hover/focus
+   toggles ONLY painted visibility (opacity + pointer-events), never the
+   layout rect of the tab or its neighbors. pointer-events:none while
+   hidden keeps invisible actions from swallowing clicks; :focus-visible
+   re-enables both visibility and hit so keyboard users always see the
+   action they reach. */
+.tab button{appearance:none;background:none;border:none;padding:0;margin:0;font-family:inherit;line-height:1;display:inline-flex;align-items:center;cursor:pointer}
 .tab-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tab:hover{background:rgba(255,255,255,0.05);color:var(--text-2)}
 .tab.active{background:rgba(var(--accent-rgb),0.16);color:var(--text-1)}
@@ -64,8 +71,8 @@ body.no-animations .startup-splash .cell{transition:none}
 .ic-green{color:#7dd58a}
 .tab-icon.connected{background:#7dd58a}
 .tab-icon.disconnected{background:rgba(255,255,255,0.25)}
-.tab-close{font-size:13px;line-height:1;color:var(--text-3);margin-left:2px;cursor:pointer;opacity:0;transition:opacity 0.12s;flex-shrink:0}
-.tab:hover .tab-close,.tab.active .tab-close{opacity:0.7}
+.tab-close{font-size:13px;line-height:1;color:var(--text-3);margin-left:2px;cursor:pointer;opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
+.tab:hover .tab-close,.tab.active .tab-close,.tab-close:focus-visible{opacity:0.7;pointer-events:auto}
 .tab-close:hover{opacity:1!important;color:#f19b92}
 /* ── Tab drag-to-split ── */
 .tab.dragging{opacity:0.35}
@@ -98,17 +105,16 @@ body.tab-dragging{user-select:none}
 .drop-zone .zone-right{top:0;right:0;bottom:0;width:30%;background:linear-gradient(270deg,rgba(var(--accent-rgb),0.28),transparent)}
 .drop-zone .zone-top{top:0;left:0;right:0;height:30%;background:linear-gradient(180deg,rgba(var(--accent-rgb),0.28),transparent)}
 .drop-zone .zone-bottom{bottom:0;left:0;right:0;height:30%;background:linear-gradient(0deg,rgba(var(--accent-rgb),0.28),transparent)}
-.tab-reconnect{font-size:12px;margin-left:2px;cursor:pointer;color:#ffb74d;opacity:0;transition:opacity 0.12s;flex-shrink:0}
-.tab:hover .tab-reconnect,.tab.active .tab-reconnect{opacity:0.7}
+.tab-reconnect{font-size:12px;margin-left:2px;cursor:pointer;color:#ffb74d;opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
+.tab:hover .tab-reconnect,.tab.active .tab-reconnect,.tab-reconnect:focus-visible{opacity:0.7;pointer-events:auto}
 .tab-reconnect:hover{opacity:1!important}
-/* Manual reconnect affordance: hidden (zero width) at rest, smoothly
-   extending out on tab hover. Safe to animate layout here ONLY because
-   #tabbar is promoted to its own compositing layer (contain + will-change)
-   — before that, every reflow frame recomposited the whole window on an
-   iGPU and hover crossings visibly stuttered. Do not remove the layer
-   isolation on #tabbar while this animates max-width. */
-.tab-reconnect-normal{font-size:12px;margin-left:0;cursor:pointer;color:var(--text-2);max-width:0;opacity:0;overflow:hidden;white-space:nowrap;transition:max-width 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),opacity 0.12s ease 0.05s,color 0.12s;flex-shrink:0}
-.tab:hover .tab-reconnect-normal{max-width:20px;opacity:0.5}
+/* Manual reconnect affordance (connected tabs). Same stable-slot contract as
+   .tab-reconnect: the slot is always reserved, hover/focus reveals it by
+   opacity only — the earlier zero-width-to-20px max-width hover animation
+   reflowed the whole tab bar per frame and fed an event→layout→event loop
+   that could pin the main thread (ADR-0001). Never animate layout here. */
+.tab-reconnect-normal{font-size:12px;margin-left:2px;cursor:pointer;color:var(--text-2);opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
+.tab:hover .tab-reconnect-normal,.tab-reconnect-normal:focus-visible{opacity:0.5;pointer-events:auto}
 .tab-reconnect-normal:hover{opacity:1!important;color:rgb(var(--accent-rgb))}
 #btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;font-size:16px;transition:all 0.12s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
 #btn-add-tab:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}

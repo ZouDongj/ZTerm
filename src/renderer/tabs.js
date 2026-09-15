@@ -530,10 +530,10 @@ const TabManager = {
                 if (t.type === 'ssh' && !t.splitRoot) {
                     const rcClass = t.connected ? 'tab-reconnect-normal' : 'tab-reconnect';
                     const rcTitle = t.connected ? '强制重连' : '重新连接';
-                    inner += `<span class="${rcClass}" title="${rcTitle}" onclick="event.stopPropagation();TabManager.reconnectTab('${t.id}')">${Icons.iconSvg('rotate-cw', 12)}</span>`;
+                    inner += `<button type="button" class="${rcClass}" title="${rcTitle}" onclick="event.stopPropagation();TabManager.reconnectTab('${t.id}');this.blur()" ondblclick="event.stopPropagation()">${Icons.iconSvg('rotate-cw', 12)}</button>`;
                 }
             }
-            inner += `<span class="tab-close" onclick="event.stopPropagation();TabManager.closeTab('${t.id}')">${Icons.iconSvg('x', 13)}</span>`;
+            inner += `<button type="button" class="tab-close" onclick="event.stopPropagation();TabManager.closeTab('${t.id}');this.blur()" ondblclick="event.stopPropagation()">${Icons.iconSvg('x', 13)}</button>`;
             div.innerHTML = inner;
             bar.insertBefore(div, addBtn);
         });
@@ -1612,7 +1612,9 @@ const TabManager = {
         if (e.button !== 0) return;
         const tab = this.tabs.find(t => t.id === tabId);
         if (!tab || tab.type === 'settings') return;
-        if (e.target.closest('button')) return; // close/reconnect buttons
+        // Action buttons are semantic <button>s; the rename field is a text
+        // input. Neither may start a tab drag (ADR-0001 interaction guard).
+        if (e.target.closest('button, input, textarea, [contenteditable]')) return;
         e.preventDefault();
         const el = e.currentTarget;
         const startX = e.clientX, startY = e.clientY;
@@ -2279,36 +2281,17 @@ const TabManager = {
 
 };
 
-// ── Shared low-latency tab hover services ──
+// ── Shared low-latency tab tooltip ──
 // Native title attributes carry a ~1s OS delay, which reads as lag when the
 // pointer sweeps across tabs. One delegated listener + one shared element.
-// The same hover lifecycle also drives truncated-name expansion: a tab whose
-// name cannot fully display (bar crowding or the 180px cap) expands on hover
-// to reveal the full name — clamped to the bar's free space so the '+' and
-// menu buttons always stay visible — and collapses when the pointer leaves.
-// Width animates via .tab's max-width transition; the whole bar lives on its
-// own compositing layer (see #tabbar in app.css) so the per-frame reflow
-// never touches the terminal canvases below.
-//
-// Handlers only RECORD the pending hover target; all measurement and style
-// work happens in ONE rAF-coalesced pass. Without this, un-hovering a
-// long-name tab collapses it for 200ms while every tab to its right slides
-// left under the moving pointer — each element change fires mouseover, each
-// handler forced 10+ layouts and wrote styles, and the layout changes fired
-// more hovers: a self-sustaining event→layout→event loop that pinned the
-// main thread (user-triggered hard freeze hovering/un-hovering the long-name
-// UVSS tab). A tab that just collapsed also refuses re-expansion for 150ms —
-// mouseovers arriving during its collapse geometry are transit noise, not a
-// deliberate hover.
+// ADR-0001: hover NEVER changes tab geometry — long names stay truncated and
+// are fully revealed by this tooltip alone; the handler only switches the
+// pending target and does one rect-read/style-write per NEW target inside
+// the 120ms timer. No width measurement, no expansion state machine.
 (() => {
     const bar = document.getElementById('tabbar');
     if (!bar) return;
     let tip = null, timer = null, current = null;
-    let expanded = null;      // tab carrying an inline hover max-width
-    let pending = null;       // hover target awaiting the next rAF pass
-    let rafScheduled = false;
-    let lastCollapsed = null, lastCollapsedAt = 0;
-
     const ensure = () => {
         if (!tip) {
             tip = document.createElement('div');
@@ -2322,48 +2305,16 @@ const TabManager = {
         if (tip) tip.classList.remove('show');
         current = null;
     };
-
-    const applyHover = () => {
-        rafScheduled = false;
-        const el = pending;
-        pending = null;
-        if (expanded) {
-            expanded.style.maxWidth = '';
-            lastCollapsed = expanded;
-            lastCollapsedAt = performance.now();
-            expanded = null;
-        }
-        if (!el || el === lastCollapsed && performance.now() - lastCollapsedAt < 150) return;
-        if (!el.classList.contains('tab')) return;
-        const name = el.querySelector('.tab-name');
-        if (!name) return;
-        const hidden = name.scrollWidth - Math.ceil(name.getBoundingClientRect().width);
-        const slot = el.querySelector('.tab-reconnect-normal') ? 20 : 0;
-        if (hidden <= 1 && slot === 0) return; // fully shown, nothing to reveal
-        const cur = el.getBoundingClientRect().width;
-        const others = [...bar.querySelectorAll('.tab')].reduce((s, t) => s + (t === el ? 0 : t.getBoundingClientRect().width), 0);
-        // fixed chrome: '+' (26+4) + menu (26) + gaps + breathing room
-        const cap = bar.clientWidth - others - 80;
-        const target = Math.min(cur + hidden + slot + 2, cap);
-        if (target <= cur + 1) return; // no room to grow — keep resting width
-        el.style.maxWidth = target + 'px';
-        expanded = el;
-    };
-    const scheduleApply = () => {
-        if (rafScheduled) return;
-        rafScheduled = true;
-        requestAnimationFrame(applyHover);
-    };
-
     bar.addEventListener('mouseover', (e) => {
-        // 覆盖 tab + tab 栏两个 chrome 按钮（dataset.tip 共用低延迟 tooltip）
+        // 覆盖 tab + tab 栏两个 chrome 按钮（dataset.tip 共用低延迟 tooltip）。
+        // Moving between a tab's internal spans/svg resolves to the same
+        // closest('.tab') target and must NOT restart the timer.
         const el = e.target.closest('.tab, #btn-add-tab, #btn-menu');
         if (!el || el === current) return;
         hide();
         current = el;
-        pending = el;
-        scheduleApply();
         timer = setTimeout(() => {
+            if (!el.isConnected) { hide(); return; }
             const name = (el.dataset.tip || el.querySelector('.tab-name')?.textContent || '').trim();
             if (!name) return;
             const t = ensure();
@@ -2374,7 +2325,12 @@ const TabManager = {
             t.style.top = (r.bottom + 6) + 'px';
         }, 120);
     });
-    bar.addEventListener('mouseleave', () => { hide(); pending = null; scheduleApply(); });
+    bar.addEventListener('mouseleave', hide);
     bar.addEventListener('click', hide, true);
     bar.addEventListener('mousedown', hide, true);
+    // Tab re-renders (connect/close/rename state changes) replace the DOM
+    // under a possibly stationary pointer — drop stale targets so a tooltip
+    // never lingers on detached elements until the next mouse move.
+    new MutationObserver(() => { if (current && !current.isConnected) hide(); })
+        .observe(bar, { childList: true, subtree: true });
 })();
