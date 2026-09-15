@@ -14,11 +14,21 @@ function _updatePaneDot(pane, connected) {
 // own reverse-video caret cell, which permanently hides the real cursor and
 // kills smooth-cursor animations inside TUI apps (herdr etc.). The filter is
 // per-tab/per-pane because it carries cross-chunk state (sync blocks, UTF-8).
-function _conPtyCaretFix(owner, data) {
+function _conPtyCaretFix(owner, data, ownerType) {
     const factory = typeof createConPtyCaretFilter === 'function'
         ? createConPtyCaretFilter
         : window.createConPtyCaretFilter;
     if (!factory) return data;
+    // ADR-0001 B1 transport policy: the repair addresses ConPTY byte-stream
+    // mutations and applies to LOCAL PTY sessions only. SSH streams reach
+    // xterm exactly as the application emitted them — the old blanket fix
+    // mode ran on them too, deleting painted caret cells (content loss) and
+    // forcing a second cursor beside the app's own caret during deletion and
+    // navigation (the reported double caret).
+    const allowed = typeof caretRepairAllowed === 'function'
+        ? caretRepairAllowed
+        : (typeof window !== 'undefined' ? window.__conPtyCaretInternals?.caretRepairAllowed : null);
+    if (allowed ? !allowed(ownerType) : ownerType === 'ssh') return data;
     if (!owner._caretFilter) owner._caretFilter = factory({ mode: 'fix' });
     const out = owner._caretFilter.push(data);
     return typeof out === 'string' ? out : data;
@@ -40,6 +50,11 @@ function _resetCaretFilterById(tabId) {
 }
 
 ipcRenderer.on('pty-output', (event, { tabId, data }) => {
+    // Diagnostic-only RAW capture (ADR-0001 B0): grabs the stream BEFORE any
+    // caret filtering so samples are pristine pre-filter evidence, not the
+    // post-fix cache. Armed by probes/tests via globalThis.__ztRawCapture =
+    // []; one property check per chunk when disarmed. Bounded by the armer.
+    if (globalThis.__ztRawCapture) globalThis.__ztRawCapture.push(data);
     // Diagnostic-only stream volume counter: armed by the perf sample /
     // stability probes (a plain global lookup otherwise — no cost when off).
     if (globalThis.__ztStreamBytes) globalThis.__ztStreamBytes[tabId] = (globalThis.__ztStreamBytes[tabId] || 0) + (data ? data.length : 0);
@@ -50,7 +65,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
                 if (!tab._contentBuffer) tab._contentBuffer = [];
                 // ConPTY caret fix must run before buffering so the filter sees
                 // the full stream in order; ptyBuffers then holds repaired bytes.
-                if (typeof data === 'string' && data) data = _conPtyCaretFix(pane, data);
+                if (typeof data === 'string' && data) data = _conPtyCaretFix(pane, data, pane.type || tab.type);
                 if (pane.term) {
                     pane.term.write(applyHighlight(data, tabId));
                 } else {
@@ -61,7 +76,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
         }
         if (tab.tabId === tabId) {
             if (!tab._contentBuffer) tab._contentBuffer = [];
-            if (typeof data === 'string' && data) data = _conPtyCaretFix(tab, data);
+            if (typeof data === 'string' && data) data = _conPtyCaretFix(tab, data, tab.type);
             // Track alternate screen (nvim, less, etc.) — don't save TUI content
             if (data.includes('\x1b[?1049h')) tab._altScreen = true;
             if (data.includes('\x1b[?1049l')) tab._altScreen = false;
