@@ -117,6 +117,10 @@
 
     send: function(channel) {
       var args = Array.prototype.slice.call(arguments, 1);
+      if (channel === 'pty-input' && window.ZTermDiagnostics?.enabled && args[0]) {
+        var diagnosticInputId = window.ZTermDiagnostics.inputSent(args[0].tabId, args[0].data);
+        if (diagnosticInputId != null) args[0] = Object.assign({}, args[0], { diagnosticInputId: diagnosticInputId });
+      }
       // 始终传 { args: [...] } — Tauri 2 忽略函数不需要的字段
       doInvoke(channel, { args: args }).catch(function(e) {
         console.error('[ipc-polyfill] send', channel, e);

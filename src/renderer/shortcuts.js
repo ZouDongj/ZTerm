@@ -173,71 +173,91 @@ const SHORTCUT_ACTIONS = {
         showToast(on ? '状态栏已显示' : `状态栏已隐藏（${combo} 恢复）`);
     },
     perfCapture: () => {
-        // 4-second self-service performance sample, originally built for
-        // cursor-motion triage and now extended for the stability effort:
-        // compositor rAF timestamps, adapter retargets/draw gaps, PLUS
-        // long tasks, slow input handlers, per-tab stream volume and
-        // per-tab (including hidden) adapter draw counters. JSON goes to
-        // the clipboard for the user to paste back — lets us measure on
-        // the user's real display (DPI/scale) without any remote control.
+        // Metadata only. rAF callback gaps measure scheduling, not presented FPS.
         if (window.__perfCapturing) { showToast('采样已在进行中', true); return; }
         window.__perfCapturing = true;
+        const diagnostics = globalThis.ZTermDiagnostics;
+        let ownedSession = null, tl = null, deadline = null, frame = null;
+        let ltObs = null, etObs = null, finished = false;
+        const cleanup = () => {
+            clearInterval(tl);
+            clearTimeout(deadline);
+            if (frame !== null) cancelAnimationFrame(frame);
+            try { ltObs && ltObs.disconnect(); } catch (e) {}
+            try { etObs && etObs.disconnect(); } catch (e) {}
+            if (ownedSession !== null && diagnostics.sessionId === ownedSession) diagnostics.stop('perf-complete');
+            window.__perfCapturing = false;
+        };
+        const snapshot = a => {
+            try { return a && a.snapshot ? a.snapshot() : null; }
+            catch (e) { return null; }
+        };
+        try {
+        if (diagnostics && !diagnostics.enabled) {
+            diagnostics.start({ durationMs: 4000 });
+            ownedSession = diagnostics.sessionId;
+        }
         showToast('性能采样中（4 秒）—— 打字 / 划动鼠标 / 或保持待测状态');
         const t0 = performance.now();
         const raf = [];
-        const loop = (t) => { raf.push(t); if (t - t0 < 4000) requestAnimationFrame(loop); else finish(); };
+        const loop = (t) => { if (finished) return; raf.push(t); if (t - t0 < 4000) frame = requestAnimationFrame(loop); else finish(); };
         const tab = TabManager.getActive();
         const adapter = tab && tab._smoothCursor && tab._smoothCursor._adapter;
-        // one-time write hook on this tab: keep the raw byte tail so the
-        // report can show exactly which hide/show sequences the app emits
-        if (tab && tab.term && !tab.__lastWrittenHooked) {
-            const origWrite = tab.term.write.bind(tab.term);
-            tab.__lastWritten = '';
-            tab.__origWrite = origWrite;
-            tab.term.write = function (d) {
-                tab.__lastWritten = (tab.__lastWritten + String(d)).slice(-800);
-                return origWrite(d);
-            };
-            tab.__lastWrittenHooked = true;
-        }
         // stability counters: stream volume per backend tabId + every tab's
         // adapter counters (hidden tabs included — are they drawing too?)
         globalThis.__ztStreamBytes = {};
         const adaptersBefore = TabManager.tabs.map(t => {
             const a = t._smoothCursor && t._smoothCursor._adapter;
-            const s = a && a.snapshot ? a.snapshot().counters : null;
-            return { id: t.id, name: t.name, visible: t.id === TabManager.activeId,
+            const s = snapshot(a)?.counters;
+            return { id: t.id, visible: t.id === TabManager.activeId,
                 cursorDrawPasses: s ? s.cursorDrawPasses : null, baseDrawPasses: s ? s.baseDrawPasses : null };
         });
         // long tasks + slow input handlers during the window
         const longTasks = [];
         const slowEvents = [];
-        let ltObs = null, etObs = null;
         try {
             ltObs = new PerformanceObserver(list => {
                 for (const e of list.getEntries()) {
-                    const attr = e.attribution && e.attribution[0];
-                    longTasks.push({ dur: Math.round(e.duration), src: (attr && (attr.containerName || attr.name)) || '' });
+                    if (longTasks.length < 20) longTasks.push({ dur: Math.round(e.duration) });
                 }
             });
             ltObs.observe({ entryTypes: ['longtask'] });
         } catch (e) {}
         try {
             etObs = new PerformanceObserver(list => {
-                for (const e of list.getEntries()) if (e.duration > 50) slowEvents.push({ type: e.name, dur: Math.round(e.duration) });
+                for (const e of list.getEntries()) if (e.duration > 50 && slowEvents.length < 20) slowEvents.push({ type: e.name, dur: Math.round(e.duration) });
             });
             etObs.observe({ type: 'event', buffered: false, durationThreshold: 50 });
         } catch (e) {}
-        const before = adapter && adapter.snapshot ? adapter.snapshot().counters : null;
+        const before = snapshot(adapter)?.counters;
+        const caretMetadata = s => {
+            const c = s?.caretOwnership;
+            const o = tab?._inkObserver?.state?.();
+            const reason = value => [
+                'cell-overwritten', 'candidate-cell-mismatch', 'out-of-range', 'buffer-switch',
+                'invalidate:scroll', 'invalidate:resize', 'invalidate:session-reset',
+                'invalidate:observer:resize', 'invalidate:observer:unmodeled-coordinate-change',
+                'unmodeled-coordinate-change', 'resize', 'stale-watermark', 'open-lexical-unit',
+                'unsupported-parser-state', 'non-default-style', 'invalid-geometry',
+            ].includes(value) ? value : null;
+            const number = value => Number.isFinite(value) ? value : null;
+            return {
+                customDrawSource: ['none', 'software', 'protocol'].includes(c?.customDrawSource) ? c.customDrawSource : null,
+                active: typeof c?.active === 'boolean' ? c.active : null,
+                queued: number(c?.queued), parsed: number(c?.parsed), generation: number(c?.generation), trustRun: number(c?.trustRun),
+                reason: reason(c?.reason), positionKnown: typeof o?.positionKnown === 'boolean' ? o.positionKnown : null,
+                positionReason: reason(o?.positionReason), checkpointReason: reason(o?.checkpointReason), recoveries: number(o?.recoveries),
+            };
+        };
         // drawable/hidden timeline: the missing observable — 100ms samples of
         // the adapter status reveal idle-hide cycles (ink TUIs hide the caret
         // ~1s after the last keystroke) vs continuous animation.
         const timeline = [];
-        const tl = setInterval(() => {
+        tl = setInterval(() => {
             // Mid-capture tab close disposes the adapter/term — every tick
             // would throw into the console for the rest of the window.
             try {
-                const s = adapter && adapter.snapshot ? adapter.snapshot() : null;
+                const s = snapshot(adapter);
                 // WHY the cursor is (not) drawable — via the PUBLIC buffer API:
                 // term._core.buffer has no '.active' (that path threw every 100ms
                 // and silently emptied this timeline in the field).
@@ -249,43 +269,39 @@ const SHORTCUT_ACTIONS = {
                     cx: buf && buf.active ? buf.active.cursorX : null,
                     cy: buf && buf.active ? buf.active.cursorY : null,
                 };
-                timeline.push({ t: Math.round(performance.now() - t0), st: s ? s.drawPassStatus : '-', anim: s ? s.animationActive : null, flags });
+                timeline.push({ t: Math.round(performance.now() - t0), st: s ? s.drawPassStatus : '-', anim: s ? s.animationActive : null, flags, caret: caretMetadata(s) });
             } catch (e) { /* disposed mid-capture */ }
         }, 100);
-        requestAnimationFrame(loop);
+        deadline = setTimeout(finish, 4000);
+        frame = requestAnimationFrame(loop);
         function finish() {
-            clearInterval(tl);
-            try { ltObs && ltObs.disconnect(); } catch (e) {}
-            try { etObs && etObs.disconnect(); } catch (e) {}
-            // Unhook the diagnostic write wrapper — leaving it in place made
-            // every future write on this terminal copy its full payload.
-            if (tab && tab.__lastWrittenHooked && tab.__origWrite) {
-                try { tab.term.write = tab.__origWrite; } catch (e) {}
-                tab.__lastWrittenHooked = false;
-            }
-            window.__perfCapturing = false;
+            if (finished) return;
+            finished = true;
+            cleanup();
+            try {
             const gaps = [];
             for (let i = 1; i < raf.length; i++) gaps.push(+(raf[i] - raf[i - 1]).toFixed(1));
             gaps.sort((a, b) => a - b);
             const q = (p) => (gaps.length ? gaps[Math.min(gaps.length - 1, Math.floor(p * gaps.length))] : null);
-            const after = adapter && adapter.snapshot ? adapter.snapshot() : null;
+            const after = snapshot(adapter);
             const adaptersAfter = TabManager.tabs.map(t => {
                 const a = t._smoothCursor && t._smoothCursor._adapter;
-                const s = a && a.snapshot ? a.snapshot().counters : null;
-                return { id: t.id, name: t.name, visible: t.id === TabManager.activeId,
+                const s = snapshot(a)?.counters;
+                return { id: t.id, visible: t.id === TabManager.activeId,
                     cursorDrawPasses: s ? s.cursorDrawPasses : null, baseDrawPasses: s ? s.baseDrawPasses : null };
             });
             const adaptersDelta = adaptersAfter.map(a => {
                 const b = adaptersBefore.find(x => x.id === a.id) || {};
-                return { name: a.name, visible: a.visible,
+                return { id: a.id, visible: a.visible,
                     cursorDrawPasses: (a.cursorDrawPasses != null && b.cursorDrawPasses != null) ? a.cursorDrawPasses - b.cursorDrawPasses : null,
                     baseDrawPasses: (a.baseDrawPasses != null && b.baseDrawPasses != null) ? a.baseDrawPasses - b.baseDrawPasses : null };
             });
             const report = {
                 at: new Date().toISOString(),
+                interaction: diagnostics ? diagnostics.snapshot() : null,
                 durationMs: +(performance.now() - t0).toFixed(0),
                 display: { dpr: window.devicePixelRatio, w: window.innerWidth, h: window.innerHeight },
-                raf: { count: raf.length, p50: q(0.5), p95: q(0.95), max: gaps[gaps.length - 1] || null },
+                raf: { measurement: 'callback-gap-ms-not-presented-fps', count: raf.length, p50: q(0.5), p95: q(0.95), max: gaps[gaps.length - 1] || null },
                 stability: {
                     longTasks: longTasks.slice(0, 20),
                     slowEvents: slowEvents.slice(0, 20),
@@ -303,11 +319,8 @@ const SHORTCUT_ACTIONS = {
                     // only retargets INSIDE the sample window (clock values >= t0)
                     retargets: after.retargets.filter(r => r.at >= t0 - 50).slice(-40).map(r => ({ dt: Math.round(r.at - t0), from: (+r.from.x.toFixed(2)) + ',' + (+r.from.y.toFixed(2)), to: r.target.x + ',' + r.target.y })),
                     drawPassStatus: after.drawPassStatus,
+                    caret: caretMetadata(after),
                     tabType: tab ? tab.type : null,
-                    // raw tail of what this terminal received (last 400
-                    // chars, escape sequences as \\x1b) — shows exactly which
-                    // hide/show bytes the app is emitting
-                    streamTail: tab && tab.__lastWritten ? tab.__lastWritten.slice(-400) : null,
                     timeline,
                 } : 'no-adapter',
             };
@@ -317,6 +330,12 @@ const SHORTCUT_ACTIONS = {
                 () => showToast('采样完成（剪贴板写入失败，见控制台）', true),
             );
             console.log('[perf-sample]', text);
+            } catch (e) { showToast('采样未能生成报告', true); }
+        }
+        } catch (e) {
+            finished = true;
+            cleanup();
+            showToast('采样未能启动', true);
         }
     },
 };

@@ -14,6 +14,8 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const { createInkCaretObserver } = require('../src/renderer/ink-caret-observer.js');
+require('../src/vendor/xterm.js');
+const { Terminal } = globalThis.TabbyXterm;
 
 const FIX = (n) => readFileSync(join(here, 'fixtures', n), 'utf8');
 
@@ -182,9 +184,37 @@ test('a multi-character reverse run is NOT a bare caret gesture', () => {
   // single-char gesture is verified as a caret).
   const stream = '\u001b[5;10H\u001b[7mword\u001b[27m \u001b[5;12H\u001b[7mx\u001b[27m';
   const { cands } = collect(stream, null, { rows: 24, cols: 80 });
-  assert.equal(cands.length, 1); // only the single-char gesture at (5,12)
-  assert.deepEqual([cands[0].x, cands[0].y, cands[0].char], [11, 4, 'x']);
+  assert.equal(cands.length, 0, 'neither highlight has the verified bare repaint context');
 });
+
+test('HOME frame prefix cancels pending autowrap exactly as xterm does', t => {
+  const term = new Terminal({ cols: 80, rows: 24 });
+  t.after(() => term.dispose());
+  const stream = '\x1b[2;2H \x1b[H' + 'x'.repeat(80)
+    + '\x1b[0m\x1b]8;;\x07\x1b[Ha\x1b[7m \x1b[27m\x1b[24;1H';
+  term._core._inputHandler.parse(stream);
+  const { cands } = collect(stream);
+  assert.equal(cands.length, 1);
+  const c = cands[0];
+  assert.deepEqual([c.x, c.y], [1, 0]);
+  assert.ok(term.buffer.active.getLine(c.y).getCell(c.x).isInverse());
+});
+
+test('bare one-character decorations do not establish caret ownership by repetition', () => {
+  const stream = '\x1b[5;10H\x1b[7m \x1b[27m\x1b[5;12H\x1b[7m \x1b[27m';
+  assert.equal(collect(stream).cands.length, 0);
+});
+
+for (const move of ['\t', '\x1b7\x1b[10;20H\x1b8', '\x1b[2E']) {
+  test(`unmodeled bare movement ${JSON.stringify(move)} needs an absolute anchor before recognition resumes`, () => {
+    const gesture = '\r\x1b[3C\x1b[1A\x1b[7m \x1b[27m';
+    const unknown = '\x1b[5;10H' + move + gesture;
+    assert.equal(collect(unknown).cands.length, 0);
+    const { cands } = collect(unknown + '\x1b[5;10H' + gesture);
+    assert.equal(cands.length, 1);
+    assert.deepEqual([cands[0].x, cands[0].y], [3, 3]);
+  });
+}
 
 test('legacy sync form still recognized (old builds)', () => {
   const { cands, state } = collect(FIX('dshtui-b0-nav-delete.txt'));

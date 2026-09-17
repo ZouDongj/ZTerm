@@ -29,6 +29,7 @@ async fn main() {
             zterm::get_profiles,
             zterm::pty_create,
             zterm::pty_input,
+            zterm::pty_diagnostics,
             zterm::pty_resize,
             zterm::pty_destroy,
             zterm::ssh_connect,

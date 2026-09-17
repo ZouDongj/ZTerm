@@ -11,6 +11,9 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot};
 
+#[path = "native_trace.rs"]
+mod native_trace;
+
 // 用于 emit config-corrupted 等需要 AppHandle 的事件（setup 时注册一次）
 static APP_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
 // 损坏配置只备份/通知一次，避免每次 load_config 重复处理
@@ -144,9 +147,15 @@ fn execute_unconditional(scripts: &mut Vec<LoginScript>) -> Vec<String> {
 // ── Session types ──
 
 pub struct PtySession {
-    pub writer_tx: mpsc::Sender<Vec<u8>>,
+    pub writer_tx: mpsc::Sender<LocalInput>,
+    pub flush_ms: u64,
     pub pair: portable_pty::PtyPair,
     pub child: Box<dyn portable_pty::Child + Send + Sync>,
+}
+
+pub struct LocalInput {
+    data: Vec<u8>,
+    trace: Option<native_trace::Ticket>,
 }
 
 pub struct SshSession {
@@ -637,6 +646,44 @@ fn pty_flush_interval_from(explicit: Option<&str>, loose: bool) -> u64 {
     PTY_FLUSH_INTERVAL_MS
 }
 
+// Every tick drains the available bytes. Equal-sized consecutive bursts are
+// unrelated; comparing their lengths can hold the second burst indefinitely.
+fn drain_pty_outbox(outbox: &mut Vec<u8>) -> Vec<u8> {
+    std::mem::take(outbox)
+}
+
+#[tauri::command]
+pub fn pty_diagnostics(state: State<'_, SessionMap>, args: Vec<Value>) -> Result<Value, String> {
+    let params = args.first().cloned().unwrap_or(json!({}));
+    let action = params
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("snapshot");
+    let tab_id = params.get("tabId").and_then(Value::as_str).unwrap_or("");
+    let flush_ms = if action == "arm" {
+        match state.lock().get(tab_id) {
+            Some(SessionType::Local(s)) => s.flush_ms,
+            _ => return Err("diagnostics require an existing local session".into()),
+        }
+    } else {
+        0
+    };
+    native_trace::control(
+        action,
+        tab_id,
+        params
+            .get("durationMs")
+            .and_then(Value::as_u64)
+            .unwrap_or(10000),
+        params
+            .get("capacity")
+            .and_then(Value::as_u64)
+            .unwrap_or(4096)
+            .min(8192) as usize,
+        flush_ms,
+    )
+}
+
 /// 增量 UTF-8 解码：把新字节接到 carry 上，解码出所有完整字符并返回；
 /// 块尾不完整的多字节序列（error_len 为 None）留在 carry 等下一块补齐，
 /// 避免单块 from_utf8_lossy 把跨块字符（中文/emoji 等）替换成 U+FFFD（�）。
@@ -744,15 +791,35 @@ pub async fn pty_create(
         .take_writer()
         .map_err(|e| format!("writer failed: {e}"))?;
 
-    let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(64);
+    let loose = std::env::var("ZTERM_PTY_COALESCE")
+        .map(|v| v.trim() == "loose")
+        .unwrap_or(false);
+    let flush_ms = pty_flush_interval_ms(loose);
+    let (writer_tx, mut writer_rx) = mpsc::channel::<LocalInput>(64);
     let writer = Arc::new(Mutex::new(Some(writer)));
     let writer_for_task = writer.clone();
+    let writer_tab_id = tab_id.clone();
     tokio::spawn(async move {
-        while let Some(data) = writer_rx.recv().await {
+        while let Some(input) = writer_rx.recv().await {
             use std::io::Write;
+            native_trace::input_stage(
+                &writer_tab_id,
+                "write-begin",
+                input.data.len(),
+                input.trace,
+                None,
+            );
+            let mut ok = false;
             if let Some(ref mut w) = *writer_for_task.lock() {
-                let _ = w.write_all(&data);
+                ok = w.write_all(&input.data).is_ok();
             }
+            native_trace::input_stage(
+                &writer_tab_id,
+                "write-end",
+                input.data.len(),
+                input.trace,
+                Some(ok),
+            );
         }
         *writer_for_task.lock() = None;
     });
@@ -761,22 +828,22 @@ pub async fn pty_create(
     let tid = tab_id.clone();
     tokio::task::spawn_blocking(move || {
         // Reader thread: blocking reads only append to the shared outbox.
-        let loose = std::env::var("ZTERM_PTY_COALESCE")
-            .map(|v| v.trim() == "loose")
-            .unwrap_or(false);
-        let flush_ms = pty_flush_interval_ms(loose);
         let outbox: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
         {
             let outbox = Arc::clone(&outbox);
             let finished = Arc::clone(&finished);
+            let read_tab_id = tid.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 8192];
                 loop {
                     use std::io::Read;
                     match reader.read(&mut buf) {
                         Ok(0) => break,
-                        Ok(n) => outbox.lock().extend_from_slice(&buf[..n]),
+                        Ok(n) => {
+                            native_trace::record(&read_tab_id, "raw-read", n, None, None, None);
+                            outbox.lock().extend_from_slice(&buf[..n]);
+                        }
                         Err(_) => break,
                     }
                 }
@@ -790,7 +857,6 @@ pub async fn pty_create(
         // 跨块字符 carry：read 块边界可能切在 UTF-8 多字节序列中间，
         // 单块 from_utf8_lossy 会把半截字符变成 U+FFFD（�）
         let mut utf8_carry: Vec<u8> = Vec::new();
-        let mut last_seen_len = 0usize;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(flush_ms));
             let taken = {
@@ -801,20 +867,16 @@ pub async fn pty_create(
                     }
                     continue;
                 }
-                // Wide-window mode: only drain once the source has gone quiet,
-                // or the extra latency would split the burst anyway.
-                if flush_ms > PTY_FLUSH_INTERVAL_MS
-                    && !finished.load(std::sync::atomic::Ordering::Acquire)
-                    && guard.len() == last_seen_len
-                {
-                    continue;
-                }
-                last_seen_len = guard.len();
-                std::mem::take(&mut *guard)
+                drain_pty_outbox(&mut guard)
             };
             if !taken.is_empty() {
                 let text = drain_utf8(&mut utf8_carry, &taken);
-                let _ = app2.emit("pty-output", json!({ "tabId": tid, "data": text }));
+                let stamp = native_trace::record(&tid, "output-emit", taken.len(), None, None, None);
+                let mut payload = json!({ "tabId": tid, "data": text });
+                if let Some(stamp) = stamp {
+                    payload["nativeTrace"] = stamp;
+                }
+                let _ = app2.emit("pty-output", payload);
             }
         }
         let _ = app2.emit("pty-exit", json!({ "tabId": tid }));
@@ -826,6 +888,7 @@ pub async fn pty_create(
             tab_id.clone(),
             SessionType::Local(PtySession {
                 writer_tx,
+                flush_ms,
                 pair,
                 child,
             }),
@@ -1582,18 +1645,46 @@ pub async fn pty_input(state: State<'_, SessionMap>, args: Vec<Value>) -> Result
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    enum InputSender {
+        Local(mpsc::Sender<LocalInput>),
+        Ssh(mpsc::Sender<Vec<u8>>),
+    }
     let writer_tx = {
         let map = state.lock();
         match map.get(&tab_id) {
-            Some(SessionType::Local(s)) => s.writer_tx.clone(),
-            Some(SessionType::Ssh(s)) => s.writer_tx.clone(),
+            Some(SessionType::Local(s)) => InputSender::Local(s.writer_tx.clone()),
+            Some(SessionType::Ssh(s)) => InputSender::Ssh(s.writer_tx.clone()),
             None => return Err(format!("no session for {}", tab_id)),
         }
     };
-    writer_tx
-        .send(data.into_bytes())
-        .await
-        .map_err(|e| format!("channel closed: {e}"))?;
+    match writer_tx {
+        InputSender::Local(tx) => {
+            let bytes = data.len();
+            let requested_op = params
+                .get("diagnosticInputId")
+                .and_then(Value::as_u64)
+                .filter(|v| *v > 0 && *v <= 9_007_199_254_740_991);
+            let trace = native_trace::input(&tab_id, bytes, requested_op);
+            native_trace::input_stage(&tab_id, "channel-wait", bytes, trace, None);
+            let result = tx
+                .send(LocalInput {
+                    data: data.into_bytes(),
+                    trace,
+                })
+                .await;
+            native_trace::input_stage(
+                &tab_id,
+                "channel-accepted",
+                bytes,
+                trace,
+                Some(result.is_ok()),
+            );
+            result.map_err(|_| "local input channel closed".to_string())?;
+        }
+        InputSender::Ssh(tx) => {
+            tx.send(data.into_bytes()).await.map_err(|e| format!("channel closed: {e}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -3587,6 +3678,18 @@ mod tests {
         // Unparsable explicit value falls through to the toggle-based default.
         assert_eq!(pty_flush_interval_from(Some("abc"), false), PTY_FLUSH_INTERVAL_MS);
         assert_eq!(pty_flush_interval_from(Some("  80  "), true), 80);
+    }
+
+    #[test]
+    fn pty_outbox_equal_sized_bursts_drain_without_later_input() {
+        for interval in [4, 40, 80, 200] {
+            assert_eq!(pty_flush_interval_from(Some(&interval.to_string()), false), interval);
+            let mut outbox = b"first!".to_vec();
+            assert_eq!(drain_pty_outbox(&mut outbox), b"first!");
+            outbox.extend_from_slice(b"second");
+            assert_eq!(drain_pty_outbox(&mut outbox), b"second");
+            assert!(drain_pty_outbox(&mut outbox).is_empty());
+        }
     }
 
     #[test]
