@@ -2450,6 +2450,113 @@ pub fn get_about_info(args: Vec<Value>) -> Value {
     })
 }
 
+// ── Update check (GitHub Releases, check-only) ──
+
+const RELEASES_LATEST_URL: &str = "https://api.github.com/repos/ZouDongj/ZTerm/releases/latest";
+
+/// True when `latest` is a strictly newer version than `current`.
+/// Both may carry a leading 'v' and a pre-release/build suffix; only the
+/// numeric dotted core is compared (1.0.5-beta.1 counts as 1.0.5).
+pub fn version_newer(current: &str, latest: &str) -> bool {
+    fn core(v: &str) -> Vec<u64> {
+        v.trim()
+            .trim_start_matches(['v', 'V'])
+            .split(['-', '+'])
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+    let (a, b) = (core(current), core(latest));
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        if y != x {
+            return y > x;
+        }
+    }
+    false
+}
+
+#[tauri::command]
+pub async fn check_update(args: Vec<Value>) -> Result<Value, String> {
+    let _ = args;
+    tokio::task::spawn_blocking(|| {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .build()
+            .into();
+        let resp = agent
+            .get(RELEASES_LATEST_URL)
+            .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
+            .header("Accept", "application/vnd.github+json")
+            .call();
+        let mut resp = match resp {
+            Ok(r) => r,
+            // 404: the repo has no published release yet — a state, not a failure.
+            Err(ureq::Error::StatusCode(404)) => {
+                return Ok(json!({
+                    "current": env!("CARGO_PKG_VERSION"),
+                    "latest": Value::Null,
+                    "none": true,
+                }));
+            }
+            Err(e) => return Err(format!("update check failed: {e}")),
+        };
+        let body: Value = resp
+            .body_mut()
+            .read_json()
+            .map_err(|e| format!("update check: bad response json: {e}"))?;
+        let tag = body
+            .get("tag_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if tag.is_empty() {
+            return Err("update check: response missing tag_name".to_string());
+        }
+        let url = body
+            .get("html_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("https://github.com/ZouDongj/ZTerm/releases")
+            .to_string();
+        let latest = tag.trim_start_matches(['v', 'V']).to_string();
+        Ok(json!({
+            "current": env!("CARGO_PKG_VERSION"),
+            "latest": latest,
+            "tag": tag,
+            "url": url,
+            "newer": version_newer(env!("CARGO_PKG_VERSION"), &latest),
+        }))
+    })
+    .await
+    .map_err(|e| format!("update check task: {e}"))?
+}
+
+#[tauri::command]
+pub fn open_url(args: Vec<Value>) -> Result<Value, String> {
+    let params = args.into_iter().next().unwrap_or(json!({}));
+    let url = params
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    // Whitelist before handing to cmd start: https only, no shell metachars.
+    let ok = regex::Regex::new(r"^https://[A-Za-z0-9._~/?&=#%+:@-]+$")
+        .unwrap()
+        .is_match(&url);
+    if !ok {
+        return Err(format!("open-url: rejected url: {url}"));
+    }
+    std::process::Command::new("cmd")
+        .args(["/c", "start", "", &url])
+        .spawn()
+        .map_err(|e| format!("open-url: {e}"))?;
+    Ok(json!({ "ok": true }))
+}
+
+
 #[tauri::command]
 pub fn get_system_fonts(args: Vec<Value>) -> Result<Value, String> {
     let _ = args;
@@ -4080,5 +4187,21 @@ mod tests {
         // Any other error maps to the generic error kind.
         let (k, _) = classify_disconnect(&R::Error(russh::Error::InactivityTimeout));
         assert_eq!(k, "error");
+    }
+
+    #[test]
+    fn version_newer_semver_core() {
+        assert!(version_newer("1.0.5", "1.1.0"));
+        assert!(version_newer("1.0.5", "v1.0.6"));
+        assert!(version_newer("1.0.5", "2.0"));
+        assert!(!version_newer("1.0.5", "1.0.5"));
+        assert!(!version_newer("1.0.5", "v1.0.5"));
+        assert!(!version_newer("1.0.5", "1.0.4"));
+        // Pre-release suffix is stripped: 1.0.6-beta.1 counts as 1.0.6.
+        assert!(version_newer("1.0.5", "v1.0.6-beta.1"));
+        assert!(!version_newer("1.0.5", "1.0.5-beta.1"));
+        // Two-component tag pads with zeros.
+        assert!(version_newer("1.0.5", "1.1"));
+        assert!(!version_newer("1.0.5", "1.0"));
     }
 }

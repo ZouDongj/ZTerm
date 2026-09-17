@@ -25,6 +25,8 @@ winapi = { version = "0.3", features = ["dpapi", "minwindef", "ntdef", "winbase"
 arboard = "3"
 # Electron safeStorage 兼容（OSCrypt AES-GCM 解密）
 aes-gcm = "0.10"
+# 检查更新：单次小 JSON GET，sync 客户端 + spawn_blocking，不引 reqwest/hyper
+ureq = { version = "3", features = ["json"] }
 
 # PoC 2: 验证 portable-pty 本地 shell + Tauri Channel 通信
 # russh 0.60 re-exports russh_keys as russh::key, 不需要单独依赖 russh-keys

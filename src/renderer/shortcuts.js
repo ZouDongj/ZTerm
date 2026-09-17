@@ -465,6 +465,49 @@ async function loadAboutInfo() {
         set('about-engine', 'xterm.js ' + (info.xterm || '?') + ' + node-pty');
         set('about-ssh', 'russh ' + (info.russh || '?'));
     } catch(e) {}
+    // Reset the update card each time the about page opens: no stale result.
+    const desc = document.getElementById('update-check-desc');
+    if (desc) { desc.textContent = '从 GitHub Releases 检查新版本'; desc.style.color = ''; }
+    const dl = document.getElementById('btn-update-download');
+    if (dl) dl.style.display = 'none';
+    window.__updateUrl = null;
+}
+
+// Update check (about page, check-only: check + notify + open download page)
+async function checkForUpdates() {
+    const btn = document.getElementById('btn-check-update');
+    const desc = document.getElementById('update-check-desc');
+    const dl = document.getElementById('btn-update-download');
+    if (!btn || !desc) return;
+    btn.disabled = true;
+    btn.textContent = '检查中…';
+    desc.style.color = '';
+    try {
+        const r = await ipcRenderer.invoke('check-update');
+        if (r && r.none) {
+            desc.textContent = '官方还没有发布版本';
+        } else if (r && r.newer) {
+            desc.textContent = `发现新版本 ${r.latest}（当前 ${r.current}）`;
+            desc.style.color = 'rgba(120,200,120,0.9)';
+            window.__updateUrl = r.url;
+            if (dl) dl.style.display = '';
+        } else if (r) {
+            desc.textContent = `已是最新版本 (${r.current})`;
+            if (dl) dl.style.display = 'none';
+        } else {
+            desc.textContent = '检查失败：空响应';
+        }
+    } catch (e) {
+        desc.textContent = '检查失败：' + (e && e.message ? e.message : String(e));
+        desc.style.color = 'rgba(220,120,120,0.9)';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '检查更新';
+    }
+}
+
+function goUpdateDownload() {
+    if (window.__updateUrl) ipcRenderer.invoke('open-url', { url: window.__updateUrl });
 }
 
 async function changeDataDir() {

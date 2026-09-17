@@ -52,6 +52,8 @@ async fn main() {
             zterm::get_data_dir_info,
             zterm::set_data_dir,
             zterm::get_about_info,
+            zterm::check_update,
+            zterm::open_url,
             zterm::get_system_fonts,
             zterm::show_open_dialog,
             zterm::show_save_dialog,
