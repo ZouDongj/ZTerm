@@ -1,6 +1,14 @@
-// ConPTY caret visibility repair (ADR-0001 B1 scope).
+// ConPTY stream filter: caret visibility repair (ADR-0001 B1) + session
+// bring-up handshake.
 //
-// WHY THIS EXISTS (captured with src/bin/pty-capture.rs, artifacts/vt-capture/):
+// DA1 HANDSHAKE (2026-09-17): OpenConsole opens every pseudoconsole with a
+// DA1 probe (ESC[c) and blocks the client shell's output until a VT220-class
+// reply arrives (VtIo.cpp WaitUntilDA1, ~3s timeout; replies with param0 < 61
+// like xterm.js's ESC[?1;2c are ignored). The filter swallows the FIRST DA1
+// of each session and reports it via onDa1Query so ipc.js answers with
+// CONPTY_DA1_RESPONSE; later probes pass through to xterm.
+//
+// WHY THE CARET REPAIR EXISTS (captured with src/bin/pty-capture.rs, artifacts/vt-capture/):
 //   herdr local       ?2026h ?25l OSC8 CUP(30;70) SGR(0;39;49) a SGR(0;7;39;49) ' ' SGR(0) CUP(30;71) ?25l ?2026l
 // ConPTY consolidates the app's cursor-visibility ops inside synchronized-
 // output blocks and rewrites its trailing `?25h` (show) into `?25l` (hide),
@@ -32,6 +40,17 @@
   const PAINTED_CARET_SGR = '\u001b[0;7;39;49m';
   const PLAIN_CARET_SGR = '\u001b[0;39;49m';
   const CUP = /^\u001b\[\d+;\d+[Hf]$/;
+  // ConPTY session bring-up: OpenConsole starts every pseudoconsole with a
+  // DA1 probe (ESC[c) and BLOCKS the client shell's output until the terminal
+  // answers with a VT220-class reply — our harness measured a ~3.3s stall when
+  // the reply never satisfies it, ~0.4s once it does (conpty_probe, 2026-09-17).
+  // xterm.js answers DA1 with ESC[?1;2c (VT100 class), which OpenConsole does
+  // not accept, so every new local terminal paid the full timeout. We answer
+  // the FIRST DA1 ourselves with CONPTY_DA1_RESPONSE and drop the query, so
+  // xterm's own reply never leaks into the shell's stdin. Later DA1 queries
+  // (an app probing the terminal) pass through to xterm untouched.
+  const DA1_QUERY = /^\u001b\[(?:0)?c$/;
+  const CONPTY_DA1_RESPONSE = '\u001b[?62;1;2;6;7;8;9;15c';
   // A sync block is only post-processed while it is small; an app that leaves
   // one open must never make us buffer unboundedly.
   const MAX_BLOCK_TOKENS = 20000;
@@ -58,10 +77,13 @@
     let inSync = false;
     let visibleBefore = true;
     let block = null;
-    // Diagnostic counters only (exposed via state()).
+    // Diagnostic counters (exposed via state()); da1Seen additionally gates
+    // the one-shot handshake swallow above.
     let hidesSeen = 0;
     let showsSeen = 0;
     let blocksSeen = 0;
+    let da1Seen = 0;
+    const onDa1Query = typeof options?.onDa1Query === 'function' ? options.onDa1Query : null;
 
     // Plain text is buffered too, so the trailing-cell rewrite can see it.
     function emit(text) {
@@ -77,6 +99,16 @@
     }
 
     function token(text) {
+      if (DA1_QUERY.test(text)) {
+        da1Seen += 1;
+        if (da1Seen === 1) {
+          if (onDa1Query) {
+            try { onDa1Query(); } catch (e) { /* the stream must never die on a reply failure */ }
+          }
+          return ''; // swallowed: OpenConsole gets our reply, xterm stays silent
+        }
+        // Later DA1 probes (an app querying the terminal) pass through.
+      }
       if (text === SYNC_BEGIN) {
         inSync = true;
         visibleBefore = visible;
@@ -202,7 +234,7 @@
       push,
       setMode,
       mode: function () { return mode; },
-      state: function () { return { mode, inSync, visible, buffered: block ? block.length : 0, hidesSeen, showsSeen, blocksSeen }; },
+      state: function () { return { mode, inSync, visible, buffered: block ? block.length : 0, hidesSeen, showsSeen, blocksSeen, da1Seen }; },
     };
   }
 
@@ -275,7 +307,7 @@
     return { end: from + 2, kind: 'esc' };
   }
 
-  const api = { createConPtyCaretFilter, caretRepairAllowed, removePaintedCaret, readSequence };
+  const api = { createConPtyCaretFilter, caretRepairAllowed, removePaintedCaret, readSequence, CONPTY_DA1_RESPONSE };
   root.createConPtyCaretFilter = createConPtyCaretFilter;
   root.__conPtyCaretInternals = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

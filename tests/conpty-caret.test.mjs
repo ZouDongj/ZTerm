@@ -154,3 +154,79 @@ test('host_cursor=native stream is enhanced, not corrupted', () => {
     assert.ok(!out.includes('\u001b[0;7;39;49m'));
     assert.ok(out.includes('\u001b[30;34H'), 'cursor position preserved');
 });
+
+// ── ConPTY DA1 handshake ──
+// OpenConsole opens every pseudoconsole with a DA1 probe (ESC[c) and blocks
+// the client shell's output until a VT220-class reply arrives (~3.3s stall
+// measured when unsatisfied, conpty_probe A/B 2026-09-17). xterm.js answers
+// DA1 with ESC[?1;2c (VT100 class), which OpenConsole ignores — so the filter
+// swallows the FIRST DA1 and reports it via onDa1Query for ipc.js to answer
+// with CONPTY_DA1_RESPONSE. Later DA1 probes (apps querying the terminal)
+// must pass through to xterm untouched.
+
+test('first DA1 query is swallowed, reported once, stream survives', () => {
+    let calls = 0;
+    const f = createConPtyCaretFilter({ mode: 'fix', onDa1Query: () => { calls += 1; } });
+    const out = f.push('\u001b[1t\u001b[c\u001b[?1004h\u001b[?9001h');
+    assert.equal(calls, 1);
+    assert.ok(!out.includes('\u001b[c'), 'query must not reach xterm');
+    assert.ok(out.includes('\u001b[1t') && out.includes('\u001b[?1004h') && out.includes('\u001b[?9001h'),
+        'neighbouring init sequences pass through: ' + JSON.stringify(out));
+    assert.equal(f.state().da1Seen, 1);
+});
+
+test('DA1 split across chunks is still swallowed exactly once', () => {
+    let calls = 0;
+    const f = createConPtyCaretFilter({ mode: 'fix', onDa1Query: () => { calls += 1; } });
+    assert.equal(f.push('\u001b'), '');
+    assert.equal(f.push('[c'), '');
+    assert.equal(calls, 1);
+});
+
+test('DA1 with explicit zero param (ESC[0c) is the same probe', () => {
+    let calls = 0;
+    const f = createConPtyCaretFilter({ mode: 'fix', onDa1Query: () => { calls += 1; } });
+    assert.equal(f.push('\u001b[0c'), '');
+    assert.equal(calls, 1);
+});
+
+test('later DA1 queries pass through unanswered (app-driven probes)', () => {
+    let calls = 0;
+    const f = createConPtyCaretFilter({ mode: 'fix', onDa1Query: () => { calls += 1; } });
+    f.push('\u001b[c');
+    const out = f.push('\u001b[c');
+    assert.equal(calls, 1, 'only the first probe is answered by us');
+    assert.equal(out, '\u001b[c', 'the second probe reaches xterm (its reply is dropped by conhost, same as the WT baseline)');
+    assert.equal(f.state().da1Seen, 2);
+});
+
+test('DA1 replies and DA2 are not mistaken for the probe', () => {
+    let calls = 0;
+    const f = createConPtyCaretFilter({ mode: 'fix', onDa1Query: () => { calls += 1; } });
+    assert.equal(f.push('\u001b[?1;2c'), '\u001b[?1;2c');
+    assert.equal(f.push('\u001b[>c'), '\u001b[>c');
+    assert.equal(f.push('\u001b[1;2c'), '\u001b[1;2c');
+    assert.equal(calls, 0);
+});
+
+test('a throwing onDa1Query callback cannot kill the stream', () => {
+    const f = createConPtyCaretFilter({ mode: 'fix', onDa1Query: () => { throw new Error('boom'); } });
+    assert.equal(f.push('\u001b[c'), '');
+    assert.equal(f.push('ok'), 'ok');
+    assert.equal(f.state().da1Seen, 1);
+});
+
+test('off mode leaves the DA1 probe untouched and silent', () => {
+    let calls = 0;
+    const f = createConPtyCaretFilter({ mode: 'off', onDa1Query: () => { calls += 1; } });
+    const input = enc('\u001b[c');
+    assert.equal(f.push(input), input);
+    assert.equal(calls, 0);
+});
+
+test('repair mode also answers the handshake', () => {
+    let calls = 0;
+    const f = createConPtyCaretFilter({ mode: 'repair', onDa1Query: () => { calls += 1; } });
+    assert.equal(f.push('\u001b[c'), '');
+    assert.equal(calls, 1);
+});
