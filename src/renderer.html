@@ -548,10 +548,11 @@
               <div class="settings-row">
                 <div class="settings-card-label">
                   <div class="settings-card-title">检查更新</div>
-                  <div class="settings-card-desc">后续版本提供在线检查更新功能</div>
+                  <div class="settings-card-desc" id="update-check-desc">从 GitHub Releases 检查新版本</div>
                 </div>
-                <div class="settings-card-control">
-                  <button class="btn-outline" style="font-size:12px;padding:6px 14px" disabled>检查更新</button>
+                <div class="settings-card-control" style="display:flex;gap:6px;flex-shrink:0">
+                  <button class="btn-outline" style="font-size:12px;padding:6px 14px;display:none" id="btn-update-download" onclick="goUpdateDownload()">前往下载</button>
+                  <button class="btn-outline" style="font-size:12px;padding:6px 14px" id="btn-check-update" onclick="checkForUpdates()">检查更新</button>
                 </div>
               </div>
             </div>
