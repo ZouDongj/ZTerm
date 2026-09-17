@@ -1,0 +1,28 @@
+{
+ "rows": 57,
+ "cols": 277,
+ "wraparound": true,
+ "source": "tests/fixtures/claude-rig-bare-rev.txt (real pre-filter rig capture, 2026-09-15)",
+ "semantics": "Chunks are derived, not original IPC segmentation: each gesture (rev-ON..rev-OFF) completes inside one chunk; two extra cuts land mid-sequence (partial SGR in gesture 1, partial CSI in gesture 3) to exercise cross-chunk buffering. Coordinate origin is self-consistent from session start, not the original absolute rows.",
+ "gestureBoundaries": [
+  42,
+  120,
+  167,
+  214,
+  261,
+  307,
+  356
+ ],
+ "chunks": [
+  "\u001b(B\u000f\u001b[2D\u001b[5B\r\u001b[2C\u001b[5Aa\u001b[7",
+  "m \r\u001b[18C\u001b[4B\u001b[27m",
+  "\u001b[K\r\r\n\u001b[3C\u001b[5A\u001b[3D\u001b[5B\r\u001b[63C\u001b[3A\u001b[K\r\r\n\r\n\r\n\u001b[3C\u001b[5A\u001b[3D\u001b[5B\r\u001b[3C\u001b[5Ab\u001b[7m \u001b[27m",
+  "\r\r\n\r\n\r\n\r\n\r\n\u001b[4C\u001b[",
+  "5A\u001b[4D\u001b[5B\r\u001b[4C\u001b[5A \u001b[7m \u001b[27m",
+  "\r\r\n\r\n\r\n\r\n\r\n\u001b[5C\u001b[5A\u001b[5D\u001b[5B\r\u001b[5C\u001b[5Ac\u001b[7m \u001b[27m",
+  "\r\r\n\r\n\r\n\r\n\r\n\u001b[6C\u001b[5A\u001b[6D\u001b[5B\r\u001b[6C\u001b[5Ad\u001b[7m \u001b[27m",
+  "\r\r\n\r\n\r\n\r\n\r\n\u001b[7C\u001b[5A\u001b[7D\u001b[5B\r\u001b[6C\u001b[5A\u001b[7md\u001b[27m",
+  "\u001b[K\r\r\n\r\n\r\n\r\n\r\n\u001b[6C\u001b[5A\u001b[6D\u001b[5B\r\u001b[5C\u001b[5A\u001b[7mc\u001b[27m",
+  "d\r\r\n\r\n\r\n\r\n\r\n\u001b[5C\u001b[5A"
+ ]
+}

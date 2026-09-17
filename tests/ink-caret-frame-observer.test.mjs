@@ -178,6 +178,30 @@ test('claude bare reverse-caret gestures (no sync, no frame prefix) are recogniz
   assert.deepEqual(xs.slice(-2), [6, 5]);
 });
 
+test('claude bare reverse-caret gestures survive arbitrary chunk splits', () => {
+  // SSH IPC chunking is arbitrary: the SAME capture must produce the SAME
+  // candidates whether fed whole, byte-wise, or at a stride that cuts
+  // escape sequences mid-flight.
+  const raw = FIX('claude-rig-bare-rev.txt');
+  const expected = collect(raw).cands.map(c => [c.x, c.y, c.char]);
+  assert.equal(expected.length, 7, 'baseline candidate count');
+  for (const chunkSize of [1, 3, 47]) {
+    const { cands } = collect(raw, chunkSize);
+    assert.deepEqual(cands.map(c => [c.x, c.y, c.char]), expected, `chunk size ${chunkSize}`);
+  }
+});
+
+test('claude derived native chunks (mid-sequence cuts) preserve candidates', () => {
+  // The native acceptance fixture cuts mid-SGR and mid-CSI; the observer
+  // must buffer across those cuts and emit identical candidates.
+  const fx = JSON.parse(FIX('claude-direct-native-chunks.json'));
+  const cands = [];
+  const obs = createInkCaretObserver({ rows: fx.rows, cols: fx.cols, onCandidate: c => cands.push(c) });
+  for (const chunk of fx.chunks) obs.push(chunk);
+  const expected = collect(FIX('claude-rig-bare-rev.txt')).cands.map(c => [c.x, c.y, c.char]);
+  assert.deepEqual(cands.map(c => [c.x, c.y, c.char]), expected);
+});
+
 test('a multi-character reverse run is NOT a bare caret gesture', () => {
   // Menu selection / highlighted word: rev spans several printables before
   // turning off — must not produce a candidate (decidability: only the
