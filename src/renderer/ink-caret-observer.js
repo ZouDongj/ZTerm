@@ -222,10 +222,15 @@
     // adapter's per-draw cell-intact check, not from unit bookkeeping.
     let bareRev = { on: false, valid: false, count: 0, char: null };
 
-    function bareRevTurnOn() {
+    function bareRevTurnOn(styleAfter) {
       bareRev = {
         on: true,
-        valid: positionKnown && barePositionStep === 3 && sgrDefault(),
+        // Validity is judged on the post-sequence style minus the reverse
+        // flag itself: colors or attributes set earlier in the SAME SGR
+        // sequence (e.g. ESC[38;5;174;7m) must disqualify the gesture —
+        // the pre-sequence state is stale evidence for that.
+        valid: positionKnown && barePositionStep === 3
+          && styleAfter.fg === null && styleAfter.bg === null && styleAfter.attrs === 0,
         count: 0,
         char: null,
       };
@@ -263,7 +268,6 @@
       while (i < ps.length) {
         const p = ps[i];
         if (p === 0) {
-          if (sgr.rev) bareRevTurnOff();
           next.fg = null; next.bg = null; next.rev = false; next.attrs = 0;
         }
         else if (p === 38 && ps[i + 1] === 2) {
@@ -276,8 +280,8 @@
           next.bg = `idx${ps[i + 2]}`; i += 2;
         } else if (p === 39) { next.fg = null; }           // default fg selector
         else if (p === 49) { next.bg = null; }             // default bg selector
-        else if (p === 7) { bareRevTurnOn(); next.rev = true; }  // reverse video: tracked separately
-        else if (p === 27) { bareRevTurnOff(); next.rev = false; } // reverse off restores the plain convention
+        else if (p === 7) { next.rev = true; }             // reverse video on
+        else if (p === 27) { next.rev = false; }           // reverse off restores the plain convention
         else if (p === 1) next.attrs |= ATTR_BOLD;
         else if (p === 2) next.attrs |= ATTR_DIM;
         else if (p === 3) next.attrs |= ATTR_ITALIC;
@@ -296,6 +300,14 @@
         else next.attrs |= ATTR_OTHER;                      // any other attribute
         i += 1;
       }
+      // Reverse edges fire AFTER the whole parameter list is computed, so
+      // the gesture tracker always sees the sequence's resulting style —
+      // never a stale mid-sequence state. ESC[7;0m leaves NO open gesture
+      // (the char that follows is not reverse in the real terminal), and
+      // repeated 7/27 within one sequence collapse to a single edge, so a
+      // multi-char rev run stays a highlight, never a caret.
+      if (!sgr.rev && next.rev) bareRevTurnOn(next);
+      if (sgr.rev && !next.rev) bareRevTurnOff();
       sgr = next;
     }
 

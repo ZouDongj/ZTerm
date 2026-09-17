@@ -250,6 +250,23 @@ test('a lingering attribute still blocks checkpoint recovery (control)', () => {
   assert.equal(obs.state().checkpointReason, 'non-default-style');
 });
 
+test('same-sequence reverse edges: ESC[7;0m leaves no stale gesture, ESC[38;5;N;7m is disqualified', () => {
+  // Reverse on/off edges are detected from the sequence's RESULTING style.
+  // (a) ESC[7;0m: rev opened and reset inside one sequence — the following
+  //     char is NOT reverse in the real terminal, so no candidate may come
+  //     out of the later SGR(27) (stale-gesture edge case).
+  // (b) ESC[38;5;174;7m: validity must see the palette color set EARLIER IN
+  //     THE SAME sequence, not the stale clean pre-sequence style.
+  const gesture = (pre) => '\r\x1b[3C\x1b[1A' + pre + ' \x1b[27m';
+  assert.equal(collect('\x1b[5;10H' + gesture('\x1b[7;0m')).cands.length, 0, 'ESC[7;0m must not leave a stale gesture');
+  assert.equal(collect('\x1b[5;10H' + gesture('\x1b[38;5;174;7m')).cands.length, 0, 'ESC[38;5;N;7m must read post-sequence style');
+  // Controls: the verified split-sequence form still works, and a repeated
+  // rev-ON inside one run keeps both chars in ONE run (a two-char highlight
+  // is never a caret — the second SGR(7) must not restart the count).
+  assert.equal(collect('\x1b[5;10H' + gesture('\x1b[7m')).cands.length, 1, 'control: plain ESC[7m gesture');
+  assert.equal(collect('\x1b[5;10H' + '\r\x1b[3C\x1b[1A' + '\x1b[7m \x1b[7m \x1b[27m').cands.length, 0, 'control: two rev chars stay one run');
+});
+
 test('a multi-character reverse run is NOT a bare caret gesture', () => {
   // Menu selection / highlighted word: rev spans several printables before
   // turning off — must not produce a candidate (decidability: only the
