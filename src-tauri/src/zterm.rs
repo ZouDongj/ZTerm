@@ -166,6 +166,10 @@ pub struct SshSession {
     pub sftp_transfer: Option<Arc<russh_sftp::client::SftpSession>>,
     pub transfer_cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
     pub cwd: Arc<Mutex<Option<String>>>,
+    /// Shared with the SshHandler and the reader task: first writer wins for
+    /// user-initiated closes (ssh_disconnect / tab close pre-fill it), the
+    /// handler's disconnected() callback fills it for everything else.
+    pub disconnect_reason: Arc<Mutex<Option<String>>>,
 }
 
 pub enum SessionType {
@@ -200,6 +204,60 @@ pub struct SshHandler {
     pub tab_id: String,
     pub app: AppHandle,
     pub decisions: Arc<Mutex<HashMap<String, oneshot::Sender<HostKeyDecision>>>>,
+    pub disconnect_reason: Arc<Mutex<Option<String>>>,
+}
+
+/// Classify a session-level disconnect into a UI kind + human-readable text.
+/// Pure function so the mapping is unit-testable without a live session.
+/// Kinds: "server" (protocol DISCONNECT message), "keepalive" (silent death
+/// detected by unanswered keepalives), "closed" (user-initiated or otherwise
+/// expected end), "error" (anything else, e.g. TCP reset).
+pub fn classify_disconnect(
+    reason: &russh::client::DisconnectReason<russh::Error>,
+) -> (&'static str, String) {
+    use russh::client::DisconnectReason as R;
+    match reason {
+        R::ReceivedDisconnect(info) => (
+            "server",
+            format!("server sent disconnect: {} ({:?})", info.message, info.reason_code),
+        ),
+        R::Error(russh::Error::KeepaliveTimeout) => (
+            "keepalive",
+            "server stopped replying (keepalive timeout)".to_string(),
+        ),
+        R::Error(russh::Error::Disconnect) => ("closed", "session closed".to_string()),
+        R::Error(e) => ("error", format!("session error: {e}")),
+    }
+}
+
+/// Emit the reader-side ssh-disconnected event, attaching the session-level
+/// disconnect reason when the handler callback already recorded one (the
+/// reader usually wins the race on channel EOF, so a late reason arrives via
+/// the separate ssh-disconnect-reason event instead).
+fn emit_ssh_disconnected(
+    app: &AppHandle,
+    tab_id: &str,
+    renderer_id: &str,
+    path: &str,
+    reason: &Arc<Mutex<Option<String>>>,
+) {
+    let mut payload = json!({ "tabId": tab_id, "rendererId": renderer_id, "path": path });
+    if let Some(r) = reason.lock().clone() {
+        payload["reason"] = json!(r);
+    }
+    let _ = app.emit("ssh-disconnected", payload);
+}
+
+/// SSH client config. SSH-level keepalive every 30s: keeps middlebox (NAT /
+/// firewall) state alive on idle connections and detects a silently dead
+/// peer within keepalive_max × interval (~120s) instead of hours later.
+/// inactivity_timeout stays None on purpose — an idle-but-alive session is
+/// exactly what a terminal must preserve.
+pub fn ssh_client_config() -> russh::client::Config {
+    russh::client::Config {
+        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        ..Default::default()
+    }
 }
 
 impl russh::client::Handler for SshHandler {
@@ -249,6 +307,35 @@ impl russh::client::Handler for SshHandler {
                     Err(_) => Ok(false),
                 }
             }
+        }
+    }
+
+    async fn disconnected(
+        &mut self,
+        reason: russh::client::DisconnectReason<russh::Error>,
+    ) -> Result<(), Self::Error> {
+        // User-initiated closes (ssh_disconnect / tab close) pre-fill the
+        // slot; the Error::Disconnect russh reports for those carries no
+        // information, so keep the explicit label and report kind "closed".
+        let user_initiated = self.disconnect_reason.lock().is_some();
+        let (kind, text) = if user_initiated {
+            ("closed", "closed by user".to_string())
+        } else {
+            let (k, t) = classify_disconnect(&reason);
+            *self.disconnect_reason.lock() = Some(t.clone());
+            (k, t)
+        };
+        let at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let _ = self.app.emit(
+            "ssh-disconnect-reason",
+            json!({ "tabId": self.tab_id, "kind": kind, "reason": text, "at": at_ms }),
+        );
+        match reason {
+            russh::client::DisconnectReason::ReceivedDisconnect(_) => Ok(()),
+            russh::client::DisconnectReason::Error(e) => Err(e),
         }
     }
 }
@@ -1183,7 +1270,12 @@ pub async fn ssh_connect(
 
     // Connect via russh — use mut handle for auth/channel (needs &mut self)
     let addr = format!("{}:{}", host, port);
-    let config = Arc::new(russh::client::Config::default());
+    let config = Arc::new(ssh_client_config());
+    // Shared disconnect-reason slot: handler callback fills it on
+    // session-level death, reader task attaches it to ssh-disconnected when
+    // it loses the race, ssh_disconnect/tab-close pre-fill it for
+    // user-initiated closes.
+    let disconnect_reason = Arc::new(Mutex::new(None::<String>));
 
     let mut handle = russh::client::connect(
         config,
@@ -1194,6 +1286,7 @@ pub async fn ssh_connect(
             tab_id: tab_id.clone(),
             app: app.clone(),
             decisions: decision_state.inner().clone(),
+            disconnect_reason: Arc::clone(&disconnect_reason),
         },
     )
         .await
@@ -1402,6 +1495,7 @@ pub async fn ssh_connect(
     let cwd = Arc::new(Mutex::new(None::<String>));
     let cwd_reader = Arc::clone(&cwd);
     let filtering_reader = Arc::clone(&filtering);
+    let reason_reader = Arc::clone(&disconnect_reason);
     tokio::spawn(async move {
         // 跨块字符 carry：SSH channel 数据可切在 UTF-8 多字节序列中间，
         // 单块 from_utf8_lossy 会把半截字符变成 U+FFFD（�）
@@ -1496,11 +1590,16 @@ pub async fn ssh_connect(
                             }
                         }
                         Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) => {
-                            let _ = app2.emit("ssh-disconnected", json!({ "tabId": tid, "rendererId": rid }));
+                            let path = if matches!(msg, Some(russh::ChannelMsg::Eof)) {
+                                "channel-eof"
+                            } else {
+                                "channel-closed"
+                            };
+                            emit_ssh_disconnected(&app2, &tid, &rid, path, &reason_reader);
                             break;
                         }
                         None => {
-                            let _ = app2.emit("ssh-disconnected", json!({ "tabId": tid, "rendererId": rid }));
+                            emit_ssh_disconnected(&app2, &tid, &rid, "session-ended", &reason_reader);
                             break;
                         }
                         _ => {}
@@ -1537,6 +1636,7 @@ pub async fn ssh_connect(
                 sftp_transfer,
                 transfer_cancels: cancels.clone(),
                 cwd,
+                disconnect_reason,
             }),
         );
     }
@@ -1586,7 +1686,13 @@ pub async fn ssh_disconnect(
     let close_handle = {
         let mut map = state.lock();
         match map.remove(&tab_id) {
-            Some(SessionType::Ssh(session)) => Some(session.handle.clone()),
+            Some(SessionType::Ssh(session)) => {
+                // Pre-fill the reason slot so the handler's disconnected()
+                // labels this as a user-initiated close instead of reporting
+                // russh's information-free Error::Disconnect.
+                *session.disconnect_reason.lock() = Some("closed by user".to_string());
+                Some(session.handle.clone())
+            }
             _ => None,
         }
     };
@@ -1771,6 +1877,8 @@ pub async fn pty_destroy(
                             c.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
+                    // Same pre-fill as ssh_disconnect: user-initiated close.
+                    *s.disconnect_reason.lock() = Some("closed by user".to_string());
                     Some(s.handle.clone())
                 }
             },
@@ -3936,5 +4044,41 @@ mod tests {
         assert!(center_on_any_monitor(-1920, 540, &two), "左屏左边缘在内");
         assert!(!center_on_any_monitor(-1921, 540, &two));
         assert!(!center_on_any_monitor(2000, 540, &two));
+    }
+
+    #[test]
+    fn ssh_client_config_keepalive() {
+        let c = ssh_client_config();
+        // Keepalive on, inactivity timeout off: an idle-but-alive session is
+        // exactly what a terminal must keep; silent death must surface fast.
+        assert_eq!(
+            c.keepalive_interval,
+            Some(std::time::Duration::from_secs(30))
+        );
+        assert_eq!(c.inactivity_timeout, None);
+        assert_eq!(c.keepalive_max, 3);
+    }
+
+    #[test]
+    fn classify_disconnect_kinds() {
+        use russh::client::DisconnectReason as R;
+        let (k, t) = classify_disconnect(&R::Error(russh::Error::KeepaliveTimeout));
+        assert_eq!(k, "keepalive");
+        assert!(t.contains("keepalive"), "text should name the cause: {t}");
+        // Bare Disconnect is the user-initiated / information-free path.
+        let (k, _) = classify_disconnect(&R::Error(russh::Error::Disconnect));
+        assert_eq!(k, "closed");
+        let (k, t) = classify_disconnect(&R::ReceivedDisconnect(
+            russh::client::RemoteDisconnectInfo {
+                reason_code: russh::Disconnect::ByApplication,
+                message: "session terminated".to_string(),
+                lang_tag: String::new(),
+            },
+        ));
+        assert_eq!(k, "server");
+        assert!(t.contains("session terminated"), "server message kept: {t}");
+        // Any other error maps to the generic error kind.
+        let (k, _) = classify_disconnect(&R::Error(russh::Error::InactivityTimeout));
+        assert_eq!(k, "error");
     }
 }
