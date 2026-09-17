@@ -411,7 +411,7 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
 });
 
 // ── IPC: SSH disconnected ──
-ipcRenderer.on('ssh-disconnected', (event, { tabId, rendererId }) => {
+ipcRenderer.on('ssh-disconnected', (event, { tabId, rendererId, reason, path }) => {
     // The filter may be stuck mid-sync-block from the dead session; drop it so
     // a reconnect cannot inherit a filter that swallows all fresh output.
     _resetCaretFilterById(tabId);
@@ -419,24 +419,51 @@ ipcRenderer.on('ssh-disconnected', (event, { tabId, rendererId }) => {
     if (TabManager._consumeClosed(tabId)) {
         return;
     }
+    const line = '\r\n\x1b[33m[SSH Disconnected]\x1b[0m' + (reason ? ` \x1b[2m${reason}\x1b[0m` : '') + '\r\n';
     for (const tab of TabManager.tabs) {
         if (tab.splitRoot) {
             const pane = getAllPanes(tab).find(p => p.tabId === tabId || p.requestId === rendererId);
             if (pane) {
                 tab.connected = false;
                 _updatePaneDot(pane, false);
-                if (pane.term) pane.term.write('\r\n\x1b[33m[SSH Disconnected]\x1b[0m\r\n');
+                if (pane.term) pane.term.write(line);
                 TabManager.render();
                 TabManager.updateStatus();
                 return;
             }
         } else if (tab.tabId === tabId || tab.id === rendererId) {
             tab.connected = false;
-            if (tab.term) tab.term.write('\r\n\x1b[33m[SSH Disconnected]\x1b[0m\r\n');
+            if (tab.term) tab.term.write(line);
             TabManager.render();
             TabManager.updateStatus();
             return;
         }
+    }
+});
+
+// ── IPC: SSH disconnect reason (session-level, from russh's disconnected() callback) ──
+// Arrives independently of ssh-disconnected — the channel reader usually
+// wins the race, so the reason typically lands AFTER the disconnect line.
+// Append it as a dim line, but only onto a tab that is actually in the
+// disconnected state; user-initiated closes (kind "closed") go to the
+// console only, since the user knows they closed it.
+ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason, at }) => {
+    console.debug('[ssh] disconnect reason:', { tabId, kind, reason, at: at ? new Date(at).toISOString() : null });
+    if (kind === 'closed' || !reason) return;
+    for (const tab of TabManager.tabs) {
+        let term = null;
+        if (tab.splitRoot) {
+            const pane = getAllPanes(tab).find(p => p.tabId === tabId);
+            if (pane) term = pane.term;
+            else continue;
+        } else if (tab.tabId === tabId) {
+            term = tab.term;
+        } else continue;
+        if (term && !tab.connected) {
+            const ts = at ? new Date(at).toLocaleTimeString() : '';
+            term.write(`\x1b[2m[SSH] ${reason}${ts ? ' · ' + ts : ''}\x1b[0m\r\n`);
+        }
+        return;
     }
 });
 
