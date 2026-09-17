@@ -199,8 +199,17 @@
 
     // Minimal SGR tracker: we only need "truecolor fg AND bg both set" for
     // the sync-form caret signature, SGR 7/27 reverse for the frame-form
-    // signature, and "default colors" for the plain convention.
-    let sgr = { fg: null, bg: null, isDefault: true, rev: false };
+    // signature, and "default colors" for the plain convention. The default
+    // state is DERIVED from fg/bg/rev/attrs — partial resets (39/49/22/…)
+    // must be able to return to it. Live finding 2026-09-17: claude's
+    // banner uses 38;5/48;5 palette colors and SGR 1 … 22 (bold on/off),
+    // which stranded the old monotonic isDefault flag and blocked every
+    // checkpoint recovery ('non-default-style') while the real terminal
+    // was verifiably back at defaults (xterm attr.fg/bg/ext all 0).
+    const ATTR_BOLD = 1, ATTR_DIM = 2, ATTR_ITALIC = 4, ATTR_UNDERLINE = 8,
+      ATTR_BLINK = 16, ATTR_INVISIBLE = 32, ATTR_STRIKE = 64, ATTR_OTHER = 128;
+    let sgr = { fg: null, bg: null, rev: false, attrs: 0 };
+    function sgrDefault() { return sgr.fg === null && sgr.bg === null && !sgr.rev && sgr.attrs === 0; }
 
     // Bare reverse-caret gesture (claude code form, verified 2026-09-15 rig
     // capture): NO sync blocks and NO frame prefix — the app just emits
@@ -216,7 +225,7 @@
     function bareRevTurnOn() {
       bareRev = {
         on: true,
-        valid: positionKnown && barePositionStep === 3 && sgr.isDefault && sgr.fg === null && sgr.bg === null,
+        valid: positionKnown && barePositionStep === 3 && sgrDefault(),
         count: 0,
         char: null,
       };
@@ -244,24 +253,47 @@
     }
 
     function applySgr(params) {
-      const ps = params === '' ? [] : params.split(';').map(p => parseInt(p, 10) || 0);
+      // ECMA-48: an empty SGR parameter list means [0] (full reset). Real
+      // prompts emit ESC[m (claude's ❯ does); treating it as a no-op would
+      // leave the style tracker dirty forever and block both the plain
+      // convention and every checkpoint recovery.
+      const ps = params === '' ? [0] : params.split(';').map(p => parseInt(p, 10) || 0);
       let i = 0;
-      const next = { fg: sgr.fg, bg: sgr.bg, isDefault: sgr.isDefault, rev: sgr.rev };
+      const next = { fg: sgr.fg, bg: sgr.bg, rev: sgr.rev, attrs: sgr.attrs };
       while (i < ps.length) {
         const p = ps[i];
         if (p === 0) {
           if (sgr.rev) bareRevTurnOff();
-          next.fg = null; next.bg = null; next.isDefault = true; next.rev = false;
+          next.fg = null; next.bg = null; next.rev = false; next.attrs = 0;
         }
         else if (p === 38 && ps[i + 1] === 2) {
-          next.fg = `${ps[i + 2]};${ps[i + 3]};${ps[i + 4]}`; next.isDefault = false; i += 4;
+          next.fg = `${ps[i + 2]};${ps[i + 3]};${ps[i + 4]}`; i += 4;
+        } else if (p === 38 && ps[i + 1] === 5) {
+          next.fg = `idx${ps[i + 2]}`; i += 2;
         } else if (p === 48 && ps[i + 1] === 2) {
-          next.bg = `${ps[i + 2]};${ps[i + 3]};${ps[i + 4]}`; next.isDefault = false; i += 4;
+          next.bg = `${ps[i + 2]};${ps[i + 3]};${ps[i + 4]}`; i += 4;
+        } else if (p === 48 && ps[i + 1] === 5) {
+          next.bg = `idx${ps[i + 2]}`; i += 2;
         } else if (p === 39) { next.fg = null; }           // default fg selector
         else if (p === 49) { next.bg = null; }             // default bg selector
         else if (p === 7) { bareRevTurnOn(); next.rev = true; }  // reverse video: tracked separately
         else if (p === 27) { bareRevTurnOff(); next.rev = false; } // reverse off restores the plain convention
-        else { next.isDefault = false; }                    // any other attribute
+        else if (p === 1) next.attrs |= ATTR_BOLD;
+        else if (p === 2) next.attrs |= ATTR_DIM;
+        else if (p === 3) next.attrs |= ATTR_ITALIC;
+        else if (p === 4) next.attrs |= ATTR_UNDERLINE;
+        else if (p === 5) next.attrs |= ATTR_BLINK;
+        else if (p === 8) next.attrs |= ATTR_INVISIBLE;
+        else if (p === 9) next.attrs |= ATTR_STRIKE;
+        else if (p === 22) next.attrs &= ~(ATTR_BOLD | ATTR_DIM);
+        else if (p === 23) next.attrs &= ~ATTR_ITALIC;
+        else if (p === 24) next.attrs &= ~ATTR_UNDERLINE;
+        else if (p === 25) next.attrs &= ~ATTR_BLINK;
+        else if (p === 28) next.attrs &= ~ATTR_INVISIBLE;
+        else if (p === 29) next.attrs &= ~ATTR_STRIKE;
+        else if ((p >= 30 && p <= 37) || (p >= 90 && p <= 97)) next.fg = `c${p}`;
+        else if ((p >= 40 && p <= 47) || (p >= 100 && p <= 107)) next.bg = `c${p}`;
+        else next.attrs |= ATTR_OTHER;                      // any other attribute
         i += 1;
       }
       sgr = next;
@@ -370,7 +402,7 @@
         if (unitMode === 'sync' && unit && unit.caret && !unit.visibleTail
           && /^[1-9]\d*;[1-9]\d*$/.test(params)
           && row === unit.caret.row && col === unit.caret.col
-          && sgr.isDefault && !sgr.rev && sgr.fg === null && sgr.bg === null) {
+          && sgrDefault()) {
           unit.visibleTail = 1;
         }
         // Frame-form completion: the first absolute park AFTER a caret
@@ -429,7 +461,7 @@
         // just advance the cursor.
         const w = charWidth(ch);
         if (unit.writes.length < 16384) unit.writes.push([row - 1, col - 1]); // 0-based, matches descriptor coords
-        const truecolorCaret = sgr.fg !== null && sgr.bg !== null && !sgr.isDefault;
+        const truecolorCaret = /^\d+;\d+;\d+$/.test(sgr.fg ?? '') && /^\d+;\d+;\d+$/.test(sgr.bg ?? '');
         const reverseCaret = sgr.rev;
         if (truecolorCaret || reverseCaret) {
           // Caret-signature styled single char at the current position.
@@ -440,7 +472,7 @@
           }
         } else {
           unit.sawPlain = true;
-          if (!sgr.isDefault) unit.plainAttrOk = false; // plain writes must use the default convention
+          if (!sgrDefault()) unit.plainAttrOk = false; // plain writes must use the default convention
         }
         col += w;
         if (col > cols) { col = cols; pendingWrap = true; }
@@ -522,7 +554,7 @@
         if (!point || point.seq !== chunkSeq) { checkpointReason = 'stale-watermark'; return false; }
         if (buffer || unit || inSync || bareRev.on) { checkpointReason = 'open-lexical-unit'; return false; }
         if (point.safe !== true) { checkpointReason = 'unsupported-parser-state'; return false; }
-        if (!sgr.isDefault || sgr.fg !== null || sgr.bg !== null || sgr.rev) { checkpointReason = 'non-default-style'; return false; }
+        if (!sgrDefault()) { checkpointReason = 'non-default-style'; return false; }
         if (point.rows !== rows || point.cols !== cols || !Number.isInteger(point.x) || !Number.isInteger(point.y)
           || point.x < 0 || point.x > cols || point.y < 0 || point.y >= rows) {
           checkpointReason = 'invalid-geometry'; return false;

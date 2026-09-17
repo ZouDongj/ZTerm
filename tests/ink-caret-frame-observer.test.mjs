@@ -202,6 +202,54 @@ test('claude derived native chunks (mid-sequence cuts) preserve candidates', () 
   assert.deepEqual(cands.map(c => [c.x, c.y, c.char]), expected);
 });
 
+test('ESC[m (empty-param SGR) resets the plain convention like ESC[0m', () => {
+  // claude's ❯ prompt styles with SGR(1;32) then resets with ESC[m. If the
+  // empty parameter list is not treated as [0], the style tracker stays
+  // dirty forever: bare gestures lose validity and every checkpoint
+  // recovery fails with 'non-default-style' (2026-09-17 live rig finding).
+  const gesture = '\r\x1b[3C\x1b[1A\x1b[7m \x1b[27m';
+  assert.equal(collect('\x1b[5;10H\x1b[1;32m❯\x1b[m' + gesture).cands.length, 1, 'bare gesture after ESC[m');
+  assert.equal(collect('\x1b[5;10H\x1b[1;32m❯\x1b[0m' + gesture).cands.length, 1, 'control: explicit SGR 0');
+  assert.equal(collect('\x1b[5;10H\x1b[1;32m❯' + gesture).cands.length, 0, 'control: still-dirty style blocks the gesture');
+});
+
+test('ESC[m unblocks checkpoint recovery after a styled prompt', () => {
+  const obs = createInkCaretObserver({ rows: 24, cols: 80 });
+  const dirty = obs.push('\x1b[1;32m\x1b7'); // dirty style + unmodeled save: position lost
+  assert.equal(obs.state().positionKnown, false);
+  assert.equal(obs.checkpoint({ seq: dirty.chunkSeq, safe: true, x: 0, y: 0, rows: 24, cols: 80 }), false);
+  assert.equal(obs.state().checkpointReason, 'non-default-style');
+  const reset = obs.push('\x1b[m');
+  assert.equal(obs.checkpoint({ seq: reset.chunkSeq, safe: true, x: 0, y: 0, rows: 24, cols: 80 }), true);
+  assert.equal(obs.state().positionKnown, true);
+});
+
+test('partial style resets (38;5 colors, 1/22 bold, 39/49) return to the default convention', () => {
+  // claude's boot banner (live capture 2026-09-17): palette fg/bg colors
+  // cleared by 39/49, bold set with SGR 1 and cleared with SGR 22 — all
+  // WITHOUT a full SGR 0. The tracker must derive the default state back;
+  // the old monotonic isDefault flag stranded every checkpoint recovery
+  // ('non-default-style') while the real terminal was back at defaults.
+  const banner = '\x1b[38;5;174m ▐\x1b[48;5;16m▛███▛█\x1b[12G\x1b[39m\x1b[49m\x1b[1mClaude\x1b[19GCode\x1b[24G\x1b[22m\x1b[38;5;246mv2\x1b[39m';
+  const gesture = '\r\x1b[3C\x1b[1A\x1b[7m \x1b[27m';
+  assert.equal(collect('\x1b[5;10H' + banner + gesture).cands.length, 1, 'bare gesture after banner-style partial resets');
+  const obs = createInkCaretObserver({ rows: 24, cols: 80 });
+  obs.push('\x1b[5;10H\x1b7' + banner); // lost position, then the banner
+  assert.equal(obs.state().positionKnown, false);
+  const tail = obs.push('');
+  assert.equal(obs.checkpoint({ seq: tail.chunkSeq, safe: true, x: 0, y: 0, rows: 24, cols: 80 }), true, 'checkpoint after partial resets');
+});
+
+test('a lingering attribute still blocks checkpoint recovery (control)', () => {
+  // The plain convention must stay strict: attributes with no reset at all
+  // keep the style non-default and the checkpoint refuses.
+  const obs = createInkCaretObserver({ rows: 24, cols: 80 });
+  const dirty = obs.push('\x1b[5;10H\x1b7\x1b[1m'); // bold, never cleared
+  assert.equal(obs.state().positionKnown, false);
+  assert.equal(obs.checkpoint({ seq: dirty.chunkSeq, safe: true, x: 0, y: 0, rows: 24, cols: 80 }), false);
+  assert.equal(obs.state().checkpointReason, 'non-default-style');
+});
+
 test('a multi-character reverse run is NOT a bare caret gesture', () => {
   // Menu selection / highlighted word: rev spans several printables before
   // turning off — must not produce a candidate (decidability: only the
