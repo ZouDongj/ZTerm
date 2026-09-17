@@ -13,16 +13,22 @@
 // 退出码：全部通过为 0，任一失败为 1。
 // 依赖：Node 22+（全局 fetch / WebSocket），无第三方包。
 
-import { spawn, execSync } from 'node:child_process';
+import { spawn, execSync, execFileSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
+import { createServer } from 'node:net';
+import { createE2eSandbox, ownsProcess, restartOwnedApp } from './e2e-isolation.mjs';
 
-const EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
+const SOURCE_EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
+let EXE = SOURCE_EXE;
 const PORT = Number(process.argv[3] ?? 9222);
+let sandbox = null;
+let ownedChild = null;
+let launchCount = 0;
 
 // ── 启动 exe（带 WebView2 远程调试）──
-const DATA_CONFIG = resolve(dirname(EXE), 'data', 'config.json');
+let DATA_CONFIG = null;
 let configBackup = null;
 // null = unknown (backup never ran or failed) — restoreConfig must NEVER
 // delete the live config in that state. This guard exists because a silent
@@ -68,47 +74,60 @@ function restoreConfig() {
   configExistedAtStart = null;
 }
 
-// A live zterm.exe at e2e start is usually the USER's session (the restart
-// section only relaunches e2e's own instance mid-run). Killing it via
-// killExisting would destroy their work and drop SSH sessions — abort and
-// let the operator close it instead.
-function detectRunningInstance() {
-  try {
-    const out = execSync('tasklist /FI "IMAGENAME eq zterm.exe" /FO CSV /NH', { encoding: 'utf8' });
-    return /zterm\.exe/i.test(out);
-  } catch {
-    return false;
-  }
-}
-
-// /T is mandatory: plain /F kills only zterm.exe and orphans the PTY children
-// (bash.exe + ConPTY OpenConsole.exe). Orphaned MSYS2 processes keep holding
-// cygwin console slots, and past ~128 of them new Git Bash sessions die with
-// "console device allocation failure".
+// Only the exact process launched from this fresh sandbox may be terminated.
+// Never use an image-name kill: even a failed preflight runs the exit hook.
 function killExisting() {
-  try { execSync('taskkill /IM zterm.exe /T /F', { stdio: 'ignore' }); } catch {}
+  const child = ownedChild;
+  if (!sandbox || !child?.pid || child.exitCode !== null) { ownedChild = null; return true; }
+  try {
+    const output = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      `Get-CimInstance Win32_Process -Filter 'ProcessId=${child.pid}' | Select-Object ProcessId,ExecutablePath | ConvertTo-Json -Compress`], { encoding: 'utf8' }).trim();
+    const actual = output ? JSON.parse(output) : null;
+    if (!actual) { ownedChild = null; return true; }
+    if (!ownsProcess(child, EXE, actual)) {
+      console.error('[e2e] refusing cleanup: process ownership mismatch');
+      return false;
+    }
+    execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    ownedChild = null;
+    return true;
+  } catch (error) { console.error('[e2e] owned process cleanup failed:', error.message); return false; }
 }
 // Safety net for exit paths that skip the explicit killExisting() calls
 // (unexpected early throw, unhandled rejection): never leave a PTY tree behind.
 process.on('exit', () => killExisting());
 
 function startApp() {
+  if (ownedChild) throw new Error('Previous owned process has not been released');
   // Fresh, unique browser profile per launch: WebView2 browser processes on
   // this machine can outlive their host for a long while, and a relaunch
   // onto the same profile attaches to the half-dead browser — the debug
   // port then never opens (30s+ hangs). A never-used profile has no stale
   // browser to attach to.
-  const udf = join(process.env.TEMP || '.', `zterm-e2e-udf-${Date.now()}`);
+  const udf = join(sandbox.directory, `webview-${++launchCount}`);
   const child = spawn(EXE, [], {
     detached: true,
     stdio: 'ignore',
     env: {
       ...process.env,
+      APPDATA: sandbox.appData,
+      LOCALAPPDATA: sandbox.appData,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`,
       WEBVIEW2_USER_DATA_FOLDER: udf,
     },
   });
+  ownedChild = child;
+  child.on('error', error => console.error('[e2e] isolated launch failed:', error.message));
   child.unref();
+}
+
+async function assertUnusedPort() {
+  if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) throw new Error('Invalid CDP port');
+  await new Promise((resolvePromise, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(PORT, '127.0.0.1', () => server.close(resolvePromise));
+  });
 }
 
 async function waitForPage(timeoutMs = 30000) {
@@ -190,11 +209,12 @@ async function waitForValue(cdp, expression, expected, timeoutMs = 8000, mode = 
 }
 
 async function main() {
-  if (!existsSync(EXE)) throw new Error(`exe 不存在: ${EXE}`);
-  if (detectRunningInstance()) {
-    throw new Error('检测到正在运行的 zterm.exe（可能是用户会话）。请先手动关闭再跑 e2e——自动强杀会丢失用户终端会话');
-  }
-  console.log(`E2E 检查: ${EXE}\n`);
+  if (!existsSync(SOURCE_EXE)) throw new Error(`exe 不存在: ${SOURCE_EXE}`);
+  await assertUnusedPort();
+  sandbox = createE2eSandbox(SOURCE_EXE);
+  EXE = sandbox.exe;
+  DATA_CONFIG = join(sandbox.directory, 'data', 'config.json');
+  console.log(`E2E source: ${SOURCE_EXE}\nIsolated runtime: ${sandbox.directory}\n`);
 
   killExisting();
   backupConfig();
@@ -210,6 +230,10 @@ async function main() {
     // renderer/*.js 尚未执行，_settingsConfig 未定义——以 settings 就绪
     // （loadSettings 已跑）作为"脚本已执行"的硬标志，防止 eval 打在旧文档上。
     await waitForValue(cdp, `document.readyState === 'complete' && typeof _settingsConfig === 'object' && !!TabManager`, true, 20000);
+    const runtimeData = await cdp.eval(`ipcRenderer.invoke('get-data-dir-info')`);
+    if (resolve(runtimeData.current).toLowerCase() !== resolve(dirname(DATA_CONFIG)).toLowerCase()) {
+      throw new Error('Connected runtime is not using the isolated E2E configuration');
+    }
 
     // 0. 启动界面：结构正确（只显示图标 + 绿点动画）+ 首帧渲染后自动淡出（最多等 5s）；兜底主动隐藏防遮挡后续检查
     const splashExists = await cdp.eval(`!!document.getElementById('startup-splash')`);
@@ -381,6 +405,13 @@ async function main() {
     //     大面积丢字（实测 echo 后仅个别字符产生 onData），键盘→onData 半截
     //     属于 xterm 自身代码，由 Ghostty 输入链路检查另行覆盖。
     const MARKER = 'ZTERM-E2E-42';
+    const diagnosticArm = await cdp.eval(`(async () => {
+      const pane = getAllPanes(TabManager.getActive())[0];
+      if (!pane?.tabId || !window.ZTermDiagnostics) return { enabled: false };
+      ZTermDiagnostics.start({ durationMs: 10000, maxRecords: 1024 });
+      return await ZTermDiagnostics.native('arm', { tabId: pane.tabId, durationMs: 10000, capacity: 1024 });
+    })()`);
+    check('诊断原生接口可显式启用', diagnosticArm.enabled === true, `enabled=${diagnosticArm.enabled}`);
     const chainProbe = await cdp.eval(`(() => {
       const tab = TabManager.getActive();
       const pane = getAllPanes(tab)[0];
@@ -403,6 +434,21 @@ async function main() {
       await sleep(400);
     }
     check('本地 PTY 全链路：按键回显进入 buffer（flusher+IPC）', markerFound === true, markerFound ? 'echoed' : (chainProbe.why || 'marker-not-found'));
+    const diagnosticResult = await cdp.eval(`(async () => {
+      const native = await ZTermDiagnostics.native('stop');
+      ZTermDiagnostics.stop();
+      const frontend = ZTermDiagnostics.snapshot();
+      const serialized = JSON.stringify({ frontend, native });
+      return {
+        nativeKinds: native.events.map(e => e.kind),
+        frontendKinds: frontend.records.map(e => e.type),
+        hasTerminalContent: serialized.includes('${MARKER}'),
+        frontendStopped: !frontend.enabled, nativeStopped: !native.enabled,
+      };
+    })()`);
+    check('本地诊断记录实际读写边界', ['input-invoke', 'write-begin', 'write-end', 'raw-read', 'output-emit'].every(k => diagnosticResult.nativeKinds.includes(k)), JSON.stringify(diagnosticResult.nativeKinds));
+    check('前端诊断记录实际接收与解析', ['input-send', 'receive', 'parsed'].every(k => diagnosticResult.frontendKinds.includes(k)), JSON.stringify(diagnosticResult.frontendKinds));
+    check('普通诊断不包含终端正文且可停止', !diagnosticResult.hasTerminalContent && diagnosticResult.frontendStopped && diagnosticResult.nativeStopped);
     // 平滑光标 adapter 真实挂载断言：bind 失败只 console.warn，旧检查（overlay DOM
     // count===0）对 adapter 恒真，无法区分"动画在跑"和"静默降级到原生光标"。
     check('WebGL 平滑光标 adapter 已挂载', chainProbe.ok === true && chainProbe.hasAdapter === true, JSON.stringify(chainProbe));
@@ -566,7 +612,7 @@ async function main() {
       writeFileSync(DATA_CONFIG, JSON.stringify(cfg), 'utf8');
     }
     async function restartAndConnect() {
-      killExisting();
+      await restartOwnedApp({ stop: killExisting, start: startApp, waitUntilQuiet: async () => {
       await sleep(800);
       // Wait out the WebView2 teardown before relaunching: taskkill /T /F
       // signals the whole tree, but the browser processes can outlive the
@@ -577,12 +623,14 @@ async function main() {
       const portQuiet = Date.now() + 15000;
       while (Date.now() < portQuiet) {
         try {
-          await fetch(`http://127.0.0.1:${PORT}/json/version`);
+          await fetch(`http://127.0.0.1:${PORT}/json/version`, { signal: AbortSignal.timeout(1000) });
           await sleep(400);
           continue;
         } catch { break; } // connection refused → old browser is gone
       }
-      startApp();
+      // A timed-out probe is not proof that the listener exited.
+      await assertUnusedPort();
+      } });
       const url = await waitForPage();
       const c2 = new Cdp(url);
       await c2.connect();
@@ -624,8 +672,9 @@ async function main() {
     await sleep(500);
   } finally {
     cdp.close();
-    killExisting();
+    const stopped = killExisting();
     restoreConfig();
+    if (!stopped) throw new Error('Owned runtime cleanup failed');
   }
 
   const failed = results.filter((r) => !r.pass);

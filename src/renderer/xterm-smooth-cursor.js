@@ -6,6 +6,8 @@
   const MAX_TIMESTAMPS = 128;
   const MAX_CAPTURE_FRAMES = 12;
   const RGB_COLOR_MODE = 0x03000000;
+  // xterm AttributeData/FgFlags.INVERSE, verified against the bundled parser.
+  const INVERSE_ATTR_FLAG = 0x04000000;
   const EXTENDED_ATTR_FLAG = 0x10000000;
 
   function finite(value, fallback = 0) {
@@ -52,6 +54,7 @@
       retargets: [],
       drawTimestamps: [],
       drawPassStatus: 'idle',
+      customDrawSource: 'none',
       scheduler: 'xterm-render-service',
       presentationSemantics: 'WebGL draw submission timestamps, not presented FPS',
     };
@@ -91,39 +94,89 @@
       published: null,          // active descriptor
       runStreak: 0,             // consecutive candidate-bearing units
       watermark: 0,             // highest chunkSeq xterm has parsed
+      enqueued: 0,              // newest raw chunk awaiting its write callback
       generation: 0,            // coordinate-space epoch
       candidateGeneration: 0,
       bufferType: null,
       active: false,
       lastRestoreRow: null,
-      latchedBg: null,          // cell bg attribute latched at first post-publish draw
     };
 
+    function clearSoftwareVisual() {
+      if (sw.lastRestoreRow === null) return;
+      const staleRows = new Set([sw.lastRestoreRow, lastDrawnRow]);
+      sw.lastRestoreRow = null;
+      lastDrawnRow = null;
+      instrumentation.customDrawSource = 'none';
+      for (const stale of staleRows) {
+        if (stale !== null) {
+          try { originalRenderRows.call(renderer, stale, stale); } catch (error) { /* mid-dispose */ }
+        }
+      }
+    }
+
     function revokeSoftware(reason) {
-      if (!sw.active) return;
+      const hadDescriptor = sw.active || sw.pending || sw.published;
       sw.active = false;
       sw.runStreak = 0;
+      sw.pending = null;
       sw.published = null;
+      if (!hadDescriptor) return;
       snapBeforeNextDraw = true;
       instrumentation.softwareCaret = { active: false, reason };
-      // Clean the pure-visual restore overlay: re-render the row from the
-      // (unmodified) buffer so the app's own caret cell shows again.
-      const stale = sw.lastRestoreRow;
-      sw.lastRestoreRow = null;
-      if (stale !== null) {
-        try { originalRenderRows.call(renderer, stale, stale); } catch (error) { /* mid-dispose */ }
-      }
+      clearSoftwareVisual();
       scheduleContinuation();
     }
 
+    function rgbAttribute(value) {
+      if (typeof value !== 'string' || !/^\d{1,3};\d{1,3};\d{1,3}$/.test(value)) return null;
+      const channels = value.split(';').map(Number);
+      if (channels.some(channel => channel > 255)) return null;
+      return RGB_COLOR_MODE | channels[0] << 16 | channels[1] << 8 | channels[2];
+    }
+
+    function softwareCellMatches(descriptor) {
+      if (!descriptor || !Number.isInteger(descriptor.x) || !Number.isInteger(descriptor.y)
+        || descriptor.x < 0 || descriptor.x >= terminal.cols || descriptor.y < 0 || descriptor.y >= terminal.rows
+        || sw.bufferType !== terminal.buffer.active.type) return false;
+      try {
+        const active = terminal.buffer.active;
+        const absoluteY = finite(active.viewportY, terminal._core?.buffer?.ydisp) + descriptor.y;
+        const line = terminal._core?.buffer?.lines?.get(absoluteY);
+        const cell = renderer._workCell;
+        if (!line || !cell || typeof line.loadCell !== 'function') return false;
+        line.loadCell(descriptor.x, cell);
+        if (cell.getChars() !== descriptor.char || cell.getWidth() !== descriptor.width) return false;
+        // Validate the observed convention, never latch whatever happens to
+        // occupy this coordinate. Reverse lives in fg, not bg. Decorations
+        // and palette colors have no verified default-color restore here.
+        if (descriptor.style === 'reverse') return cell.fg === INVERSE_ATTR_FLAG && cell.bg === 0;
+        if (descriptor.style !== 'truecolor') return false;
+        const fg = rgbAttribute(descriptor.fg);
+        const bg = rgbAttribute(descriptor.bg);
+        return fg !== null && bg !== null && cell.fg === fg && cell.bg === bg;
+      } catch (error) { return false; }
+    }
+
     const softwareCaretPort = {
+      generation() { return sw.generation; },
+      isParsed(seq) { return !disposed && seq === sw.enqueued && seq === sw.watermark; },
       // Raw-stream candidate (pre-parse): queue until its watermark.
       candidate(cand) {
         if (disposed || !cand) return;
+        sw.enqueued = Math.max(sw.enqueued, cand.chunkSeq);
         sw.runStreak += 1;
         sw.pending = { ...cand };
         sw.candidateGeneration = sw.generation;
         sw.bufferType = terminal.buffer.active.type;
+      },
+      // IPC calls this for every chunk, including chunks with no candidate.
+      // Suspend drawing before parsing, but retain the trusted source and
+      // motion anchor so an ordinary matching completion keeps smoothing.
+      enqueued(seq) {
+        if (disposed || !Number.isFinite(seq)) return;
+        sw.enqueued = Math.max(sw.enqueued, seq);
+        if (sw.enqueued > sw.watermark) clearSoftwareVisual();
       },
       // Completed unit without a candidate: NEUTRAL unless it wrote to the
       // candidate cell (contradiction → revoke + reset trust). Interleaved
@@ -150,21 +203,29 @@
       parsed(seq) {
         if (disposed) return;
         if (typeof seq === 'number' && seq > sw.watermark) sw.watermark = seq;
+        if (sw.enqueued > sw.watermark) return;
         if (sw.pending && sw.pending.chunkSeq <= sw.watermark && sw.candidateGeneration === sw.generation) {
+          if (!softwareCellMatches(sw.pending)) {
+            revokeSoftware('candidate-cell-mismatch');
+            return;
+          }
           sw.published = sw.pending;
-          sw.latchedBg = null; // re-latch the style anchor on every publish
           sw.pending = null;
           if (sw.runStreak >= 2 && !sw.active) {
             sw.active = true;
             snapBeforeNextDraw = true; // source switch never flies from the protocol anchor
             instrumentation.softwareCaret = { active: true, since: clock() };
           }
-          scheduleContinuation();
         }
+        if (sw.active) scheduleContinuation();
       },
       invalidate(reason) {
         sw.generation += 1;
         revokeSoftware('invalidate:' + (reason || 'unknown'));
+        if (reason === 'session-reset') {
+          sw.watermark = 0;
+          sw.enqueued = 0;
+        }
       },
     };
 
@@ -180,6 +241,7 @@
       const previousHidden = coreService.isCursorHidden;
       if (ownsCursor) coreService.isCursorHidden = true;
       instrumentation.drawPassStatus = 'base';
+      instrumentation.customDrawSource = 'none';
       try {
         originalRenderRows.call(renderer, start, end);
         instrumentation.baseDrawPasses += 1;
@@ -259,6 +321,7 @@
       instrumentation.target = { ...lastTarget };
       instrumentation.visual = { ...visual };
       instrumentation.cursorDrawPasses += 1;
+      instrumentation.customDrawSource = cursorBeforeBase.software ? 'software' : 'protocol';
       instrumentation.drawPassStatus = cursorStyle === 'block' ? 'base+rectangle+glyph' : 'base+rectangle';
 
       if (diagnostic.remaining > 0 && motion.animating && !diagnostic.held) {
@@ -348,6 +411,24 @@
     }
 
     function readCursor() {
+      if (sw.enqueued > sw.watermark) {
+        clearSoftwareVisual();
+        // The base renderer alone owns the uncommitted display. In
+        // particular, a visible protocol cursor must not become a second
+        // animated source while a software descriptor is suspended.
+        return { drawable: false };
+      }
+      // A proven visible-sync painted cell must not acquire a second,
+      // smoothed protocol cursor while its first descriptor earns trust.
+      // Keep the untouched base display until the normal two-unit takeover.
+      if (!sw.active && sw.runStreak === 1 && sw.published?.confirmedVisibleSync === true
+        && sw.candidateGeneration === sw.generation && softwareCellMatches(sw.published)) {
+        const active = terminal.buffer.active;
+        const viewportY = finite(active.viewportY, terminal._core?.buffer?.ydisp);
+        const protocolX = Math.max(0, Math.min(terminal.cols - 1, active.cursorX));
+        const protocolY = active.baseY + active.cursorY - viewportY;
+        if (protocolX === sw.published.x && protocolY === sw.published.y) return { drawable: false };
+      }
       // Software-caret source (ADR-0001 B2): when a trusted, watermark-
       // matched descriptor exists, IT defines the drawn cursor. DECTCEM is
       // ignored here on purpose (the app hides the protocol cursor and
@@ -360,26 +441,7 @@
         const inRange = y >= 0 && y < terminal.rows && sw.published.x >= 0 && sw.published.x < terminal.cols;
         const viewportY = finite(active.viewportY, terminal._core?.buffer?.ydisp);
         const absoluteY = viewportY + y;
-        let cellIntact = false;
-        if (inRange) {
-          try {
-            const line = terminal._core?.buffer?.lines?.get(absoluteY);
-            const cell = renderer._workCell;
-            if (line && cell && typeof line.loadCell === 'function') {
-              line.loadCell(sw.published.x, cell);
-              const charOk = cell.getChars() === sw.published.char;
-              // Style evidence (reviewer N2): compare the cell's RAW bg
-              // attribute number against the value latched at the first
-              // post-publish draw (format-agnostic — the public cell API in
-              // this build exposes no color accessors, and internal color
-              // encodings must not be guessed). A plain same-char rewrite
-              // (app removed its caret styling) changes bg and revokes.
-              if (sw.latchedBg === null) sw.latchedBg = cell.bg;
-              const styleOk = cell.bg === sw.latchedBg;
-              cellIntact = charOk && styleOk;
-            }
-          } catch (error) { cellIntact = false; }
-        }
+        const cellIntact = inRange && softwareCellMatches(sw.published);
         const bufferOk = sw.bufferType === null || sw.bufferType === active.type;
         if (inRange && bufferOk && cellIntact) {
           instrumentation.lastSoftwareCursor = { x: sw.published.x, y, char: sw.published.char, width: sw.published.width, focused, drawable: focused };
@@ -698,6 +760,19 @@
           lastRectangle: instrumentation.lastRectangle,
           lastGlyph: instrumentation.lastGlyph,
           drawPassStatus: instrumentation.drawPassStatus,
+          caretOwnership: {
+            customDrawSource: instrumentation.customDrawSource,
+            active: sw.active,
+            queued: sw.enqueued,
+            parsed: sw.watermark,
+            generation: sw.generation,
+            trustRun: sw.runStreak,
+            reason: [
+              'cell-overwritten', 'candidate-cell-mismatch', 'out-of-range', 'buffer-switch',
+              'invalidate:scroll', 'invalidate:resize', 'invalidate:session-reset',
+              'invalidate:observer:resize', 'invalidate:observer:unmodeled-coordinate-change',
+            ].includes(instrumentation.softwareCaret?.reason) ? instrumentation.softwareCaret.reason : null,
+          },
           scheduler: instrumentation.scheduler,
           presentationSemantics: instrumentation.presentationSemantics,
           retargets: instrumentation.retargets.map(function (record) {

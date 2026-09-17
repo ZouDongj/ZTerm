@@ -59,12 +59,46 @@ function _inkFeed(owner, tab, pane, data) {
             cols: term?.cols,
             onCandidate: c => port.candidate(c),
             onUnit: u => port.unit(u),
+            onInvalidate: reason => port.invalidate('observer:' + reason),
         });
     }
     // Scroll/wrap modeling needs the live geometry (cheap no-op normally).
     const liveTerm = (pane || tab)?.term;
     if (liveTerm) owner._inkObserver.setSize?.(liveTerm.rows, liveTerm.cols);
-    return owner._inkObserver.push(data).chunkSeq;
+    const seq = owner._inkObserver.push(data).chunkSeq;
+    port.enqueued?.(seq);
+    return { seq, port, adapter, observer: owner._inkObserver, term: liveTerm,
+        generation: port.generation?.(), epoch: owner._inkSessionEpoch || 0 };
+}
+
+function _inkParsedCheckpoint(ink) {
+    const term = ink.term;
+    if (!term || !ink.port.isParsed?.(ink.seq)) return;
+    const active = term.buffer?.active;
+    const core = term._core;
+    const buffer = core?.buffer;
+    const modes = core?.coreService?.decPrivateModes;
+    const attr = core?._inputHandler?._curAttrData;
+    const safe = !!active && !!buffer && !!modes && !!attr
+        && active.viewportY === active.baseY
+        && modes.origin === false && modes.wraparound === true && modes.reverseWraparound === false
+        && core.coreService.modes?.insertMode === false
+        && buffer.scrollTop === 0 && buffer.scrollBottom === term.rows - 1
+        && attr.fg === 0 && attr.bg === 0 && attr.extended?.ext === 0 && attr.extended?.urlId === 0;
+    ink.observer.checkpoint?.({ seq: ink.seq, safe, x: active?.cursorX, y: active?.cursorY,
+        rows: term.rows, cols: term.cols });
+}
+
+function _outputParsed(owner, ink, diagnostic) {
+    if (!ink && !diagnostic) return undefined;
+    return () => {
+        if (ink && (owner._inkSessionEpoch || 0) === ink.epoch && owner._smoothCursor?._adapter === ink.adapter
+            && owner._inkObserver === ink.observer && owner.term === ink.term) {
+            ink.port.parsed(ink.seq);
+            if (ink.port.generation?.() === ink.generation) _inkParsedCheckpoint(ink);
+        }
+        if (diagnostic) globalThis.ZTermDiagnostics?.parsed(diagnostic);
+    };
 }
 
 // Drop the caret filter at session boundaries. If a TUI left the filter in
@@ -82,6 +116,8 @@ function _resetCaretFilterById(tabId) {
     }
 }
 function _resetCaretState(owner) {
+    owner._inkSessionEpoch = (owner._inkSessionEpoch || 0) + 1;
+    if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(owner);
     delete owner._caretFilter;
     // Session reset: the ink observer's candidates belong to the dead
     // session's coordinate space — drop them and invalidate the descriptor.
@@ -89,7 +125,9 @@ function _resetCaretState(owner) {
     owner._smoothCursor?._adapter?.softwareCaretPort?.invalidate('session-reset');
 }
 
-ipcRenderer.on('pty-output', (event, { tabId, data }) => {
+ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
+    const diagnostics = globalThis.ZTermDiagnostics?.enabled ? globalThis.ZTermDiagnostics : null;
+    const diagnostic = diagnostics?.receive(tabId, data, nativeTrace);
     // Diagnostic-only RAW capture (ADR-0001 B0): grabs the stream BEFORE any
     // caret filtering so samples are pristine pre-filter evidence, not the
     // post-fix cache. Armed by probes/tests via globalThis.__ztRawCapture =
@@ -102,6 +140,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
         if (tab.splitRoot) {
             const pane = getAllPanes(tab).find(p => p.tabId === tabId);
             if (pane) {
+                diagnostics?.routed(diagnostic, pane, data);
                 if (!tab._contentBuffer) tab._contentBuffer = [];
                 // Observe the RAW bytes first (ADR B2), then the transport
                 // filter, then write with a parse-watermark callback.
@@ -109,9 +148,10 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
                 // ConPTY caret fix must run before buffering so the filter sees
                 // the full stream in order; ptyBuffers then holds repaired bytes.
                 if (typeof data === 'string' && data) data = _conPtyCaretFix(pane, data, pane.type || tab.type);
+                diagnostics?.filtered(diagnostic, data);
                 if (pane.term) {
                     pane.term.write(applyHighlight(data, tabId),
-                        inkSeq != null ? () => { pane._smoothCursor?._adapter?.softwareCaretPort?.parsed(inkSeq); } : undefined);
+                        _outputParsed(pane, inkSeq, diagnostic));
                 } else {
                     let _b = ptyBuffers[tabId] || ''; _b += data; if (_b.length > 1048576) _b = _b.slice(-524288); ptyBuffers[tabId] = _b;
                 }
@@ -119,9 +159,11 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
             }
         }
         if (tab.tabId === tabId) {
+            diagnostics?.routed(diagnostic, tab, data);
             if (!tab._contentBuffer) tab._contentBuffer = [];
             const inkSeq = _inkFeed(tab, tab, null, data);
             if (typeof data === 'string' && data) data = _conPtyCaretFix(tab, data, tab.type);
+            diagnostics?.filtered(diagnostic, data);
             // Track alternate screen (nvim, less, etc.) — don't save TUI content
             if (data.includes('\x1b[?1049h')) tab._altScreen = true;
             if (data.includes('\x1b[?1049l')) tab._altScreen = false;
@@ -140,7 +182,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data }) => {
                     delete ptyBuffers[tabId];
                 }
                 tab.term.write(applyHighlight(data, tabId),
-                    inkSeq != null ? () => { tab._smoothCursor?._adapter?.softwareCaretPort?.parsed(inkSeq); } : undefined);
+                    _outputParsed(tab, inkSeq, diagnostic));
             } else {
                 let _b = ptyBuffers[tabId] || ''; _b += data; if (_b.length > 1048576) _b = _b.slice(-524288); ptyBuffers[tabId] = _b;
             }
@@ -157,6 +199,7 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
             if (tab.splitRoot) {
                 const pane = findPane(tab, requestId) || getAllPanes(tab).find(p => p.requestId === requestId);
                 if (pane) {
+                    if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(pane);
                     pane.tabId = tabId;
                     wireTerminalToPane(tab, pane);
                     if (spawnError && pane.term) pane.term.write('\r\n\x1b[31m[ZTerm] 启动失败: ' + spawnError + '\x1b[0m\r\n');
@@ -165,6 +208,7 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
                     return;
                 }
             } else if (tab.id === requestId || tab._ptyRequestId === requestId) {
+                if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(tab);
                 delete tab._ptyRequestId;
                 if (!tab.term) {
                     wireTerminal(tab, tabId);
@@ -205,6 +249,7 @@ ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId }) => {
         if (tab.splitRoot) {
             const pane = findPane(tab, rendererId) || getAllPanes(tab).find(p => p.requestId === rendererId);
             if (pane) {
+                if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(pane);
                 pane.tabId = tabId;
                 // 保留模式（clearOnConnect=false）下终端已存在：不重建，否则保留的内容被替换成空终端
                 if (!pane.term) wireTerminalToPane(tab, pane);
@@ -215,6 +260,7 @@ ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId }) => {
                 return;
             }
         } else if (tab.id === rendererId) {
+            if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(tab);
             tab.tabId = tabId;
             if (!tab.term) wireTerminal(tab, tabId);
             if (tab.term) tab.term.write('\x1b[33mConnecting to ' + (tab.host || tab.name) + '...\x1b[0m\r\n');
@@ -505,4 +551,3 @@ ipcRenderer.on('ssh-hostkey-mismatch', (event, { tabId, host, oldAlgorithm, oldF
     overlay.classList.add('open');
     _activeHostkeyCleanup = cleanup;
 });
-
