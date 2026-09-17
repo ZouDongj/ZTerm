@@ -14,6 +14,9 @@ function _updatePaneDot(pane, connected) {
 // own reverse-video caret cell, which permanently hides the real cursor and
 // kills smooth-cursor animations inside TUI apps (herdr etc.). The filter is
 // per-tab/per-pane because it carries cross-chunk state (sync blocks, UTF-8).
+// The same stream position also answers the ConPTY bring-up handshake: the
+// filter swallows OpenConsole's opening DA1 probe and onDa1Query replies with
+// a VT220-class response, or the shell's first output stalls ~3s.
 function _conPtyCaretFix(owner, data, ownerType) {
     const factory = typeof createConPtyCaretFilter === 'function'
         ? createConPtyCaretFilter
@@ -29,7 +32,13 @@ function _conPtyCaretFix(owner, data, ownerType) {
         ? caretRepairAllowed
         : (typeof window !== 'undefined' ? window.__conPtyCaretInternals?.caretRepairAllowed : null);
     if (allowed ? !allowed(ownerType) : ownerType === 'ssh') return data;
-    if (!owner._caretFilter) owner._caretFilter = factory({ mode: 'fix' });
+    if (!owner._caretFilter) owner._caretFilter = factory({ mode: 'fix', onDa1Query: () => {
+        // OpenConsole blocks the shell's first output on a VT220-class DA1
+        // reply; xterm's own answer (ESC[?1;2c) is ignored by it, so the
+        // filter swallowed the query and we answer here instead.
+        const response = globalThis.__conPtyCaretInternals?.CONPTY_DA1_RESPONSE;
+        if (response && owner.tabId) ipcRenderer.send('pty-input', { tabId: owner.tabId, data: response });
+    } });
     const out = owner._caretFilter.push(data);
     return typeof out === 'string' ? out : data;
 }
@@ -193,7 +202,6 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
 
 // ── IPC: PTY created (local) ──
 ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
-    _resetCaretFilterById(tabId);
     if (requestId) {
         for (const tab of TabManager.tabs) {
             if (tab.splitRoot) {
@@ -201,6 +209,11 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
                 if (pane) {
                     if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(pane);
                     pane.tabId = tabId;
+                    // Owner-scoped reset: at this point the pane still carried
+                    // the PREVIOUS session's tabId, so a lookup by the new
+                    // tabId never matched (respawn would inherit the old
+                    // filter with da1Seen=1 and never answer the handshake).
+                    _resetCaretState(pane);
                     wireTerminalToPane(tab, pane);
                     if (spawnError && pane.term) pane.term.write('\r\n\x1b[31m[ZTerm] 启动失败: ' + spawnError + '\x1b[0m\r\n');
                     // 同步 fit + 立即上报尺寸：本地 pty 以 80x24 开启，缩短到真实尺寸的窗口
@@ -210,6 +223,7 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
             } else if (tab.id === requestId || tab._ptyRequestId === requestId) {
                 if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(tab);
                 delete tab._ptyRequestId;
+                _resetCaretState(tab); // see the split branch above
                 if (!tab.term) {
                     wireTerminal(tab, tabId);
                     if (spawnError && tab.term) tab.term.write('\r\n\x1b[31m[ZTerm] 启动失败: ' + spawnError + '\x1b[0m\r\n');

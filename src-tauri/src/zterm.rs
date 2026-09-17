@@ -883,6 +883,27 @@ pub async fn pty_create(
         .unwrap_or(false);
     let flush_ms = pty_flush_interval_ms(loose);
     let (writer_tx, mut writer_rx) = mpsc::channel::<LocalInput>(64);
+
+    // Announce the session BEFORE starting the output threads: the first
+    // output burst carries the ConPTY DA1 handshake, and a chunk that beats
+    // pty-created to the renderer would have no owner and be silently dropped.
+    {
+        let mut map = state.lock();
+        map.insert(
+            tab_id.clone(),
+            SessionType::Local(PtySession {
+                writer_tx,
+                flush_ms,
+                pair,
+                child,
+            }),
+        );
+    }
+    let _ = app.emit(
+        "pty-created",
+        json!({ "tabId": tab_id, "requestId": request_id }),
+    );
+
     let writer = Arc::new(Mutex::new(Some(writer)));
     let writer_for_task = writer.clone();
     let writer_tab_id = tab_id.clone();
@@ -969,23 +990,6 @@ pub async fn pty_create(
         let _ = app2.emit("pty-exit", json!({ "tabId": tid }));
     });
 
-    {
-        let mut map = state.lock();
-        map.insert(
-            tab_id.clone(),
-            SessionType::Local(PtySession {
-                writer_tx,
-                flush_ms,
-                pair,
-                child,
-            }),
-        );
-    }
-
-    let _ = app.emit(
-        "pty-created",
-        json!({ "tabId": tab_id, "requestId": request_id }),
-    );
     Ok(json!({ "tabId": tab_id, "requestId": request_id }))
 }
 
