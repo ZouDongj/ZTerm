@@ -22,7 +22,7 @@
     ],
     "windows": {
       "nsis": {
-        "installMode": "currentUser",
+        "installMode": "both",
         "languages": ["SimpChinese", "English"],
         "installerHooks": "./installer.nsh",
         "installerIcon": "../build/icon.ico",
