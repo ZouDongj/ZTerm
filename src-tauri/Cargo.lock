@@ -6575,7 +6575,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zterm"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
