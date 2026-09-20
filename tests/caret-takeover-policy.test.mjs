@@ -48,10 +48,13 @@ test('B1: real nav/delete samples keep every styled caret cell (content first)',
   }
 });
 
-test('B1: the painted-caret takeover mode never engages', () => {
+test('B1: the painted-caret takeover mode is gone from the state surface', () => {
+  // The takeover (glyph-evidence engagement) was removed; this guard pins
+  // the absence of its state field so a silent reintroduction trips red.
   for (const [name, raw] of samples) {
     const { state } = replay(raw);
-    assert.notEqual(state.paintedCaret, true, `${name}: paintedCaret must never engage`);
+    assert.equal('paintedCaret' in state, false,
+      `${name}: state() must not carry a paintedCaret engagement flag`);
   }
 });
 
@@ -62,38 +65,44 @@ test('B1: transport policy — SSH streams never enter the caret repair', () => 
   assert.equal(mod.caretRepairAllowed('local'), true, 'local ConPTY keeps its visibility repair');
 });
 
-test('B1: local visibility repair still consolidates transient hides (regression guard)', () => {
-  // The independently verified 2026-09-13 local ConPTY repair: after the app
-  // has genuinely shown the cursor (a shell prompt always does before a TUI
-  // launches), a visible frame's in-block ?25l churn is dropped and a
-  // block-end SHOW re-asserts visibility. This must survive the takeover
-  // removal.
+test('B1: a genuine SHOW does not unlock SHOW manufacturing for evidence-free frames', () => {
+  // 2026-09-18 sandbox captures (kimi/dsh-tui/bash panes, herdr 0.9.0):
+  // current herdr hides its console cursor once and paints pane carets as
+  // content, so frames arrive with in-block ?25l and NO painted-caret SGR —
+  // even though the shell showed the caret before the TUI launched. The old
+  // "shown once => every later hide is ConPTY's rewrite" premise manufactured
+  // a block-end SHOW per frame, parking a phantom protocol caret at each
+  // frame's final CUP (the far-right blinking caret reported while an agent
+  // works). Evidence-free frames must pass through raw.
   const frame = '\u001b[?2026h\u001b[?25l\u001b[30;70H\u001b[0;39;49ma\u001b[0m\u001b[30;71H\u001b[?25l\u001b[?2026l';
   const f = createConPtyCaretFilter({ mode: 'fix' });
   let out = '';
   out += f.push('\u001b[?25h'); // genuine app SHOW (shell prompt)
   out += f.push(frame);
   out += f.push(frame);
-  assert.ok(out.includes('\u001b[?25h'), 'block-end SHOW must re-assert visibility');
-  const churn = (out.match(/\u001b\[\?25l/g) || []).length;
-  assert.ok(churn <= 2, `transient hides should be consolidated (got ${churn})`);
+  const shows = (out.match(/\u001b\[\?25h/g) || []).length;
+  assert.equal(shows, 1, `only the genuine SHOW may survive (got ${shows})`);
+  const hides = (out.match(/\u001b\[\?25l/g) || []).length;
+  assert.equal(hides, 4, `evidence-free hides must forward untouched (got ${hides})`);
   assert.ok(out.includes('a'), 'content preserved');
 });
 
-test('B1: local ink stream keeps the verified churn repair (consolidated hides)', () => {
-  // LOCAL captures (dshtui-input.txt) have every hide consolidated INSIDE
-  // sync blocks by ConPTY — no out-of-block strays — so every frame starts
-  // visible and the 2026-09-13 user-verified repair re-asserts SHOW per
-  // frame: typing stays smooth with the real cursor riding the painted
-  // cell. Known B1 residual until B2: navigation/deletion diverges the two
-  // positions (double caret) locally.
+test('B1: ink painted-caret frames get no manufactured SHOW (B2 owns the caret)', () => {
+  // Live dsh-tui/kimi frames paint the caret as a styled CELL (truecolor
+  // fg+bg, one glyph) — the B2 software-caret candidate — inside sync blocks
+  // with NO conhost painted-caret SGR. The visibility repair must not fire
+  // here: every manufactured SHOW draws the protocol caret at the frame's
+  // final CUP on top of the app-painted caret (the double caret the user
+  // reported). The software caret (ink-caret-observer → xterm-smooth-cursor)
+  // renders this cursor instead.
   const frame = '\u001b[?2026h\u001b[?25l\u001b[30;70Hhi\u001b[0m\u001b[0;38;2;40;44;52;48;2;220;223;228md\u001b[0m\u001b[30;71H\u001b[?25l\u001b[?2026l';
   const f = createConPtyCaretFilter({ mode: 'fix' });
   let out = '';
   for (let i = 0; i < 6; i++) out += f.push(frame);
   const shows = (out.match(/\u001b\[\?25h/g) || []).length;
-  assert.ok(shows >= 5, `consolidated-hide frames must keep the SHOW repair (got ${shows})`);
+  assert.equal(shows, 0, `no SHOW may be manufactured without painted-caret evidence (got ${shows})`);
   assert.ok(out.includes('hi') && out.includes('d'), 'content preserved');
+  assert.ok(out.includes('\u001b[0;38;2;40;44;52;48;2;220;223;228md\u001b[0m'), 'styled caret cell preserved');
 });
 
 test('B1: an out-of-block hide sticks — hidden-start frames never force-shown', () => {
@@ -106,7 +115,7 @@ test('B1: an out-of-block hide sticks — hidden-start frames never force-shown'
   const frame = '\u001b[?2026h\u001b[?25l\u001b[30;70Hhi\u001b[0m\u001b[0;38;2;40;44;52;48;2;220;223;228md\u001b[0m\u001b[30;71H\u001b[?25l\u001b[?2026l';
   const f = createConPtyCaretFilter({ mode: 'fix' });
   f.push('\u001b[?25h'); // shell showed once
-  f.push(frame);          // repaired frame (fine)
+  f.push(frame);          // no painted evidence -> passthrough, still no SHOW
   let out = f.push(parkHide); // genuine out-of-block park+hide
   for (let i = 0; i < 3; i++) out += f.push(frame);
   const shows = (out.match(/\u001b\[\?25h/g) || []).length;

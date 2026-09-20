@@ -115,12 +115,15 @@ test('real detach stream passes through intact (alt-screen exit never freezes)',
         `nothing swallowed beyond transient hides (out=${out.length}, in=${inStr.length}, hides=${hidesIn})`);
 });
 
-test('dsh-tui capture: hide churn eliminated, caret continuously visible (real bytes)', () => {
-    // Real pre-filter capture of typing 5 keys into dsh-tui inside herdr
-    // (local PTY). The TUI redraws in ~10 sync blocks per keystroke and only
-    // ever hides the caret (?25h count 0 in the raw stream — ConPTY rewrote
-    // every app show to hide). Old filter behavior: 96 hide/show flickers ->
-    // animation cancelled on every key = the reported "choppy caret".
+test('dsh-tui-era capture without painted evidence passes through untouched (real bytes)', () => {
+    // 2026-09 capture of typing 5 keys into dsh-tui inside herdr: 12 sync
+    // blocks, 24 in-block hides, ZERO painted-caret cells. The pre-gate
+    // filter manufactured one SHOW per block anyway (visibleBefore self-
+    // sustained) and parked a protocol caret at each frame's final CUP —
+    // correct-looking only while the park happened to be the input box.
+    // Current herdr (verified 2026-09-18 sandbox, 0.9.0) hides its console
+    // cursor and draws pane carets as content, so a manufactured SHOW is a
+    // phantom caret (the far-right blinking one in kimi working frames).
     const s = readFileSync(join(here, 'fixtures', 'dshtui-input.txt'), 'latin1');
     const count = (re, t) => (t.match(re) || []).length;
     const blocks = count(/\x1b\[\?2026h/g, s);
@@ -130,9 +133,10 @@ test('dsh-tui capture: hide churn eliminated, caret continuously visible (real b
         const f = createConPtyCaretFilter({ mode: 'fix' });
         let out = '';
         for (let i = 0; i < s.length; i += size) out += f.push(s.slice(i, i + size));
-        assert.equal(count(/\x1b\[\?25l/g, out), 0, `size ${size}: no transient hides forwarded`);
-        assert.equal(count(/\x1b\[\?25h/g, out), blocks, `size ${size}: one SHOW per repaired frame`);
-        assert.ok(out.includes('\u001b[52;'), `size ${size}: caret park position preserved`);
+        assert.equal(count(/\x1b\[\?25h/g, out), 0, `size ${size}: no SHOW manufactured without painted evidence`);
+        assert.equal(count(/\x1b\[\?25l/g, out), count(/\x1b\[\?25l/g, s), `size ${size}: genuine hides forwarded`);
+        assert.equal(out, s, `size ${size}: stream passes through bit-exact`);
+        assert.equal(f.state().visible, false, `size ${size}: caret state stays hidden`);
     }
     // off mode stays bit-exact on the same fixture
     const fo = createConPtyCaretFilter({ mode: 'off' });
@@ -142,6 +146,39 @@ test('dsh-tui capture: hide churn eliminated, caret continuously visible (real b
     let outr = '';
     for (let i = 0; i < s.length; i += 64) outr += fr.push(s.slice(i, i + 64));
     assert.equal(count(/\x1b\[\?25l/g, outr), count(/\x1b\[\?25l/g, s), 'repair forwards hides');
+});
+
+// Distilled from the real 2026-09-18 kimi-working capture (sandbox ztprobe;
+// field-observed, raw capture not checked in): spinner frame idiom — sync
+// block, OSC8-end, styled braille, park CUP, two in-block hides, no painted
+// caret. Byte-pattern verified equivalent to the live stream (0 shows /
+// 94 hides all in-block / 0 painted in 48KB).
+const HERDR_KIMI_FRAME =
+    '\u001b[?2026h\u001b[?25l\u001b]8;;\u001b\\\u001b[24;28H\u001b[0;38;2;136;136;136;49m⠴\u001b[0m\u001b[27;32H\u001b[?25l\u001b[?2026l';
+
+test('genuine-hide herdr working frames: no phantom SHOW at the frame park', () => {
+    const count = (re, t) => (t.match(re) || []).length;
+    const input = HERDR_KIMI_FRAME.repeat(8);
+    for (const size of [1, 3, 17, 64, 1 << 20]) {
+        const f = createConPtyCaretFilter({ mode: 'fix' });
+        let out = '';
+        for (let i = 0; i < input.length; i += size) out += f.push(input.slice(i, i + size));
+        assert.equal(count(/\x1b\[\?25h/g, out), 0, `size ${size}: no SHOW manufactured`);
+        assert.equal(count(/\x1b\[\?25l/g, out), count(/\x1b\[\?25l/g, input), `size ${size}: genuine hides preserved`);
+        assert.equal(out, input, `size ${size}: bit-exact`);
+        assert.equal(f.state().visible, false, `size ${size}: hidden`);
+    }
+});
+
+test('painted-caret evidence still triggers the visibility repair', () => {
+    // Conhost draws the console caret into the frame as SGR 0;7;39;49 only
+    // when the console cursor is visible — that is the positive evidence the
+    // in-block hides are ConPTY's rewrite of an app-intended show.
+    const f = createConPtyCaretFilter({ mode: 'fix' });
+    const out = f.push(HERDR_FRAME);
+    assert.ok(!out.includes('\u001b[0;7;39;49m'), 'painted cell de-reversed');
+    assert.ok(!out.includes('\u001b[?25l'), 'rewritten hides stripped');
+    assert.ok(out.includes('\u001b[?25h'), 'SHOW re-asserted on painted evidence');
 });
 
 test('host_cursor=native stream is enhanced, not corrupted', () => {

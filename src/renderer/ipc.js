@@ -38,6 +38,15 @@ function _conPtyCaretFix(owner, data, ownerType) {
         // filter swallowed the query and we answer here instead.
         const response = globalThis.__conPtyCaretInternals?.CONPTY_DA1_RESPONSE;
         if (response && owner.tabId) ipcRenderer.send('pty-input', { tabId: owner.tabId, data: response });
+    }, onWin32InputMode: () => {
+        // conhost invited win32-input-mode on this (local) session: key
+        // events may now be serialized as full INPUT_RECORDs (win32-input.js).
+        // SSH never enters this filter, so the flag can only stick locally.
+        owner._win32InputMode = true;
+        // Gate keyed by the backend session id: split/drag migration moves
+        // this terminal to a different tab/pane wrapper, and the id is the
+        // only handle that survives the move (ADR-0002 review).
+        globalThis.__win32Input?.markGated?.(owner.tabId);
     } });
     const out = owner._caretFilter.push(data);
     return typeof out === 'string' ? out : data;

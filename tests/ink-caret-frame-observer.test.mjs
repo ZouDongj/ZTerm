@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
-const { createInkCaretObserver } = require('../src/renderer/ink-caret-observer.js');
+const { createInkCaretObserver, charWidth } = require('../src/renderer/ink-caret-observer.js');
 require('../src/vendor/xterm.js');
 const { Terminal } = globalThis.TabbyXterm;
 
@@ -200,6 +200,21 @@ test('claude derived native chunks (mid-sequence cuts) preserve candidates', () 
   for (const chunk of fx.chunks) obs.push(chunk);
   const expected = collect(FIX('claude-rig-bare-rev.txt')).cands.map(c => [c.x, c.y, c.char]);
   assert.deepEqual(cands.map(c => [c.x, c.y, c.char]), expected);
+});
+
+test('charWidth: plane-1 pictograph blocks are 2 (zterm6 parity), BMP emoji stays 1', () => {
+  // kimi/string-width/zterm6 all lay plane-1 pictographs out as 2 cells; a
+  // 1-count here drifts the tracked caret one cell left per emoji on the
+  // input line (IME anchor then covers committed text). BMP emoji like ✨
+  // stay 1, matching the documented zterm6 boundary.
+  assert.equal(charWidth('🌑'), 2, 'U+1F311 moon phase');
+  assert.equal(charWidth('🚀'), 2, 'U+1F680');
+  assert.equal(charWidth('🤖'), 2, 'U+1F916');
+  assert.equal(charWidth('🪽'), 2, 'U+1FABD in 1FA70-1FAFF');
+  assert.equal(charWidth('想'), 2, 'CJK control');
+  assert.equal(charWidth('✨'), 1, 'BMP emoji boundary (zterm6 parity)');
+  assert.equal(charWidth(String.fromCodePoint(0x1f650)), 1, 'U+1F650 just past the widened block');
+  assert.equal(charWidth('a'), 1, 'ascii');
 });
 
 test('ESC[m (empty-param SGR) resets the plain convention like ESC[0m', () => {

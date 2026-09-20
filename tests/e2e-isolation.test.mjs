@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createE2eSandbox, ownsProcess, restartOwnedApp } from '../scripts/e2e-isolation.mjs';
+import { createE2eSandbox, ownsProcess, restartOwnedApp, seedIsolatedConfig } from '../scripts/e2e-isolation.mjs';
 
 test('E2E copies only the executable into a fresh profile, leaving source config intact', () => {
   const root = mkdtempSync(join(tmpdir(), 'zterm-isolation-test-'));
@@ -43,4 +43,35 @@ test('restart never replaces ownership when cleanup or port teardown failed', as
   await restartOwnedApp({ stop: () => { calls.push('stop'); return true; },
     waitUntilQuiet: async () => calls.push('quiet'), start: () => calls.push('start') });
   assert.deepEqual(calls, ['stop', 'quiet', 'start']);
+});
+
+test('seedIsolatedConfig aborts before seeding when the anchor sets a custom dataDir', () => {
+  const root = mkdtempSync(join(tmpdir(), 'zterm-seed-test-'));
+  try {
+    const source = join(root, 'source');
+    mkdirSync(join(source, 'data'), { recursive: true });
+    writeFileSync(join(source, 'zterm.exe'), 'test executable');
+    const box = createE2eSandbox(join(source, 'zterm.exe'), root);
+    const appData = join(root, 'fake-appdata');
+    mkdirSync(join(appData, 'ZTerm'), { recursive: true });
+    writeFileSync(join(appData, 'ZTerm', 'config.json'), JSON.stringify({ dataDir: join(root, 'real-data') }));
+    assert.throws(() => seedIsolatedConfig(box, appData), /dataDir/);
+    assert.equal(existsSync(join(box.directory, 'data', 'config.json')), false, 'aborted before seeding');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('seedIsolatedConfig seeds an empty config and never overwrites an existing one', () => {
+  const root = mkdtempSync(join(tmpdir(), 'zterm-seed-test-'));
+  try {
+    const source = join(root, 'source');
+    mkdirSync(join(source, 'data'), { recursive: true });
+    writeFileSync(join(source, 'zterm.exe'), 'test executable');
+    const box = createE2eSandbox(join(source, 'zterm.exe'), root);
+    const appData = join(root, 'fake-appdata'); // no anchor at all
+    const target = seedIsolatedConfig(box, appData);
+    assert.equal(readFileSync(target, 'utf8').trim(), '{}');
+    writeFileSync(target, 'sentinel');
+    seedIsolatedConfig(box, appData);
+    assert.equal(readFileSync(target, 'utf8'), 'sentinel', 'existing config untouched');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

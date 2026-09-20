@@ -228,6 +228,73 @@ function _shortcutPassthrough(term, e) {
     return !isShortcut;
 }
 
+// Ctrl+J over win32-input-mode (local ConPTY sessions only). The legacy byte
+// path makes OpenConsole rewrite LF into a Ctrl+Enter INPUT_RECORD, so
+// event-level stdin readers (crossterm, kimi) never see Ctrl+J; serializing
+// the key as a full INPUT_RECORD (what Windows Terminal emits) delivers it
+// intact. Returns true when the event was handled (swallow it), false to
+// let xterm process it normally. keyup/keypress are swallowed without a
+// resend — only keydown serializes.
+//
+// The owner is resolved at EVENT TIME by terminal identity: split/drag
+// migration moves a term between tab and pane wrappers, and a handler closed
+// over the original pair keeps targeting the stale wrapper — whose tabId was
+// nulled by the move, so the key was handled yet sent nowhere (swallowed).
+// The gate is keyed by backend session id (win32-input.js gatedSessions) for
+// the same reason: the id is the only handle that travels with the session.
+function _resolveTermOwner(term) {
+    if (typeof TabManager === 'undefined' || !TabManager?.tabs) return null;
+    for (const tab of TabManager.tabs) {
+        if (tab.term === term) return { tab, owner: tab };
+        if (tab.splitRoot && typeof getAllPanes === 'function') {
+            const pane = getAllPanes(tab).find(p => p.term === term);
+            if (pane) return { tab, owner: pane };
+        }
+    }
+    return null;
+}
+
+function _tryWin32CtrlJ(term, e) {
+    const w32 = typeof window !== 'undefined' ? window.__win32Input : null;
+    if (!w32 || !term || !w32.isCtrlJ(e)) return false;
+    const resolved = _resolveTermOwner(term);
+    if (!resolved) return false;
+    const { tab, owner } = resolved;
+    if (!owner.tabId || !w32.isGated?.(owner.tabId)) return false;
+    // sync-input broadcasts to every pane of the tab — including SSH panes,
+    // which must never receive win32 INPUT_RECORD bytes. Use the win32 path
+    // only when every recipient's session is gated.
+    if (tab.syncInput && tab.splitRoot) {
+        const panes = typeof getAllPanes === 'function' ? getAllPanes(tab) : [];
+        if (!panes.length || !panes.every(p => p.tabId && w32.isGated(p.tabId))) return false;
+    }
+    // We own the key from here. Suppress the browser default: WebView2 maps
+    // Ctrl+J to its downloads flyout (browser accelerator keys are on the
+    // default-action path, so preventDefault suppresses them).
+    e.preventDefault?.();
+    if (e.type !== 'keydown') return true;
+    _sendPaneInput(tab, owner, w32.ctrlJSequence());
+    // xterm's swallowed path would also scroll-on-input and re-show the
+    // cursor; mirror the part the user can notice.
+    owner.term?.scrollToBottom?.();
+    return true;
+}
+
+// Per-terminal behavior installs: the zterm6 width provider (plane-1 emoji
+// are 2 cells, matching what modern TUIs assume — the vendored UnicodeV6
+// says 1, which breaks their CUP-based layouts) and the IME caret anchor
+// guard (while the protocol cursor is hidden, the IME anchor follows the
+// smooth-cursor adapter's perceived caret — the app-drawn caret the user
+// actually sees — and falls back to stock protocol anchoring when no caret
+// is known, which tracks the insertion point during input phases). Both
+// live in our own modules loaded via renderer.html; failures are loud but
+// must not break terminal creation. perceivedCaret is looked up lazily
+// because the smooth-cursor adapter is only created after term.open().
+function _installTerminalBehavior(term, perceivedCaret) {
+    try { window.__unicodeWidth?.installOn(term); } catch(e) { console.warn('unicode width install failed:', e); }
+    try { window.__imeCaretAnchor?.patchTerminal(term, { perceivedCaret }); } catch(e) { console.warn('IME anchor patch failed:', e); }
+}
+
 // ── Terminal wiring (shared by PTY and SSH) ──
 function wireTerminal(tab, tabId) {
     tab.tabId = tabId;
@@ -243,6 +310,7 @@ function wireTerminal(tab, tabId) {
     document.getElementById('main-area').appendChild(wrap);
 
     const term = new Terminal(_buildTerminalOptions());
+    _installTerminalBehavior(term, () => tab._smoothCursor?._adapter?.perceivedCaretCell?.() ?? null);
     let fitAddon, searchAddon;
     try { fitAddon = new FitAddon(); term.loadAddon(fitAddon); } catch(e) { console.warn('FitAddon init failed:', e); }
     try { searchAddon = new SearchAddon(); term.loadAddon(searchAddon); } catch(e) { console.warn('SearchAddon init failed:', e); }
@@ -257,7 +325,10 @@ function wireTerminal(tab, tabId) {
     });
 
     term.open(inner);
-    term.attachCustomKeyEventHandler(e => { return _shortcutPassthrough(term, e); });
+    term.attachCustomKeyEventHandler(e => {
+        if (_tryWin32CtrlJ(term, e)) return false;
+        return _shortcutPassthrough(term, e);
+    });
     // The WebGL addon must load AFTER open(): loading it before open loses the
     // render-service registration race to the DOM renderer, silently falling
     // back to DOM rendering (verified: no .xterm-webgl canvas, adapter idle).
@@ -403,6 +474,7 @@ function wireTerminalToPane(tab, pane) {
     if (!bodyEl) return;
 
     const term = new Terminal(_buildTerminalOptions());
+    _installTerminalBehavior(term, () => pane._smoothCursor?._adapter?.perceivedCaretCell?.() ?? null);
     let fitAddon, searchAddon;
     try { fitAddon = new FitAddon(); term.loadAddon(fitAddon); } catch(e) { console.warn('FitAddon init failed:', e); }
     try { searchAddon = new SearchAddon(); term.loadAddon(searchAddon); } catch(e) { console.warn('SearchAddon init failed:', e); }
@@ -417,7 +489,10 @@ function wireTerminalToPane(tab, pane) {
     });
 
     term.open(bodyEl);
-    term.attachCustomKeyEventHandler(e => { return _shortcutPassthrough(term, e); });
+    term.attachCustomKeyEventHandler(e => {
+        if (_tryWin32CtrlJ(term, e)) return false;
+        return _shortcutPassthrough(term, e);
+    });
     // WebGL addon loads after open() — see wireTerminal for the race details.
     let webglAddon = null;
     try { webglAddon = new WebglAddon(); term.loadAddon(webglAddon); } catch(e) { console.warn('WebglAddon init failed:', e); }

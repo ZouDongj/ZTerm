@@ -1,72 +1,47 @@
 # ZTerm
 
-A modern terminal emulator for Windows with first-class SSH management, split panes, and SFTP file transfer.
+A Windows terminal with SSH management, split panes, SFTP file transfer, and a Material-You-inspired interface. Built with Tauri 2, WebView2, xterm.js, and vanilla HTML/CSS/JavaScript.
 
-Built with [Tauri 2](https://tauri.app/) and [xterm.js](https://xtermjs.org/), styled with a Material-You-inspired dark theme.
+[Current status](docs/STATUS.md) is the authoritative source for verified fixes, unresolved issues, and validation limits. Before changing tab hover or TUI caret ownership, read [ADR-0001](docs/adr/0001-stable-tab-hit-regions-and-safe-tui-caret-ownership.md). Project terminology lives in [CONTEXT.md](CONTEXT.md).
 
 ## Features
 
-- **Multi-tab terminal** — PowerShell, CMD, Git Bash, WSL auto-detection
-- **SSH manager** — Profile groups, DPAPI-encrypted passwords, public key auth, one-click connect
-- **SSH hardening** — Known-hosts TOFU with host-key change confirmation (MITM protection)
-- **Login scripts** — Auto-respond to terminal prompts after SSH login (Expect/Send rules)
-- **Follow CWD** — The SFTP panel follows your SSH terminal's current directory (OSC 7)
-- **Split panes** — Horizontal & vertical splits, drag-to-reorder with smooth animations, maximize, resize
-- **SFTP panel** — Browse, upload, download, drag-and-drop, transfer progress & cancellation
-- **12 color schemes** — One Dark Pro, Catppuccin, Nord, Dracula, Tokyo Night, and more
-- **Quick Commands** — Fuzzy-searchable macro library with groups
-- **Custom highlights** — Regex/keyword-based ANSI color injection
-- **Customizable shortcuts** — Record-style keybinding editor
+- Multi-tab local terminals with PowerShell, CMD, Git Bash, and WSL detection.
+- SSH profiles and groups, password or public-key authentication, reconnect actions, and Expect/Send login scripts.
+- Horizontal and vertical split panes, resizing, maximizing, and drag reordering.
+- SFTP browsing, upload/download, drag-and-drop, progress, and cancellation. Follow CWD uses shell directory reports; availability depends on the remote shell integration.
+- Terminal color schemes, grouped quick commands, keyword/regex highlights, and editable keyboard shortcuts.
+- Smooth cursors and conservative TUI software-caret recognition; supported and unresolved scenarios are listed in current status.
 
-## Screenshots
+## Install and build
 
-<!-- TODO: add screenshots -->
+Published packages, when available, are listed on [GitHub Releases](https://github.com/ZouDongj/zterm/releases). Local verification does not establish that a matching package has been published. Windows requires WebView2; see the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for runtime and MSVC setup.
 
-## Install
+For development, install stable Rust, Windows MSVC build tools, WebView2, and Node.js 22 or later (also required by the E2E runner).
 
-Download the latest installer from [Releases](https://github.com/ZouDongj/zterm/releases). The NSIS installer is ~4 MB and needs no separate runtime — it uses the system WebView2 (preinstalled on Windows 10/11).
-
-## Build from source
-
-Prerequisites: [Rust](https://rustup.rs/) (stable), [Node.js](https://nodejs.org/) 18+, and the [Tauri CLI prerequisites](https://v2.tauri.app/start/prerequisites/) (WebView2, MSVC build tools).
-
-```bash
+```powershell
 git clone https://github.com/ZouDongj/zterm.git
-cd zterm/ZTerm
-npm install          # installs @tauri-apps/cli
-npm run dev          # run in development mode
+cd zterm
+npm ci
+npm run dev
 ```
 
-To build the release installer (NSIS, x64):
-
-```bash
-npm run build
-```
-
-The installer is written to `src-tauri/target/release/bundle/nsis/`.
+In the MyTerm workspace, run npm commands from its `ZTerm` directory. `npm run build` creates the configured NSIS installer under `src-tauri/target/release/bundle/nsis/`; `npm run build:release` builds the release executable without packaging. Commands are defined in [package.json](package.json), and bundle settings in [tauri.conf.json](src-tauri/tauri.conf.json).
 
 ## Verification
 
-`npm run e2e` launches a release build and drives it through the WebView2 debugging protocol to verify that interactive elements actually work at runtime (CSP-effective `unsafe-inline`, compiled `onclick` handlers, window minimize/maximize/restore, menu interaction, IPC reachability). This catches issues that unit tests and syntax checks cannot — e.g. a CSP change that silently disables every inline click handler. Requires Node 22+ and a desktop session (WebView2 cannot initialize on CI runners, so this runs locally rather than in CI).
+Run `npm test` for Rust and frontend unit tests. The default pre-commit gate is `npm run verify`: unit tests, release executable build, then native UI E2E. `npm run e2e` alone uses an existing release executable.
 
-## Tech Stack
+The [E2E runner](scripts/e2e-check.mjs) requires a Windows desktop session and working WebView2. It copies the tested executable into a fresh sandbox, isolates application data and the browser profile, and drives runtime interaction through the debugging protocol. A unit-test pass does not establish native UI behavior. Actual coverage and any explicit exception are recorded in [current status](docs/STATUS.md).
 
-- [Tauri 2](https://tauri.app/) — App framework (Rust backend + WebView2)
-- [xterm.js](https://xtermjs.org/) — Terminal rendering
-- [russh](https://github.com/warp-tech/russh) — Pure-Rust SSH client
-- [portable-pty](https://github.com/wez/wezterm) — Pseudoterminal (ConPTY)
-- [russh-sftp](https://github.com/warp-tech/russh-sftp) — SFTP protocol
-- [arboard](https://github.com/1Password/arboard) — System clipboard
-- Zero frontend framework — vanilla HTML/CSS/JS
+## Data and security
 
-### Data & Security
+Configuration is stored as `config.json`. Debug builds default to `%APPDATA%\ZTerm`; release builds default to a `data` directory beside the executable. A custom directory selected through settings is resolved through the `dataDir` pointer in `%APPDATA%\ZTerm\config.json`. These rules are implemented by `resolve_data_dir` in [zterm.rs](src-tauri/src/zterm.rs).
 
-- Configuration lives in `%APPDATA%\ZTerm\config.json` (dev) or `<install dir>\data\config.json` (packaged), with `%APPDATA%\ZTerm` acting as the anchor/fallback
-- SSH passwords are encrypted with Windows DPAPI and never stored in plaintext
-- Server host keys are tracked with Trust-On-First-Use; key changes trigger a confirmation dialog
+Saved SSH passwords use Windows DPAPI encryption. Other configuration, including login-script text, is not covered by that password-encryption claim. Host-key fingerprints are stored separately in `%APPDATA%\ZTerm\known_hosts.json`: the first key is trusted automatically, and a changed key requires confirmation. This trust-on-first-use policy does not independently verify a server's first connection.
+
+The Rust backend uses russh for SSH, russh-sftp for file transfer, portable-pty/ConPTY for local terminals, and arboard for the clipboard. Dependencies are declared in [Cargo.toml](src-tauri/Cargo.toml); resolved versions are in [Cargo.lock](src-tauri/Cargo.lock).
 
 ## License
 
-MIT © 2026 zoudongjie
-
-See [LICENSE](LICENSE) for details. Third-party notices: xterm.js and its addons are distributed under the MIT license; see `src/vendor/` for their bundled sources.
+MIT © 2026 zoudongjie. See [LICENSE](LICENSE). Bundled xterm.js and addon notices are in [src/vendor](src/vendor).

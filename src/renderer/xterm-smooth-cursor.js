@@ -724,6 +724,19 @@
         diagnostic.heldAt = 0;
         scheduleContinuation();
       },
+      // The viewport-relative 0-based cell the user currently perceives as
+      // the caret: the trusted software descriptor when the adapter owns the
+      // cursor, else null (a visible protocol cursor is stock-anchored by
+      // xterm itself). Consumed by the IME caret anchor (ime-caret-anchor.js):
+      // agent TUIs hide the protocol cursor for whole sessions, so the IME
+      // candidate window must follow THIS position, not the hidden park.
+      perceivedCaretCell() {
+        if (disposed || !sw.active || !sw.published) return null;
+        const x = sw.published.x;
+        const y = sw.published.y;
+        if (!(x >= 0 && x < terminal.cols && y >= 0 && y < terminal.rows)) return null;
+        return { x, y, width: Math.max(1, finite(sw.published.width, 1)) };
+      },
       snapshot() {
         return {
           enabled,

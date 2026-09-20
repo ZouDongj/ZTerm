@@ -453,6 +453,81 @@ async function main() {
     // count===0）对 adapter 恒真，无法区分"动画在跑"和"静默降级到原生光标"。
     check('WebGL 平滑光标 adapter 已挂载', chainProbe.ok === true && chainProbe.hasAdapter === true, JSON.stringify(chainProbe));
 
+    // 月相/plane-1 emoji 宽度：zterm6 provider 必须已激活且把 plane-1 emoji
+    // 计为 2 格（kimi tip 行实测 U+1F311 按 2 格布局；vendored UnicodeV6 算
+    // 1，导致 2 格字形溢出到从不擦除的邻格、旧字符叠进月亮——现场截图）。
+    // term.write 走同一个 InputHandler->charProperties 路径，钉住 buffer 布局。
+    const moonProbe = await cdp.eval(`(async () => {
+      const pane = getAllPanes(TabManager.getActive())[0];
+      const term = pane?.term;
+      if (!term) return { ok: false, why: 'no-term' };
+      const write = s => new Promise(r => term.write(s, r));
+      await write('\\r\\n');
+      const b = term.buffer.active;
+      // getLine() takes an absolute buffer index; cursorY is viewport-relative.
+      const row = b.baseY + b.cursorY;
+      await write('\\uD83C\\uDF11ab');
+      const line = b.getLine(row);
+      return { ok: true, active: term.unicode?.activeVersion,
+        w0: line?.getCell(0)?.getWidth(), w1: line?.getCell(1)?.getWidth(),
+        c2: line?.getCell(2)?.getChars(), cx: b.cursorX };
+    })()`);
+    check('月相 emoji 宽度=2（zterm6 provider 已激活）',
+      moonProbe.active === 'zterm6' && moonProbe.w0 === 2 && moonProbe.w1 === 0 && moonProbe.c2 === 'a' && moonProbe.cx === 4,
+      JSON.stringify(moonProbe));
+
+    // IME 锚点：协议光标可见时原生跟随；隐藏且无软件光标时回退原生协议锚定
+    //（现场探针实证：输入阶段协议光标精确跟随插入点——冻结策略会把锚点钉在
+    // textarea 的 DOM 默认位或刚被覆盖的旧 caret 格，候选窗卡左上/拼音覆盖
+    // 已提交内容）；隐藏且软件光标（用户实际看到的 app 自绘 caret）位置已知
+    // 时，锚点必须落在软件光标格——kimi 整段会话不显示协议光标，无 caret 时
+    // 回退原生是最坏基线。该检查同时钉住 patch 的内部锚点
+    //（_core/_syncTextArea/isCursorHidden）存在。
+    const imeProbe = await cdp.eval(`(async () => {
+      const pane = getAllPanes(TabManager.getActive())[0];
+      const term = pane?.term;
+      if (!term?.textarea) return { ok: false, why: 'no-term' };
+      term.textarea.focus();
+      const write = s => new Promise(r => term.write(s, r));
+      const pos = () => ({ left: term.textarea.style.left, top: term.textarea.style.top });
+      const core = term._core;
+      const cell = core?._renderService?.dimensions?.css?.cell;
+      const px = (x, y) => cell ? { left: (x * cell.width) + 'px', top: (y * cell.height) + 'px' } : null;
+      await write('\\u001b[?25h\\u001b[10;10H');
+      const p1 = pos();
+      await write('\\u001b[?25l\\u001b[20;40H');
+      const p2 = pos();
+      await write('\\u001b[?25h\\u001b[12;12H');
+      const p3 = pos();
+      // 软件光标分支：临时把 provider 换成固定格（模拟 adapter 已接管），
+      // 隐藏 CUP 到别处，textarea 必须锚在软件光标格而非协议 park 位。
+      const prevProvider = core?.__imeAnchorPerceivedCaret;
+      let p4 = null;
+      if (core && cell) {
+        core.__imeAnchorPerceivedCaret = () => ({ x: 15, y: 5, width: 1 });
+        await write('\\u001b[?25l\\u001b[22;30H');
+        p4 = pos();
+        core.__imeAnchorPerceivedCaret = prevProvider;
+        await write('\\u001b[?25h');
+      }
+      return { ok: true, p1, p2, p3, p4,
+        e1: px(9, 9), e2: px(39, 19), e3: px(11, 11), e4: px(15, 5),
+        hiddenKnown: typeof core?.coreService?.isCursorHidden === 'boolean' };
+    })()`);
+    // Numeric compare with an epsilon: at fractional devicePixelRatio (e.g. a
+    // 175% monitor) the expected cell math is a long float while the browser
+    // serializes style.top to a few decimals — string equality only holds at
+    // integer CSS px (DPR 1.0). 0.01px covers serialization noise and is far
+    // below one cell.
+    const nearPx = (a, b) => Math.abs(parseFloat(a) - parseFloat(b)) <= 0.01;
+    check('IME 锚点：可见跟随、隐藏无软件光标回退协议锚定、有软件光标位优先',
+      imeProbe.hiddenKnown === true
+        && nearPx(imeProbe.p1.left, imeProbe.e1.left) && nearPx(imeProbe.p1.top, imeProbe.e1.top)
+        && nearPx(imeProbe.p2.left, imeProbe.e2.left) && nearPx(imeProbe.p2.top, imeProbe.e2.top)
+        && nearPx(imeProbe.p3.left, imeProbe.e3.left) && nearPx(imeProbe.p3.top, imeProbe.e3.top)
+        && imeProbe.p4 !== null && nearPx(imeProbe.p4.left, imeProbe.e4.left) && nearPx(imeProbe.p4.top, imeProbe.e4.top),
+      JSON.stringify(imeProbe));
+
     // 10. 设置页：打开 → settings tab 出现；页面切换
     await cdp.eval(`openSettings()`);
     await sleep(1000);

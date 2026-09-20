@@ -50,7 +50,10 @@
   const MAX_UNIT_BYTES = 262144;
 
   // Width of a character in cells (best-effort, consistent for the verified
-  // clients: ASCII and common CJK ranges).
+  // clients: ASCII and common CJK ranges). The plane-1 pictograph blocks
+  // match the zterm6 terminal width provider (unicode-width.js) and modern
+  // string-width — kimi lays its input line out with those as 2 cells, so a
+  // 1-count here would drift the tracked caret left by one cell per emoji.
   function charWidth(ch) {
     const cp = ch.codePointAt(0);
     if (cp >= 0x1100 && (
@@ -61,6 +64,10 @@
       (cp >= 0xfe30 && cp <= 0xfe6f) ||
       (cp >= 0xff00 && cp <= 0xff60) ||
       (cp >= 0xffe0 && cp <= 0xffe6) ||
+      (cp >= 0x1f300 && cp <= 0x1f64f) ||
+      (cp >= 0x1f680 && cp <= 0x1f6ff) ||
+      (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+      (cp >= 0x1fa70 && cp <= 0x1faff) ||
       (cp >= 0x20000 && cp <= 0x3fffd)
     )) return 2;
     return 1;

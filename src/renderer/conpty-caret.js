@@ -15,9 +15,13 @@
 // so xterm parks isCursorHidden=true forever and every caret animation dies.
 //
 // `fix` (LOCAL CONPTY TRANSPORTS ONLY — see caretRepairAllowed):
-//   1. drops the transient in-block ?25l churn of frames that started
-//      visible, re-asserting SHOW at the block end (the 2026-09-13
-//      user-verified repair);
+//   1. drops the transient in-block ?25l churn of frames that carry ConPTY's
+//      painted-caret evidence (SGR 0;7;39;49 = conhost's own "console cursor
+//      visible" ground truth), re-asserting SHOW at the block end (the
+//      2026-09-13 user-verified repair; evidence gate added 2026-09-18 —
+//      frames that hide the caret without painting one belong to apps that
+//      genuinely hide it, and manufacturing a SHOW there parked a phantom
+//      caret at the frame's final CUP);
 //   2. strips the reverse flag of the console caret cell ConPTY itself
 //      paints (SGR 0;7;39;49) — a style-only change on a narrow signature.
 //
@@ -51,6 +55,10 @@
   // (an app probing the terminal) pass through to xterm untouched.
   const DA1_QUERY = /^\u001b\[(?:0)?c$/;
   const CONPTY_DA1_RESPONSE = '\u001b[?62;1;2;6;7;8;9;15c';
+  // OpenConsole requests win32-input-mode with this on every ConPTY session
+  // (VtIo.cpp). xterm.js cannot answer it, but the input side can serialize
+  // keys as full INPUT_RECORDs once observed — see renderer/win32-input.js.
+  const WIN32_INPUT_MODE_ENABLE = '\u001b[?9001h';
   // A sync block is only post-processed while it is small; an app that leaves
   // one open must never make us buffer unboundedly.
   const MAX_BLOCK_TOKENS = 20000;
@@ -75,7 +83,6 @@
     let buffer = '';
     let visible = true;
     let inSync = false;
-    let visibleBefore = true;
     let block = null;
     // Diagnostic counters (exposed via state()); da1Seen additionally gates
     // the one-shot handshake swallow above.
@@ -83,7 +90,9 @@
     let showsSeen = 0;
     let blocksSeen = 0;
     let da1Seen = 0;
+    let win32Input = false;
     const onDa1Query = typeof options?.onDa1Query === 'function' ? options.onDa1Query : null;
+    const onWin32InputMode = typeof options?.onWin32InputMode === 'function' ? options.onWin32InputMode : null;
 
     // Plain text is buffered too, so the trailing-cell rewrite can see it.
     function emit(text) {
@@ -109,9 +118,19 @@
         }
         // Later DA1 probes (an app querying the terminal) pass through.
       }
+      if (text === WIN32_INPUT_MODE_ENABLE) {
+        // Pass through (xterm ignores it); flag the session for the input
+        // side exactly once.
+        if (!win32Input) {
+          win32Input = true;
+          if (onWin32InputMode) {
+            try { onWin32InputMode(); } catch (e) { /* stream must never die */ }
+          }
+        }
+        return emit(text);
+      }
       if (text === SYNC_BEGIN) {
         inSync = true;
-        visibleBefore = visible;
         block = [];
         return text;
       }
@@ -123,19 +142,30 @@
 
         let out = buffered.join('');
         if (mode === 'fix') {
+          // The repair fires only on ConPTY's painted-caret evidence (SGR
+          // 0;7;39;49): conhost draws the console caret into the frame when
+          // the console cursor is visible, so its presence proves the
+          // in-block ?25l is ConPTY's rewrite of an app-intended show (the
+          // 2026-09-13 anti-churn case). Frames that hide the caret WITHOUT
+          // painting one are passed through untouched: current herdr draws
+          // pane carets as content and keeps its console cursor hidden
+          // (0 painted cells in the 2026-09-18 sandbox captures of
+          // kimi/dsh-tui/bash panes), and re-asserting SHOW there parked a
+          // phantom protocol caret at each frame's final CUP — the
+          // far-right blinking caret reported while an agent works.
+          const hasPaintedCaret = out.indexOf(PAINTED_CARET_SGR) >= 0;
           out = removePaintedCaret(out);
-          // Transient-hide churn: a frame that started from the visible state
-          // is one we repair with a block-end SHOW anyway; forwarding the
-          // in-frame ?25l toggles the caret hide->show once per sync block.
-          // TUI input boxes redraw in ~10 sync blocks per keystroke, so that
-          // churn cancels the cursor animation on every key (the "choppy
-          // caret" the user-verified 2026-09-13 repair addressed, kept for
-          // LOCAL transports only — the transport gate in ipc.js decides).
+          // Transient-hide churn: forwarding the in-frame ?25l toggles the
+          // caret hide->show once per sync block; TUI input boxes redraw in
+          // ~10 sync blocks per keystroke, so that churn cancels the cursor
+          // animation on every key. Strip the rewritten hides and re-assert
+          // SHOW at the block end (LOCAL transports only — the transport
+          // gate in ipc.js decides).
           // Known B1 residual, fixed by B2's draw-phase takeover: during
           // ink-TUI navigation/deletion the app paints its caret over a
           // CHARACTER away from the park position, so the restored protocol
           // cursor and the painted cell diverge (double caret) locally.
-          if (visibleBefore) {
+          if (hasPaintedCaret) {
             out = out.split(HIDE).join('');
             visible = true;
           }
@@ -234,7 +264,7 @@
       push,
       setMode,
       mode: function () { return mode; },
-      state: function () { return { mode, inSync, visible, buffered: block ? block.length : 0, hidesSeen, showsSeen, blocksSeen, da1Seen }; },
+      state: function () { return { mode, inSync, visible, buffered: block ? block.length : 0, hidesSeen, showsSeen, blocksSeen, da1Seen, win32Input }; },
     };
   }
 

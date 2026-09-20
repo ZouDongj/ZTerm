@@ -362,6 +362,21 @@ test('engagement: two candidates + watermark publish; draws from the descriptor'
   assert.ok(f.adapter.instrumentation.cursorDrawPasses >= 1, 'the cursor is drawn from the descriptor');
 });
 
+test('perceivedCaretCell: null until the adapter owns the caret, then the published viewport cell', () => {
+  const f = fixture();
+  const p = f.adapter.softwareCaretPort;
+  assert.equal(f.adapter.perceivedCaretCell(), null, 'no descriptor -> null (stock anchoring applies)');
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 }));
+  p.parsed(1);
+  assert.equal(f.adapter.perceivedCaretCell(), null, 'a single candidate has not engaged yet');
+  p.candidate(f.cand({ chunkSeq: 2, x: 5, y: 2 }));
+  p.parsed(2);
+  assert.deepEqual(f.adapter.perceivedCaretCell(), { x: 5, y: 2, width: 1 },
+    'the IME anchor must follow the caret the user sees');
+  p.invalidate('scroll');
+  assert.equal(f.adapter.perceivedCaretCell(), null, 'invalidation revokes the perceived cell');
+});
+
 test('watermark gating: a candidate publishes only after its chunk is parsed', () => {
   const f = fixture();
   const p = f.adapter.softwareCaretPort;
