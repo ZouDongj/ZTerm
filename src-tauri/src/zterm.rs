@@ -2487,10 +2487,7 @@ pub fn version_newer(current: &str, latest: &str) -> bool {
 pub async fn check_update(args: Vec<Value>) -> Result<Value, String> {
     let _ = args;
     tokio::task::spawn_blocking(|| {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(std::time::Duration::from_secs(10)))
-            .build()
-            .into();
+        let agent = update_http_agent(10);
         let resp = agent
             .get(RELEASES_LATEST_URL)
             .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
@@ -2526,16 +2523,471 @@ pub async fn check_update(args: Vec<Value>) -> Result<Value, String> {
             .unwrap_or("https://github.com/ZouDongj/ZTerm/releases")
             .to_string();
         let latest = tag.trim_start_matches(['v', 'V']).to_string();
+        let newer = version_newer(env!("CARGO_PKG_VERSION"), &latest);
+        // Installer reuse across restarts: when a verified setup exe for this
+        // release is already in the download dir, report ready so the UI can
+        // jump straight to "restart & install". A release without a usable
+        // x64 asset still reports newer (manual download page remains).
+        let info = if newer {
+            newer_asset_info(&body)
+        } else {
+            NewerAssetInfo::default()
+        };
+        // Seed the state machine from the on-disk installer, otherwise
+        // apply_update (which requires the Ready phase) would refuse the very
+        // installer this ready flag advertises — the card would deadlock.
+        seed_ready_from_check(&tag, &info);
         Ok(json!({
             "current": env!("CARGO_PKG_VERSION"),
             "latest": latest,
             "tag": tag,
             "url": url,
-            "newer": version_newer(env!("CARGO_PKG_VERSION"), &latest),
+            "newer": newer,
+            "asset_name": info.name,
+            "asset_size": info.size,
+            "ready": info.ready,
         }))
     })
     .await
     .map_err(|e| format!("update check task: {e}"))?
+}
+
+// ── In-app update download & apply ──
+// Flow: check_update reports a newer release -> the user clicks download ->
+// download_update streams the x64 NSIS setup exe to %TEMP%\zterm-update and
+// verifies its sha256 against the GitHub asset digest -> apply_update launches
+// it (passive /P /UPDATE /R) and exits so the installer can overwrite us.
+
+/// Directory holding downloaded installers (survives an app restart, so a
+/// previously verified installer can be reused without re-downloading).
+fn update_download_dir() -> PathBuf {
+    std::env::temp_dir().join("zterm-update")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateDlPhase {
+    Idle,
+    Downloading,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct UpdateDlState {
+    phase: UpdateDlPhase,
+    tag: String,
+    file_name: String,
+    sha256: String,
+    downloaded: u64,
+    total: u64,
+    error: String,
+}
+
+impl UpdateDlState {
+    const fn idle() -> Self {
+        UpdateDlState {
+            phase: UpdateDlPhase::Idle,
+            tag: String::new(),
+            file_name: String::new(),
+            sha256: String::new(),
+            downloaded: 0,
+            total: 0,
+            error: String::new(),
+        }
+    }
+
+    fn snapshot_json(&self) -> Value {
+        let phase = match self.phase {
+            UpdateDlPhase::Idle => "idle",
+            UpdateDlPhase::Downloading => "downloading",
+            UpdateDlPhase::Ready => "ready",
+            UpdateDlPhase::Failed => "failed",
+        };
+        json!({
+            "phase": phase,
+            "tag": self.tag,
+            "file_name": self.file_name,
+            "downloaded": self.downloaded,
+            "total": self.total,
+            "error": self.error,
+        })
+    }
+}
+
+static UPDATE_DL: parking_lot::Mutex<UpdateDlState> =
+    parking_lot::Mutex::new(UpdateDlState::idle());
+
+/// Pick the unique Windows x64 NSIS setup asset from a GitHub release's
+/// assets array. Returns (name, download_url, size, sha256_hex).
+/// Errors when there is not exactly one candidate, the download URL is
+/// missing, or GitHub did not provide a sha256 digest for the asset.
+fn select_setup_asset(assets: &[Value]) -> Result<(String, String, u64, String), String> {
+    let mut hits: Vec<&Value> = assets
+        .iter()
+        .filter(|a| {
+            a.get("name")
+                .and_then(|n| n.as_str())
+                // Reject anything with path semantics: this name is joined
+                // into the download dir and later spawned as the installer.
+                .map(|n| {
+                    n.starts_with("ZTerm_")
+                        && n.ends_with("_x64-setup.exe")
+                        && !n.contains(['/', '\\'])
+                        && !n.contains("..")
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    if hits.is_empty() {
+        return Err("release has no ZTerm_*_x64-setup.exe asset".to_string());
+    }
+    if hits.len() > 1 {
+        return Err(format!(
+            "release has {} x64 setup assets, expected exactly one",
+            hits.len()
+        ));
+    }
+    let a = hits.pop().unwrap();
+    let name = a
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap()
+        .to_string();
+    let url = a
+        .get("browser_download_url")
+        .and_then(|v| v.as_str())
+        .ok_or("setup asset missing browser_download_url")?
+        .to_string();
+    let size = a.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+    let digest = a.get("digest").and_then(|v| v.as_str()).unwrap_or("");
+    let sha = digest
+        .strip_prefix("sha256:")
+        .filter(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()))
+        .ok_or("setup asset missing sha256 digest")?
+        .to_string();
+    Ok((name, url, size, sha))
+}
+
+/// Streaming SHA-256 of a file, lowercase hex.
+fn file_sha256_hex(path: &std::path::Path) -> std::io::Result<String> {
+    use sha2::Digest;
+    let mut f = std::fs::File::open(path)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut f, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+
+/// When the installer for `asset_name` already sits in the download dir with
+/// a sha256 matching the release digest, return its path. Lets check_update
+/// offer "restart & install" directly after an app restart.
+fn ready_installer_path(asset_name: &str, expected_sha256: &str) -> Option<PathBuf> {
+    let p = update_download_dir().join(asset_name);
+    if !p.is_file() {
+        return None;
+    }
+    match file_sha256_hex(&p) {
+        Ok(h) if h.eq_ignore_ascii_case(expected_sha256) => Some(p),
+        _ => None,
+    }
+}
+
+/// Outcome of inspecting a newer release's assets (see newer_asset_info).
+#[derive(Debug, Default)]
+struct NewerAssetInfo {
+    name: Option<String>,
+    size: Option<u64>,
+    sha256: Option<String>,
+    ready: bool,
+}
+
+/// Inspect a newer release's assets: pick the x64 installer and check whether
+/// a hash-matching copy already sits in the download dir (downloaded on a
+/// previous run). A release without a usable asset yields a default (empty)
+/// info — the caller still reports newer so the manual page stays reachable.
+fn newer_asset_info(body: &Value) -> NewerAssetInfo {
+    let assets = match body.get("assets").and_then(|a| a.as_array()) {
+        Some(a) => a,
+        None => return NewerAssetInfo::default(),
+    };
+    match select_setup_asset(assets) {
+        Ok((name, _url, size, sha)) => {
+            let ready = ready_installer_path(&name, &sha).is_some();
+            NewerAssetInfo {
+                name: Some(name),
+                size: Some(size),
+                sha256: Some(sha),
+                ready,
+            }
+        }
+        Err(_) => NewerAssetInfo::default(),
+    }
+}
+
+/// check_update found a verified installer already on disk: seed the download
+/// state machine with Ready so apply_update can act on it directly (the
+/// download step was completed on a previous run). Only seeds from Idle —
+/// never clobbers an in-flight or finished download of this run.
+fn seed_ready_from_check(tag: &str, info: &NewerAssetInfo) {
+    if !info.ready {
+        return;
+    }
+    let mut st = UPDATE_DL.lock();
+    if st.phase != UpdateDlPhase::Idle {
+        return;
+    }
+    st.phase = UpdateDlPhase::Ready;
+    st.tag = tag.to_string();
+    st.file_name = info.name.clone().unwrap_or_default();
+    st.sha256 = info.sha256.clone().unwrap_or_default();
+}
+
+/// ureq agent for GitHub update traffic. Honors the proxy env vars
+/// (ALL_PROXY/HTTPS_PROXY/HTTP_PROXY, either case, NO_PROXY respected) and,
+/// via ureq's win-system-proxy feature, the Windows registry proxy
+/// (ProxyEnable/ProxyServer; PAC and per-protocol entries are not read and
+/// degrade to direct). No proxy configured → direct connection, unchanged.
+fn update_http_agent(timeout_secs: u64) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
+        // Bound any single stalled body read: timeout_global does not cover
+        // manual into_reader() streaming, and a hang there would wedge the
+        // download state machine until an app restart.
+        .timeout_recv_body(Some(std::time::Duration::from_secs(30)))
+        .proxy(ureq::Proxy::try_from_env())
+        .build()
+        .into()
+}
+
+/// Fetch the latest-release JSON from GitHub (shared by check/download).
+fn fetch_latest_release() -> Result<Value, String> {
+    let agent = update_http_agent(10);
+    let resp = agent
+        .get(RELEASES_LATEST_URL)
+        .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
+        .header("Accept", "application/vnd.github+json")
+        .call();
+    let mut resp = resp.map_err(|e| format!("update: release query failed: {e}"))?;
+    resp.body_mut()
+        .read_json()
+        .map_err(|e| format!("update: bad release json: {e}"))
+}
+
+/// Stream the installer to <name>.part, verify sha256, rename to final.
+/// Progress is written into UPDATE_DL as (downloaded, total).
+fn download_setup_exe(url: &str, name: &str, size_hint: u64, sha256: &str) -> Result<(), String> {
+    let dir = update_download_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("update: create download dir: {e}"))?;
+    // Keep the dir single-version: drop installers and partials of any
+    // version, INCLUDING the current target — we are re-downloading it, and
+    // a leftover final file would make fs::rename fail on Windows.
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            let is_setup = fname.starts_with("ZTerm_") && fname.contains("_x64-setup.exe");
+            if is_setup {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let part = dir.join(format!("{name}.part"));
+    let _ = std::fs::remove_file(&part);
+    let final_path = dir.join(name);
+
+    let agent = update_http_agent(300);
+    let resp = agent
+        .get(url)
+        .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
+        .call()
+        .map_err(|e| format!("update: download failed: {e}"))?;
+    let total = resp
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(size_hint);
+    {
+        let mut st = UPDATE_DL.lock();
+        st.total = total;
+        st.downloaded = 0;
+    }
+    let mut reader = resp.into_body().into_reader();
+    let mut file = std::fs::File::create(&part)
+        .map_err(|e| format!("update: create temp file: {e}"))?;
+    let mut buf = [0u8; 64 * 1024];
+    let mut downloaded: u64 = 0;
+    let io_result: std::io::Result<()> = (|| {
+        use std::io::{Read, Write};
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n])?;
+            downloaded += n as u64;
+            UPDATE_DL.lock().downloaded = downloaded;
+        }
+        Ok(())
+    })();
+    if let Err(e) = io_result {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!("update: download interrupted: {e}"));
+    }
+    drop(file);
+
+    let hex = file_sha256_hex(&part).map_err(|e| format!("update: hash temp file: {e}"))?;
+    if !hex.eq_ignore_ascii_case(sha256) {
+        let _ = std::fs::remove_file(&part);
+        return Err("update: installer sha256 mismatch, file discarded".to_string());
+    }
+    std::fs::rename(&part, &final_path).map_err(|e| format!("update: finalize file: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn download_update(args: Vec<Value>) -> Result<Value, String> {
+    let params = args.into_iter().next().unwrap_or(json!({}));
+    let want_tag = params
+        .get("tag")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    {
+        let mut st = UPDATE_DL.lock();
+        let short_circuit = match st.phase {
+            UpdateDlPhase::Downloading => {
+                return Err("update download already in progress".to_string())
+            }
+            // Same-tag installer already verified: nothing to do — but only
+            // while the file is actually still there and intact. A vanished
+            // or tampered file falls through and is downloaded again,
+            // otherwise the card would deadlock on a phantom Ready.
+            UpdateDlPhase::Ready if st.tag == want_tag => {
+                let path = update_download_dir().join(&st.file_name);
+                file_sha256_hex(&path)
+                    .map(|h| h.eq_ignore_ascii_case(&st.sha256))
+                    .unwrap_or(false)
+            }
+            _ => false,
+        };
+        if short_circuit {
+            return Ok(st.snapshot_json());
+        }
+        // Transition to Downloading while still holding the lock: a
+        // concurrent call must be rejected before we release it —
+        // otherwise both pass the check and double-download.
+        *st = UpdateDlState::idle();
+        st.phase = UpdateDlPhase::Downloading;
+        st.tag = want_tag.clone();
+    }
+    tokio::task::spawn_blocking(move || {
+        // Re-fetch the release JSON and select the asset here instead of
+        // trusting URLs/digests passed from the renderer.
+        let work = || -> Result<(), String> {
+            let body = fetch_latest_release()?;
+            let tag = body
+                .get("tag_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if tag.is_empty() {
+                return Err("update: release response missing tag_name".to_string());
+            }
+            if !want_tag.is_empty() && tag != want_tag {
+                return Err(format!("update: release changed ({tag} != {want_tag}), re-check first"));
+            }
+            let assets = body
+                .get("assets")
+                .and_then(|a| a.as_array())
+                .ok_or("update: release response missing assets")?;
+            let (name, url, size, sha) = select_setup_asset(assets)?;
+            {
+                let mut st = UPDATE_DL.lock();
+                st.tag = tag.clone();
+                st.file_name = name.clone();
+                st.sha256 = sha.clone();
+            }
+            download_setup_exe(&url, &name, size, &sha)
+        };
+        // Evaluate work() BEFORE taking the lock: work() acquires UPDATE_DL
+        // itself for progress updates — locking first would self-deadlock.
+        let result = work();
+        let mut st = UPDATE_DL.lock();
+        match result {
+            Ok(()) => {
+                st.phase = UpdateDlPhase::Ready;
+                Ok(st.snapshot_json())
+            }
+            // Any failure lands in Failed so the UI offers a retry button.
+            Err(e) => {
+                st.phase = UpdateDlPhase::Failed;
+                st.error = e.clone();
+                st.downloaded = 0;
+                Err(e)
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("update download task: {e}"))?
+}
+
+#[tauri::command]
+pub fn update_download_state(args: Vec<Value>) -> Value {
+    let _ = args;
+    UPDATE_DL.lock().snapshot_json()
+}
+
+#[tauri::command]
+pub fn apply_update(args: Vec<Value>) -> Result<Value, String> {
+    let params = args.into_iter().next().unwrap_or(json!({}));
+    let dry_run = params
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let st = UPDATE_DL.lock();
+    if st.phase != UpdateDlPhase::Ready {
+        return Err("apply-update: no verified update ready".to_string());
+    }
+    let path = update_download_dir().join(&st.file_name);
+    let sha = st.sha256.clone();
+    let tag = st.tag.clone();
+    drop(st);
+    if !path.is_file() {
+        return Err("apply-update: installer file missing, download again".to_string());
+    }
+    // Re-verify before handing the file to the user account's installer:
+    // the bytes on disk must still be the ones we validated at download time.
+    let hex = file_sha256_hex(&path).map_err(|e| format!("apply-update: hash installer: {e}"))?;
+    if !hex.eq_ignore_ascii_case(&sha) {
+        return Err("apply-update: installer sha256 changed, download again".to_string());
+    }
+    let cmdline = format!("\"{}\" /P /UPDATE /R", path.display());
+    if dry_run {
+        return Ok(json!({
+            "ok": true,
+            "dry_run": true,
+            "tag": tag,
+            "cmdline": cmdline,
+        }));
+    }
+    std::process::Command::new(&path)
+        .args(["/P", "/UPDATE", "/R"])
+        .spawn()
+        .map_err(|e| format!("apply-update: failed to launch installer: {e}"))?;
+    // Let the installer come up before we vanish; NSIS CheckIfAppIsRunning
+    // would kill us anyway, exiting here is just the clean path.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::process::exit(0);
 }
 
 #[tauri::command]
@@ -4207,5 +4659,196 @@ mod tests {
         // Two-component tag pads with zeros.
         assert!(version_newer("1.0.5", "1.1"));
         assert!(!version_newer("1.0.5", "1.0"));
+    }
+
+    // ── In-app update download ──
+
+    fn gh_asset(name: &str, size: u64, digest: Option<&str>) -> Value {
+        json!({
+            "name": name,
+            "browser_download_url": format!("https://github.com/ZouDongj/ZTerm/releases/download/v1.0.8/{name}"),
+            "size": size,
+            "digest": digest,
+        })
+    }
+
+    #[test]
+    fn select_setup_asset_happy_path() {
+        let sha = "a".repeat(64);
+        let assets = vec![
+            gh_asset("ZTerm_1.0.8_x64-setup.exe", 4_700_000, Some(&format!("sha256:{sha}"))),
+            gh_asset("ZTerm_1.0.8_arm64-setup.exe", 4_100_000, Some(&format!("sha256:{sha}"))),
+        ];
+        let (name, url, size, got_sha) = select_setup_asset(&assets).unwrap();
+        assert_eq!(name, "ZTerm_1.0.8_x64-setup.exe");
+        assert!(url.ends_with("/ZTerm_1.0.8_x64-setup.exe"));
+        assert_eq!(size, 4_700_000);
+        assert_eq!(got_sha, sha);
+    }
+
+    #[test]
+    fn select_setup_asset_rejects_bad_sets() {
+        let sha = format!("sha256:{}", "b".repeat(64));
+        // No x64 setup asset at all.
+        let none = vec![gh_asset("ZTerm_1.0.8_arm64-setup.exe", 1, Some(&sha))];
+        assert!(select_setup_asset(&none).unwrap_err().contains("no ZTerm_"));
+        // Two candidates: ambiguous, refuse to guess.
+        let two = vec![
+            gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, Some(&sha)),
+            gh_asset("ZTerm_1.0.9_x64-setup.exe", 2, Some(&sha)),
+        ];
+        assert!(select_setup_asset(&two).unwrap_err().contains("expected exactly one"));
+        // Missing digest field entirely.
+        let no_digest = vec![gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, None)];
+        assert!(select_setup_asset(&no_digest).unwrap_err().contains("sha256 digest"));
+        // Digest with a wrong algorithm prefix.
+        let wrong_alg = vec![gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, Some("md5:abc"))];
+        assert!(select_setup_asset(&wrong_alg).unwrap_err().contains("sha256 digest"));
+        // Truncated hash is not a valid sha256 digest.
+        let short = format!("sha256:{}", "c".repeat(32));
+        let bad_len = vec![gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, Some(&short))];
+        assert!(select_setup_asset(&bad_len).unwrap_err().contains("sha256 digest"));
+        // Right length but non-hex characters are not a valid sha256 digest.
+        let non_hex = format!("sha256:{}", "zz".repeat(32));
+        let bad_hex = vec![gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, Some(&non_hex))];
+        assert!(select_setup_asset(&bad_hex).unwrap_err().contains("sha256 digest"));
+        // Download URL missing.
+        let no_url = vec![json!({
+            "name": "ZTerm_1.0.8_x64-setup.exe",
+            "size": 1,
+            "digest": sha,
+        })];
+        assert!(select_setup_asset(&no_url).unwrap_err().contains("browser_download_url"));
+        // Path separators / parent refs in the asset name are rejected (the
+        // name is joined into the download dir and spawned as the installer).
+        let sha2 = format!("sha256:{}", "e".repeat(64));
+        for evil in ["ZTerm_a\\..\\x_x64-setup.exe", "ZTerm_a/b_x64-setup.exe", "ZTerm_.._x64-setup.exe"] {
+            let v = vec![gh_asset(evil, 1, Some(&sha2))];
+            assert!(select_setup_asset(&v).is_err(), "traversal name must be rejected: {evil}");
+        }
+    }
+
+    #[test]
+    fn newer_asset_info_wiring() {
+        let sha = "d".repeat(64);
+        // Asset present but nothing on disk: name/size/sha surface, ready=false.
+        let body = json!({ "assets": [gh_asset("ZTerm_0.0.0nonexistent_x64-setup.exe", 42, Some(&format!("sha256:{sha}")))] });
+        let info = newer_asset_info(&body);
+        assert_eq!(info.name.as_deref(), Some("ZTerm_0.0.0nonexistent_x64-setup.exe"));
+        assert_eq!(info.size, Some(42));
+        assert_eq!(info.sha256.as_deref(), Some(sha.as_str()));
+        assert!(!info.ready);
+        // Hash-matching file already on disk: ready=true.
+        let dir = update_download_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let fname = "ZTerm_9.9.9wiring_x64-setup.exe";
+        std::fs::write(dir.join(fname), b"abc").unwrap();
+        let abc_sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let body = json!({ "assets": [gh_asset(fname, 3, Some(&format!("sha256:{abc_sha}")))] });
+        let info = newer_asset_info(&body);
+        assert!(info.ready, "matching on-disk installer must report ready");
+        let _ = std::fs::remove_file(dir.join(fname));
+        // No assets key at all: empty info, not ready.
+        let info = newer_asset_info(&json!({}));
+        assert!(info.name.is_none() && info.size.is_none() && !info.ready);
+        // Asset unusable (no digest): empty info, not ready — caller still reports newer.
+        let body = json!({ "assets": [gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, None)] });
+        let info = newer_asset_info(&body);
+        assert!(info.name.is_none() && info.size.is_none() && !info.ready);
+    }
+
+    #[test]
+    fn seed_ready_from_check_only_seeds_from_idle() {
+        let info = NewerAssetInfo {
+            name: Some("ZTerm_9.9.9seed_x64-setup.exe".to_string()),
+            size: Some(7),
+            sha256: Some("f".repeat(64)),
+            ready: true,
+        };
+        // From Idle the state machine adopts the ready installer.
+        {
+            let mut st = UPDATE_DL.lock();
+            *st = UpdateDlState::idle();
+        }
+        seed_ready_from_check("v9.9.9", &info);
+        {
+            let st = UPDATE_DL.lock();
+            assert_eq!(st.phase, UpdateDlPhase::Ready);
+            assert_eq!(st.tag, "v9.9.9");
+            assert_eq!(st.file_name, "ZTerm_9.9.9seed_x64-setup.exe");
+            assert_eq!(st.sha256, "f".repeat(64));
+        }
+        // A non-Idle phase (e.g. an in-flight download) is never clobbered.
+        {
+            let mut st = UPDATE_DL.lock();
+            *st = UpdateDlState::idle();
+            st.phase = UpdateDlPhase::Downloading;
+            st.tag = "v1.1.1".to_string();
+        }
+        seed_ready_from_check("v9.9.9", &info);
+        {
+            let st = UPDATE_DL.lock();
+            assert_eq!(st.phase, UpdateDlPhase::Downloading);
+            assert_eq!(st.tag, "v1.1.1");
+        }
+        // Leave the global idle again for other tests.
+        *UPDATE_DL.lock() = UpdateDlState::idle();
+        // Not-ready info never seeds.
+        seed_ready_from_check("v9.9.9", &NewerAssetInfo::default());
+        assert_eq!(UPDATE_DL.lock().phase, UpdateDlPhase::Idle);
+    }
+
+    #[test]
+    fn file_sha256_known_vector() {
+        let dir = std::env::temp_dir().join(format!("zterm-sha2test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("abc.bin");
+        std::fs::write(&p, b"abc").unwrap();
+        // SHA-256("abc") from FIPS 180-4.
+        assert_eq!(
+            file_sha256_hex(&p).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_dl_state_snapshot_phases() {
+        let mut st = UpdateDlState::idle();
+        assert_eq!(st.snapshot_json()["phase"], "idle");
+        st.phase = UpdateDlPhase::Downloading;
+        st.tag = "v1.0.8".to_string();
+        st.file_name = "ZTerm_1.0.8_x64-setup.exe".to_string();
+        st.total = 100;
+        st.downloaded = 42;
+        let j = st.snapshot_json();
+        assert_eq!(j["phase"], "downloading");
+        assert_eq!(j["tag"], "v1.0.8");
+        assert_eq!(j["downloaded"], 42);
+        assert_eq!(j["total"], 100);
+        st.phase = UpdateDlPhase::Ready;
+        assert_eq!(st.snapshot_json()["phase"], "ready");
+        st.phase = UpdateDlPhase::Failed;
+        st.error = "boom".to_string();
+        let j = st.snapshot_json();
+        assert_eq!(j["phase"], "failed");
+        assert_eq!(j["error"], "boom");
+    }
+
+    #[test]
+    fn ready_installer_path_requires_matching_hash() {
+        // No file on disk for this asset name -> not ready.
+        assert!(ready_installer_path("ZTerm_0.0.0nonexistent_x64-setup.exe", &"0".repeat(64)).is_none());
+        // A file whose hash does not match the expected digest -> not ready.
+        let dir = update_download_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "ZTerm_9.9.9test_x64-setup.exe";
+        std::fs::write(dir.join(name), b"abc").unwrap();
+        assert!(ready_installer_path(name, &"0".repeat(64)).is_none());
+        // Correct digest -> ready with the full path.
+        let abc_sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let p = ready_installer_path(name, abc_sha).expect("matching hash must be ready");
+        assert!(p.ends_with(name));
+        let _ = std::fs::remove_file(dir.join(name));
     }
 }

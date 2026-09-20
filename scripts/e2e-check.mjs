@@ -318,8 +318,9 @@ async function main() {
 
     // 4. 最小化按钮：合成点击 → 窗口真正最小化
     await cdp.eval(`document.getElementById('win-minimize').click()`);
-    await sleep(1500);
-    const minimized = await cdp.eval(`window.__TAURI__.window.getCurrentWindow().isMinimized().then(r => r)`);
+    // Poll instead of a fixed sleep: on a loaded machine the minimize
+    // transition outlasts 1.5s and a single query fails spuriously.
+    const minimized = await waitForValue(cdp, `window.__TAURI__.window.getCurrentWindow().isMinimized().then(r => r)`, true, 8000);
     check('点击最小化后窗口最小化', minimized === true, `isMinimized=${minimized}`);
 
     // 恢复窗口：优先 CDP 直接操作（避免 Tauri ACL 限制 unminimize）
@@ -678,6 +679,146 @@ async function main() {
     const inputOk = inputProbe.ok === true && gotInput.includes('x') && gotInput.includes('y') && gotInput.includes('\r');
     check('xterm 键盘链路：合成按键→onData 编码', inputOk === true, inputProbe.why || JSON.stringify(gotInput));
 
+    // 13.6 About-page update card state machine (mocked IPC: no real
+    // download, no real exit). Covers the full flow 新版发现 → 下载更新 →
+    // 就绪 → 重启并安装, plus the SSH-blocker confirm dialog (open / cancel /
+    // button-label restore).
+    const updMock = await cdp.eval(`(() => {
+      window.__e2eOrigInvoke = ipcRenderer.invoke.bind(ipcRenderer);
+      window.__e2eDlState = { phase: 'idle' };
+      window.__e2eDlStarted = false;
+      window.__e2eStatePolls = 0;
+      window.__e2eApplied = 0;
+      ipcRenderer.invoke = (cmd, args) => {
+        if (cmd === 'check-update') return Promise.resolve({ current: '1.0.0', latest: '9.9.9', tag: 'v9.9.9', url: 'https://example.com/rel', newer: true, ready: false });
+        if (cmd === 'download-update') {
+          // Resolve after ~4 poll ticks so the 500ms poll loop first renders
+          // the downloading phase (state polls 1-3 below) and then ready.
+          window.__e2eDlStarted = true;
+          return new Promise(res => setTimeout(() => {
+            window.__e2eDlState = { phase: 'ready', tag: 'v9.9.9' };
+            res(window.__e2eDlState);
+          }, 2200));
+        }
+        if (cmd === 'update-download-state') {
+          if (!window.__e2eDlStarted) return Promise.resolve({ phase: 'idle' });
+          window.__e2eStatePolls++;
+          return Promise.resolve(window.__e2eStatePolls <= 3
+            ? { phase: 'downloading', tag: 'v9.9.9', downloaded: 50, total: 100 }
+            : { phase: 'ready', tag: 'v9.9.9' });
+        }
+        if (cmd === 'apply-update') { window.__e2eApplied++; return Promise.resolve({ ok: true }); }
+        return window.__e2eOrigInvoke(cmd, args);
+      };
+      openSettings('about');
+      return 'mocked';
+    })()`).catch(e => 'eval-fail: ' + e.message);
+    await sleep(800);
+    const updInit = await cdp.eval(`({
+      desc: document.getElementById('update-check-desc')?.textContent,
+      dlHidden: document.getElementById('btn-update-download')?.style.display === 'none',
+      applyHidden: document.getElementById('btn-update-apply')?.style.display === 'none',
+      notesHidden: document.getElementById('update-release-notes')?.style.display === 'none'
+    })`);
+    check('更新卡片初始态（mock 后）', updMock === 'mocked' && updInit.dlHidden === true && updInit.applyHidden === true,
+      JSON.stringify({ updMock, ...updInit }));
+    await cdp.eval(`checkForUpdates(); 'checking'`);
+    const updNewer = await waitForValue(cdp, `document.getElementById('update-check-desc')?.textContent || ''`, '发现新版本 9.9.9（当前 1.0.0）');
+    const updNewerUi = await cdp.eval(`({
+      dlShown: document.getElementById('btn-update-download')?.style.display !== 'none',
+      dlText: document.getElementById('btn-update-download')?.textContent,
+      applyHidden: document.getElementById('btn-update-apply')?.style.display === 'none',
+      notesShown: document.getElementById('update-release-notes')?.style.display !== 'none'
+    })`);
+    check('更新卡片：发现新版显示下载入口', updNewer === '发现新版本 9.9.9（当前 1.0.0）' && updNewerUi.dlShown === true && updNewerUi.dlText === '下载更新' && updNewerUi.applyHidden === true && updNewerUi.notesShown === true,
+      JSON.stringify({ desc: updNewer, ...updNewerUi }));
+    await cdp.eval(`startUpdateDownload(); 'downloading'`);
+    // The 500ms poll must render the downloading phase before ready arrives
+    // (mock holds ready back for ~4 ticks): sample until 下载中 50% appears.
+    let updDlPhase = null;
+    for (let i = 0; i < 16 && !updDlPhase; i++) {
+      const s = await cdp.eval(`({
+        text: document.getElementById('btn-update-download')?.textContent,
+        disabled: document.getElementById('btn-update-download')?.disabled,
+        checkDisabled: document.getElementById('btn-check-update')?.disabled
+      })`).catch(() => null);
+      if (s && s.text === '下载中 50%') updDlPhase = s;
+      else await sleep(250);
+    }
+    check('更新卡片：轮询驱动下载中进度', !!updDlPhase && updDlPhase.disabled === true && updDlPhase.checkDisabled === true, JSON.stringify(updDlPhase));
+    const updReadyDesc = await waitForValue(cdp, `document.getElementById('update-check-desc')?.textContent || ''`, 'v9.9.9 已下载完成，随时可安装');
+    const updReadyUi = await cdp.eval(`({
+      applyShown: document.getElementById('btn-update-apply')?.style.display !== 'none',
+      applyText: document.getElementById('btn-update-apply')?.textContent,
+      dlHidden: document.getElementById('btn-update-download')?.style.display === 'none'
+    })`);
+    check('更新卡片：下载完成进入就绪态', updReadyDesc === 'v9.9.9 已下载完成，随时可安装' && updReadyUi.applyShown === true && updReadyUi.applyText === '重启并安装 v9.9.9' && updReadyUi.dlHidden === true,
+      JSON.stringify({ desc: updReadyDesc, ...updReadyUi }));
+    // 无阻断：直接 apply，不弹确认框
+    await cdp.eval(`applyUpdate(); 'applying'`);
+    await sleep(400);
+    const updApplied = await cdp.eval(`({ n: window.__e2eApplied, overlayOpen: document.getElementById('overlay-confirm').classList.contains('open') })`);
+    check('更新卡片：无 SSH/SFTP 阻断直接安装', updApplied.n === 1 && updApplied.overlayOpen === false, JSON.stringify(updApplied));
+    // 有阻断（临时伪 SSH tab）：弹确认框；取消后恢复按钮默认文案
+    const updConfirm = await cdp.eval(`(() => {
+      const fake = { id: '__e2e_fake_ssh', type: 'ssh', connected: true, name: 'fake' };
+      TabManager.tabs.push(fake);
+      let r = {};
+      try {
+        // Previous successful apply left the button disabled ("正在退出…");
+        // re-arm it so this path is exercised from a clean ready state.
+        const applyBtn = document.getElementById('btn-update-apply');
+        applyBtn.disabled = false;
+        applyUpdate();
+        const ov = document.getElementById('overlay-confirm');
+        r.open = ov.classList.contains('open');
+        r.msg = document.getElementById('confirm-msg').textContent;
+        r.okText = document.getElementById('confirm-ok').textContent;
+        r.appliedBefore = window.__e2eApplied;
+        document.getElementById('confirm-cancel').click();
+        r.closedAfterCancel = !ov.classList.contains('open');
+        r.okTextRestored = document.getElementById('confirm-ok').textContent;
+        r.appliedAfter = window.__e2eApplied;
+      } finally {
+        TabManager.tabs.splice(TabManager.tabs.indexOf(fake), 1);
+      }
+      return r;
+    })()`);
+    const updConfirmOk = updConfirm.open === true && /1 个已连接的 SSH 会话/.test(updConfirm.msg || '') &&
+      updConfirm.okText === '退出并安装' && updConfirm.appliedBefore === 1 &&
+      updConfirm.closedAfterCancel === true && updConfirm.okTextRestored === '删除' && updConfirm.appliedAfter === 1;
+    check('更新卡片：SSH 阻断确认框（取消不安装）', updConfirmOk === true, JSON.stringify(updConfirm));
+    // ready:true short-circuit: when check_update reports an installer that
+    // is already downloaded and verified, the card must jump straight to the
+    // apply state and must NOT trigger another download. The card is first
+    // perturbed to the up-to-date state so only the ready branch itself can
+    // produce the asserted ready rendering.
+    await cdp.eval(`(() => {
+      window.__e2eDlCalls = 0;
+      const prevInvoke = ipcRenderer.invoke;
+      ipcRenderer.invoke = (cmd, args) => {
+        if (cmd === 'download-update') window.__e2eDlCalls++;
+        if (cmd === 'check-update') return Promise.resolve({ current: '1.0.0', latest: '9.9.9', tag: 'v9.9.9', url: 'https://example.com/rel', newer: true, ready: true });
+        return prevInvoke(cmd, args);
+      };
+      document.getElementById('update-check-desc').textContent = '已是最新版本 (1.0.0)';
+      document.getElementById('btn-update-apply').style.display = 'none';
+      document.getElementById('btn-update-download').style.display = '';
+      checkForUpdates();
+      return 'armed';
+    })()`);
+    const updShortDesc = await waitForValue(cdp, `document.getElementById('update-check-desc')?.textContent || ''`, 'v9.9.9 已下载完成，随时可安装');
+    const updShortUi = await cdp.eval(`({
+      applyShown: document.getElementById('btn-update-apply')?.style.display !== 'none',
+      applyText: document.getElementById('btn-update-apply')?.textContent,
+      dlHidden: document.getElementById('btn-update-download')?.style.display === 'none',
+      dlCalls: window.__e2eDlCalls
+    })`);
+    check('更新卡片：ready 直跳安装态不触发重下', updShortDesc === 'v9.9.9 已下载完成，随时可安装' && updShortUi.applyShown === true && updShortUi.applyText === '重启并安装 v9.9.9' && updShortUi.dlHidden === true && updShortUi.dlCalls === 0,
+      JSON.stringify({ desc: updShortDesc, ...updShortUi }));
+    await cdp.eval(`(() => { ipcRenderer.invoke = window.__e2eOrigInvoke; closeSettingsTab(); return 'restored'; })()`).catch(() => null);
+    await sleep(300);
+
     // 14. 窗口状态恢复：写入 config 的 window 字段 → 重启 → 验证最大化/尺寸恢复
     async function writeWindowState(state) {
       // 读现有 config（若存在）并注入 window 字段
@@ -695,7 +836,7 @@ async function main() {
       // instance then attaches to the half-dead browser and its debug port
       // never opens (deterministic 30s timeout under load). The old browser
       // ANSWERS the debug port while alive, so poll until it goes silent.
-      const portQuiet = Date.now() + 15000;
+      const portQuiet = Date.now() + 45000;
       while (Date.now() < portQuiet) {
         try {
           await fetch(`http://127.0.0.1:${PORT}/json/version`, { signal: AbortSignal.timeout(1000) });

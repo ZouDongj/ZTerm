@@ -568,6 +568,10 @@ let _activeHostkeyCleanup = null;
 
 ipcRenderer.on('ssh-hostkey-mismatch', (event, { tabId, host, oldAlgorithm, oldFingerprint, newAlgorithm, newFingerprint }) => {
     if (_activeHostkeyCleanup) _activeHostkeyCleanup();
+    // showConfirm (delete/update confirmations) shares this DOM but keeps its
+    // own cleanup registry; unbind it too or this dialog's buttons would also
+    // fire its stale callbacks.
+    if (typeof _activeConfirmCleanup === 'function' && _activeConfirmCleanup) _activeConfirmCleanup();
     const msg = `⚠ 主机密钥变更警告\n\n主机 ${host} 的密钥指纹与已知记录不符，可能存在中间人攻击。\n\n旧指纹 (${oldAlgorithm}):\n${oldFingerprint}\n\n新指纹 (${newAlgorithm}):\n${newFingerprint}\n\n是否信任新密钥并继续连接？`;
     document.getElementById('confirm-msg').textContent = msg;
     const overlay = document.getElementById('overlay-confirm');

@@ -466,18 +466,128 @@ async function loadAboutInfo() {
         set('about-ssh', 'russh ' + (info.russh || '?'));
     } catch(e) {}
     // Reset the update card each time the about page opens: no stale result.
+    _stopUpdatePoll();
     const desc = document.getElementById('update-check-desc');
     if (desc) { desc.textContent = '从 GitHub Releases 检查新版本'; desc.style.color = ''; }
     const dl = document.getElementById('btn-update-download');
-    if (dl) dl.style.display = 'none';
+    if (dl) { dl.style.display = 'none'; dl.disabled = false; dl.textContent = '下载更新'; }
+    const apply = document.getElementById('btn-update-apply');
+    if (apply) apply.style.display = 'none';
+    const notes = document.getElementById('update-release-notes');
+    if (notes) notes.style.display = 'none';
+    const check = document.getElementById('btn-check-update');
+    if (check) { check.disabled = false; check.textContent = '检查更新'; }
     window.__updateUrl = null;
+    window.__updateTag = null;
+    // A download started on an earlier visit may still run (or be done) in
+    // the main process; sync the card from its state instead of staying idle.
+    _syncUpdateCardFromState();
 }
 
-// Update check (about page, check-only: check + notify + open download page)
+// ── In-app update download (about page state machine) ──
+let _updatePollTimer = null;
+// Toast at most once per downloaded tag (poll path and invoke-return path
+// both reach the ready state).
+let _updateToastTag = null;
+
+function _stopUpdatePoll() {
+    if (_updatePollTimer) { clearInterval(_updatePollTimer); _updatePollTimer = null; }
+}
+
+function _setUpdateDesc(text, color) {
+    const desc = document.getElementById('update-check-desc');
+    if (desc) { desc.textContent = text; desc.style.color = color || ''; }
+}
+
+function _toastUpdateReadyOnce(tag) {
+    if (_updateToastTag === tag) return;
+    _updateToastTag = tag;
+    showToast('更新已下载完成，可在关于页安装');
+}
+
+function _renderUpdateDownloading(st) {
+    const dl = document.getElementById('btn-update-download');
+    const apply = document.getElementById('btn-update-apply');
+    const check = document.getElementById('btn-check-update');
+    if (apply) apply.style.display = 'none';
+    if (check) check.disabled = true;
+    if (dl) {
+        dl.style.display = '';
+        dl.disabled = true;
+        let pct = '';
+        if (st.total > 0) pct = ' ' + Math.floor(st.downloaded * 100 / st.total) + '%';
+        else if (st.downloaded > 0) pct = ' ' + (st.downloaded / 1048576).toFixed(1) + 'MB';
+        dl.textContent = '下载中' + pct;
+    }
+    _setUpdateDesc('正在下载 ' + (st.tag || '') + ' 安装包…');
+}
+
+function _renderUpdateReady(tag) {
+    const dl = document.getElementById('btn-update-download');
+    const apply = document.getElementById('btn-update-apply');
+    const check = document.getElementById('btn-check-update');
+    if (dl) dl.style.display = 'none';
+    if (check) { check.disabled = false; check.textContent = '检查更新'; }
+    if (apply) { apply.style.display = ''; apply.disabled = false; apply.textContent = '重启并安装 ' + (tag || ''); }
+    _setUpdateDesc((tag || '新版本') + ' 已下载完成，随时可安装', 'rgba(120,200,120,0.9)');
+}
+
+function _renderUpdateFailed(err) {
+    const dl = document.getElementById('btn-update-download');
+    const apply = document.getElementById('btn-update-apply');
+    const check = document.getElementById('btn-check-update');
+    if (apply) apply.style.display = 'none';
+    if (check) { check.disabled = false; check.textContent = '检查更新'; }
+    if (dl) { dl.style.display = ''; dl.disabled = false; dl.textContent = '重试下载'; }
+    _setUpdateDesc('下载失败：' + (err || '未知错误'), 'rgba(220,120,120,0.9)');
+}
+
+function _startUpdatePoll() {
+    _stopUpdatePoll();
+    _updatePollTimer = setInterval(async () => {
+        // Stop when the about page is hidden; the main-process download
+        // continues and is re-synced on the next visit.
+        const desc = document.getElementById('update-check-desc');
+        if (!desc || desc.offsetParent === null) { _stopUpdatePoll(); return; }
+        try {
+            const st = await ipcRenderer.invoke('update-download-state');
+            if (!st) return;
+            if (st.phase === 'downloading') {
+                _renderUpdateDownloading(st);
+            } else if (st.phase === 'ready') {
+                _stopUpdatePoll();
+                _renderUpdateReady(st.tag);
+                _toastUpdateReadyOnce(st.tag);
+            } else if (st.phase === 'failed') {
+                _stopUpdatePoll();
+                _renderUpdateFailed(st.error);
+            }
+        } catch(e) {}
+    }, 500);
+}
+
+async function _syncUpdateCardFromState() {
+    try {
+        const st = await ipcRenderer.invoke('update-download-state');
+        if (!st || !st.phase) return;
+        if (st.phase === 'downloading') {
+            _renderUpdateDownloading(st);
+            _startUpdatePoll();
+        } else if (st.phase === 'ready') {
+            _renderUpdateReady(st.tag);
+        } else if (st.phase === 'failed') {
+            _renderUpdateFailed(st.error);
+        }
+    } catch(e) {}
+}
+
+// Update check (about page): check -> download -> ready -> restart & install.
 async function checkForUpdates() {
     const btn = document.getElementById('btn-check-update');
     const desc = document.getElementById('update-check-desc');
     const dl = document.getElementById('btn-update-download');
+    const apply = document.getElementById('btn-update-apply');
+    const notes = document.getElementById('update-release-notes');
     if (!btn || !desc) return;
     btn.disabled = true;
     btn.textContent = '检查中…';
@@ -487,13 +597,26 @@ async function checkForUpdates() {
         if (r && r.none) {
             desc.textContent = '官方还没有发布版本';
         } else if (r && r.newer) {
-            desc.textContent = `发现新版本 ${r.latest}（当前 ${r.current}）`;
-            desc.style.color = 'rgba(120,200,120,0.9)';
             window.__updateUrl = r.url;
-            if (dl) dl.style.display = '';
+            window.__updateTag = r.tag;
+            if (notes) notes.style.display = '';
+            if (r.ready) {
+                // Verified installer already on disk from an earlier
+                // download (survives restarts): skip straight to apply.
+                _renderUpdateReady(r.tag);
+            } else {
+                desc.textContent = `发现新版本 ${r.latest}（当前 ${r.current}）`;
+                desc.style.color = 'rgba(120,200,120,0.9)';
+                if (apply) apply.style.display = 'none';
+                if (dl) { dl.style.display = ''; dl.disabled = false; dl.textContent = '下载更新'; }
+            }
         } else if (r) {
             desc.textContent = `已是最新版本 (${r.current})`;
             if (dl) dl.style.display = 'none';
+            if (apply) apply.style.display = 'none';
+            if (notes) notes.style.display = 'none';
+            window.__updateUrl = null;
+            window.__updateTag = null;
         } else {
             desc.textContent = '检查失败：空响应';
         }
@@ -506,8 +629,71 @@ async function checkForUpdates() {
     }
 }
 
-function goUpdateDownload() {
+function goUpdateReleaseNotes() {
     if (window.__updateUrl) ipcRenderer.invoke('open-url', { url: window.__updateUrl });
+}
+
+async function startUpdateDownload() {
+    const dl = document.getElementById('btn-update-download');
+    if (!dl || dl.disabled) return;
+    dl.disabled = true;
+    dl.textContent = '下载中…';
+    _startUpdatePoll();
+    try {
+        const st = await ipcRenderer.invoke('download-update', { tag: window.__updateTag || '' });
+        _stopUpdatePoll();
+        if (st && st.phase === 'ready') {
+            _renderUpdateReady(st.tag);
+            _toastUpdateReadyOnce(st.tag);
+        } else {
+            _renderUpdateFailed(st && st.error ? st.error : '未知错误');
+        }
+    } catch (e) {
+        _stopUpdatePoll();
+        _renderUpdateFailed(e && e.message ? e.message : String(e));
+    }
+}
+
+// Exit blockers: only live SSH sessions and in-flight SFTP transfers are
+// worth a confirmation; local shells die on every ordinary exit anyway.
+// Counting itself is the pure countUpdateBlockers (update-utils.js).
+function _countUpdateBlockers() {
+    try {
+        const transfers = (typeof TransferManager !== 'undefined') ? TransferManager._transfers : [];
+        return countUpdateBlockers(TabManager.tabs || [], transfers, typeof getAllPanes === 'function' ? getAllPanes : null);
+    } catch(e) {
+        return { ssh: 0, sftp: 0 };
+    }
+}
+
+async function applyUpdate() {
+    const apply = document.getElementById('btn-update-apply');
+    if (apply && apply.disabled) return;
+    const { ssh, sftp } = _countUpdateBlockers();
+    if (ssh + sftp > 0) {
+        const parts = [];
+        if (ssh > 0) parts.push(ssh + ' 个已连接的 SSH 会话');
+        if (sftp > 0) parts.push(sftp + ' 个传输中的 SFTP 任务');
+        showConfirm('退出安装将中断 ' + parts.join('、') + '。确定继续？', _doApplyUpdate, '退出并安装');
+        return;
+    }
+    _doApplyUpdate();
+}
+
+async function _doApplyUpdate() {
+    const apply = document.getElementById('btn-update-apply');
+    if (apply) { apply.disabled = true; apply.textContent = '正在退出…'; }
+    showToast('正在退出并启动安装…');
+    // Persist session state so the post-install relaunch restores tabs.
+    try { if (typeof saveConfig === 'function') await saveConfig(); } catch(e) {}
+    try {
+        await ipcRenderer.invoke('apply-update');
+        // On success the main process exits and the installer takes over;
+        // control only returns here when the launch failed.
+    } catch (e) {
+        if (apply) { apply.disabled = false; apply.textContent = '重启并安装'; }
+        _setUpdateDesc('启动安装失败：' + (e && e.message ? e.message : String(e)), 'rgba(220,120,120,0.9)');
+    }
 }
 
 async function changeDataDir() {

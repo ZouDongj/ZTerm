@@ -74,12 +74,17 @@ function escJsString(s) { return (s || '').replace(/\\/g,'\\\\').replace(/'/g,"\
 // cleanup，旧监听会残留到下次弹窗叠加执行（误删数据）。打开新弹窗前先解绑旧的。
 let _activeConfirmCleanup = null;
 
-function showConfirm(msg, onOk) {
+function showConfirm(msg, onOk, okText) {
     if (_activeConfirmCleanup) _activeConfirmCleanup();
+    // The hostkey dialog shares this DOM but keeps its own cleanup registry;
+    // unbind it too or a following OK click would fire its stale callbacks
+    // (trusting an unconfirmed host key).
+    if (typeof _activeHostkeyCleanup === 'function' && _activeHostkeyCleanup) _activeHostkeyCleanup();
     document.getElementById('confirm-msg').textContent = msg;
     const overlay = document.getElementById('overlay-confirm');
     const cancelBtn = document.getElementById('confirm-cancel');
     const okBtn = document.getElementById('confirm-ok');
+    okBtn.textContent = okText || '删除';
 
     const cleanup = () => {
         _activeConfirmCleanup = null;
@@ -87,6 +92,8 @@ function showConfirm(msg, onOk) {
         cancelBtn.removeEventListener('click', onCancel);
         okBtn.removeEventListener('click', onOkClick);
         overlay.querySelector('.overlay-backdrop').removeEventListener('click', onCancel);
+        // Restore the default label so delete flows are unaffected.
+        okBtn.textContent = '删除';
     };
     const onCancel = () => cleanup();
     const onOkClick = () => { cleanup(); onOk(); };

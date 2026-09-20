@@ -549,9 +549,11 @@
                 <div class="settings-card-label">
                   <div class="settings-card-title">检查更新</div>
                   <div class="settings-card-desc" id="update-check-desc">从 GitHub Releases 检查新版本</div>
+                  <div class="settings-card-desc" id="update-release-notes" style="display:none;margin-top:4px"><a href="#" onclick="goUpdateReleaseNotes();return false" style="color:rgba(120,170,255,0.85);font-size:11px;text-decoration:none">查看发布说明</a></div>
                 </div>
                 <div class="settings-card-control" style="display:flex;gap:6px;flex-shrink:0">
-                  <button class="btn-outline" style="font-size:12px;padding:6px 14px;display:none" id="btn-update-download" onclick="goUpdateDownload()">前往下载</button>
+                  <button class="btn-outline" style="font-size:12px;padding:6px 14px;display:none" id="btn-update-download" onclick="startUpdateDownload()">下载更新</button>
+                  <button class="btn-primary" style="font-size:12px;padding:6px 14px;display:none" id="btn-update-apply" onclick="applyUpdate()">重启并安装</button>
                   <button class="btn-outline" style="font-size:12px;padding:6px 14px" id="btn-check-update" onclick="checkForUpdates()">检查更新</button>
                 </div>
               </div>
@@ -998,6 +1000,7 @@
   <script src="renderer/state.js"></script>
   <script src="renderer/split-layout.js"></script>
   <script src="renderer/shortcut-utils.js"></script>
+  <script src="renderer/update-utils.js"></script>
   <script src="renderer/qc-utils.js"></script>
   <script src="renderer/highlight-utils.js"></script>
   <script src="renderer/tab-serialize.js"></script>
