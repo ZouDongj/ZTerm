@@ -405,44 +405,71 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .panel-footer{display:flex;align-items:center;gap:12px;padding:12px 20px 14px;font-size:12px;color:var(--text-2);flex-shrink:0}
 .panel-footer kbd{background:rgba(var(--accent-rgb),0.12);padding:2px 7px;border-radius:5px;font-family:inherit;font-size:10px;color:#9cc8ee}
 
-/* Quick Commands + Palette（V3 分区标题式表项） */
-.qc-panel{width:500px;max-height:460px}
-.qc-list{overflow-y:auto;padding:8px 12px 12px;max-height:300px;min-height:90px}
-.qc-footer{display:flex;align-items:center;gap:12px;padding:10px 16px;font-size:11px;color:var(--text-2);flex-shrink:0}
-.palette-panel{width:500px;max-height:620px}
-.palette-list{overflow-y:auto;padding:8px 12px 12px;max-height:500px;min-height:90px}
+/* Quick Commands + Palette（与会话选择器同一视觉语言：ss-header/ss-search/
+   ss-results/ss-footer + 选型行） */
+.qc-panel{width:500px;max-width:calc(100vw - 32px);max-height:460px;display:flex;flex-direction:column;overflow:hidden}
+.palette-panel{width:500px;max-width:calc(100vw - 32px);max-height:620px;display:flex;flex-direction:column;overflow:hidden}
+.qc-panel .ss-results{max-height:260px;min-height:90px}
+.palette-panel .ss-results{max-height:480px;min-height:90px}
 .palette-empty{display:none;padding:28px 16px;text-align:center;color:var(--text-2);font-size:12px}
-.palette-empty.show{display:block}
-/* V3 表项（快捷命令/命令面板共用） */
-.v3-section{font-size:12px;font-weight:600;color:var(--text-2);letter-spacing:0.8px;text-transform:uppercase;padding:10px 12px 4px}
-.v3-section:first-child{padding-top:4px}
-.v3-item{display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:9px;cursor:pointer;transition:background 0.12s}
-.v3-item:hover{background:rgba(255,255,255,0.04)}
-.v3-item.sel,.v3-item[data-selected]{background:rgba(var(--accent-rgb),0.16)}
-.v3-name{flex:1;min-width:0;font-size:13px;color:var(--text-1);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* V3 分组标题（快捷命令/命令面板共用），镜像 .ss-section-label */
+.v3-section{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--text-3);min-height:29px;padding:1px 13px 5px;user-select:none}
+.v3-section:not(:first-child){margin-top:12px;padding-top:3px}
+/* V3 表项，镜像 .ss-row：透明边框预留选中描边，左侧 accent 条标示选中 */
+.v3-item{position:relative;display:flex;align-items:center;gap:11px;padding:9px 11px;border:1px solid transparent;border-radius:7px;cursor:pointer;user-select:none;margin-bottom:1px;transition:background 0.12s}
+.v3-item:hover:not([data-selected]){background:rgba(255,255,255,.045)}
+.v3-item[data-selected]{background:rgba(var(--accent-rgb),.14);border-color:rgba(var(--accent-rgb),.28)}
+.v3-item[data-selected]::before{content:"";position:absolute;left:-1px;top:9px;bottom:9px;width:2px;background:rgb(var(--accent-rgb));border-radius:2px}
+.v3-name{flex:1;min-width:0;font-size:13.5px;font-weight:500;line-height:19px;color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* No hardcoded font stack: the command text inherits the UI font, which in
    follow mode IS the configured terminal font. */
 .v3-cmd{font-size:12px;color:var(--text-2);max-width:55%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.v3-kbd{font-size:10px;color:#9cc8ee;background:rgba(var(--accent-rgb),0.1);padding:2px 7px;border-radius:5px;flex-shrink:0;font-family:inherit}
-
-/* Search */
-.panel-search{display:flex;align-items:center;gap:10px;padding:12px 20px 10px}
-.panel-search svg{flex-shrink:0;color:var(--text-3)}
-.panel-search input{flex:1;background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:10px;padding:9px 13px;color:var(--text-1);font-size:13px;font-family:inherit;outline:none;transition:all 0.12s}
-.panel-search input:focus{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
-.panel-search input::placeholder{color:var(--text-3)}
+.v3-kbd{font-size:10px;color:var(--text-3);background:rgba(255,255,255,.06);padding:2px 7px;border-radius:5px;flex-shrink:0;font-family:inherit}
 
 /* Panel items（会话选择/SSH 管理器等） */
-.panel-item{display:flex;align-items:center;gap:12px;padding:10px 13px;border-radius:11px;cursor:pointer;transition:background 0.12s}
-.panel-item:hover{background:rgba(255,255,255,0.04)}
-.panel-item[data-selected]{background:rgba(var(--accent-rgb),0.16)}
-.panel-item-icon{width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
-.panel-item-icon.loc{background:rgba(125,213,138,0.14);color:#7dd58a}
-.panel-item-icon.ssh{background:rgba(255,183,77,0.14);color:#ffb74d}
-.panel-item-info{flex:1;min-width:0}
-.panel-item-name{font-size:13px;color:var(--text-1);font-weight:500}
-.panel-item-detail{font-size:11px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.panel-item-badge{font-size:10px;padding:2px 9px;border-radius:8px;background:rgba(var(--accent-rgb),0.14);color:#9cc8ee;flex-shrink:0}
+/* ── Session selector (new-session overlay, extends prototype A; container-scoped) ── */
+.session-selector{width:min(548px,calc(100vw - 32px));max-height:calc(100vh - 83px);display:flex;flex-direction:column;overflow:hidden}
+.ss-header{display:flex;align-items:center;justify-content:space-between;padding:20px 21px 14px;flex-shrink:0;user-select:none}
+.ss-header h3{font-size:16px;font-weight:500;color:var(--text-1);letter-spacing:.2px}
+.ss-close{display:flex;align-items:center;justify-content:center;width:27px;height:27px;border-radius:5px;border:none;background:transparent;color:var(--text-3);cursor:pointer;margin-right:-4px;transition:all .12s}
+.ss-close:hover{background:rgba(255,255,255,.07);color:var(--text-1)}
+.ss-search{display:flex;align-items:center;gap:9px;height:39px;margin:0 21px;padding:0 10px;border:1px solid rgba(255,255,255,.16);border-radius:7px;color:var(--text-3);flex-shrink:0;transition:border-color .12s}
+.ss-search:focus-within{border-color:rgba(var(--accent-rgb),.55);box-shadow:0 0 0 1px rgba(var(--accent-rgb),.13)}
+.ss-search input{flex:1;min-width:0;height:100%;background:none;border:0;outline:none;color:var(--text-1);font-size:13px;font-family:inherit;padding:0}
+.ss-search input::placeholder{color:var(--text-3)}
+.ss-search input::-webkit-search-cancel-button{-webkit-appearance:none}
+.ss-clear{width:23px;height:23px;display:flex;align-items:center;justify-content:center;border:none;background:transparent;color:var(--text-3);border-radius:4px;cursor:pointer}
+.ss-clear[hidden]{display:none}
+.ss-clear:hover{background:rgba(255,255,255,.07);color:var(--text-1)}
+.ss-results{overflow-y:auto;overscroll-behavior:contain;min-height:0;max-height:431px;padding:10px 10px 11px;flex:1}
+.ss-section-label{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--text-3);min-height:29px;padding:1px 13px 5px;user-select:none}
+.ss-section:not(:first-child) .ss-section-label{margin-top:12px;padding-top:3px}
+.ss-row{position:relative;display:flex;align-items:center;gap:11px;min-height:58px;padding:9px 11px;border:1px solid transparent;border-radius:7px;cursor:pointer;user-select:none;margin-bottom:1px}
+.ss-row:hover:not([aria-selected=true]){background:rgba(255,255,255,.045)}
+.ss-row[aria-selected=true]{background:rgba(var(--accent-rgb),.14);border-color:rgba(var(--accent-rgb),.28)}
+.ss-row[aria-selected=true]::before{content:"";position:absolute;left:-1px;top:15px;bottom:15px;width:2px;background:rgb(var(--accent-rgb));border-radius:2px}
+.ss-row-icon{width:25px;flex:none;display:flex;align-items:center;justify-content:center;color:var(--text-3)}
+.ss-row[aria-selected=true] .ss-row-icon{color:var(--text-2)}
+.ss-identity{min-width:0;flex:1;display:flex;flex-direction:column}
+.ss-primary{display:block;font-size:13.5px;font-weight:500;line-height:19px;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ss-primary.host{font-family:"Cascadia Code",Consolas,monospace;font-weight:400;font-size:12.5px;letter-spacing:.1px}
+.ss-meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;color:var(--text-2);font-size:11.5px;margin-top:3px;line-height:17px}
+.ss-meta .mono{font-family:"Cascadia Code",Consolas,monospace;font-size:11px;font-variant-numeric:tabular-nums}
+.ss-meta .dot{color:var(--text-3)}
+.ss-key{color:var(--text-3);display:flex;align-items:center}
+.ss-group-name{max-width:72px;flex:none;text-align:right;color:var(--text-3);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ss-open{width:21px;display:flex;align-items:center;justify-content:center;color:rgba(var(--accent-rgb),.85);visibility:hidden;flex:none;margin-left:2px}
+.ss-row[aria-selected=true] .ss-open{visibility:visible}
+.ss-empty{min-height:220px;display:flex;align-items:center;justify-content:center;flex-direction:column;padding:32px 20px;text-align:center}
+.ss-empty strong{font-size:13px;font-weight:400;color:var(--text-2)}
+.ss-empty p{font-size:11px;line-height:1.7;color:var(--text-3);margin:10px 0 0}
+.ss-footer{display:flex;justify-content:space-between;align-items:center;gap:14px;border-top:1px solid rgba(255,255,255,.08);padding:12px 21px;min-height:45px;flex-shrink:0;user-select:none}
+.ss-hints{display:flex;align-items:center;gap:13px;color:var(--text-3);font-size:10px;white-space:nowrap}
+.ss-hints span{display:flex;align-items:center;gap:4px}
+.ss-hints kbd{font-size:10px;color:var(--text-2);font-family:inherit}
+.ss-manage{font-size:11px;color:rgba(var(--accent-rgb),.85);background:none;border:none;cursor:pointer;white-space:nowrap;border-radius:3px;padding:2px 4px;font-family:inherit}
+.ss-manage:hover{color:rgb(var(--accent-rgb))}
+.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .panel-section-title{font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:0.5px;padding:12px 12px 6px}
 
 /* ── SFTP overlay window ── */
@@ -561,6 +588,87 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ssh-manager-actions button:hover{background:rgba(var(--accent-rgb),0.2);color:var(--text-1)}
 .ssh-manager-actions button.primary{background:rgb(var(--accent-rgb));color:var(--accent-contrast);font-weight:600}
 .ssh-manager-actions button.primary:hover{filter:brightness(1.1)}
+/* ── SSH manager scheme-A rows (shared by settings page and overlay; .ssh-mgr-list scope) ── */
+.ssh-mgr-searchrow{display:flex;align-items:center;gap:10px;padding:4px 18px 10px}
+.ssh-mgr-search{display:flex;align-items:center;gap:9px;height:34px;padding:0 10px;border:1px solid rgba(255,255,255,.16);border-radius:6px;color:var(--text-3);max-width:295px;flex:1;transition:border-color .12s}
+.ssh-mgr-search:focus-within{border-color:rgba(var(--accent-rgb),.55)}
+.ssh-mgr-search input{width:100%;min-width:0;background:none;border:0;outline:none;color:var(--text-1);font-size:12px;font-family:inherit}
+.ssh-mgr-search input::placeholder{color:var(--text-3)}
+.ssh-mgr-search input::-webkit-search-cancel-button{-webkit-appearance:none}
+.ssh-mgr-count{font-size:12px;color:var(--text-3);flex:none;white-space:nowrap}
+.ssh-mgr-group{margin-bottom:8px}
+.ssh-mgr-group-title{display:flex;align-items:center;gap:8px;padding:8px;margin-bottom:3px;border-radius:5px;cursor:pointer;color:var(--text-2);font-size:12px;font-weight:500;user-select:none;outline-offset:2px}
+.ssh-mgr-group-title:hover{background:rgba(255,255,255,.045)}
+.ssh-mgr-group-title .group-chevron{transition:transform .2s;color:var(--text-3);flex:none}
+.ssh-mgr-group-title.collapsed .group-chevron{transform:rotate(-90deg)}
+.ssh-mgr-group-title .group-rule{height:1px;background:rgba(255,255,255,.07);flex:1;margin-left:9px}
+.ssh-mgr-group-title .group-rename{opacity:0;background:none;border:none;color:var(--text-3);cursor:pointer;padding:2px 6px;border-radius:5px;display:flex;align-items:center;transition:all .12s}
+.ssh-mgr-group-title:hover .group-rename,.ssh-mgr-group-title:focus-within .group-rename{opacity:1}
+.ssh-mgr-group-title .group-rename:hover{background:rgba(var(--accent-rgb),.14);color:var(--text-1)}
+.ssh-mgr-group-title .group-name-input{background:rgba(var(--accent-rgb),.1);border:1px solid rgba(var(--accent-rgb),.35);border-radius:6px;padding:2px 8px;color:var(--text-1);font-size:13px;font-family:inherit;outline:none;width:130px}
+.ssh-mgr-group-title .group-name-input:focus{border-color:rgb(var(--accent-rgb))}
+.ssh-mgr-group-items{display:flex;flex-direction:column;gap:1px}
+.ssh-mgr-group-items.collapsed{display:none}
+.ssh-mgr-row{display:flex;align-items:center;gap:14px;padding:10px 13px;min-height:60px;border-radius:7px}
+.ssh-mgr-row:hover{background:rgba(255,255,255,.04)}
+.ssh-mgr-server{display:flex;align-items:center;justify-content:center;width:31px;height:34px;color:var(--text-3);flex:none}
+.ssh-mgr-identity{flex:1;min-width:0;cursor:pointer;border-radius:4px;outline-offset:2px;display:flex;flex-direction:column}
+.ssh-mgr-primary{display:block;font-size:14px;line-height:21px;font-weight:500;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ssh-mgr-primary.host{font-family:"Cascadia Code",Consolas,monospace;font-weight:400;font-size:13px;letter-spacing:.15px}
+.ssh-mgr-meta{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:12px;color:var(--text-2);line-height:18px;margin-top:3px}
+.ssh-mgr-meta .mono{font-family:"Cascadia Code",Consolas,monospace;font-size:11.5px;font-variant-numeric:tabular-nums}
+.ssh-mgr-meta .dot{color:var(--text-3)}
+.ssh-mgr-key{color:var(--text-3);display:flex;align-items:center}
+.ssh-mgr-actions{display:flex;gap:4px;flex:none;margin-left:15px}
+.ssh-mgr-btn{width:31px;height:31px;display:flex;align-items:center;justify-content:center;border:none;background:transparent;color:var(--text-3);border-radius:6px;cursor:pointer;transition:all .12s}
+.ssh-mgr-btn:hover{background:rgba(255,255,255,.08);color:var(--text-1)}
+.ssh-mgr-btn.connect:hover{color:rgb(var(--accent-rgb))}
+.ssh-mgr-btn.danger:hover{color:#e5a6a6}
+.ssh-mgr-empty{padding:48px 20px;color:var(--text-2);text-align:center;font-size:13px}
+.ssh-mgr-empty-hint{font-size:11px;color:var(--text-3);margin-top:10px}
+.ssh-mgr-empty-actions{margin-top:14px}
+
+/* ── Settings host only: section titles + one settings-card per group ──
+   (design/ssh-settings-card-design.md; the overlay manager stays flat) */
+.ssh-settings-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:4px}
+/* Chained to .btn-primary (defined later in this file) so the 9px radius and
+   32px height actually win the cascade. */
+.btn-primary.ssh-settings-add{height:32px;border-radius:9px;padding:0 14px;flex-shrink:0}
+.ssh-mgr-searchrow.ssh-settings-toolbar{padding:0 2px;margin:14px 0 4px;flex-wrap:wrap;row-gap:8px}
+.ssh-settings-toolbar .ssh-mgr-search{border:1px solid rgba(255,255,255,.075);border-radius:9px;background:rgba(255,255,255,.025)}
+/* The scoped border above sits after the shared :focus-within rule at equal
+   specificity — restate it or the settings search loses its focus border. */
+.ssh-settings-toolbar .ssh-mgr-search:focus-within{border-color:rgba(var(--accent-rgb),.55)}
+.ssh-settings-toolbar-actions{margin-left:auto;display:flex;gap:14px}
+.ssh-quiet-action{background:none;border:none;padding:4px 2px;font-size:11px;font-family:inherit;color:var(--text-2);cursor:pointer;border-radius:4px;transition:color .12s}
+.ssh-quiet-action:hover{color:rgb(var(--accent-rgb))}
+/* Group title reads as a settings-section (structure layer), not a strip:
+   12/600 + tracking, no rule line, quiet hover. min-height keeps the rename
+   inline editor from growing the title. */
+#settings-ssh-list .ssh-mgr-group{margin-bottom:0}
+#settings-ssh-list .ssh-mgr-group-title{margin:30px 0 10px;padding:1px 2px;border-radius:4px;font-weight:600;letter-spacing:.06em;gap:7px;min-height:22px;box-sizing:border-box}
+#settings-ssh-list .ssh-mgr-group:first-child .ssh-mgr-group-title{margin-top:12px}
+#settings-ssh-list .ssh-mgr-group-title:hover{background:none;color:var(--text-1)}
+#settings-ssh-list .ssh-mgr-group-title .group-rule{display:none}
+#settings-ssh-list .ssh-mgr-group-title .group-name-input{font-size:12px;padding:1px 8px}
+/* One card per group; a collapsed group hides the whole card (the shared
+   .collapsed{display:none} rule), leaving just the section title. */
+#settings-ssh-list .ssh-mgr-group-items{background:var(--surface-card);border-radius:14px;padding:6px 16px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);gap:0}
+#settings-ssh-list .ssh-mgr-row{padding:10px 0;min-height:62px;gap:12px}
+
+@media(max-width:560px){
+  .ssh-mgr-searchrow{padding-left:12px;padding-right:12px}
+  .ssh-settings-toolbar-actions{width:100%;justify-content:flex-end}
+  #settings-ssh-list .ssh-mgr-group-items{padding:6px 12px}
+  .ssh-mgr-row{padding:10px 8px;gap:8px}
+  #settings-ssh-list .ssh-mgr-row{padding:10px 0}
+  .ssh-mgr-actions{margin-left:6px;gap:2px}
+  .ssh-mgr-btn{width:28px;height:28px}
+  .ss-header{padding:17px 15px 12px}
+  .ss-search{margin:0 15px}
+  .ss-footer{padding:12px 15px;gap:8px}
+  .ss-hints{gap:8px;font-size:9px}
+}
 
 /* ── Buttons ── */
 .btn-primary{background:rgb(var(--accent-rgb));color:var(--accent-contrast);border:none;padding:7px 18px;border-radius:16px;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.12s;font-family:inherit}
@@ -659,8 +767,14 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .toast.show{opacity:1}
 .toast.error{background:#f2b8b5;color:#5f2120}
 .toast.error::before{mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'/%3E%3Cline x1='6' y1='6' x2='18' y2='18'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'/%3E%3Cline x1='6' y1='6' x2='18' y2='18'/%3E%3C/svg%3E")}
+/* Terminal link hover tip (ADR-0003): real target + gesture hint */
+.link-tip{position:fixed;z-index:90;max-width:480px;background:var(--surface-float);color:var(--text-1);border:1px solid var(--surface-card);border-radius:6px;padding:6px 10px;font-size:12px;line-height:1.5;pointer-events:none;opacity:0;transition:opacity 0.12s;word-break:break-all;box-shadow:var(--shadow-float)}
+.link-tip.show{opacity:1}
+.link-tip-target{display:block;font-family:monospace}
+.link-tip-hint{display:block;color:var(--text-3);font-size:11px;margin-top:2px}
 
 /* Confirm dialog */
+#confirm-msg{white-space:pre-line;word-break:break-all}
 .btn-danger{background:rgba(242,184,181,0.18);border:1px solid rgba(242,184,181,0.18);color:#eed2d0;padding:8px 20px;border-radius:20px;font-size:13px;cursor:pointer;transition:all 0.12s;font-family:inherit}
 .btn-danger:hover{background:rgba(242,184,181,0.28);border-color:rgba(242,184,181,0.28);color:#fef0ef}
 
@@ -675,8 +789,11 @@ select:focus-visible,input:focus-visible,textarea:focus-visible,
   outline:none;
   box-shadow:0 0 0 2px rgba(var(--accent-rgb),0.5);
 }
+/* Search inputs living inside an already-bordered container show focus on the
+   container (focus-within border), not as a second inner ring. */
+.ss-search input:focus-visible,.ssh-mgr-search input:focus-visible{box-shadow:none}
 button:active:not(:disabled),.tab:active,.menu-item:active,
-.panel-item:active,.v3-item:active,.sftp-item:active{
+.v3-item:active,.sftp-item:active{
   filter:brightness(0.88);
 }
 button:disabled,.menu-item.disabled,.shortcut-edit-btn:disabled{

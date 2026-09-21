@@ -2990,25 +2990,114 @@ pub fn apply_update(args: Vec<Value>) -> Result<Value, String> {
     std::process::exit(0);
 }
 
+// ADR-0003: pure validation for URLs the renderer asks us to open with the OS
+// shell. Every rejection carries a stable category prefix (invalidUrl /
+// blockedProtocol) the UI can key on; OS-level failures are osOpenFailed.
+fn validate_open_url(raw: &str) -> Result<tauri::Url, &'static str> {
+    if raw.is_empty() {
+        return Err("invalidUrl: empty");
+    }
+    if raw.chars().count() > 4096 {
+        return Err("invalidUrl: too long");
+    }
+    if raw.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7F) {
+        return Err("invalidUrl: control character");
+    }
+    let url = tauri::Url::parse(raw).map_err(|_| "invalidUrl: unparseable")?;
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => return Err("blockedProtocol"),
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("invalidUrl: userinfo not allowed");
+    }
+    if url.host_str().map_or(true, |h| h.is_empty()) {
+        return Err("invalidUrl: empty host");
+    }
+    // Percent-encoded C0/DEL anywhere would decode into raw control bytes
+    // downstream. Scan every %XX triplet (case-insensitive via uppercase) and
+    // reject values < 0x20 or == 0x7F; a literal "%2500" (double-encoded) is
+    // %25 = '%' and passes as harmless text.
+    fn hex_val(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let upper = raw.to_ascii_uppercase();
+    let bytes = upper.as_bytes();
+    let mut i = 0;
+    while i + 2 < bytes.len() {
+        if bytes[i] == b'%' {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                let v = h * 16 + l;
+                if v < 0x20 || v == 0x7F {
+                    return Err("invalidUrl: encoded control character");
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(url)
+}
+
+#[cfg(windows)]
+fn shell_execute_open(target: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::shellapi::ShellExecuteW;
+    use winapi::um::winuser::SW_SHOWNORMAL;
+    let wide = |s: &str| -> Vec<u16> {
+        std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
+    };
+    let verb = wide("open");
+    let file = wide(target);
+    // "open" verb with a NULL parameters field: the URL is the document
+    // itself, no shell argument parsing is involved (unlike cmd /c start).
+    let ret = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // MSDN: the HINSTANCE return is a success indicator when > 32, otherwise
+    // it is one of the SE_ERR_* codes.
+    if (ret as isize) > 32 {
+        Ok(())
+    } else {
+        Err(format!("osOpenFailed: ShellExecuteW code {}", ret as isize))
+    }
+}
+
+#[cfg(not(windows))]
+fn shell_execute_open(_target: &str) -> Result<(), String> {
+    Err("osOpenFailed: unsupported platform".to_string())
+}
+
+// Testable core of the open-url command: validation always precedes dispatch,
+// so a rejected target never reaches the OS and an accepted one is dispatched
+// exactly once, in its normalized form. Tests inject a counting dispatcher.
+fn validate_then_dispatch(
+    raw: &str,
+    dispatch: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let url = validate_open_url(raw).map_err(|e| format!("open-url: {e}"))?;
+    dispatch(url.as_str()).map_err(|e| format!("open-url: {e}"))
+}
+
 #[tauri::command]
 pub fn open_url(args: Vec<Value>) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
-    let url = params
+    let raw = params
         .get("url")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // Whitelist before handing to cmd start: https only, no shell metachars.
-    let ok = regex::Regex::new(r"^https://[A-Za-z0-9._~/?&=#%+:@-]+$")
-        .unwrap()
-        .is_match(&url);
-    if !ok {
-        return Err(format!("open-url: rejected url: {url}"));
-    }
-    std::process::Command::new("cmd")
-        .args(["/c", "start", "", &url])
-        .spawn()
-        .map_err(|e| format!("open-url: {e}"))?;
+    validate_then_dispatch(&raw, shell_execute_open)?;
     Ok(json!({ "ok": true }))
 }
 
@@ -4162,6 +4251,77 @@ mod tests {
         assert_eq!(ssh.len(), 1);
         assert_eq!(ssh[0]["host"], "example.com");
         assert_eq!(ssh[0]["port"], 22);
+    }
+
+    // ADR-0003 open_url validation matrix (pure; no OS side effects).
+    #[test]
+    fn validate_open_url_accepts_realistic_targets() {
+        for raw in [
+            "https://example.com",
+            "https://example.com/path?q=1&r=2#frag",
+            "http://192.168.1.1:8080/admin",
+            "https://[2001:db8::1]:8443/x",
+            "https://sub.domain.example:443/a%20b",
+            "https://example.com/%2500",           // double-encoded literal stays text
+            "https://xn--nxasmq6b.example/",       // punycode IDN
+            "HTTP://EXAMPLE.COM",                  // case-insensitive scheme
+        ] {
+            assert!(validate_open_url(raw).is_ok(), "should accept: {raw}");
+        }
+    }
+
+    #[test]
+    fn validate_open_url_rejects_bad_inputs() {
+        let long = format!("https://example.com/{}", "a".repeat(4096));
+        for (raw, prefix) in [
+            ("", "invalidUrl"),
+            ("   ", "invalidUrl"),
+            ("not-a-url", "invalidUrl"),
+            ("ftp://example.com/file", "blockedProtocol"),
+            ("file:///C:/Windows/System32", "blockedProtocol"),
+            ("javascript:alert(1)", "blockedProtocol"),
+            ("mailto:a@example.com", "blockedProtocol"),
+            ("https://user:pass@example.com/", "invalidUrl"), // userinfo
+            ("https://user@example.com/", "invalidUrl"),
+            ("https://", "invalidUrl"),                        // empty host
+            ("https://exa\nmple.com/", "invalidUrl"),          // raw control
+            ("https://example.com/%00", "invalidUrl"),         // encoded NUL
+            ("https://example.com/a%0Ad", "invalidUrl"),       // encoded LF
+            ("https://example.com/?q=%0d", "invalidUrl"),      // encoded CR (lowercase hex)
+            ("https://example.com/#x%7Fy", "invalidUrl"),      // encoded DEL
+            ("https://example.com/%1B[2J", "invalidUrl"),      // encoded ESC
+            ("https://example.com/%08", "invalidUrl"),         // encoded BS
+            ("https://example.com/\u{7f}", "invalidUrl"),      // raw DEL
+            ("https://example.com:99999/x", "invalidUrl"),     // bad port
+            ("//example.com/x", "invalidUrl"),                 // protocol-relative
+            (long.as_str(), "invalidUrl"),                     // >4096 chars
+        ] {
+            let err = validate_open_url(raw).expect_err(&format!("should reject: {raw:?}"));
+            assert!(err.starts_with(prefix), "{raw:?} → {err}, want prefix {prefix}");
+        }
+    }
+
+    #[test]
+    fn validate_open_url_normalizes_for_shell() {
+        // The value handed to ShellExecuteW is the normalized form.
+        let url = validate_open_url("https://EXAMPLE.com:443/a b?x=1").unwrap();
+        assert_eq!(url.as_str(), "https://example.com/a%20b?x=1");
+    }
+
+    // ADR-0003 seam: rejected targets must never reach the dispatcher, and an
+    // accepted target is dispatched exactly once with the normalized URL.
+    #[test]
+    fn open_url_dispatch_seam() {
+        use std::cell::RefCell;
+        let calls: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let recorder = |target: &str| -> Result<(), String> {
+            calls.borrow_mut().push(target.to_string());
+            Ok(())
+        };
+        assert!(validate_then_dispatch("https://EXAMPLE.com:443/a b?x=1", recorder).is_ok());
+        assert!(validate_then_dispatch("javascript:alert(1)", recorder).is_err());
+        assert!(validate_then_dispatch("https://example.com/%00", recorder).is_err());
+        assert_eq!(calls.borrow().as_slice(), ["https://example.com/a%20b?x=1"]);
     }
 
     fn script(expect: &str, send: &str) -> LoginScript {

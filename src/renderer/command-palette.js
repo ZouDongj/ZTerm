@@ -52,7 +52,7 @@ function renderPaletteList(filter = '') {
         const comboDisplay = typeof _comboDisplay === 'function' ? _comboDisplay(combo) : combo;
         const sel = i === _paletteSelected ? ' data-selected' : '';
         // V3 表项（无分组纯列表）：名称 + 快捷键
-        html += `<div class="v3-item"${sel} data-action-id="${id}"
+        html += `<div class="v3-item" role="option" aria-selected="${i === _paletteSelected}"${sel} data-action-id="${id}"
                   onclick="paletteClickItem('${id}')"
                   onmouseenter="paletteSelect(${i})">
                   <span class="v3-name">${escHtml(label)}</span>
@@ -68,9 +68,11 @@ function paletteSelect(i) {
     items.forEach((el, idx) => {
         if (idx === i) {
             el.setAttribute('data-selected', '');
+            el.setAttribute('aria-selected', 'true');
             el.scrollIntoView({ block: 'nearest' });
         } else {
             el.removeAttribute('data-selected');
+            el.setAttribute('aria-selected', 'false');
         }
     });
 }

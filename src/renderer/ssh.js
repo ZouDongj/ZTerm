@@ -70,12 +70,152 @@ document.addEventListener('click', (e) => {
 }, true);
 
 
+// ── Session Selector (new-session overlay) ──
+// Selection is tracked by stable session ID (local_/ssh_ + profile id), never
+// by filtered DOM index; key/focus/Esc routing is consolidated in this
+// module's own listeners, bound on open and unbound on close.
+let _sessionSel = null;
+
 function openSessionSelector() {
-    document.getElementById('sessions-search').value = '';
-    renderSessionList();
+    const opener = document.activeElement;
+    _sessionSel = {
+        activeId: null,
+        opener: opener && opener !== document.body && opener.isConnected ? opener : null,
+        keysBound: false,
+    };
+    const search = document.getElementById('sessions-search');
+    search.value = '';
+    _updateSessionClearBtn();
+    renderSessionList('');
+    // Pre-select the visible default-local-profile item, else the first item;
+    // with no visible items the selection stays empty
+    const items = getSessionItems('');
+    const defId = 'local_' + getDefaultLocalProfile().id;
+    _sessionSel.activeId = items.some(i => i.id === defId) ? defId : (items.length ? items[0].id : null);
+    // Scroll the preselected row into view: the default local profile is not
+    // necessarily among the first few items.
+    _syncSessionSelection(true);
     openOverlay('overlay-sessions');
-    setTimeout(() => document.getElementById('sessions-search').focus(), 100);
+    _bindSessionKeys();
+    // Focus only while this exact opening is still live (a close/reopen within
+    // the delay must not steal focus back).
+    const openToken = _sessionSel;
+    setTimeout(() => {
+        if (_sessionSel !== openToken) return;
+        const s = document.getElementById('sessions-search');
+        if (s) s.focus();
+    }, 100);
 }
+
+// Unified close path: unbind listeners and clear selection state. A plain
+// close restores the invoking control, falling back to the active terminal
+// when it is gone; navigating to the manager or opening a session hands
+// focus to the destination instead.
+function _closeSessionSelector(restoreFocus) {
+    _unbindSessionKeys();
+    closeOverlay('overlay-sessions');
+    const opener = _sessionSel ? _sessionSel.opener : null;
+    _sessionSel = null;
+    if (!restoreFocus) return;
+    // A still-connected but hidden opener (e.g. a button inside an overlay
+    // that has since closed) swallows focus() as a silent no-op; treat it as
+    // gone and fall back to the active terminal.
+    if (opener && opener.isConnected && opener.getClientRects().length > 0) {
+        opener.focus({ preventScroll: true });
+    } else if (typeof _refocusActiveTerminal === 'function') {
+        _refocusActiveTerminal();
+    }
+}
+
+function _bindSessionKeys() {
+    if (!_sessionSel || _sessionSel.keysBound) return;
+    _sessionSel.keysBound = true;
+    document.addEventListener('keydown', _sessionKeyHandler, true);
+}
+function _unbindSessionKeys() {
+    if (_sessionSel) _sessionSel.keysBound = false;
+    document.removeEventListener('keydown', _sessionKeyHandler, true);
+}
+
+function _sessionKeyHandler(e) {
+    const overlay = document.getElementById('overlay-sessions');
+    if (!overlay || !overlay.classList.contains('open')) {
+        // Closed via an external path (closeAllOverlays / another overlay):
+        // self-clean so no stale listener survives
+        _unbindSessionKeys();
+        return;
+    }
+    // IME composition: never select, connect or close; confirming a
+    // candidate is not "open session".
+    if (e.isComposing || e.keyCode === 229) return;
+    const onButton = e.target && e.target.closest && e.target.closest('button');
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault(); e.stopPropagation();
+        _moveSessionActive(e.key === 'ArrowDown' ? 1 : -1);
+    } else if (e.key === 'Enter') {
+        if (onButton) return; // native buttons (footer/clear/close) run their own action
+        e.preventDefault(); e.stopPropagation();
+        if (_sessionSel && _sessionSel.activeId) selectSession(_sessionSel.activeId);
+    } else if (e.key === 'Escape') {
+        e.preventDefault(); e.stopPropagation();
+        _closeSessionSelector(true);
+    } else if (e.key === 'Tab') {
+        _trapSessionTab(e);
+    }
+    // Left/right/Home/End keep the search field's native text editing
+}
+
+function _moveSessionActive(delta) {
+    if (!_sessionSel) return;
+    const search = document.getElementById('sessions-search');
+    const items = getSessionItems(search ? search.value : '');
+    if (!items.length) return; // 零结果不执行选择、不报错
+    const idx = items.findIndex(i => i.id === _sessionSel.activeId);
+    // No current selection (edge): Down lands on the first item, Up on the
+    // last — never a wrapped-around middle item.
+    const next = idx < 0
+        ? (delta > 0 ? items[0] : items[items.length - 1])
+        : items[(idx + delta + items.length) % items.length];
+    _sessionSel.activeId = next.id;
+    _syncSessionSelection(true);
+}
+
+function _trapSessionTab(e) {
+    const panel = document.querySelector('#overlay-sessions .panel');
+    if (!panel) return;
+    const focusables = [...panel.querySelectorAll('input, button')]
+        .filter(el => !el.hidden && el.offsetParent !== null);
+    if (!focusables.length) return;
+    const first = focusables[0], last = focusables[focusables.length - 1];
+    if (!panel.contains(document.activeElement)) {
+        e.preventDefault(); first.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault(); first.focus();
+    } else if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault(); last.focus();
+    }
+}
+
+// Delegated row interaction: mousedown must not steal the search field's
+// focus; a click opens exactly the clicked row's stable ID (not a stale
+// keyboard selection); hover is CSS-only and never changes the selection.
+(function bindSessionListDelegation() {
+    const wire = () => {
+        const list = document.getElementById('sessions-list');
+        if (!list) return;
+        list.addEventListener('mousedown', e => {
+            if (e.target.closest('.ss-row')) e.preventDefault();
+        });
+        list.addEventListener('click', e => {
+            const row = e.target.closest('.ss-row');
+            if (!row) return;
+            const id = row.dataset.id;
+            if (id) selectSession(id);
+        });
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire);
+    else wire();
+})();
 
 // 默认本地终端：defaultShell 配置（兼容旧值存 command 的情况）→ 第一个 profile → 兜底 pwsh
 function getDefaultLocalProfile() {
@@ -93,49 +233,115 @@ function getSessionItems(filter) {
 
 function renderSessionList(filter) {
     const list = document.getElementById('sessions-list');
+    const status = document.getElementById('sessions-status');
     const items = getSessionItems(filter);
     if (items.length === 0) {
-        list.innerHTML = '<div style="padding:20px;text-align:center;color:rgba(171,178,191,0.3);font-size:13px">没有匹配的会话</div>';
-        return;
+        list.innerHTML = '<div class="ss-empty" role="presentation"><strong>没有匹配的会话</strong><p>试试名称、地址、用户名或分组。</p></div>';
+        if (status) status.textContent = '没有匹配的会话';
+        return items;
     }
     let html = '';
     let lastType = '';
-    items.forEach((item, i) => {
+    items.forEach(item => {
         if (item.type !== lastType) {
-            html += `<div class="panel-section-title">${item.type === 'local' ? '本地终端' : 'SSH 连接'}</div>`;
+            if (lastType) html += '</div>';
+            const label = item.type === 'local' ? '本地终端' : 'SSH 连接';
+            html += `<div class="ss-section" role="group" aria-label="${label}"><div class="ss-section-label" aria-hidden="true">${label}</div>`;
             lastType = item.type;
         }
-        html += `<div class="panel-item" data-index="${i}" data-session-id="${item.id}" onclick="selectSession('${item.id}')" onmouseenter="selectPanelItem(this)">
-          <div class="panel-item-icon ${item.type === 'ssh' ? 'ssh' : 'loc'}">${Icons.iconSvg(item.icon, 14)}</div>
-          <div class="panel-item-info">
-            <div class="panel-item-name">${escHtml(item.name)}</div>
-            <div class="panel-item-detail">${escHtml(item.detail)}</div>
-          </div>
-          ${item.badge ? `<span class="panel-item-badge">${escHtml(item.badge)}</span>` : ''}
-        </div>`;
+        html += _sessionRowHtml(item);
     });
+    if (lastType) html += '</div>';
     list.innerHTML = html;
-    // Pre-select the default local profile (fallback: first item)
-    const defId = 'local_' + getDefaultLocalProfile().id;
-    const target = list.querySelector(`[data-session-id="${defId}"]`) || list.querySelector('.panel-item');
-    if (target) target.setAttribute('data-selected', '');
+    if (status) status.textContent = `${items.length} 个可用会话`;
+    return items;
+}
+
+// Same display algorithm as the SSH manager (ssh-display.js); only grouping
+// and selection presentation differ
+function _sessionRowHtml(item) {
+    const selected = !!_sessionSel && _sessionSel.activeId === item.id;
+    let icon, primary, meta, group = '', titleText = '';
+    if (item.type === 'ssh') {
+        const m = SshDisplay.sshDisplayModel(item.sshProfile);
+        const keyBadge = m.keyAuth
+            ? `<span class="ss-key" role="img" aria-label="密钥认证" title="密钥认证">${Icons.iconSvg('key', 11)}</span>` : '';
+        icon = 'server';
+        primary = `<span class="ss-primary ${m.primaryIsHost ? 'host' : ''}">${escHtml(m.primary)}</span>`;
+        meta = m.named
+            ? `<span class="mono">${escHtml(m.endpoint)}</span><span class="dot">·</span><span>${escHtml(m.user)}</span>${keyBadge}`
+            : `<span>${escHtml(m.user)}</span><span class="dot">·</span><span>端口 <span class="mono">${escHtml(String(m.port))}</span></span>${keyBadge}`;
+        titleText = m.named ? `${m.primary} — ${m.endpoint} · ${m.user}` : `${m.primary} — ${m.user} · 端口 ${m.port}`;
+        group = item.badge || '';
+    } else {
+        icon = 'terminal';
+        primary = `<span class="ss-primary">${escHtml(item.name)}</span>`;
+        meta = `<span>${escHtml(item.detail)}</span>`;
+        titleText = item.detail ? `${item.name} — ${item.detail}` : item.name;
+    }
+    return `<div class="ss-row" role="option" id="sess-opt-${escAttr(item.id)}" aria-selected="${selected}" data-id="${escAttr(item.id)}" title="${escAttr(titleText)}">
+      <span class="ss-row-icon" aria-hidden="true">${Icons.iconSvg(icon, 19)}</span>
+      <span class="ss-identity">${primary}<span class="ss-meta">${meta}</span></span>
+      ${group ? `<span class="ss-group-name">${escHtml(group)}</span>` : ''}
+      <span class="ss-open" aria-hidden="true">${Icons.iconSvg('enter-arrow', 15)}</span>
+    </div>`;
+}
+
+function _syncSessionSelection(scroll) {
+    const list = document.getElementById('sessions-list');
+    const search = document.getElementById('sessions-search');
+    const activeId = _sessionSel ? _sessionSel.activeId : null;
+    let activeEl = null;
+    list.querySelectorAll('.ss-row').forEach(row => {
+        const on = !!activeId && row.dataset.id === activeId;
+        row.setAttribute('aria-selected', String(on));
+        if (on) activeEl = row;
+    });
+    if (search) {
+        if (activeEl) search.setAttribute('aria-activedescendant', activeEl.id);
+        else search.removeAttribute('aria-activedescendant');
+    }
+    // Scroll only the inner list so the active row enters the nearest visible
+    // area; the search field, footer and background must not jump
+    if (activeEl && scroll) activeEl.scrollIntoView({ block: 'nearest' });
 }
 
 function filterSessions(query) {
-    renderSessionList(query);
+    const items = renderSessionList(query || '');
+    _updateSessionClearBtn();
+    if (!_sessionSel) return;
+    if (_sessionSel.activeId && items.some(i => i.id === _sessionSel.activeId)) {
+        // Keep the selection while it remains in the results (also when the
+        // query is cleared and the selection is still valid)
+    } else {
+        const defId = 'local_' + getDefaultLocalProfile().id;
+        const cleared = !query || !query.trim();
+        _sessionSel.activeId = cleared && items.some(i => i.id === defId)
+            ? defId
+            : (items.length ? items[0].id : null);
+    }
+    _syncSessionSelection(true);
 }
 
-function selectPanelItem(el) {
-    const list = document.getElementById('sessions-list');
-    list.querySelectorAll('.panel-item').forEach(i => i.removeAttribute('data-selected'));
-    el.setAttribute('data-selected', '');
+function _updateSessionClearBtn() {
+    const search = document.getElementById('sessions-search');
+    const clear = document.getElementById('sessions-clear');
+    if (clear && search) clear.hidden = !search.value;
+}
+
+function clearSessionSearch() {
+    const search = document.getElementById('sessions-search');
+    if (!search) return;
+    search.value = '';
+    filterSessions('');
+    search.focus();
 }
 
 function selectSession(sessionId) {
     const items = getSessionItems();
     const item = items.find(i => i.id === sessionId);
     if (!item) return;
-    closeAllOverlays();
+    _closeSessionSelector(false); // focus is taken over by the new session/tab flow
     if (item.type === 'local') {
         TabManager.createTab({ name: item.name, type: 'local', command: item.profile.command, args: item.profile.args });
     } else {
@@ -166,12 +372,30 @@ function selectSession(sessionId) {
     }
 }
 
-// ── SSH Manager ──
+// ── SSH Manager (scheme-A rows shared by settings page and overlay) ──
 let _editingSSHId = null;
+
+// Per-container in-memory view state: search query + collapse choices.
+// Collapse state deliberately has no storage contract — it lives here for
+// the app run only, so re-renders (CRUD, filtering) preserve it and clearing
+// the search restores the pre-query collapse view for free.
+const _sshMgrViews = new Map();
+function _sshMgrView(containerId) {
+    let v = _sshMgrViews.get(containerId);
+    if (!v) {
+        v = { query: '', collapsed: new Set() };
+        _sshMgrViews.set(containerId, v);
+    }
+    return v;
+}
 
 function openSSHManager() {
     renderSSHManager();
     openOverlay('overlay-ssh-manager');
+    setTimeout(() => {
+        const s = document.getElementById('ssh-manager-search');
+        if (s) s.focus();
+    }, 100);
 }
 
 function getSSHGroups() {
@@ -185,57 +409,233 @@ function getSSHGroups() {
     return groups;
 }
 
-function renderSSHManager() {
-    const list = document.getElementById('ssh-manager-list');
-    const groups = getSSHGroups();
-    const groupNames = Object.keys(groups);
-    if (groupNames.length === 0) {
-        list.innerHTML = '<div style="padding:30px;text-align:center;color:rgba(171,178,191,0.3);font-size:13px">暂无 SSH 连接<br><span style="font-size:11px;cursor:pointer;color:rgba(var(--accent-rgb),0.5);margin-top:8px;display:inline-block" onclick="openSSHEdit(true)">+ 添加第一个连接</span></div>';
+// Focus continuity across a redraw: remember the focused control, re-focus
+// the same logical control afterwards; a vanished control falls back to the
+// container's stable search field (never strands focus on a removed node).
+function _sshFocusSnapshot(listEl) {
+    const el = document.activeElement;
+    if (!el || !listEl || !listEl.contains(el)) return null;
+    const row = el.closest('.ssh-mgr-row');
+    if (row) {
+        // Identity (row body) and icon buttons both carry data-action; record
+        // which kind held focus so the restore lands on the same control.
+        if (el.closest('.ssh-mgr-identity') && row.contains(el)) {
+            return { profileId: row.dataset.profileId, action: '' };
+        }
+        const btn = el.closest('.ssh-mgr-btn');
+        if (btn && row.contains(btn)) {
+            return { profileId: row.dataset.profileId, action: btn.dataset.action || '' };
+        }
+        return { profileId: row.dataset.profileId, action: '' };
+    }
+    const group = el.closest('.ssh-mgr-group-title');
+    if (group) return { group: group.dataset.group || '' };
+    return null;
+}
+function _sshFocusRestore(listEl, snap) {
+    if (!snap) return;
+    let target = null;
+    if (snap.profileId) {
+        const row = [...listEl.querySelectorAll('.ssh-mgr-row')]
+            .find(r => r.dataset.profileId === snap.profileId);
+        if (row) {
+            const known = ['connect', 'edit', 'delete'].includes(snap.action);
+            target = snap.action === '' || !known
+                ? row.querySelector('.ssh-mgr-identity')
+                : row.querySelector(`.ssh-mgr-btn[data-action="${snap.action}"]`);
+        }
+    } else if (snap.group) {
+        target = [...listEl.querySelectorAll('.ssh-mgr-group-title')]
+            .find(h => h.dataset.group === snap.group);
+    }
+    if (target) { target.focus({ preventScroll: true }); return; }
+    const search = document.querySelector(`[data-ssh-search="${listEl.id}"]`);
+    if (search) search.focus({ preventScroll: true });
+}
+
+function _sshRowHtml(p) {
+    const m = SshDisplay.sshDisplayModel(p);
+    const metaText = m.named ? `${m.endpoint} · ${m.user}` : `${m.user} · 端口 ${m.port}`;
+    const title = `${m.primary} — ${metaText}`;
+    const keyBadge = m.keyAuth
+        ? `<span class="ssh-mgr-key" role="img" aria-label="密钥认证" title="密钥认证">${Icons.iconSvg('key', 11)}</span>` : '';
+    const meta = m.named
+        ? `<span class="mono">${escHtml(m.endpoint)}</span><span class="dot">·</span><span>${escHtml(m.user)}</span>`
+        : `<span>${escHtml(m.user)}</span><span class="dot">·</span><span>端口 <span class="mono">${escHtml(String(m.port))}</span></span>`;
+    // No profile values in inline JS (design §3): clicks resolve the action
+    // and profile id from data attributes via the container delegation below.
+    return `<article class="ssh-mgr-row" data-profile-id="${escAttr(p.id)}">
+      <span class="ssh-mgr-server" aria-hidden="true">${Icons.iconSvg('server', 21)}</span>
+      <div class="ssh-mgr-identity" role="button" tabindex="0" data-action="edit" title="${escAttr(title)}" aria-label="编辑 ${escAttr(m.primary)}">
+        <span class="ssh-mgr-primary ${m.primaryIsHost ? 'host' : ''}">${escHtml(m.primary)}</span>
+        <span class="ssh-mgr-meta">${meta}${keyBadge}</span>
+      </div>
+      <div class="ssh-mgr-actions">
+        <button class="ssh-mgr-btn connect" data-action="connect" title="连接" aria-label="连接 ${escAttr(m.primary)}">${Icons.iconSvg('play', 14)}</button>
+        <button class="ssh-mgr-btn" data-action="edit" title="编辑" aria-label="编辑 ${escAttr(m.primary)}">${Icons.iconSvg('pencil', 14)}</button>
+        <button class="ssh-mgr-btn danger" data-action="delete" title="删除" aria-label="删除 ${escAttr(m.primary)}">${Icons.iconSvg('trash', 14)}</button>
+      </div>
+    </article>`;
+}
+
+// Delegated row interaction for both manager containers: no inline handlers,
+// so config values (ids, names) never enter an HTML/JS quoting context.
+(function bindSSHManagerDelegation() {
+    const wire = () => {
+        document.querySelectorAll('.ssh-mgr-list').forEach(list => {
+            if (list._sshMgrBound) return;
+            list._sshMgrBound = true;
+            list.addEventListener('click', e => {
+                const row = e.target.closest('.ssh-mgr-row');
+                if (!row || !list.contains(row)) return;
+                const actionEl = e.target.closest('[data-action]');
+                if (!actionEl || !row.contains(actionEl)) return;
+                const id = row.dataset.profileId;
+                if (!id) return;
+                const action = actionEl.dataset.action;
+                if (action === 'connect') connectSSHProfile(id);
+                else if (action === 'edit') openSSHEdit(false, id);
+                else if (action === 'delete') deleteSSHProfile(id);
+            });
+            list.addEventListener('keydown', e => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                const identity = e.target.closest('.ssh-mgr-identity');
+                if (!identity || !list.contains(identity)) return;
+                const row = identity.closest('.ssh-mgr-row');
+                const id = row && row.dataset.profileId;
+                if (!id) return;
+                e.preventDefault();
+                openSSHEdit(false, id);
+            });
+        });
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire);
+    else wire();
+})();
+
+function _sshGroupHtml(gname, matched, expanded) {
+    const rows = expanded ? matched.map(_sshRowHtml).join('') : '';
+    return `<section class="ssh-mgr-group" aria-label="${escAttr(gname)}">
+      <div class="ssh-mgr-group-title${expanded ? '' : ' collapsed'}" role="button" tabindex="0" aria-expanded="${expanded}"
+           data-group="${escAttr(gname)}" onclick="toggleSSHGroup(this)" onkeydown="sshGroupHeaderKey(event)">
+        <svg class="group-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+        <span class="group-name-text">${escHtml(gname)}</span>
+        <button class="group-rename" title="重命名分组" aria-label="重命名分组 ${escAttr(gname)}" onclick="event.stopPropagation();startRenameGroup(this)">${Icons.iconSvg('pencil', 11)}</button>
+        <span class="ssh-group-count">${matched.length}</span>
+        <span class="group-rule" aria-hidden="true"></span>
+      </div>
+      <div class="ssh-mgr-group-items${expanded ? '' : ' collapsed'}">${rows}</div>
+    </section>`;
+}
+
+function _sshUpdateCount(containerId, matched, total) {
+    const el = document.querySelector(`[data-ssh-count="${containerId}"]`);
+    if (!el) return;
+    el.textContent = matched === total ? `${total} 个连接` : `${matched} / ${total} 个连接`;
+}
+
+// Shared A-scheme renderer for both manager entries. Display format comes
+// from ssh-display.js; order and IDs are the stored profile order/identity.
+function renderSSHManagerInto(listEl, view) {
+    if (!listEl) return;
+    const profiles = TabManager.sshProfiles || [];
+    const snap = _sshFocusSnapshot(listEl);
+    const querying = view.query.trim().length > 0;
+    if (profiles.length === 0) {
+        listEl.innerHTML = `<div class="ssh-mgr-empty">暂无 SSH 连接
+          <div class="ssh-mgr-empty-hint">密码使用 Windows DPAPI 加密存储</div>
+          <div class="ssh-mgr-empty-actions"><button class="btn-primary" onclick="openSSHEdit(true)">+ 添加第一个连接</button></div></div>`;
+        _sshUpdateCount(listEl.id, 0, 0);
+        // Rows are gone: return focus to the container's stable search field
+        // instead of stranding it on a removed node.
+        _sshFocusRestore(listEl, snap);
         return;
     }
-    let html = '';
-    groupNames.forEach(gname => {
-        const items = groups[gname];
-        html += `<div class="ssh-group">
-          <div class="ssh-group-header" onclick="toggleSSHGroup(this)">
-            <svg class="group-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
-            <span class="group-name-text">${escHtml(gname)}</span>
-            <button class="group-rename" title="重命名分组" onclick="event.stopPropagation();startRenameGroup(this,'${escJsString(gname)}')"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-            <span class="ssh-group-count">${items.length}</span>
-          </div>
-          <div class="ssh-group-items">`;
-        items.forEach(p => {
-            html += `<div class="ssh-item">
-              <div class="ssh-item-icon">${Icons.iconSvg('zap', 14)}</div>
-              <div class="ssh-item-info" style="cursor:pointer" onclick="openSSHEdit(false,'${p.id}')">
-                <div class="ssh-item-name">${escHtml(p.name)}</div>
-                <div class="ssh-item-detail">${escHtml(p.username)}@${escHtml(p.host)}:${p.port||22} ${p.authType==='key'?Icons.iconSvg('key', 11):''}</div>
-              </div>
-              <button class="ssh-item-btn connect" title="连接" onclick="event.stopPropagation();connectSSHProfile('${p.id}')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
-              <button class="ssh-item-btn" title="编辑" onclick="openSSHEdit(false,'${p.id}')"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-              <button class="ssh-item-btn danger" title="删除" onclick="deleteSSHProfile('${p.id}')">${Icons.iconSvg('x', 13)}</button>
-            </div>`;
-        });
-        html += '</div></div>';
+    const groups = getSSHGroups();
+    let html = '', totalMatches = 0;
+    Object.keys(groups).forEach(gname => {
+        const matched = groups[gname].filter(p => SshDisplay.sshProfileMatches(p, view.query));
+        if (!matched.length) return;
+        totalMatches += matched.length;
+        // While querying, matched groups are force-expanded so results stay
+        // visible; the collapse set itself is untouched and reappears as-is
+        // once the query is cleared.
+        const expanded = querying || !view.collapsed.has(gname);
+        html += _sshGroupHtml(gname, matched, expanded);
     });
-    list.innerHTML = html;
-    // Also refresh the settings page SSH list if visible
-    setTimeout(() => {
-        if (document.getElementById('settings-ssh-list')) renderSSHManagerInSettings();
-    }, 0);
+    listEl.innerHTML = totalMatches === 0
+        ? `<div class="ssh-mgr-empty">没有匹配的连接<div class="ssh-mgr-empty-hint">试试调整或清空搜索。</div></div>`
+        : html;
+    _sshUpdateCount(listEl.id, totalMatches, profiles.length);
+    _sshFocusRestore(listEl, snap);
+}
+
+function renderSSHManager() {
+    renderSSHManagerInto(document.getElementById('ssh-manager-list'), _sshMgrView('ssh-manager-list'));
+    // Both manager entries show the same data: keep the settings page in sync.
+    renderSSHManagerInSettings();
+}
+
+function filterSSHManager(containerId, query) {
+    const view = _sshMgrView(containerId);
+    view.query = query || '';
+    renderSSHManagerInto(document.getElementById(containerId), view);
 }
 
 function toggleSSHGroup(header) {
-    // Ignore if clicking on input
-    if (header.querySelector('input')) return;
-    header.classList.toggle('collapsed');
-    const items = header.nextElementSibling;
-    if (items) items.classList.toggle('collapsed');
+    if (header.querySelector('input')) return; // group rename in progress
+    const list = header.closest('.ssh-mgr-list');
+    if (!list) {
+        // Reused by the quick-commands panel (.ssh-group-header without a
+        // manager list): keep the legacy DOM-only toggle there.
+        header.classList.toggle('collapsed');
+        const items = header.nextElementSibling;
+        if (items) items.classList.toggle('collapsed');
+        return;
+    }
+    const view = _sshMgrView(list.id);
+    // Force-expansion during search is display-only; collapse toggles resume
+    // once the query is cleared, so ignore them while a query is active.
+    if (view.query.trim()) return;
+    const gname = header.dataset.group || '';
+    if (view.collapsed.has(gname)) view.collapsed.delete(gname);
+    else view.collapsed.add(gname);
+    // Re-render through the single render path: a collapsed group then has no
+    // rows in the DOM at all (same shape as its initially-rendered form), and
+    // focus continuity comes from the snapshot/restore inside the renderer.
+    renderSSHManagerInto(list, view);
+}
+
+function sshGroupHeaderKey(e) {
+    if (e.target !== e.currentTarget) return; // inner rename button keeps native behavior
+    if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleSSHGroup(e.currentTarget);
+    }
+}
+
+// Collapse/expand-all applies to its own manager container only
+// (settings page and overlay do not affect each other)
+function collapseAllGroups(containerId) {
+    const view = _sshMgrView(containerId);
+    Object.keys(getSSHGroups()).forEach(g => view.collapsed.add(g));
+    renderSSHManagerInto(document.getElementById(containerId), view);
+}
+
+function expandAllGroups(containerId) {
+    const view = _sshMgrView(containerId);
+    view.collapsed.clear();
+    renderSSHManagerInto(document.getElementById(containerId), view);
 }
 
 function startRenameGroup(btn, oldName) {
-    const header = btn.closest('.ssh-group-header');
+    const header = btn.closest('.ssh-mgr-group-title, .ssh-group-header');
+    if (!header) return;
     const nameSpan = header.querySelector('.group-name-text');
+    if (!nameSpan) return;
+    // The manager renderer passes no name: derive it from the header's data
+    // attribute so group names never enter an inline-JS quoting context.
+    if (oldName === undefined) oldName = header.dataset.group || '';
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'group-name-input inline-edit';
@@ -286,16 +686,6 @@ function startRenameGroup(btn, oldName) {
         if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
         if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
     });
-}
-
-function collapseAllGroups() {
-    document.querySelectorAll('#ssh-manager-list .ssh-group-header').forEach(h => h.classList.add('collapsed'));
-    document.querySelectorAll('#ssh-manager-list .ssh-group-items').forEach(i => i.classList.add('collapsed'));
-}
-
-function expandAllGroups() {
-    document.querySelectorAll('#ssh-manager-list .ssh-group-header').forEach(h => h.classList.remove('collapsed'));
-    document.querySelectorAll('#ssh-manager-list .ssh-group-items').forEach(i => i.classList.remove('collapsed'));
 }
 
 // 已配密码的状态控制：dirty=true 表示用户在"已配"状态下点过修改按钮

@@ -33,37 +33,6 @@ ipcRenderer.on('window-state-changed', (event, { maximized }) => {
     if (winEl) winEl.classList.toggle('is-maximized', maximized);
 });
 
-document.addEventListener('keydown', e => {
-    const sessionsOverlay = document.getElementById('overlay-sessions');
-    if (!sessionsOverlay.classList.contains('open')) return;
-    const list = document.getElementById('sessions-list');
-    const items = [...list.querySelectorAll('.panel-item')];
-    const selected = list.querySelector('.panel-item[data-selected]');
-    let idx = selected ? items.indexOf(selected) : -1;
-
-    if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        if (idx < items.length - 1) idx++;
-        else idx = 0;
-        items.forEach(i => i.removeAttribute('data-selected'));
-        items[idx].setAttribute('data-selected', '');
-        items[idx].scrollIntoView({ block: 'nearest' });
-    } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (idx > 0) idx--;
-        else idx = items.length - 1;
-        items.forEach(i => i.removeAttribute('data-selected'));
-        items[idx].setAttribute('data-selected', '');
-        items[idx].scrollIntoView({ block: 'nearest' });
-    } else if (e.key === 'Enter') {
-        e.preventDefault();
-        if (selected) {
-            const sid = selected.getAttribute('data-session-id');
-            if (sid) selectSession(sid);
-        }
-    }
-});
-
 // ── 全局禁用表单补全/拼写建议 ──
 // WebView2 的 autofill 已在主进程关闭（general_autofill_enabled(false)）；
 // 这里再兜一层：所有输入框关闭 autocomplete/autocorrect/spellcheck，

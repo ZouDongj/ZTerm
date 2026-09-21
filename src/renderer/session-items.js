@@ -31,9 +31,9 @@ function filterSessionItems(items, query) {
     if (!query) return items;
     const q = query.toLowerCase();
     return items.filter(i =>
-        i.name.toLowerCase().includes(q) ||
-        i.detail.toLowerCase().includes(q) ||
-        i.badge.toLowerCase().includes(q)
+        String(i.name || '').toLowerCase().includes(q) ||
+        String(i.detail || '').toLowerCase().includes(q) ||
+        String(i.badge || '').toLowerCase().includes(q)
     );
 }
 

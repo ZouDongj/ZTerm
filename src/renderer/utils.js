@@ -1,5 +1,5 @@
 // ZTerm - 通用工具（拆自 renderer.html，纯代码搬运，未改逻辑）
-const { ipcRenderer, shell, webUtils } = require('electron');
+const { ipcRenderer, webUtils } = require('electron');
 const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
 const { WebglAddon } = require('@xterm/addon-webgl');
@@ -34,6 +34,9 @@ function closeOverlay(id) {
 
 function openOverlay(id) {
     closeAllOverlays();
+    // A hover tip survives keyboard-driven overlay opens (no mousemove → no
+    // leave event); its z-index sits above overlays, so hide it explicitly.
+    if (typeof LinkOpen !== 'undefined' && LinkOpen.hideLinkTip) LinkOpen.hideLinkTip();
     const el = document.getElementById(id);
     if (el) el.classList.add('open');
 }
@@ -156,11 +159,20 @@ function _getAccentColorAlpha(alpha) {
     return rgb ? 'rgba(' + rgb + ',' + alpha + ')' : 'rgba(97,175,239,' + alpha + ')';
 }
 
-// Ctrl+Click 打开链接（http/https/ftp/mailto），其余协议不打开
-function _createWebLinksAddon() {
-    return new WebLinksAddon((event, uri) => {
-        if (/^(https?|ftp|mailto):/i.test(uri)) shell.openExternal(uri);
-    }, { requireModifier: true });
+// Terminal link opening (ADR-0003): the vendored addon's built-in regex is
+// already http(s)-only and `requireModifier` is not a real option — the
+// gesture gate lives in the unified LinkOpen entry (bare Ctrl+click).
+// Known detection gap: the regex matches only all-lower or all-upper case
+// schemes, so mixed-case "Https://…" plain text is not linkified (harmless;
+// the backend validator is case-insensitive and would accept it).
+function _createWebLinksAddon(term) {
+    return new WebLinksAddon(
+        (event, uri) => LinkOpen.handleLinkActivate(event, uri, { term }),
+        {
+            hover: (event, text) => LinkOpen.showLinkTip(event, text),
+            leave: () => LinkOpen.hideLinkTip(),
+        }
+    );
 }
 
 // 规范化 fontFamily：字体名加引号（带空格的必须引号），

@@ -630,7 +630,9 @@ async function checkForUpdates() {
 }
 
 function goUpdateReleaseNotes() {
-    if (window.__updateUrl) ipcRenderer.invoke('open-url', { url: window.__updateUrl });
+    // Unified open + categorized failure toast (ADR-0003): release
+    // notes go through the same backend validation as terminal links.
+    if (window.__updateUrl) LinkOpen.invokeOpenUrl(window.__updateUrl);
 }
 
 async function startUpdateDownload() {
@@ -725,6 +727,11 @@ document.addEventListener('keydown', e => {
         // combo dropdown menu 开着时（SSH/QC 编辑面板的分组字段），Escape 应先关 menu
         // 而非关整个编辑表单；input keydown 已 stopPropagation（bubble），这里负责放行
         if (document.querySelector('.dd-menu.open')) {
+            return;
+        }
+        // The session selector routes Esc/IME/focus through its own capture listener (registered on open in ssh.js); let it pass here to avoid double handling.
+        const sessionsOv = document.getElementById('overlay-sessions');
+        if (sessionsOv && sessionsOv.classList.contains('open')) {
             return;
         }
         const menuPopup = document.getElementById('menu-popup');

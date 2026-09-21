@@ -55,7 +55,7 @@ function qcFilter() {
         html += `<div class="v3-section">${escHtml(g)}</div>`;
         arr.forEach(({ c, i }) => {
             html += `
-        <div class="v3-item" data-index="${i}" ${i === _qcSelected ? 'data-selected' : ''} onclick="qcRun('${c.id}')" onmouseenter="qcSelect(${i})">
+        <div class="v3-item" role="option" aria-selected="${i === _qcSelected}" data-index="${i}" ${i === _qcSelected ? 'data-selected' : ''} onclick="qcRun('${c.id}')" onmouseenter="qcSelect(${i})">
             <span class="v3-name">${escHtml(c.name)}</span>
             <span class="v3-cmd">${escHtml(c.command)}</span>
             <span class="v3-kbd">Enter</span>
@@ -68,8 +68,14 @@ function qcFilter() {
 function qcSelect(i) {
     _qcSelected = i;
     document.querySelectorAll('#qc-list .v3-item').forEach((el, idx) => {
-        if (idx === i) el.setAttribute('data-selected', '');
-        else el.removeAttribute('data-selected');
+        if (idx === i) {
+            el.setAttribute('data-selected', '');
+            el.setAttribute('aria-selected', 'true');
+            el.scrollIntoView({ block: 'nearest' });
+        } else {
+            el.removeAttribute('data-selected');
+            el.setAttribute('aria-selected', 'false');
+        }
     });
 }
 

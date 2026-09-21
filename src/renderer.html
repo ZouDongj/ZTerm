@@ -96,34 +96,38 @@
   <!-- Quick Commands Overlay -->
   <div class="overlay" id="overlay-qc" onclick="closeQC()">
     <div class="panel qc-panel" onclick="event.stopPropagation()">
-      <div class="panel-search">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="qc-input" placeholder="输入命令名称或分组…" oninput="qcFilter()" onkeydown="qcKeydown(event)">
+      <div class="ss-header">
+        <h3 id="qc-title">快捷命令</h3>
+        <button class="ss-close" onclick="closeQC()" aria-label="关闭快捷命令" title="关闭"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
-      <div class="qc-list" id="qc-list"></div>
-      <div class="qc-footer">
-        <span>↑↓ 选择</span>
-        <span>Enter 执行</span>
-        <span>Esc 关闭</span>
-        <span style="margin-left:auto;cursor:pointer;color:rgba(var(--accent-rgb),0.5)" onclick="closeQC();openSettings('quickcommands')">管理命令 →</span>
+      <div class="ss-search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+        <input type="search" id="qc-input" placeholder="输入命令名称或分组…" aria-label="搜索命令名称或分组" autocomplete="off" spellcheck="false" oninput="qcFilter()" onkeydown="qcKeydown(event)">
       </div>
+      <div class="qc-list ss-results" id="qc-list" role="listbox" aria-label="可用命令"></div>
+      <footer class="ss-footer">
+        <div class="ss-hints" aria-hidden="true"><span><kbd>↑ ↓</kbd> 选择</span><span><kbd>Enter</kbd> 执行</span><span><kbd>Esc</kbd> 关闭</span></div>
+        <button class="ss-manage" onclick="closeQC();openSettings('quickcommands')">管理命令</button>
+      </footer>
     </div>
   </div>
 
   <!-- 命令面板 -->
   <div class="overlay" id="overlay-palette" onclick="closePalette()">
     <div class="panel palette-panel" onclick="event.stopPropagation()">
-      <div class="panel-search">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        <input type="text" id="palette-input" placeholder="搜索操作…" oninput="paletteFilter()" onkeydown="paletteKeyDown(event)">
+      <div class="ss-header">
+        <h3 id="palette-title">命令面板</h3>
+        <button class="ss-close" onclick="closePalette()" aria-label="关闭命令面板" title="关闭"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
-      <div class="palette-list" id="palette-list"></div>
+      <div class="ss-search">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+        <input type="search" id="palette-input" placeholder="搜索操作…" aria-label="搜索操作" autocomplete="off" spellcheck="false" oninput="paletteFilter()" onkeydown="paletteKeyDown(event)">
+      </div>
+      <div class="palette-list ss-results" id="palette-list" role="listbox" aria-label="可用操作"></div>
       <div class="palette-empty" id="palette-empty">无匹配的操作</div>
-      <div class="qc-footer">
-        <span>↑↓ 选择</span>
-        <span>Enter 执行</span>
-        <span>Esc 关闭</span>
-      </div>
+      <footer class="ss-footer">
+        <div class="ss-hints" aria-hidden="true"><span><kbd>↑ ↓</kbd> 选择</span><span><kbd>Enter</kbd> 执行</span><span><kbd>Esc</kbd> 关闭</span></div>
+      </footer>
     </div>
   </div>
 
@@ -456,15 +460,22 @@
           </div>
           <!-- SSH page -->
           <div class="settings-page" data-page="ssh">
-            <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:4px">
+            <div class="ssh-settings-heading">
               <div><h2>SSH 配置管理</h2><p class="desc">管理远程服务器连接。密码使用 Windows DPAPI 加密存储。</p></div>
-              <div style="display:flex;gap:6px;flex-shrink:0">
-                <button class="btn-outline" style="font-size:12px;padding:5px 12px" onclick="collapseAllGroups()">折叠全部</button>
-                <button class="btn-outline" style="font-size:12px;padding:5px 12px" onclick="expandAllGroups()">展开全部</button>
-                <button class="btn-primary" style="font-size:12px;padding:5px 14px" onclick="openSSHEdit(true)">+ 添加连接</button>
+              <button class="btn-primary ssh-settings-add" onclick="openSSHEdit(true)">+ 添加连接</button>
+            </div>
+            <div class="ssh-mgr-searchrow ssh-settings-toolbar">
+              <label class="ssh-mgr-search">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+                <input type="search" data-ssh-search="settings-ssh-list" aria-label="搜索连接名称、地址、用户或端口" placeholder="搜索名称、地址、用户或端口" autocomplete="off" oninput="filterSSHManager('settings-ssh-list', this.value)">
+              </label>
+              <span class="ssh-mgr-count" data-ssh-count="settings-ssh-list"></span>
+              <div class="ssh-settings-toolbar-actions">
+                <button class="ssh-quiet-action" onclick="collapseAllGroups('settings-ssh-list')">折叠全部</button>
+                <button class="ssh-quiet-action" onclick="expandAllGroups('settings-ssh-list')">展开全部</button>
               </div>
             </div>
-            <div id="settings-ssh-list"></div>
+            <div id="settings-ssh-list" class="ssh-mgr-list"></div>
           </div>
           <!-- Highlight page -->
           <div class="settings-page" data-page="highlight">
@@ -585,47 +596,52 @@
 
 <!-- ── Session Selector Overlay ── -->
 <div class="overlay" id="overlay-sessions">
-  <div class="overlay-backdrop" onclick="closeOverlay('overlay-sessions')"></div>
-  <div class="panel" style="width:520px;max-height:520px" onclick="event.stopPropagation()">
-    <div class="panel-header">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(171,178,191,0.4)" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <h3>新建会话</h3>
-      <div class="spacer"></div>
-      <button class="panel-close" onclick="closeOverlay('overlay-sessions')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+  <div class="overlay-backdrop" onclick="_closeSessionSelector(true)"></div>
+  <div class="panel session-selector" role="dialog" aria-modal="true" aria-labelledby="sessions-title" onclick="event.stopPropagation()">
+    <div class="ss-header">
+      <h3 id="sessions-title">新建会话</h3>
+      <button class="ss-close" aria-label="关闭新建会话" title="关闭" onclick="_closeSessionSelector(true)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <div class="panel-search">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-      <input id="sessions-search" type="text" placeholder="搜索会话..." oninput="filterSessions(this.value)">
+    <div class="ss-search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+      <input id="sessions-search" type="search" role="combobox" aria-expanded="true" aria-controls="sessions-list" aria-autocomplete="list" aria-label="搜索会话名称、地址或分组" placeholder="搜索名称、地址或分组" autocomplete="off" spellcheck="false" oninput="filterSessions(this.value)">
+      <button id="sessions-clear" class="ss-clear" aria-label="清空搜索" title="清空搜索" hidden onclick="clearSessionSearch()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
-    <div class="panel-list" id="sessions-list"></div>
-    <div class="panel-footer">
-      <span><kbd>↑↓</kbd> 导航</span>
-      <span><kbd>Enter</kbd> 选择</span>
-      <span><kbd>Esc</kbd> 关闭</span>
-      <span style="margin-left:auto;cursor:pointer;color:rgba(var(--accent-rgb),0.5)" onclick="closeOverlay('overlay-sessions');openSSHManager()">管理 SSH 连接 →</span>
-    </div>
+    <div id="sessions-list" class="ss-results" role="listbox" aria-label="可用会话"></div>
+    <div id="sessions-status" class="sr-only" aria-live="polite"></div>
+    <footer class="ss-footer">
+      <div class="ss-hints" aria-hidden="true"><span><kbd>↑ ↓</kbd> 选择</span><span><kbd>Enter</kbd> 打开</span><span><kbd>Esc</kbd> 关闭</span></div>
+      <button class="ss-manage" onclick="_closeSessionSelector(false);openSSHManager()">管理 SSH 连接</button>
+    </footer>
   </div>
 </div>
 
 <!-- ── SSH Manager Overlay ── -->
 <div class="overlay" id="overlay-ssh-manager">
   <div class="overlay-backdrop" onclick="closeOverlay('overlay-ssh-manager')"></div>
-  <div class="panel" style="width:560px;max-height:540px" onclick="event.stopPropagation()">
+  <div class="panel ssh-manager-panel" style="width:560px;max-width:calc(100vw - 32px);max-height:540px" onclick="event.stopPropagation()">
     <div class="panel-header">
       <h3>SSH 连接管理</h3>
       <div class="spacer"></div>
       <button class="panel-close" onclick="closeOverlay('overlay-ssh-manager')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
+    <div class="ssh-mgr-searchrow">
+      <label class="ssh-mgr-search">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+        <input id="ssh-manager-search" type="search" data-ssh-search="ssh-manager-list" aria-label="搜索连接名称、地址或用户" placeholder="搜索名称、地址、用户或端口" autocomplete="off" oninput="filterSSHManager('ssh-manager-list', this.value)">
+      </label>
+      <span class="ssh-mgr-count" data-ssh-count="ssh-manager-list"></span>
+    </div>
     <div class="ssh-manager-actions">
-      <button onclick="collapseAllGroups()">折叠全部</button>
-      <button onclick="expandAllGroups()">展开全部</button>
+      <button onclick="collapseAllGroups('ssh-manager-list')">折叠全部</button>
+      <button onclick="expandAllGroups('ssh-manager-list')">展开全部</button>
       <div class="spacer"></div>
       <button class="primary" onclick="openSSHEdit(true)">+ 添加连接</button>
     </div>
-    <div class="panel-list" id="ssh-manager-list"></div>
+    <div class="panel-list ssh-mgr-list" id="ssh-manager-list"></div>
     <div class="panel-footer">
       <span>密码使用 Windows DPAPI 加密存储</span>
-      <span style="margin-left:auto;cursor:pointer;color:rgba(var(--accent-rgb),0.5)" onclick="closeOverlay('overlay-ssh-manager');openSessionSelector()">← 返回会话选择</span>
+      <button class="ss-manage" style="margin-left:auto" onclick="closeOverlay('overlay-ssh-manager');openSessionSelector()">← 返回会话选择</button>
     </div>
   </div>
 </div>
@@ -1008,6 +1024,8 @@
   <script src="renderer/smooth-cursor-overlay.js"></script>
   <script src="renderer/xterm-smooth-cursor.js"></script>
   <script src="renderer/session-items.js"></script>
+  <script src="renderer/ssh-display.js"></script>
+  <script src="renderer/link-open.js"></script>
   <script src="renderer/tabs.js"></script>
   <script src="renderer/split.js"></script>
   <script src="renderer/terminal.js"></script>

@@ -119,40 +119,9 @@ function switchSettingsTab(el, page) {
 }
 
 function renderSSHManagerInSettings() {
-    const list = document.getElementById('settings-ssh-list');
-    if (!list) return;
-    const groups = getSSHGroups();
-    const groupNames = Object.keys(groups);
-    if (groupNames.length === 0) {
-        list.innerHTML = '<div style="padding:30px;text-align:center;color:rgba(171,178,191,0.3);font-size:13px">暂无 SSH 连接</div>';
-        return;
-    }
-    let html = '';
-    groupNames.forEach(gname => {
-        const items = groups[gname];
-        html += `<div class="ssh-group">
-          <div class="ssh-group-header" onclick="toggleSSHGroup(this)">
-            <svg class="group-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
-            <span class="group-name-text">${escHtml(gname)}</span>
-            <button class="group-rename" title="重命名分组" onclick="event.stopPropagation();startRenameGroup(this,'${escJsString(gname)}')"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-            <span class="ssh-group-count">${items.length}</span>
-          </div>
-          <div class="ssh-group-items">`;
-        items.forEach(p => {
-            html += `<div class="ssh-item">
-              <div class="ssh-item-icon">${Icons.iconSvg('zap', 14)}</div>
-              <div class="ssh-item-info" style="cursor:pointer" onclick="openSSHEdit(false,'${p.id}')">
-                <div class="ssh-item-name">${escHtml(p.name)}</div>
-                <div class="ssh-item-detail">${escHtml(p.username)}@${escHtml(p.host)}:${p.port||22} ${p.authType==='key'?Icons.iconSvg('key', 11):''}</div>
-              </div>
-              <button class="ssh-item-btn connect" title="连接" onclick="event.stopPropagation();connectSSHProfile('${p.id}')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
-              <button class="ssh-item-btn" title="编辑" onclick="openSSHEdit(false,'${p.id}')"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-              <button class="ssh-item-btn danger" title="删除" onclick="deleteSSHProfile('${p.id}')">${Icons.iconSvg('x', 13)}</button>
-            </div>`;
-        });
-        html += '</div></div>';
-    });
-    list.innerHTML = html;
+    // Same renderer as the standalone manager overlay (ssh.js): identical row
+    // content, actions and visual hierarchy
+    renderSSHManagerInto(document.getElementById('settings-ssh-list'), _sshMgrView('settings-ssh-list'));
 }
 
 function toggleSwitch(el) {

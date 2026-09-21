@@ -197,6 +197,20 @@ function _buildTerminalOptions() {
     };
 }
 
+// OSC 8 hyperlinks: same unified entry as plain links, replacing the vendored
+// default (confirm() + window.open, which wry swallows). Assigned after
+// construction because the activate closure needs the term for the TUI-mode
+// consumption gate; OscLinkProvider reads options.linkHandler lazily at
+// provideLinks time, so setting it before term.open() still replaces the
+// default from birth.
+function _installLinkHandler(term) {
+    term.options.linkHandler = {
+        activate: (event, uri) => LinkOpen.handleLinkActivate(event, uri, { osc8: true, term }),
+        hover: (event, uri) => LinkOpen.showLinkTip(event, uri),
+        leave: () => LinkOpen.hideLinkTip(),
+    };
+}
+
 // ── OSC 52 clipboard provider ──
 // Tauri: 走 Rust 命令（系统剪贴板，不受 WebView2 用户手势限制 —— OSC 52 由
 // 终端输出触发，navigator.clipboard 在非手势下会抛 NotAllowedError）
@@ -310,6 +324,7 @@ function wireTerminal(tab, tabId) {
     document.getElementById('main-area').appendChild(wrap);
 
     const term = new Terminal(_buildTerminalOptions());
+    _installLinkHandler(term);
     _installTerminalBehavior(term, () => tab._smoothCursor?._adapter?.perceivedCaretCell?.() ?? null);
     let fitAddon, searchAddon;
     try { fitAddon = new FitAddon(); term.loadAddon(fitAddon); } catch(e) { console.warn('FitAddon init failed:', e); }
@@ -318,7 +333,7 @@ function wireTerminal(tab, tabId) {
     if (_settingsConfig.osc52 !== false) {
         try { term.loadAddon(_createClipboardAddon()); } catch(e) { console.warn('ClipboardAddon init failed:', e); }
     }
-    try { term.loadAddon(_createWebLinksAddon()); } catch(e) { console.warn('WebLinksAddon init failed:', e); }
+    try { term.loadAddon(_createWebLinksAddon(term)); } catch(e) { console.warn('WebLinksAddon init failed:', e); }
     tab._searchAddon = searchAddon;
     searchAddon.onDidChangeResults(r => {
         document.getElementById('search-count').textContent = r?.resultCount ? `${r.resultIndex+1}/${r.resultCount}` : '';
@@ -474,6 +489,7 @@ function wireTerminalToPane(tab, pane) {
     if (!bodyEl) return;
 
     const term = new Terminal(_buildTerminalOptions());
+    _installLinkHandler(term);
     _installTerminalBehavior(term, () => pane._smoothCursor?._adapter?.perceivedCaretCell?.() ?? null);
     let fitAddon, searchAddon;
     try { fitAddon = new FitAddon(); term.loadAddon(fitAddon); } catch(e) { console.warn('FitAddon init failed:', e); }
@@ -482,7 +498,7 @@ function wireTerminalToPane(tab, pane) {
     if (_settingsConfig.osc52 !== false) {
         try { term.loadAddon(_createClipboardAddon()); } catch(e) { console.warn('ClipboardAddon init failed:', e); }
     }
-    try { term.loadAddon(_createWebLinksAddon()); } catch(e) { console.warn('WebLinksAddon init failed:', e); }
+    try { term.loadAddon(_createWebLinksAddon(term)); } catch(e) { console.warn('WebLinksAddon init failed:', e); }
     pane._searchAddon = searchAddon;
     searchAddon.onDidChangeResults(r => {
         document.getElementById('search-count').textContent = r?.resultCount ? `${r.resultIndex+1}/${r.resultCount}` : '';

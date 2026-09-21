@@ -15,7 +15,7 @@
 
 import { spawn, execSync, execFileSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { createServer } from 'node:net';
 import { createE2eSandbox, ownsProcess, restartOwnedApp } from './e2e-isolation.mjs';
@@ -818,6 +818,894 @@ async function main() {
       JSON.stringify({ desc: updShortDesc, ...updShortUi }));
     await cdp.eval(`(() => { ipcRenderer.invoke = window.__e2eOrigInvoke; closeSettingsTab(); return 'restored'; })()`).catch(() => null);
     await sleep(300);
+
+    // 13.7 SSH manager + session selector (design/ssh-session-ui-design.md).
+    // Fixtures use documentation-only addresses (TEST-NET-1 / 2001:db8 / .example):
+    // no real connection is ever opened — SSH dispatch is captured with a
+    // createTab stub and the edit overlay is pure UI.
+    // ZTERM_E2E_SHOTS=<dir> additionally captures UI screenshots there.
+    const shotDir = process.env.ZTERM_E2E_SHOTS || '';
+    await cdp.send('Page.enable').catch(() => {});
+    async function shot(name) {
+      if (!shotDir) return;
+      try {
+        const r = await cdp.send('Page.captureScreenshot', { format: 'png' });
+        if (r?.data) {
+          mkdirSync(shotDir, { recursive: true });
+          writeFileSync(join(shotDir, name + '.png'), Buffer.from(r.data, 'base64'));
+        }
+      } catch (e) { console.log(`[e2e] screenshot ${name} failed: ${e.message}`); }
+    }
+    const sshFxCount = await cdp.eval(`(() => {
+      TabManager.sshProfiles = [
+        { id: 'e2essh1', name: '', host: '192.0.2.10', port: 22, username: 'deploy', group: '生产', authType: 'password' },
+        { id: 'e2essh2', name: '构建机', host: 'builder.example.com', port: 2222, username: 'ci', group: '生产', authType: 'key', privateKeyPath: 'C:/keys/ci' },
+        { id: 'e2essh3', name: '日志', host: '2001:db8::5', port: 0, username: 'root', group: '观测', authType: 'password' }
+      ];
+      openSettings('ssh');
+      return TabManager.sshProfiles.length;
+    })()`).catch(() => 0);
+    await sleep(500);
+    const mgrStruct = await cdp.eval(`(() => {
+      const list = document.getElementById('settings-ssh-list');
+      const rows = [...list.querySelectorAll('.ssh-mgr-row')].map(row => ({
+        id: row.dataset.profileId,
+        primary: row.querySelector('.ssh-mgr-primary')?.textContent,
+        isHost: row.querySelector('.ssh-mgr-primary')?.classList.contains('host') === true,
+        meta: (row.querySelector('.ssh-mgr-meta')?.textContent || '').replace(/\\s+/g, ''),
+        key: !!row.querySelector('.ssh-mgr-key'),
+        actions: [...row.querySelectorAll('.ssh-mgr-btn')].map(b => b.dataset.action)
+      }));
+      return { rows,
+        groups: [...list.querySelectorAll('.ssh-mgr-group-title')].map(h => h.dataset.group),
+        count: document.querySelector('[data-ssh-count="settings-ssh-list"]')?.textContent };
+    })()`).catch(() => null);
+    const mgrOk = sshFxCount === 3 && !!mgrStruct &&
+      JSON.stringify(mgrStruct.groups) === JSON.stringify(['生产', '观测']) &&
+      mgrStruct.rows.length === 3 &&
+      mgrStruct.rows[0].id === 'e2essh1' && mgrStruct.rows[0].primary === '192.0.2.10' && mgrStruct.rows[0].isHost === true &&
+      mgrStruct.rows[0].meta.includes('deploy') && mgrStruct.rows[0].meta.includes('端口22') && mgrStruct.rows[0].key === false &&
+      mgrStruct.rows[1].primary === '构建机' && mgrStruct.rows[1].isHost === false &&
+      mgrStruct.rows[1].meta.includes('builder.example.com:2222') && mgrStruct.rows[1].meta.includes('ci') && mgrStruct.rows[1].key === true &&
+      mgrStruct.rows[2].meta.includes('[2001:db8::5]:22') && mgrStruct.rows[2].meta.includes('root') &&
+      mgrStruct.rows.every(r => JSON.stringify(r.actions) === JSON.stringify(['connect', 'edit', 'delete'])) &&
+      mgrStruct.count === '3 个连接';
+    check('SSH 管理页：地址/端口/密钥徽标/IPv6/计数渲染', mgrOk === true, JSON.stringify(mgrStruct));
+    await shot('ssh-settings-page');
+    // Search narrows rows + count and force-expands the matched group; clearing
+    // the query must restore the pre-search collapse view (view-state round trip).
+    await cdp.eval(`filterSSHManager('settings-ssh-list', '构建'); 'q1'`);
+    const mgrQuery = await cdp.eval(`({
+      rows: document.querySelectorAll('#settings-ssh-list .ssh-mgr-row').length,
+      count: document.querySelector('[data-ssh-count="settings-ssh-list"]').textContent,
+      expanded: [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-title')].map(h => h.getAttribute('aria-expanded'))
+    })`);
+    check('SSH 管理页：搜索过滤命中并强制展开', mgrQuery.rows === 1 && mgrQuery.count === '1 / 3 个连接' && mgrQuery.expanded.length === 1 && mgrQuery.expanded[0] === 'true', JSON.stringify(mgrQuery));
+    await cdp.eval(`filterSSHManager('settings-ssh-list', ''); 'q0'`);
+    await cdp.eval(`document.querySelector('#settings-ssh-list .ssh-mgr-group-title[data-group="生产"]').click(); 'c1'`);
+    const mgrCollapsed = await cdp.eval(`({
+      collapsedItems: document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-items.collapsed').length,
+      visibleRows: document.querySelectorAll('#settings-ssh-list .ssh-mgr-row').length,
+      count: document.querySelector('[data-ssh-count="settings-ssh-list"]').textContent
+    })`);
+    await cdp.eval(`filterSSHManager('settings-ssh-list', '构建'); filterSSHManager('settings-ssh-list', ''); 'cycle'`);
+    const mgrStillCollapsed = await cdp.eval(`document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-items.collapsed').length`);
+    check('SSH 管理页：折叠选择跨搜索往返保持', mgrCollapsed.collapsedItems === 1 && mgrCollapsed.visibleRows === 1 && mgrCollapsed.count === '3 个连接' && mgrStillCollapsed === 1,
+      JSON.stringify({ ...mgrCollapsed, mgrStillCollapsed }));
+    await cdp.eval(`expandAllGroups('settings-ssh-list'); 'exp'`);
+    await cdp.eval(`filterSSHManager('settings-ssh-list', 'zzz-no-match'); 'q9'`);
+    const mgrEmpty = await cdp.eval(`(document.querySelector('#settings-ssh-list .ssh-mgr-empty')?.textContent || '').includes('没有匹配的连接')`);
+    check('SSH 管理页：零结果空态', mgrEmpty === true, '');
+    await shot('ssh-manager-empty');
+    await cdp.eval(`filterSSHManager('settings-ssh-list', ''); 'q00'`);
+    // Second entry: standalone manager overlay renders the same data; the edit
+    // action opens the prefilled editor (no network involved).
+    await cdp.eval(`openSSHManager(); 'm1'`);
+    await sleep(350);
+    const ovlStruct = await cdp.eval(`({
+      open: document.getElementById('overlay-ssh-manager').classList.contains('open'),
+      rows: document.querySelectorAll('#ssh-manager-list .ssh-mgr-row').length,
+      primaries: [...document.querySelectorAll('#ssh-manager-list .ssh-mgr-primary')].map(e => e.textContent),
+      count: document.querySelector('[data-ssh-count="ssh-manager-list"]')?.textContent,
+      focus: document.activeElement?.id
+    })`);
+    const ovlOk = ovlStruct.open === true && ovlStruct.rows === 3 && ovlStruct.count === '3 个连接' &&
+      JSON.stringify(ovlStruct.primaries) === JSON.stringify(['192.0.2.10', '构建机', '日志']) && ovlStruct.focus === 'ssh-manager-search';
+    check('SSH 管理浮层：第二入口数据一致 + 搜索聚焦', ovlOk === true, JSON.stringify(ovlStruct));
+    await shot('ssh-manager-overlay');
+    const editProbe = await cdp.eval(`(() => {
+      document.querySelector('#ssh-manager-list .ssh-mgr-row[data-profile-id="e2essh1"] .ssh-mgr-btn[data-action="edit"]').click();
+      return { open: document.getElementById('overlay-ssh-edit').classList.contains('open'),
+        host: document.getElementById('ssh-edit-host').value,
+        user: document.getElementById('ssh-edit-user').value };
+    })()`).catch(() => null);
+    check('SSH 管理：编辑动作打开预填表单', !!editProbe && editProbe.open === true && editProbe.host === '192.0.2.10' && editProbe.user === 'deploy', JSON.stringify(editProbe));
+    await cdp.eval(`closeOverlay('overlay-ssh-edit'); closeOverlay('overlay-ssh-manager'); 'c9'`);
+    // Session selector: combobox semantics, default-local preselection, wrap
+    // navigation, IME guard, button-Enter guard and click/Enter dispatch
+    // (createTab stubbed — a real dispatch would dial the fixture host).
+    const selSetup = await cdp.eval(`(() => {
+      window.__e2eCreated = [];
+      window.__e2eOrigCreateTab = TabManager.createTab.bind(TabManager);
+      TabManager.createTab = (opts) => { window.__e2eCreated.push(opts); return { id: 'stub' }; };
+      openSessionSelector();
+      return 'ok';
+    })()`).catch(() => null);
+    await sleep(400);
+    const selInit = await cdp.eval(`(() => {
+      const items = getSessionItems('');
+      const search = document.getElementById('sessions-search');
+      return {
+        open: document.getElementById('overlay-sessions').classList.contains('open'),
+        focus: document.activeElement?.id,
+        role: search.getAttribute('role'), controls: search.getAttribute('aria-controls'),
+        listRole: document.getElementById('sessions-list').getAttribute('role'),
+        optionRole: document.querySelector('#sessions-list .ss-row')?.getAttribute('role'),
+        sshRows: items.filter(i => i.type === 'ssh').length,
+        active: _sessionSel.activeId,
+        actDesc: search.getAttribute('aria-activedescendant'),
+        selectedRow: document.querySelector('#sessions-list .ss-row[aria-selected="true"]')?.dataset.id
+      };
+    })()`);
+    const selInitOk = selSetup === 'ok' && selInit.open === true && selInit.focus === 'sessions-search' &&
+      selInit.role === 'combobox' && selInit.controls === 'sessions-list' && selInit.listRole === 'listbox' && selInit.optionRole === 'option' &&
+      selInit.sshRows === 3 && !!selInit.active && selInit.active.startsWith('local_') &&
+      selInit.selectedRow === selInit.active && selInit.actDesc === 'sess-opt-' + selInit.active;
+    check('会话选择器：combobox 语义 + 默认本地预选 + 焦点', selInitOk === true, JSON.stringify(selInit));
+    await shot('session-selector');
+    const selNav = await cdp.eval(`(() => {
+      const items = getSessionItems('');
+      const search = document.getElementById('sessions-search');
+      const start = _sessionSel.activeId;
+      const idx = items.findIndex(i => i.id === start);
+      search.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+      const wrapped = _sessionSel.activeId;
+      const expectWrap = items[(idx - 1 + items.length) % items.length].id;
+      search.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+      return { start, wrapped, expectWrap, back: _sessionSel.activeId };
+    })()`);
+    check('会话选择器：↑↓ 循环导航', selNav.wrapped === selNav.expectWrap && selNav.back === selNav.start, JSON.stringify(selNav));
+    const selIme = await cdp.eval(`(() => {
+      const search = document.getElementById('sessions-search');
+      search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 229, bubbles: true, cancelable: true }));
+      search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true }));
+      return { created: window.__e2eCreated.length, open: document.getElementById('overlay-sessions').classList.contains('open') };
+    })()`);
+    check('会话选择器：IME 合成中 Enter 不触发打开', selIme.created === 0 && selIme.open === true, JSON.stringify(selIme));
+    const selBtn = await cdp.eval(`(() => {
+      const btn = document.querySelector('#overlay-sessions .ss-manage');
+      btn.focus();
+      btn.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      return { created: window.__e2eCreated.length, open: document.getElementById('overlay-sessions').classList.contains('open') };
+    })()`);
+    check('会话选择器：按钮上的 Enter 不劫持', selBtn.created === 0 && selBtn.open === true, JSON.stringify(selBtn));
+    const selEnter = await cdp.eval(`(() => {
+      const search = document.getElementById('sessions-search');
+      search.value = '日志';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+      const rows = [...document.querySelectorAll('#sessions-list .ss-row')].map(r => r.dataset.id);
+      search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      return { rows, created: window.__e2eCreated, open: document.getElementById('overlay-sessions').classList.contains('open') };
+    })()`);
+    const selEnterOk = JSON.stringify(selEnter.rows) === JSON.stringify(['ssh_e2essh3']) &&
+      selEnter.created.length === 1 && selEnter.created[0].type === 'ssh' && selEnter.created[0].host === '2001:db8::5' &&
+      selEnter.created[0].user === 'root' && selEnter.created[0].sshProfileId === 'e2essh3' && selEnter.open === false;
+    check('会话选择器：过滤后 Enter 精确打开目标', selEnterOk === true, JSON.stringify(selEnter));
+    const selClick = await cdp.eval(`(() => {
+      openSessionSelector();
+      const row = [...document.querySelectorAll('#sessions-list .ss-row')].find(r => r.dataset.id === 'ssh_e2essh1');
+      row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      return { created: window.__e2eCreated.map(c => c.sshProfileId || c.type),
+        open: document.getElementById('overlay-sessions').classList.contains('open') };
+    })()`);
+    check('会话选择器：点击行打开该目标', selClick.created.length === 2 && selClick.created[1] === 'e2essh1' && selClick.open === false, JSON.stringify(selClick));
+    const selEsc = await cdp.eval(`(() => {
+      openSessionSelector();
+      document.getElementById('sessions-search').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      const closed = !document.getElementById('overlay-sessions').classList.contains('open');
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+      return { closed, sel: _sessionSel };
+    })()`);
+    check('会话选择器：Esc 关闭并解绑按键', selEsc.closed === true && selEsc.sel === null, JSON.stringify(selEsc));
+    await cdp.eval(`(() => { TabManager.createTab = window.__e2eOrigCreateTab; return 'unstub'; })()`);
+    // Narrow viewport via CDP emulation (OS-level setSize needs the
+    // core:window:allow-set-size capability, which the app deliberately does
+    // not grant the renderer): the 560px media query still applies. The
+    // override sits in try/finally so a failed assertion can never leak an
+    // emulated viewport into the remaining sections.
+    const emulated = await cdp.send('Emulation.setDeviceMetricsOverride', { width: 560, height: 720, deviceScaleFactor: 1, mobile: false }).then(() => true).catch(() => false);
+    try {
+      await sleep(400);
+      const narrow = await cdp.eval(`({ w: window.innerWidth, rows: document.querySelectorAll('#settings-ssh-list .ssh-mgr-row').length })`).catch(() => ({ w: 0, rows: 0 }));
+      check('窄窗口（560px）SSH 列表仍完整渲染', emulated === true && narrow.w === 560 && narrow.rows === 3, JSON.stringify({ emulated, ...narrow }));
+      await shot('ssh-settings-narrow');
+      // The fixed-560px manager panel must stay inside the narrower viewport
+      // (inline max-width: calc(100vw - 32px) on the .ssh-manager-panel div).
+      await cdp.eval(`openSSHManager(); 'm-narrow'`).catch(() => null);
+      await sleep(350);
+      const panelFit = await cdp.eval(`(() => {
+        const r = document.querySelector('#overlay-ssh-manager .panel').getBoundingClientRect();
+        return { left: Math.round(r.left), right: Math.round(r.right), vw: window.innerWidth };
+      })()`).catch(() => null);
+      check('窄窗口（560px）管理浮层面板不溢出视口', !!panelFit && panelFit.left >= 0 && panelFit.right <= panelFit.vw, JSON.stringify(panelFit));
+      await cdp.eval(`closeOverlay('overlay-ssh-manager'); 'm-narrow-off'`).catch(() => null);
+      // Extreme 320px pass: rows still render, panel still fits.
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 320, height: 640, deviceScaleFactor: 1, mobile: false }).catch(() => null);
+      await sleep(350);
+      const tiny = await cdp.eval(`({ w: window.innerWidth, rows: document.querySelectorAll('#settings-ssh-list .ssh-mgr-row').length })`).catch(() => ({ w: 0, rows: 0 }));
+      await cdp.eval(`openSSHManager(); 'm-tiny'`).catch(() => null);
+      await sleep(350);
+      const tinyFit = await cdp.eval(`(() => {
+        const r = document.querySelector('#overlay-ssh-manager .panel').getBoundingClientRect();
+        return { left: Math.round(r.left), right: Math.round(r.right), vw: window.innerWidth };
+      })()`).catch(() => null);
+      check('极窄窗口（320px）列表渲染且面板不溢出', tiny.w === 320 && tiny.rows === 3 && !!tinyFit && tinyFit.left >= 0 && tinyFit.right <= tinyFit.vw,
+        JSON.stringify({ ...tiny, ...tinyFit }));
+      await cdp.eval(`closeOverlay('overlay-ssh-manager'); 'm-tiny-off'`).catch(() => null);
+    } finally {
+      await cdp.send('Emulation.clearDeviceMetricsOverride').catch(() => null);
+    }
+    await sleep(300);
+    // Clear-button visibility follows the query (the .ss-clear[hidden] rule
+    // must beat display:flex), and clicking it resets the search.
+    const clearBtn = await cdp.eval(`(() => {
+      openSessionSelector();
+      const search = document.getElementById('sessions-search');
+      const clear = document.getElementById('sessions-clear');
+      const initiallyHidden = clear.hidden && getComputedStyle(clear).display === 'none';
+      search.value = 'x';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+      const shownWhenTyping = !clear.hidden && getComputedStyle(clear).display !== 'none';
+      clear.click();
+      return { initiallyHidden, shownWhenTyping,
+        hiddenAfterClear: clear.hidden && getComputedStyle(clear).display === 'none',
+        query: search.value };
+    })()`).catch(() => null);
+    check('会话选择器：清空按钮显隐联动并可点击清空', !!clearBtn && clearBtn.initiallyHidden && clearBtn.shownWhenTyping && clearBtn.hiddenAfterClear && clearBtn.query === '',
+      JSON.stringify(clearBtn));
+    // IME composition must not close the overlay (Escape with keyCode 229 is a
+    // candidate-window cancel, not an overlay close).
+    const imeEsc = await cdp.eval(`(() => {
+      const search = document.getElementById('sessions-search');
+      search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 229, bubbles: true, cancelable: true }));
+      return document.getElementById('overlay-sessions').classList.contains('open');
+    })()`).catch(() => false);
+    check('会话选择器：IME 合成中 Esc(229) 不关闭', imeEsc === true, '');
+    // Esc with a visible opener restores focus to that opener.
+    const escFocus = await cdp.eval(`(() => {
+      const opener = document.querySelector('[data-ssh-search="settings-ssh-list"]');
+      if (!opener) return { opener: false };
+      opener.focus();
+      openSessionSelector();
+      document.getElementById('sessions-search').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      return { opener: true,
+        closed: !document.getElementById('overlay-sessions').classList.contains('open'),
+        back: document.activeElement === opener };
+    })()`).catch(() => null);
+    check('会话选择器：Esc 关闭后焦点回到打开者', !!escFocus && escFocus.closed === true && escFocus.back === true, JSON.stringify(escFocus));
+    // Selector → manager overlay → back: both entries hand focus over and the
+    // panels swap exactly once.
+    const roundtrip = await cdp.eval(`(() => {
+      openSessionSelector();
+      document.querySelector('#overlay-sessions .ss-manage').click();
+      const mgrOpen = document.getElementById('overlay-ssh-manager').classList.contains('open');
+      const selClosed = !document.getElementById('overlay-sessions').classList.contains('open');
+      document.querySelector('#overlay-ssh-manager .ss-manage').click();
+      return { mgrOpen, selClosed,
+        selBack: document.getElementById('overlay-sessions').classList.contains('open'),
+        mgrClosed: !document.getElementById('overlay-ssh-manager').classList.contains('open') };
+    })()`).catch(() => null);
+    check('会话选择器↔管理浮层往返', !!roundtrip && roundtrip.mgrOpen && roundtrip.selClosed && roundtrip.selBack && roundtrip.mgrClosed, JSON.stringify(roundtrip));
+    // Tab trap wraps in both directions over the visible focusable set.
+    const tabTrap = await cdp.eval(`(() => {
+      const panel = document.querySelector('#overlay-sessions .panel');
+      const focusables = [...panel.querySelectorAll('input, button')].filter(el => !el.hidden && el.offsetParent !== null);
+      const first = focusables[0], last = focusables[focusables.length - 1];
+      first.focus();
+      first.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+      const wrappedBack = document.activeElement === last;
+      last.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: false, bubbles: true, cancelable: true }));
+      return { wrappedBack, wrappedFwd: document.activeElement === first, n: focusables.length };
+    })()`).catch(() => null);
+    check('会话选择器：Tab/Shift+Tab 焦点陷阱双向循环', !!tabTrap && tabTrap.n >= 3 && tabTrap.wrappedBack && tabTrap.wrappedFwd, JSON.stringify(tabTrap));
+    // Zero-result navigation is a no-op (no crash, selection stays empty).
+    const zeroNav = await cdp.eval(`(() => {
+      const search = document.getElementById('sessions-search');
+      search.value = 'zzz-none';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+      const rows = document.querySelectorAll('#sessions-list .ss-row').length;
+      const before = _sessionSel && _sessionSel.activeId;
+      search.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+      search.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+      const after = _sessionSel && _sessionSel.activeId;
+      const open = document.getElementById('overlay-sessions').classList.contains('open');
+      search.value = '';
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+      return { rows, before, after, open };
+    })()`).catch(() => null);
+    check('会话选择器：零结果时方向键为空操作', !!zeroNav && zeroNav.rows === 0 && zeroNav.before === zeroNav.after && zeroNav.open === true, JSON.stringify(zeroNav));
+    await cdp.eval(`_closeSessionSelector(false); 'sel-off'`).catch(() => null);
+    // A hidden opener (button inside a since-closed overlay) must not receive
+    // focus back; the fallback path runs instead of stranding focus.
+    const hiddenOpener = await cdp.eval(`(() => {
+      openSSHManager();
+      const btn = document.querySelector('#overlay-ssh-manager .ss-manage');
+      btn.focus();
+      openSessionSelector(); // openOverlay closes the manager → opener hidden
+      document.getElementById('sessions-search').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      return { closed: !document.getElementById('overlay-sessions').classList.contains('open') };
+    })()`).catch(() => null);
+    await sleep(250); // outlast the 100ms deferred focus of the closed opening
+    const hiddenOpenerFocus = await cdp.eval(`(() => {
+      const ae = document.activeElement;
+      return { tag: ae && ae.tagName, id: ae && ae.id,
+        inSessions: !!(ae && ae.closest && ae.closest('#overlay-sessions')),
+        isMgrBtn: !!(ae && ae.classList && ae.classList.contains('ss-manage')) };
+    })()`).catch(() => null);
+    check('隐藏打开者不回收焦点且延迟聚焦不复活', !!hiddenOpener && hiddenOpener.closed === true && !!hiddenOpenerFocus &&
+      hiddenOpenerFocus.inSessions === false && hiddenOpenerFocus.isMgrBtn === false,
+      JSON.stringify({ ...hiddenOpener, ...hiddenOpenerFocus }));
+    // Manager redraws keep the focused control: icon button vs row identity
+    // restore to their own kind, and a group title survives its own toggle.
+    const focusKeep = await cdp.eval(`(() => {
+      const list = document.getElementById('settings-ssh-list');
+      const editSel = '.ssh-mgr-row[data-profile-id="e2essh1"] .ssh-mgr-btn[data-action="edit"]';
+      list.querySelector(editSel).focus();
+      filterSSHManager('settings-ssh-list', '192'); // row survives the query
+      const afterQuery = document.activeElement === list.querySelector(editSel);
+      filterSSHManager('settings-ssh-list', '');
+      const afterClear = document.activeElement === list.querySelector(editSel);
+      const idSel = '.ssh-mgr-row[data-profile-id="e2essh2"] .ssh-mgr-identity';
+      list.querySelector(idSel).focus();
+      filterSSHManager('settings-ssh-list', '构建');
+      const identityKept = document.activeElement === list.querySelector(idSel);
+      filterSSHManager('settings-ssh-list', '');
+      const gh = list.querySelector('.ssh-mgr-group-title[data-group="生产"]');
+      gh.focus();
+      toggleSSHGroup(gh); // collapses: rows leave the DOM, the title stays
+      const ghKept = document.activeElement === list.querySelector('.ssh-mgr-group-title[data-group="生产"]');
+      toggleSSHGroup(list.querySelector('.ssh-mgr-group-title[data-group="生产"]'));
+      return { afterQuery, afterClear, identityKept, ghKept };
+    })()`).catch(() => null);
+    check('SSH 管理页：重绘后焦点按控件类型还原', !!focusKeep && focusKeep.afterQuery && focusKeep.afterClear && focusKeep.identityKept && focusKeep.ghKept,
+      JSON.stringify(focusKeep));
+    // Removing every profile under a focused row drops to the empty state and
+    // hands focus to the container search instead of a detached node.
+    const emptyFocus = await cdp.eval(`(() => {
+      const list = document.getElementById('settings-ssh-list');
+      list.querySelector('.ssh-mgr-row[data-profile-id="e2essh1"] .ssh-mgr-btn[data-action="edit"]').focus();
+      const saved = TabManager.sshProfiles;
+      TabManager.sshProfiles = [];
+      renderSSHManagerInto(list, _sshMgrView('settings-ssh-list'));
+      const empty = (list.querySelector('.ssh-mgr-empty')?.textContent || '').includes('暂无 SSH 连接');
+      const focusInSearch = !!(document.activeElement && document.activeElement.matches &&
+        document.activeElement.matches('[data-ssh-search="settings-ssh-list"]'));
+      const addBtn = !!list.querySelector('.ssh-mgr-empty-actions button');
+      TabManager.sshProfiles = saved;
+      renderSSHManagerInto(list, _sshMgrView('settings-ssh-list'));
+      const restored = list.querySelectorAll('.ssh-mgr-row').length === 3;
+      return { empty, focusInSearch, addBtn, restored };
+    })()`).catch(() => null);
+    check('SSH 管理页：零 profile 空态 + 焦点回落搜索', !!emptyFocus && emptyFocus.empty && emptyFocus.focusInSearch && emptyFocus.addBtn && emptyFocus.restored,
+      JSON.stringify(emptyFocus));
+    // Hostile fixture: quotes/markup in names and groups, a dirty string port.
+    // Nothing may create elements or handlers; values round-trip via dataset;
+    // the port collapses to the 22 default.
+    const evilProbe = await cdp.eval(`(() => {
+      const list = document.getElementById('settings-ssh-list');
+      const saved = TabManager.sshProfiles;
+      window.__evilFired = 0;
+      window.__evil = () => { window.__evilFired++; };
+      TabManager.sshProfiles = [
+        { id: 'evil1', name: 'x</span><img src=x onerror="window.__evil()">', host: '198.51.100.7',
+          port: '6000;window.__evil()', username: 'u<script>', group: 'g" onmouseover="window.__evil()', authType: 'password' }
+      ];
+      renderSSHManagerInto(list, _sshMgrView('settings-ssh-list'));
+      const imgs = list.querySelectorAll('img').length;
+      const scripts = list.querySelectorAll('script').length;
+      const evilHandlers = [...list.querySelectorAll('*')]
+        .filter(el => [...el.attributes].some(a => /^on/i.test(a.name) && a.value.includes('__evil'))).length;
+      const row = list.querySelector('.ssh-mgr-row[data-profile-id="evil1"]');
+      const roundtrip = !!row && row.dataset.profileId === 'evil1';
+      const metaText = row ? (row.querySelector('.ssh-mgr-meta')?.textContent || '') : '';
+      const gh = list.querySelector('.ssh-mgr-group-title');
+      const groupRoundtrip = !!gh && gh.dataset.group === 'g" onmouseover="window.__evil()';
+      const fired = window.__evilFired;
+      TabManager.sshProfiles = saved;
+      renderSSHManagerInto(list, _sshMgrView('settings-ssh-list'));
+      const restored = list.querySelectorAll('.ssh-mgr-row').length === 3;
+      return { imgs, scripts, evilHandlers, roundtrip, groupRoundtrip, metaText, fired, restored };
+    })()`).catch(() => null);
+    const evilOk = !!evilProbe && evilProbe.imgs === 0 && evilProbe.scripts === 0 && evilProbe.evilHandlers === 0 &&
+      evilProbe.roundtrip === true && evilProbe.groupRoundtrip === true && evilProbe.fired === 0 &&
+      evilProbe.metaText.includes('198.51.100.7:22') && evilProbe.restored === true;
+    check('SSH 管理页：恶意名称/分组/脏端口零注入且数据往返', evilOk === true, JSON.stringify(evilProbe));
+    // Leave the app as found (fixtures never reached the network).
+    await cdp.eval(`(() => { TabManager.sshProfiles = []; _sshMgrViews.clear(); closeSettingsTab(); return 'clean'; })()`).catch(() => null);
+    await sleep(300);
+
+    // 13.8 Terminal link opening (ADR-0003): plain links reach the open-url
+    // IPC only via bare Ctrl+click; OSC 8 links confirm first and show the
+    // real target; hover shows target + gesture hint; the release-notes link
+    // shares the unified entry and toasts on failure. The IPC is wrapped, so
+    // nothing in this section ever reaches the OS shell.
+    const linkSetup = await cdp.eval(`(() => {
+      window.__linkOpenCalls = [];
+      window.__linkOrigInvoke = ipcRenderer.invoke.bind(ipcRenderer);
+      ipcRenderer.invoke = (cmd, args) => {
+        if (cmd === 'open-url') { window.__linkOpenCalls.push(String((args && args.url) || '')); return Promise.resolve({ ok: true }); }
+        return window.__linkOrigInvoke(cmd, args);
+      };
+      const locate = (needle) => {
+        const term = TabManager.tabs.find(t => t.type === 'local').term;
+        const buf = term.buffer.active;
+        for (let y = 0; y < buf.length; y++) {
+          const line = buf.getLine(y)?.translateToString(true) || '';
+          const col = line.indexOf(needle);
+          if (col < 0) continue;
+          const row = y - buf.viewportY;
+          if (row < 0 || row >= term.rows) continue;
+          const screen = term.element.querySelector('.xterm-screen');
+          const r = screen.getBoundingClientRect();
+          return { screen, row, col, r,
+            px: r.left + (col + 0.5) * (r.width / term.cols),
+            py: r.top + (row + 0.5) * (r.height / term.rows) };
+        }
+        return null;
+      };
+      window.__linkHover = (needle) => {
+        const p = locate(needle);
+        if (!p) return Promise.resolve({ at: 'not-found' });
+        // xterm re-evaluates hover only when the buffer cell changes; an
+        // earlier click hid the tip while the link stayed current, so first
+        // move off the link (top-left corner is never a link), then back on.
+        const corner = { bubbles: true, cancelable: true, button: 0, ctrlKey: true, clientX: p.r.left + 2, clientY: p.r.top + 2 };
+        const over = { bubbles: true, cancelable: true, button: 0, ctrlKey: true, clientX: p.px, clientY: p.py };
+        p.screen.dispatchEvent(new MouseEvent('mousemove', corner));
+        return new Promise(res => setTimeout(() => {
+          p.screen.dispatchEvent(new MouseEvent('mousemove', over));
+          setTimeout(() => {
+            const tip = document.querySelector('.link-tip');
+            res({ at: 'hover@' + p.row + ':' + p.col, shown: !!tip && tip.classList.contains('show'), text: tip ? tip.textContent : '' });
+          }, 250);
+        }, 60));
+      };
+      window.__linkClick = (needle, ctrl) => {
+        const p = locate(needle);
+        if (!p) return Promise.resolve('not-found');
+        const opts = { bubbles: true, cancelable: true, button: 0, ctrlKey: !!ctrl, clientX: p.px, clientY: p.py };
+        p.screen.dispatchEvent(new MouseEvent('mousemove', opts));
+        return new Promise(res => setTimeout(() => {
+          p.screen.dispatchEvent(new MouseEvent('mousedown', opts));
+          p.screen.dispatchEvent(new MouseEvent('mouseup', opts));
+          res('click@' + p.row + ':' + p.col);
+        }, 200));
+      };
+      const tab = TabManager.tabs.find(t => t.type === 'local');
+      TabManager.switchTo(tab.id);
+      return tab.id;
+    })()`).catch(() => null);
+    await sleep(600);
+    await cdp.eval(`(() => {
+      const term = TabManager.tabs.find(t => t.type === 'local').term;
+      term.write('\\r\\nhttps://e2e-link.example/plain-path\\r\\n');
+      term.write('\\x1b]8;;https://e2e-osc8.example/real-target\\x07osc8-label\\x1b]8;;\\x07\\r\\n');
+      return 'written';
+    })()`).catch(() => null);
+    await sleep(600);
+    const linkPlain = await cdp.eval(`window.__linkClick('e2e-link.example', true)`).catch(e => 'eval-err');
+    await sleep(300);
+    const plainState = await cdp.eval(`({ calls: window.__linkOpenCalls, overlay: document.getElementById('overlay-confirm').classList.contains('open') })`);
+    check('终端链接：Ctrl+点击纯文本链接直开一次', typeof linkPlain === 'string' && linkPlain.startsWith('click@') && plainState.calls.length === 1 && plainState.calls[0] === 'https://e2e-link.example/plain-path' && plainState.overlay === false,
+      JSON.stringify({ linkPlain, ...plainState, setup: linkSetup }));
+    const linkNoCtrl = await cdp.eval(`window.__linkClick('e2e-link.example', false)`).catch(() => 'eval-err');
+    await sleep(300);
+    const noCtrlCalls = await cdp.eval(`window.__linkOpenCalls.length`);
+    check('终端链接：无 Ctrl 点击不打开', typeof linkNoCtrl === 'string' && linkNoCtrl.startsWith('click@') && noCtrlCalls === 1, JSON.stringify({ linkNoCtrl, noCtrlCalls }));
+    const linkHover = await cdp.eval(`window.__linkHover('e2e-link.example')`).catch(() => null);
+    const hoverOk = !!linkHover && linkHover.shown === true && linkHover.text.includes('https://e2e-link.example/plain-path') && linkHover.text.includes('Ctrl+点击打开');
+    check('终端链接：悬停提示真实目标与手势', hoverOk === true, JSON.stringify(linkHover));
+    await cdp.eval(`window.__linkClick('osc8-label', true)`).catch(() => 'eval-err');
+    await sleep(300);
+    const oscConfirm = await cdp.eval(`({
+      open: document.getElementById('overlay-confirm').classList.contains('open'),
+      msg: document.getElementById('confirm-msg').textContent,
+      okText: document.getElementById('confirm-ok').textContent,
+      calls: window.__linkOpenCalls.length
+    })`);
+    const oscConfirmOk = oscConfirm.open === true && oscConfirm.msg.includes('https://e2e-osc8.example/real-target') && oscConfirm.okText === '打开' && oscConfirm.calls === 1;
+    check('终端链接：OSC8 先弹确认（真实目标，未打开）', oscConfirmOk === true, JSON.stringify(oscConfirm));
+    await cdp.eval(`document.getElementById('confirm-cancel').click(); 'cancel'`);
+    await sleep(250);
+    const oscAfterCancel = await cdp.eval(`({ open: document.getElementById('overlay-confirm').classList.contains('open'), calls: window.__linkOpenCalls.length })`);
+    await cdp.eval(`window.__linkClick('osc8-label', true)`).catch(() => 'eval-err');
+    await sleep(300);
+    await cdp.eval(`document.getElementById('confirm-ok').click(); 'ok'`);
+    await sleep(300);
+    const oscAfterOk = await cdp.eval(`({ open: document.getElementById('overlay-confirm').classList.contains('open'), calls: window.__linkOpenCalls })`);
+    const oscFlowOk = oscAfterCancel.open === false && oscAfterCancel.calls === 1 && oscAfterOk.open === false && oscAfterOk.calls.length === 2 && oscAfterOk.calls[1] === 'https://e2e-osc8.example/real-target';
+    check('终端链接：OSC8 取消零调用、确定调用一次', oscFlowOk === true, JSON.stringify({ oscAfterCancel, oscAfterOk }));
+    // Drag-select gesture: press on the link, move off it, release elsewhere —
+    // the Linkifier only activates when down/up land on the same link, so this
+    // must never open (calls stay at 2 from the earlier plain + OSC8 opens).
+    const linkDrag = await cdp.eval(`(() => {
+      const term = TabManager.tabs.find(t => t.type === 'local').term;
+      const buf = term.buffer.active;
+      let p = null;
+      for (let y = 0; y < buf.length; y++) {
+        const line = buf.getLine(y)?.translateToString(true) || '';
+        const col = line.indexOf('e2e-link.example');
+        if (col < 0) continue;
+        const row = y - buf.viewportY;
+        if (row < 0 || row >= term.rows) continue;
+        const screen = term.element.querySelector('.xterm-screen');
+        const r = screen.getBoundingClientRect();
+        p = { screen, px: r.left + (col + 0.5) * (r.width / term.cols), py: r.top + (row + 0.5) * (r.height / term.rows), left: r.left, top: r.top };
+        break;
+      }
+      if (!p) return Promise.resolve('not-found');
+      const on = { bubbles: true, cancelable: true, button: 0, ctrlKey: true, clientX: p.px, clientY: p.py };
+      const off = { bubbles: true, cancelable: true, button: 0, ctrlKey: true, clientX: p.left + 3, clientY: p.top + 3 };
+      p.screen.dispatchEvent(new MouseEvent('mousemove', on));
+      return new Promise(res => setTimeout(() => {
+        p.screen.dispatchEvent(new MouseEvent('mousedown', on));
+        p.screen.dispatchEvent(new MouseEvent('mousemove', off));
+        p.screen.dispatchEvent(new MouseEvent('mouseup', off));
+        setTimeout(() => res({ calls: window.__linkOpenCalls.length,
+          overlay: document.getElementById('overlay-confirm').classList.contains('open') }), 150);
+      }, 200));
+    })()`).catch(() => null);
+    check('终端链接：拖出链接后抬起不打开', !!linkDrag && linkDrag.calls === 2 && linkDrag.overlay === false, JSON.stringify(linkDrag));
+    // Right button (even with Ctrl) is not an activation gesture.
+    const linkRight = await cdp.eval(`(() => {
+      const term = TabManager.tabs.find(t => t.type === 'local').term;
+      const buf = term.buffer.active;
+      let p = null;
+      for (let y = 0; y < buf.length; y++) {
+        const line = buf.getLine(y)?.translateToString(true) || '';
+        const col = line.indexOf('e2e-link.example');
+        if (col < 0) continue;
+        const row = y - buf.viewportY;
+        if (row < 0 || row >= term.rows) continue;
+        const screen = term.element.querySelector('.xterm-screen');
+        const r = screen.getBoundingClientRect();
+        p = { screen, px: r.left + (col + 0.5) * (r.width / term.cols), py: r.top + (row + 0.5) * (r.height / term.rows) };
+        break;
+      }
+      if (!p) return Promise.resolve('not-found');
+      const opts = { bubbles: true, cancelable: true, button: 2, ctrlKey: true, clientX: p.px, clientY: p.py };
+      p.screen.dispatchEvent(new MouseEvent('mousemove', opts));
+      return new Promise(res => setTimeout(() => {
+        p.screen.dispatchEvent(new MouseEvent('mousedown', opts));
+        p.screen.dispatchEvent(new MouseEvent('mouseup', opts));
+        setTimeout(() => res({ calls: window.__linkOpenCalls.length,
+          overlay: document.getElementById('overlay-confirm').classList.contains('open') }), 150);
+      }, 200));
+    })()`).catch(() => null);
+    check('终端链接：Ctrl+右键不打开', !!linkRight && linkRight.calls === 2 && linkRight.overlay === false, JSON.stringify(linkRight));
+    const notesProbe = await cdp.eval(`(() => {
+      window.__updateUrl = 'https://notes.example/release';
+      goUpdateReleaseNotes();
+      return window.__linkOpenCalls.length;
+    })()`);
+    check('更新说明链接走统一 open-url 入口', notesProbe === 3, `calls=${notesProbe}`);
+    const notesFail = await cdp.eval(`(async () => {
+      const prev = ipcRenderer.invoke;
+      ipcRenderer.invoke = (cmd) => cmd === 'open-url' ? Promise.reject('blockedProtocol') : prev(cmd);
+      goUpdateReleaseNotes();
+      await new Promise(r => setTimeout(r, 120));
+      ipcRenderer.invoke = prev;
+      const t = document.getElementById('toast');
+      return { shown: t.classList.contains('show'), text: t.textContent };
+    })()`);
+    const notesFailOk = notesFail.shown === true && notesFail.text.includes('无法打开链接') && notesFail.text.includes('blockedProtocol');
+    check('更新说明链接失败弹出错误反馈', notesFailOk === true, JSON.stringify(notesFail));
+    await cdp.eval(`(() => { ipcRenderer.invoke = window.__linkOrigInvoke; window.__updateUrl = ''; return 'restored'; })()`).catch(() => null);
+
+    // 13.9 Overlay style unification + search focus-ring + action-icon optical
+    // alignment (user-reported visual issues). Re-seed SSH fixtures (13.7's
+    // cleanup removed them) so the settings manager renders rows again.
+    await cdp.eval(`(() => {
+      TabManager.sshProfiles = [
+        { id: 'e2essh1', name: '', host: '192.0.2.10', port: 22, username: 'deploy', group: '生产', authType: 'password' },
+        { id: 'e2essh2', name: '构建机', host: 'builder.example.com', port: 2222, username: 'ci', group: '生产', authType: 'key' }
+      ];
+      openSettings('ssh');
+      return 'seeded';
+    })()`).catch(() => null);
+    await sleep(450);
+    // A) Search inputs inside bordered containers must not show the global
+    // input focus ring (the container's focus-within border is the indicator).
+    const ringProbe = await cdp.eval(`(() => {
+      openSessionSelector();
+      const s1 = document.getElementById('sessions-search');
+      s1.focus();
+      const r1 = getComputedStyle(s1).boxShadow;
+      _closeSessionSelector(false);
+      const s2 = document.querySelector('[data-ssh-search="settings-ssh-list"]');
+      let r2 = 'missing';
+      if (s2) { s2.focus(); r2 = getComputedStyle(s2).boxShadow; s2.blur(); }
+      return { r1, r2 };
+    })()`).catch(() => null);
+    check('搜索框无内层焦点环（选择器/SSH 管理）', !!ringProbe && ringProbe.r1 === 'none' && ringProbe.r2 === 'none', JSON.stringify(ringProbe));
+    // B) Row action icons: same rendered size, glyph ink centers within 0.6
+    // viewBox units vertically (optical alignment, DPR-safe).
+    const iconAlign = await cdp.eval(`(() => {
+      const rows = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-row')];
+      if (!rows.length) return { missing: true };
+      const svgs = [...rows[0].querySelectorAll('.ssh-mgr-btn svg')];
+      const info = svgs.map(s => {
+        const bb = s.getBBox();
+        return { w: s.getAttribute('width'), cy: +(bb.y + bb.height / 2).toFixed(2) };
+      });
+      const cys = info.map(i => i.cy);
+      return { info, spread: +(Math.max(...cys) - Math.min(...cys)).toFixed(2), n: svgs.length };
+    })()`).catch(() => null);
+    const iconAlignOk = !!iconAlign && iconAlign.n === 3 && iconAlign.spread <= 0.6 &&
+      iconAlign.info.every(i => i.w === '14');
+    check('SSH 行尾操作图标光学对齐（同尺寸/墨心一致）', iconAlignOk === true, JSON.stringify(iconAlign));
+    // C1) Quick commands overlay carries the session-selector chrome (header
+    // with title + close, ss-search, footer hints + manage entry), keeps its
+    // data and keyboard flow, and closes on Esc.
+    await cdp.eval(`openQC(); 'qc-open'`).catch(() => null);
+    await sleep(350);
+    const qcStruct = await cdp.eval(`(() => {
+      const panel = document.querySelector('#overlay-qc .qc-panel');
+      const items = [...document.querySelectorAll('#qc-list .v3-item')];
+      const sel = document.querySelector('#qc-list .v3-item[data-selected]');
+      return {
+        open: document.getElementById('overlay-qc').classList.contains('open'),
+        title: document.getElementById('qc-title')?.textContent,
+        close: !!panel.querySelector('.ss-close'),
+        searchBox: !!panel.querySelector('.ss-search'),
+        focus: document.activeElement && document.activeElement.id,
+        sections: [...document.querySelectorAll('#qc-list .v3-section')].map(e => e.textContent),
+        rows: items.length,
+        roleOpt: items.length > 0 && items.every(e => e.getAttribute('role') === 'option' && ['true', 'false'].includes(e.getAttribute('aria-selected'))),
+        selAria: sel ? sel.getAttribute('aria-selected') : '',
+        selAccent: sel ? getComputedStyle(sel).backgroundColor : '',
+        selBar: sel ? getComputedStyle(sel, '::before').width : '',
+        manage: panel.querySelector('.ss-manage')?.textContent,
+        hints: panel.querySelectorAll('.ss-hints kbd').length
+      };
+    })()`).catch(() => null);
+    const qcOk = !!qcStruct && qcStruct.open === true && qcStruct.title === '快捷命令' && qcStruct.close === true &&
+      qcStruct.searchBox === true && qcStruct.focus === 'qc-input' && qcStruct.rows >= 1 &&
+      qcStruct.sections.length >= 1 && qcStruct.roleOpt === true && qcStruct.selAria === 'true' &&
+      qcStruct.selAccent.includes('0.14') && qcStruct.selBar === '2px' &&
+      (qcStruct.manage || '').includes('管理命令') && qcStruct.hints === 3;
+    check('快捷命令浮窗：选择器风格结构 + 数据与选中态', qcOk === true, JSON.stringify(qcStruct));
+    await shot('qc-overlay');
+    const qcEsc = await cdp.eval(`(() => {
+      document.getElementById('qc-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      return !document.getElementById('overlay-qc').classList.contains('open');
+    })()`).catch(() => false);
+    check('快捷命令浮窗：Esc 关闭', qcEsc === true, '');
+    // C2) Command palette: same chrome, search narrows rows, Esc closes (never
+    // dispatch Enter here — palette Enter executes real actions).
+    await cdp.eval(`openPalette(); 'pal-open'`).catch(() => null);
+    await sleep(350);
+    const palStruct = await cdp.eval(`(() => {
+      const panel = document.querySelector('#overlay-palette .palette-panel');
+      const inp = document.getElementById('palette-input');
+      const all = document.querySelectorAll('#palette-list .v3-item').length;
+      inp.value = 'ssh';
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      const narrowedItems = [...document.querySelectorAll('#palette-list .v3-item')];
+      const narrowed = narrowedItems.length;
+      const sel = document.querySelector('#palette-list .v3-item[data-selected]');
+      return {
+        open: document.getElementById('overlay-palette').classList.contains('open'),
+        title: document.getElementById('palette-title')?.textContent,
+        close: !!panel.querySelector('.ss-close'),
+        focus: document.activeElement && document.activeElement.id,
+        all, narrowed,
+        roleOpt: narrowed > 0 && narrowedItems.every(e => e.getAttribute('role') === 'option' && ['true', 'false'].includes(e.getAttribute('aria-selected'))),
+        selAria: sel ? sel.getAttribute('aria-selected') : '',
+        hasKbd: !!document.querySelector('#palette-list .v3-kbd'),
+        selAccent: sel ? getComputedStyle(sel).backgroundColor : '',
+        hints: panel.querySelectorAll('.ss-hints kbd').length
+      };
+    })()`).catch(() => null);
+    const palOk = !!palStruct && palStruct.open === true && palStruct.title === '命令面板' && palStruct.close === true &&
+      palStruct.focus === 'palette-input' && palStruct.all >= 10 && palStruct.narrowed >= 1 && palStruct.narrowed < palStruct.all &&
+      palStruct.roleOpt === true && palStruct.selAria === 'true' &&
+      palStruct.hasKbd === true && palStruct.selAccent.includes('0.14') && palStruct.hints === 3;
+    check('命令面板浮窗：选择器风格结构 + 搜索过滤', palOk === true, JSON.stringify(palStruct));
+    await shot('palette-overlay');
+    const palEsc = await cdp.eval(`(() => {
+      document.getElementById('palette-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      return !document.getElementById('overlay-palette').classList.contains('open');
+    })()`).catch(() => false);
+    check('命令面板浮窗：Esc 关闭', palEsc === true, '');
+    // Leave 13.9 as found: fixtures out, settings page closed.
+    await cdp.eval(`(() => { TabManager.sshProfiles = []; _sshMgrViews.clear(); closeSettingsTab(); return 'clean-13.9'; })()`).catch(() => null);
+    await sleep(250);
+
+    // 13.10 Settings SSH page: section titles + one settings-card per group
+    // (design/ssh-settings-card-design.md). Shared renderer/DOM untouched —
+    // the card chrome must be scoped to #settings-ssh-list while the overlay
+    // manager stays flat. Re-seed fixtures (13.9 cleaned them out).
+    await cdp.eval(`(() => {
+      TabManager.sshProfiles = [
+        { id: 'e2essh1', name: '', host: '192.0.2.10', port: 22, username: 'deploy', group: '生产', authType: 'password' },
+        { id: 'e2essh2', name: '构建机', host: 'builder.example.com', port: 2222, username: 'ci', group: '生产', authType: 'key' },
+        { id: 'e2essh3', name: '', host: '2001:db8::7', port: 22, username: 'root', group: '运维', authType: 'key' }
+      ];
+      openSettings('ssh');
+      return 'seeded-13.10';
+    })()`).catch(() => null);
+    await sleep(450);
+    const cardStruct = await cdp.eval(`(() => {
+      const groups = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group')];
+      const cards = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-items')];
+      const cs = cards[0] ? getComputedStyle(cards[0]) : null;
+      const title = document.querySelector('#settings-ssh-list .ssh-mgr-group-title');
+      const rule = title && title.querySelector('.group-rule');
+      const row = document.querySelector('#settings-ssh-list .ssh-mgr-row');
+      const refCard = document.querySelector('.settings-card');
+      const heading = document.querySelector('.ssh-settings-heading');
+      const toolbar = document.querySelector('.ssh-settings-toolbar');
+      const add = document.querySelector('.ssh-settings-add');
+      const addCs = add ? getComputedStyle(add) : null;
+      return {
+        groups: groups.length, cards: cards.length,
+        cardBg: cs && cs.backgroundColor,
+        refCardBg: refCard ? getComputedStyle(refCard).backgroundColor : 'missing',
+        cardRadius: cs && cs.borderRadius,
+        cardShadow: cs && cs.boxShadow, cardPadding: cs && cs.padding,
+        ruleDisplay: rule ? getComputedStyle(rule).display : 'missing',
+        titleWeight: title && getComputedStyle(title).fontWeight,
+        titleTracking: title && getComputedStyle(title).letterSpacing,
+        rowBg: row && getComputedStyle(row).backgroundColor,
+        headingBtns: heading ? heading.querySelectorAll('button').length : -1,
+        addBtn: !!add, addH: addCs && addCs.height, addRadius: addCs && addCs.borderRadius,
+        quietBtns: toolbar ? [...toolbar.querySelectorAll('.ssh-quiet-action')].map(b => b.textContent) : []
+      };
+    })()`).catch(() => null);
+    // Card surface must equal the appearance page's .settings-card surface
+    // (scheme-derived token, not a hardcoded color).
+    const cardOk = !!cardStruct && cardStruct.groups === 2 && cardStruct.cards === 2 &&
+      cardStruct.refCardBg.startsWith('rgb') && cardStruct.cardBg === cardStruct.refCardBg &&
+      cardStruct.cardRadius === '14px' &&
+      (cardStruct.cardShadow || '').includes('inset') && cardStruct.cardPadding === '6px 16px' &&
+      cardStruct.ruleDisplay === 'none' && cardStruct.titleWeight === '600' &&
+      !['normal', '0px'].includes(cardStruct.titleTracking || '') &&
+      cardStruct.rowBg === 'rgba(0, 0, 0, 0)' &&
+      cardStruct.headingBtns === 1 && cardStruct.addBtn === true &&
+      cardStruct.addH === '32px' && cardStruct.addRadius === '9px' &&
+      cardStruct.quietBtns.join(',') === '折叠全部,展开全部';
+    check('SSH 设置页：每组一张设置卡片 + 分节标题 + 工具栏', cardOk === true, JSON.stringify(cardStruct));
+    // The container's focus-within accent border is the search field's only
+    // focus indicator (the inner input's ring is intentionally off). Read
+    // after a real sleep: border-color has a 120ms transition.
+    const searchFocusPre = await cdp.eval(`(() => {
+      const box = document.querySelector('.ssh-settings-toolbar .ssh-mgr-search');
+      const input = document.querySelector('[data-ssh-search="settings-ssh-list"]');
+      if (!box || !input) return null;
+      const before = getComputedStyle(box).borderColor;
+      input.focus();
+      return { before };
+    })()`).catch(() => null);
+    await sleep(250);
+    const searchFocusPost = await cdp.eval(`(() => {
+      const box = document.querySelector('.ssh-settings-toolbar .ssh-mgr-search');
+      if (!box) return null;
+      const r = { after: getComputedStyle(box).borderColor,
+                  focused: document.activeElement === document.querySelector('[data-ssh-search="settings-ssh-list"]') };
+      document.activeElement.blur();
+      return r;
+    })()`).catch(() => null);
+    const searchFocusOk = !!searchFocusPre && !!searchFocusPost && searchFocusPost.focused === true &&
+      searchFocusPre.before !== searchFocusPost.after && searchFocusPost.after.includes('97, 175, 239');
+    check('SSH 设置页：搜索框焦点有容器强调边框', searchFocusOk === true, JSON.stringify({ ...searchFocusPre, ...searchFocusPost }));
+    await shot('settings-ssh-cards');
+    // Same-condition reference: the appearance page in the very same window,
+    // DPR, theme and UI font, for the side-by-side chrome comparison.
+    await cdp.eval(`openSettings('appearance'); 'appearance-13.10'`).catch(() => null);
+    await sleep(350);
+    await shot('settings-appearance-ref');
+    await cdp.eval(`openSettings('ssh'); 'ssh-13.10'`).catch(() => null);
+    await sleep(350);
+    // Collapse-all via the moved toolbar buttons hides each whole card but
+    // keeps the section titles; expand-all restores. Real button clicks, not
+    // the bare functions, so the rewired toolbar itself is exercised.
+    const collapseAll = await cdp.eval(`(() => {
+      const btns = [...document.querySelectorAll('.ssh-settings-toolbar .ssh-quiet-action')];
+      btns[0].click();
+      const cards = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-items')];
+      const titles = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-title')];
+      return {
+        hidden: cards.every(c => c.classList.contains('collapsed') && getComputedStyle(c).display === 'none' && c.offsetHeight === 0),
+        titlesUp: titles.every(t => t.offsetHeight > 0),
+        n: cards.length
+      };
+    })()`).catch(() => null);
+    check('SSH 设置页：折叠全部隐藏整张卡片保留组标题', !!collapseAll && collapseAll.hidden === true && collapseAll.titlesUp === true && collapseAll.n === 2, JSON.stringify(collapseAll));
+    await shot('ssh-settings-collapsed');
+    const expandAllBack = await cdp.eval(`(() => {
+      const btns = [...document.querySelectorAll('.ssh-settings-toolbar .ssh-quiet-action')];
+      btns[1].click();
+      const cards = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-items')];
+      return cards.every(c => !c.classList.contains('collapsed') && c.offsetHeight > 0);
+    })()`).catch(() => false);
+    check('SSH 设置页：展开全部恢复卡片', expandAllBack === true, '');
+    // Rename entry: opacity-revealed on focus (keyboard reachable), and the
+    // reveal must not nudge the section title's height. The opacity has a
+    // 120ms transition, so the post-focus read happens after a real sleep.
+    const renamePre = await cdp.eval(`(() => {
+      const title = document.querySelector('#settings-ssh-list .ssh-mgr-group-title');
+      const btn = title && title.querySelector('.group-rename');
+      if (!btn) return null;
+      const h0 = title.offsetHeight;
+      const op0 = getComputedStyle(btn).opacity;
+      btn.focus();
+      return { h0, op0 };
+    })()`).catch(() => null);
+    await sleep(250);
+    const renamePost = await cdp.eval(`(() => {
+      const title = document.querySelector('#settings-ssh-list .ssh-mgr-group-title');
+      const btn = title && title.querySelector('.group-rename');
+      if (!btn) return null;
+      const r = { op1: getComputedStyle(btn).opacity, h1: title.offsetHeight,
+                  focused: document.activeElement === btn };
+      btn.blur();
+      return r;
+    })()`).catch(() => null);
+    const renameOk = !!renamePre && !!renamePost && renamePre.op0 === '0' && renamePost.focused === true &&
+      renamePost.op1 === '1' && renamePre.h0 === renamePost.h1;
+    check('SSH 设置页：重命名入口焦点显现且不挤动标题', renameOk === true, JSON.stringify({ ...renamePre, ...renamePost }));
+    // Overlay manager stays flat: same shared rows, no card chrome, rule kept.
+    await cdp.eval(`openSSHManager(); 'mgr-13.10'`).catch(() => null);
+    await sleep(350);
+    const overlayFlat = await cdp.eval(`(() => {
+      const items = document.querySelector('#ssh-manager-list .ssh-mgr-group-items');
+      if (!items) return null;
+      const cs = getComputedStyle(items);
+      const rule = document.querySelector('#ssh-manager-list .group-rule');
+      return { bg: cs.backgroundColor, radius: cs.borderRadius, shadow: cs.boxShadow,
+               rule: rule ? getComputedStyle(rule).display : 'missing' };
+    })()`).catch(() => null);
+    check('SSH 管理浮层：保持平铺（无卡片样式）', !!overlayFlat && overlayFlat.bg === 'rgba(0, 0, 0, 0)' && overlayFlat.radius === '0px' && overlayFlat.shadow === 'none' && overlayFlat.rule !== 'none', JSON.stringify(overlayFlat));
+    await shot('ssh-overlay-flat');
+    await cdp.eval(`closeOverlay('overlay-ssh-manager'); 'mgr-13.10-off'`).catch(() => null);
+    // Narrow (560px) and 150% zoom passes (CDP emulation, try/finally so a
+    // failure can never leak an emulated viewport into later sections):
+    // toolbar actions wrap to their own row, card padding tightens, rows and
+    // card radius survive the zoom.
+    const emu10 = await cdp.send('Emulation.setDeviceMetricsOverride', { width: 560, height: 720, deviceScaleFactor: 1, mobile: false }).then(() => true).catch(() => false);
+    try {
+      await sleep(400);
+      const narrowCard = await cdp.eval(`(() => {
+        const toolbar = document.querySelector('.ssh-settings-toolbar');
+        const actions = document.querySelector('.ssh-settings-toolbar-actions');
+        const search = toolbar && toolbar.querySelector('.ssh-mgr-search');
+        const card = document.querySelector('#settings-ssh-list .ssh-mgr-group-items');
+        return { w: window.innerWidth,
+                 wrapped: actions && search ? actions.getBoundingClientRect().top > search.getBoundingClientRect().top : null,
+                 cardPadding: card ? getComputedStyle(card).padding : '',
+                 rows: document.querySelectorAll('#settings-ssh-list .ssh-mgr-row').length };
+      })()`).catch(() => null);
+      check('窄窗口（560px）：工具栏动作换行且卡片内边距收窄', emu10 === true && !!narrowCard && narrowCard.w === 560 && narrowCard.wrapped === true && narrowCard.cardPadding === '6px 12px' && narrowCard.rows === 3, JSON.stringify(narrowCard));
+      await shot('ssh-settings-cards-narrow');
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 900, height: 700, deviceScaleFactor: 1.5, mobile: false }).catch(() => null);
+      await sleep(350);
+      const zoomCard = await cdp.eval(`(() => {
+        const card = document.querySelector('#settings-ssh-list .ssh-mgr-group-items');
+        const cs = card ? getComputedStyle(card) : null;
+        return { dpr: window.devicePixelRatio, radius: cs && cs.borderRadius,
+                 rows: document.querySelectorAll('#settings-ssh-list .ssh-mgr-row').length };
+      })()`).catch(() => null);
+      check('150% 缩放：卡片圆角与行渲染保持', !!zoomCard && zoomCard.dpr === 1.5 && zoomCard.radius === '14px' && zoomCard.rows === 3, JSON.stringify(zoomCard));
+      await shot('ssh-settings-cards-zoom150');
+    } finally {
+      await cdp.send('Emulation.clearDeviceMetricsOverride').catch(() => null);
+    }
+    await sleep(300);
+    // Leave 13.10 as found: fixtures out, settings page closed.
+    await cdp.eval(`(() => { TabManager.sshProfiles = []; _sshMgrViews.clear(); closeSettingsTab(); return 'clean-13.10'; })()`).catch(() => null);
+    await sleep(250);
 
     // 14. 窗口状态恢复：写入 config 的 window 字段 → 重启 → 验证最大化/尺寸恢复
     async function writeWindowState(state) {
