@@ -18,8 +18,14 @@ fn main() {
         std::process::exit(2);
     }
     let script = args[0].clone();
-    let cols: u16 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(80);
-    let rows: u16 = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(24);
+    let cols: u16 = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(80);
+    let rows: u16 = std::env::args()
+        .nth(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(24);
     let phases: Vec<&str> = script.split('|').collect();
 
     let pty_system = native_pty_system();

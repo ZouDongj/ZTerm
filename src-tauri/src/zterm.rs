@@ -219,7 +219,10 @@ pub fn classify_disconnect(
     match reason {
         R::ReceivedDisconnect(info) => (
             "server",
-            format!("server sent disconnect: {} ({:?})", info.message, info.reason_code),
+            format!(
+                "server sent disconnect: {} ({:?})",
+                info.message, info.reason_code
+            ),
         ),
         R::Error(russh::Error::KeepaliveTimeout) => (
             "keepalive",
@@ -979,7 +982,8 @@ pub async fn pty_create(
             };
             if !taken.is_empty() {
                 let text = drain_utf8(&mut utf8_carry, &taken);
-                let stamp = native_trace::record(&tid, "output-emit", taken.len(), None, None, None);
+                let stamp =
+                    native_trace::record(&tid, "output-emit", taken.len(), None, None, None);
                 let mut payload = json!({ "tabId": tid, "data": text });
                 if let Some(stamp) = stamp {
                     payload["nativeTrace"] = stamp;
@@ -1792,7 +1796,9 @@ pub async fn pty_input(state: State<'_, SessionMap>, args: Vec<Value>) -> Result
             result.map_err(|_| "local input channel closed".to_string())?;
         }
         InputSender::Ssh(tx) => {
-            tx.send(data.into_bytes()).await.map_err(|e| format!("channel closed: {e}"))?;
+            tx.send(data.into_bytes())
+                .await
+                .map_err(|e| format!("channel closed: {e}"))?;
         }
     }
     Ok(())
@@ -2512,7 +2518,12 @@ pub async fn check_update(args: Vec<Value>) -> Result<Value, String> {
                     "none": true,
                 }));
             }
-            Err(e) => return Err(format!("update check failed [{}]: {e}", update_net_error_tag(&e))),
+            Err(e) => {
+                return Err(format!(
+                    "update check failed [{}]: {e}",
+                    update_net_error_tag(&e)
+                ))
+            }
         };
         let body: Value = resp
             .body_mut()
@@ -2657,11 +2668,7 @@ fn select_setup_asset(assets: &[Value]) -> Result<(String, String, u64, String),
         ));
     }
     let a = hits.pop().unwrap();
-    let name = a
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap()
-        .to_string();
+    let name = a.get("name").and_then(|v| v.as_str()).unwrap().to_string();
     let url = a
         .get("browser_download_url")
         .and_then(|v| v.as_str())
@@ -2801,7 +2808,12 @@ fn fetch_latest_release() -> Result<Value, String> {
         .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
         .call();
-    let mut resp = resp.map_err(|e| format!("update: release query failed [{}]: {e}", update_net_error_tag(&e)))?;
+    let mut resp = resp.map_err(|e| {
+        format!(
+            "update: release query failed [{}]: {e}",
+            update_net_error_tag(&e)
+        )
+    })?;
     resp.body_mut()
         .read_json()
         .map_err(|e| format!("update: bad release json: {e}"))
@@ -2833,7 +2845,12 @@ fn download_setup_exe(url: &str, name: &str, size_hint: u64, sha256: &str) -> Re
         .get(url)
         .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
         .call()
-        .map_err(|e| format!("update: download failed [{}]: {e}", update_net_error_tag(&e)))?;
+        .map_err(|e| {
+            format!(
+                "update: download failed [{}]: {e}",
+                update_net_error_tag(&e)
+            )
+        })?;
     let total = resp
         .headers()
         .get("content-length")
@@ -2846,8 +2863,8 @@ fn download_setup_exe(url: &str, name: &str, size_hint: u64, sha256: &str) -> Re
         st.downloaded = 0;
     }
     let mut reader = resp.into_body().into_reader();
-    let mut file = std::fs::File::create(&part)
-        .map_err(|e| format!("update: create temp file: {e}"))?;
+    let mut file =
+        std::fs::File::create(&part).map_err(|e| format!("update: create temp file: {e}"))?;
     let mut buf = [0u8; 64 * 1024];
     let mut downloaded: u64 = 0;
     let io_result: std::io::Result<()> = (|| {
@@ -2928,7 +2945,9 @@ pub async fn download_update(args: Vec<Value>) -> Result<Value, String> {
                 return Err("update: release response missing tag_name".to_string());
             }
             if !want_tag.is_empty() && tag != want_tag {
-                return Err(format!("update: release changed ({tag} != {want_tag}), re-check first"));
+                return Err(format!(
+                    "update: release changed ({tag} != {want_tag}), re-check first"
+                ));
             }
             let assets = body
                 .get("assets")
@@ -3072,7 +3091,10 @@ fn shell_execute_open(target: &str) -> Result<(), String> {
     use winapi::um::shellapi::ShellExecuteW;
     use winapi::um::winuser::SW_SHOWNORMAL;
     let wide = |s: &str| -> Vec<u16> {
-        std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
     };
     let verb = wide("open");
     let file = wide(target);
@@ -3124,7 +3146,6 @@ pub fn open_url(args: Vec<Value>) -> Result<Value, String> {
     validate_then_dispatch(&raw, shell_execute_open)?;
     Ok(json!({ "ok": true }))
 }
-
 
 #[tauri::command]
 pub async fn get_system_fonts(args: Vec<Value>) -> Result<Value, String> {
@@ -4301,9 +4322,9 @@ mod tests {
             "http://192.168.1.1:8080/admin",
             "https://[2001:db8::1]:8443/x",
             "https://sub.domain.example:443/a%20b",
-            "https://example.com/%2500",           // double-encoded literal stays text
-            "https://xn--nxasmq6b.example/",       // punycode IDN
-            "HTTP://EXAMPLE.COM",                  // case-insensitive scheme
+            "https://example.com/%2500", // double-encoded literal stays text
+            "https://xn--nxasmq6b.example/", // punycode IDN
+            "HTTP://EXAMPLE.COM",        // case-insensitive scheme
         ] {
             assert!(validate_open_url(raw).is_ok(), "should accept: {raw}");
         }
@@ -4322,21 +4343,24 @@ mod tests {
             ("mailto:a@example.com", "blockedProtocol"),
             ("https://user:pass@example.com/", "invalidUrl"), // userinfo
             ("https://user@example.com/", "invalidUrl"),
-            ("https://", "invalidUrl"),                        // empty host
-            ("https://exa\nmple.com/", "invalidUrl"),          // raw control
-            ("https://example.com/%00", "invalidUrl"),         // encoded NUL
-            ("https://example.com/a%0Ad", "invalidUrl"),       // encoded LF
-            ("https://example.com/?q=%0d", "invalidUrl"),      // encoded CR (lowercase hex)
-            ("https://example.com/#x%7Fy", "invalidUrl"),      // encoded DEL
-            ("https://example.com/%1B[2J", "invalidUrl"),      // encoded ESC
-            ("https://example.com/%08", "invalidUrl"),         // encoded BS
-            ("https://example.com/\u{7f}", "invalidUrl"),      // raw DEL
-            ("https://example.com:99999/x", "invalidUrl"),     // bad port
-            ("//example.com/x", "invalidUrl"),                 // protocol-relative
-            (long.as_str(), "invalidUrl"),                     // >4096 chars
+            ("https://", "invalidUrl"),                    // empty host
+            ("https://exa\nmple.com/", "invalidUrl"),      // raw control
+            ("https://example.com/%00", "invalidUrl"),     // encoded NUL
+            ("https://example.com/a%0Ad", "invalidUrl"),   // encoded LF
+            ("https://example.com/?q=%0d", "invalidUrl"),  // encoded CR (lowercase hex)
+            ("https://example.com/#x%7Fy", "invalidUrl"),  // encoded DEL
+            ("https://example.com/%1B[2J", "invalidUrl"),  // encoded ESC
+            ("https://example.com/%08", "invalidUrl"),     // encoded BS
+            ("https://example.com/\u{7f}", "invalidUrl"),  // raw DEL
+            ("https://example.com:99999/x", "invalidUrl"), // bad port
+            ("//example.com/x", "invalidUrl"),             // protocol-relative
+            (long.as_str(), "invalidUrl"),                 // >4096 chars
         ] {
             let err = validate_open_url(raw).expect_err(&format!("should reject: {raw:?}"));
-            assert!(err.starts_with(prefix), "{raw:?} → {err}, want prefix {prefix}");
+            assert!(
+                err.starts_with(prefix),
+                "{raw:?} → {err}, want prefix {prefix}"
+            );
         }
     }
 
@@ -4523,13 +4547,14 @@ mod tests {
         // window 存在但字段缺失
         assert!(window_state_from_config(&json!({"window": {"x": 1}})).is_none());
         // 字段类型错误（字符串而非数字）
-        assert!(
-            window_state_from_config(&json!({"window": {"x": "a", "y": 2, "width": 3, "height": 4}}))
-                .is_none()
-        );
+        assert!(window_state_from_config(
+            &json!({"window": {"x": "a", "y": 2, "width": 3, "height": 4}})
+        )
+        .is_none());
         // maximized 缺失 → 默认 false
-        let s = window_state_from_config(&json!({"window": {"x": 1, "y": 2, "width": 3, "height": 4}}))
-            .unwrap();
+        let s =
+            window_state_from_config(&json!({"window": {"x": 1, "y": 2, "width": 3, "height": 4}}))
+                .unwrap();
         assert!(!s.maximized);
     }
 
@@ -4538,7 +4563,10 @@ mod tests {
         // Env parsing is isolated in pty_flush_interval_from so the matrix is
         // testable without mutating process-global env (cargo test is parallel).
         assert_eq!(pty_flush_interval_from(None, false), PTY_FLUSH_INTERVAL_MS);
-        assert_eq!(pty_flush_interval_from(None, true), PTY_LOOSE_FLUSH_WINDOW_MS);
+        assert_eq!(
+            pty_flush_interval_from(None, true),
+            PTY_LOOSE_FLUSH_WINDOW_MS
+        );
         // Explicit value always wins over the loose toggle, clamped at max.
         assert_eq!(pty_flush_interval_from(Some("56"), true), 56);
         assert_eq!(
@@ -4546,14 +4574,20 @@ mod tests {
             PTY_MAX_FLUSH_WINDOW_MS
         );
         // Unparsable explicit value falls through to the toggle-based default.
-        assert_eq!(pty_flush_interval_from(Some("abc"), false), PTY_FLUSH_INTERVAL_MS);
+        assert_eq!(
+            pty_flush_interval_from(Some("abc"), false),
+            PTY_FLUSH_INTERVAL_MS
+        );
         assert_eq!(pty_flush_interval_from(Some("  80  "), true), 80);
     }
 
     #[test]
     fn pty_outbox_equal_sized_bursts_drain_without_later_input() {
         for interval in [4, 40, 80, 200] {
-            assert_eq!(pty_flush_interval_from(Some(&interval.to_string()), false), interval);
+            assert_eq!(
+                pty_flush_interval_from(Some(&interval.to_string()), false),
+                interval
+            );
             let mut outbox = b"first!".to_vec();
             assert_eq!(drain_pty_outbox(&mut outbox), b"first!");
             outbox.extend_from_slice(b"second");
@@ -4654,10 +4688,16 @@ mod tests {
         assert_eq!(parse_osc7_cwd(head), None, "半截序列单独匹配必须失败");
         assert_eq!(parse_osc7_cwd(tail), None, "半截序列尾部单独匹配必须失败");
         let combined = format!("{head}{tail}");
-        assert_eq!(parse_osc7_cwd(&combined).as_deref(), Some("/home/user/project"));
+        assert_eq!(
+            parse_osc7_cwd(&combined).as_deref(),
+            Some("/home/user/project")
+        );
         // 前有大量输出（大文本场景）时同样能匹配
         let noisy = format!("ls output line\nanother\n{combined}");
-        assert_eq!(parse_osc7_cwd(&noisy).as_deref(), Some("/home/user/project"));
+        assert_eq!(
+            parse_osc7_cwd(&noisy).as_deref(),
+            Some("/home/user/project")
+        );
     }
 
     #[test]
@@ -4693,7 +4733,9 @@ mod tests {
         );
         // 噪声中匹配
         assert_eq!(
-            parse_1337_currentdir(&format!("prompt ❯ some output\n\u{1b}]1337;CurrentDir=/srv\u{7}\nmore")),
+            parse_1337_currentdir(&format!(
+                "prompt ❯ some output\n\u{1b}]1337;CurrentDir=/srv\u{7}\nmore"
+            )),
             Some("/srv".to_string())
         );
     }
@@ -4703,7 +4745,10 @@ mod tests {
         // 无终止符（跨块时上游窗口拼接后才会匹配，单块必须返回 None）
         assert_eq!(parse_1337_currentdir("\u{1b}]1337;CurrentDir=/root"), None);
         // 相对路径/空路径不接受
-        assert_eq!(parse_1337_currentdir("\u{1b}]1337;CurrentDir=relative\u{7}"), None);
+        assert_eq!(
+            parse_1337_currentdir("\u{1b}]1337;CurrentDir=relative\u{7}"),
+            None
+        );
         assert_eq!(parse_1337_currentdir("\u{1b}]1337;CurrentDir=\u{7}"), None);
         assert_eq!(parse_1337_currentdir("plain text"), None);
         assert_eq!(parse_1337_currentdir(""), None);
@@ -4734,17 +4779,21 @@ mod tests {
     fn bash_rc_wrapper_end_to_end() {
         // 用真实 bash 执行 RC wrapper（本机无 bash 则跳过）：验证生成的 rc 文件
         // 能让 shell 输出可解析的 OSC 7 cwd。隔离 HOME 避免污染测试机用户配置。
-        let bash = ["bash", "D:/Program Files/Git/bin/bash.exe", "C:/Program Files/Git/bin/bash.exe"]
-            .iter()
-            .find(|p| {
-                std::process::Command::new(p)
-                    .arg("--version")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            });
+        let bash = [
+            "bash",
+            "D:/Program Files/Git/bin/bash.exe",
+            "C:/Program Files/Git/bin/bash.exe",
+        ]
+        .iter()
+        .find(|p| {
+            std::process::Command::new(p)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
         let Some(bash) = bash else {
             eprintln!("skip: no bash on this machine");
             return;
@@ -4790,7 +4839,12 @@ mod tests {
 
     #[test]
     fn window_center_on_any_monitor() {
-        let one = [MonitorRect { x: 0, y: 0, w: 1920, h: 1080 }];
+        let one = [MonitorRect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        }];
         assert!(center_on_any_monitor(960, 540, &one));
         assert!(center_on_any_monitor(0, 0, &one));
         // 边界外：左侧/右侧/下侧
@@ -4799,8 +4853,18 @@ mod tests {
         assert!(!center_on_any_monitor(960, 1080, &one));
         // 双显示器（副屏在左侧，负坐标）
         let two = [
-            MonitorRect { x: 0, y: 0, w: 1920, h: 1080 },
-            MonitorRect { x: -1920, y: 0, w: 1920, h: 1080 },
+            MonitorRect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+            MonitorRect {
+                x: -1920,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
         ];
         assert!(center_on_any_monitor(-960, 540, &two));
         assert!(center_on_any_monitor(-1920, 540, &two), "左屏左边缘在内");
@@ -4875,8 +4939,16 @@ mod tests {
     fn select_setup_asset_happy_path() {
         let sha = "a".repeat(64);
         let assets = vec![
-            gh_asset("ZTerm_1.0.8_x64-setup.exe", 4_700_000, Some(&format!("sha256:{sha}"))),
-            gh_asset("ZTerm_1.0.8_arm64-setup.exe", 4_100_000, Some(&format!("sha256:{sha}"))),
+            gh_asset(
+                "ZTerm_1.0.8_x64-setup.exe",
+                4_700_000,
+                Some(&format!("sha256:{sha}")),
+            ),
+            gh_asset(
+                "ZTerm_1.0.8_arm64-setup.exe",
+                4_100_000,
+                Some(&format!("sha256:{sha}")),
+            ),
         ];
         let (name, url, size, got_sha) = select_setup_asset(&assets).unwrap();
         assert_eq!(name, "ZTerm_1.0.8_x64-setup.exe");
@@ -4896,34 +4968,53 @@ mod tests {
             gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, Some(&sha)),
             gh_asset("ZTerm_1.0.9_x64-setup.exe", 2, Some(&sha)),
         ];
-        assert!(select_setup_asset(&two).unwrap_err().contains("expected exactly one"));
+        assert!(select_setup_asset(&two)
+            .unwrap_err()
+            .contains("expected exactly one"));
         // Missing digest field entirely.
         let no_digest = vec![gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, None)];
-        assert!(select_setup_asset(&no_digest).unwrap_err().contains("sha256 digest"));
+        assert!(select_setup_asset(&no_digest)
+            .unwrap_err()
+            .contains("sha256 digest"));
         // Digest with a wrong algorithm prefix.
         let wrong_alg = vec![gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, Some("md5:abc"))];
-        assert!(select_setup_asset(&wrong_alg).unwrap_err().contains("sha256 digest"));
+        assert!(select_setup_asset(&wrong_alg)
+            .unwrap_err()
+            .contains("sha256 digest"));
         // Truncated hash is not a valid sha256 digest.
         let short = format!("sha256:{}", "c".repeat(32));
         let bad_len = vec![gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, Some(&short))];
-        assert!(select_setup_asset(&bad_len).unwrap_err().contains("sha256 digest"));
+        assert!(select_setup_asset(&bad_len)
+            .unwrap_err()
+            .contains("sha256 digest"));
         // Right length but non-hex characters are not a valid sha256 digest.
         let non_hex = format!("sha256:{}", "zz".repeat(32));
         let bad_hex = vec![gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, Some(&non_hex))];
-        assert!(select_setup_asset(&bad_hex).unwrap_err().contains("sha256 digest"));
+        assert!(select_setup_asset(&bad_hex)
+            .unwrap_err()
+            .contains("sha256 digest"));
         // Download URL missing.
         let no_url = vec![json!({
             "name": "ZTerm_1.0.8_x64-setup.exe",
             "size": 1,
             "digest": sha,
         })];
-        assert!(select_setup_asset(&no_url).unwrap_err().contains("browser_download_url"));
+        assert!(select_setup_asset(&no_url)
+            .unwrap_err()
+            .contains("browser_download_url"));
         // Path separators / parent refs in the asset name are rejected (the
         // name is joined into the download dir and spawned as the installer).
         let sha2 = format!("sha256:{}", "e".repeat(64));
-        for evil in ["ZTerm_a\\..\\x_x64-setup.exe", "ZTerm_a/b_x64-setup.exe", "ZTerm_.._x64-setup.exe"] {
+        for evil in [
+            "ZTerm_a\\..\\x_x64-setup.exe",
+            "ZTerm_a/b_x64-setup.exe",
+            "ZTerm_.._x64-setup.exe",
+        ] {
             let v = vec![gh_asset(evil, 1, Some(&sha2))];
-            assert!(select_setup_asset(&v).is_err(), "traversal name must be rejected: {evil}");
+            assert!(
+                select_setup_asset(&v).is_err(),
+                "traversal name must be rejected: {evil}"
+            );
         }
     }
 
@@ -4933,7 +5024,10 @@ mod tests {
         // Asset present but nothing on disk: name/size/sha surface, ready=false.
         let body = json!({ "assets": [gh_asset("ZTerm_0.0.0nonexistent_x64-setup.exe", 42, Some(&format!("sha256:{sha}")))] });
         let info = newer_asset_info(&body);
-        assert_eq!(info.name.as_deref(), Some("ZTerm_0.0.0nonexistent_x64-setup.exe"));
+        assert_eq!(
+            info.name.as_deref(),
+            Some("ZTerm_0.0.0nonexistent_x64-setup.exe")
+        );
         assert_eq!(info.size, Some(42));
         assert_eq!(info.sha256.as_deref(), Some(sha.as_str()));
         assert!(!info.ready);
@@ -5037,7 +5131,9 @@ mod tests {
     #[test]
     fn ready_installer_path_requires_matching_hash() {
         // No file on disk for this asset name -> not ready.
-        assert!(ready_installer_path("ZTerm_0.0.0nonexistent_x64-setup.exe", &"0".repeat(64)).is_none());
+        assert!(
+            ready_installer_path("ZTerm_0.0.0nonexistent_x64-setup.exe", &"0".repeat(64)).is_none()
+        );
         // A file whose hash does not match the expected digest -> not ready.
         let dir = update_download_dir();
         std::fs::create_dir_all(&dir).unwrap();
