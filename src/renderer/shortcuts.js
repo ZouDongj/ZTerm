@@ -296,11 +296,21 @@ const SHORTCUT_ACTIONS = {
                     cursorDrawPasses: (a.cursorDrawPasses != null && b.cursorDrawPasses != null) ? a.cursorDrawPasses - b.cursorDrawPasses : null,
                     baseDrawPasses: (a.baseDrawPasses != null && b.baseDrawPasses != null) ? a.baseDrawPasses - b.baseDrawPasses : null };
             });
+            // Opt-in capture only: no terminal text, commands or session names.
+            let glyphs = null;
+            try {
+                const active = TabManager.getActive();
+                const panes = active?.splitRoot ? getAllPanes(active) : active ? [active] : [];
+                glyphs = { scope: 'active-tab-at-capture-end',
+                    panes: panes.slice(0, 8).map(p => globalThis.__glyphDiagnostics?.snapshot(p.term) ?? null),
+                    truncatedPanes: panes.length > 8 };
+            } catch { glyphs = { unavailable: true }; }
             const report = {
                 at: new Date().toISOString(),
                 interaction: diagnostics ? diagnostics.snapshot() : null,
                 durationMs: +(performance.now() - t0).toFixed(0),
                 display: { dpr: window.devicePixelRatio, w: window.innerWidth, h: window.innerHeight },
+                glyphs,
                 raf: { measurement: 'callback-gap-ms-not-presented-fps', count: raf.length, p50: q(0.5), p95: q(0.95), max: gaps[gaps.length - 1] || null },
                 stability: {
                     longTasks: longTasks.slice(0, 20),

@@ -108,7 +108,8 @@ test('caret report explicitly whitelists metadata and excludes descriptor charac
     }) } };
     f.start(); for (const interval of f.intervals.values()) interval(); f.advance(4000);
     const report = f.report();
-    assert.doesNotMatch(JSON.stringify(report), /private-|char|glyph/);
+    // Metadata may name glyph diagnostics; raw cursor text fields must remain absent.
+    assert.doesNotMatch(JSON.stringify(report), /private-|"(?:char|chars|glyph|lastGlyph|lastSoftwareCursor)"\s*:/);
     assert.equal(report.cursor.caret.customDrawSource, 'protocol');
     assert.equal(report.cursor.caret.positionKnown, false);
     assert.equal(report.cursor.caret.checkpointReason, 'open-lexical-unit');

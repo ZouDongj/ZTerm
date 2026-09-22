@@ -49,13 +49,16 @@
   // Bounded state: a unit longer than this is not an input-line update.
   const MAX_UNIT_BYTES = 262144;
 
-  // Width of a character in cells (best-effort, consistent for the verified
-  // clients: ASCII and common CJK ranges). The plane-1 pictograph blocks
-  // match the zterm6 terminal width provider (unicode-width.js) and modern
-  // string-width — kimi lays its input line out with those as 2 cells, so a
-  // 1-count here would drift the tracked caret left by one cell per emoji.
+  const unicodeWidth = root.__unicodeWidth ||
+    (typeof module !== 'undefined' && module.exports ? require('./unicode-width.js') : null);
+
+  // Use the terminal provider for BMP wide symbols, so modern emoji cannot
+  // shift the software caret and IME anchor left. Preserve the established
+  // heuristic for other characters; zero-width and grapheme tracking require
+  // separate stream-model handling rather than a width-table-only change.
   function charWidth(ch) {
     const cp = ch.codePointAt(0);
+    if (cp < 0x10000 && unicodeWidth?.wcwidth(cp) === 2) return 2;
     if (cp >= 0x1100 && (
       cp <= 0x115f || // Hangul Jamo
       (cp >= 0x2e80 && cp <= 0xa4cf) ||
@@ -466,19 +469,21 @@
         // DECAWM: a char written in the pending-wrap state wraps to the next
         // line first (with bottom-stick scrolling).
         if (pendingWrap) { lineFeed(); col = 1; }
+        const w = charWidth(ch);
+        // A two-cell glyph cannot start in the final column. Match xterm's
+        // pre-write wrap before recording writes or the software caret.
+        if (w === 2 && col === cols) { lineFeed(); col = 1; }
         if (!unit) { // printable outside a unit still advances the cursor
-          const w0 = charWidth(ch);
           if (bareRev.on) {
             bareRev.count += 1;
-            if (bareRev.count === 1) bareRev.char = { row, col, ch, width: w0 };
+            if (bareRev.count === 1) bareRev.char = { row, col, ch, width: w };
           }
-          col += w0;
+          col += w;
           if (col > cols) { col = cols; pendingWrap = true; }
           continue;
         }
         // The caret signature is a SINGLE styled character; runs of text
         // just advance the cursor.
-        const w = charWidth(ch);
         if (unit.writes.length < 16384) unit.writes.push([row - 1, col - 1]); // 0-based, matches descriptor coords
         const truecolorCaret = /^\d+;\d+;\d+$/.test(sgr.fg ?? '') && /^\d+;\d+;\d+$/.test(sgr.bg ?? '');
         const reverseCaret = sgr.rev;

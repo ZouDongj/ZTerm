@@ -3,6 +3,10 @@
 // verbatim to avoid transcription errors. Diagnostic tool, not shipped.
 import { readFileSync, writeFileSync } from 'node:fs';
 
+// Historical V6 extraction template only. It does not contain the later BMP
+// widening correction and must not silently replace the maintained provider.
+throw new Error('Legacy Unicode V6 generator is disabled: it would erase the maintained BMP width correction');
+
 const src = readFileSync(new URL('../src/vendor/xterm.js', import.meta.url), 'utf8');
 const lines = src.split('\n');
 

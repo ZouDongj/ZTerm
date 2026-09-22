@@ -202,19 +202,62 @@ test('claude derived native chunks (mid-sequence cuts) preserve candidates', () 
   assert.deepEqual(cands.map(c => [c.x, c.y, c.char]), expected);
 });
 
-test('charWidth: plane-1 pictograph blocks are 2 (zterm6 parity), BMP emoji stays 1', () => {
+test('charWidth: existing pictographs and modern BMP wide symbols stay aligned', () => {
   // kimi/string-width/zterm6 all lay plane-1 pictographs out as 2 cells; a
   // 1-count here drifts the tracked caret one cell left per emoji on the
-  // input line (IME anchor then covers committed text). BMP emoji like ✨
-  // stay 1, matching the documented zterm6 boundary.
+  // input line (IME anchor then covers committed text). Modern BMP wide
+  // symbols must follow the terminal provider as well.
   assert.equal(charWidth('🌑'), 2, 'U+1F311 moon phase');
   assert.equal(charWidth('🚀'), 2, 'U+1F680');
   assert.equal(charWidth('🤖'), 2, 'U+1F916');
   assert.equal(charWidth('🪽'), 2, 'U+1FABD in 1FA70-1FAFF');
   assert.equal(charWidth('想'), 2, 'CJK control');
-  assert.equal(charWidth('✨'), 1, 'BMP emoji boundary (zterm6 parity)');
+  assert.equal(charWidth('✨'), 2, 'BMP sparkles');
+  assert.equal(charWidth('⚡'), 2, 'BMP lightning');
   assert.equal(charWidth(String.fromCodePoint(0x1f650)), 1, 'U+1F650 just past the widened block');
   assert.equal(charWidth('a'), 1, 'ascii');
+});
+
+test('BMP wide symbols before a software caret advance its actual frame position', async () => {
+  const { installOn } = require('../src/renderer/unicode-width.js');
+  for (const icon of ['⚡', '✨', '⌚', '🌑', '\uF07B']) {
+    const term = new Terminal({ cols: 80, rows: 24, allowProposedApi: true });
+    installOn(term);
+    const prefix = '\x1b[0m\x1b]8;;\x07\x1b[H' + icon;
+    const frame = prefix + '\x1b[7m \x1b[27m\x1b[24;1H';
+    try {
+      await new Promise(resolve => term.write(prefix, resolve));
+      const expectedX = term.buffer.active.cursorX;
+      for (const chunkSize of [undefined, 1, 3]) {
+        const result = collect(frame, chunkSize);
+        assert.equal(result.cands.length, 1, `${icon}: one caret`);
+        assert.equal(result.cands[0].x, expectedX, `${icon}: parser/observer parity`);
+      }
+    } finally { term.dispose(); }
+  }
+});
+
+test('wide symbols at the final column wrap before the observed caret', async () => {
+  const { installOn } = require('../src/renderer/unicode-width.js');
+  for (const icon of ['⚡', '✨', '🌑', '想']) {
+    for (const home of ['\x1b[H', '\x1b[24;1H']) {
+      const term = new Terminal({ cols: 5, rows: 24, allowProposedApi: true });
+      installOn(term);
+      const prefix = '\x1b[0m\x1b]8;;\x07\x1b[H' + home + 'AAAA' + icon;
+      const frame = prefix + '\x1b[7m \x1b[27m\x1b[24;1H';
+      try {
+        await new Promise(resolve => term.write(prefix, resolve));
+        const expected = [term.buffer.active.cursorX, term.buffer.active.cursorY];
+        // BMP additions are tested at every chunk boundary. Astral surrogate
+        // reconstruction is a separate, pre-existing observer limitation.
+        for (const chunkSize of icon.length === 1 ? [undefined, 1, 3] : [undefined]) {
+          const result = collect(frame, chunkSize, { cols: 5, rows: 24 });
+          assert.equal(result.cands.length, 1);
+          assert.deepEqual([result.cands[0].x, result.cands[0].y], expected, icon);
+        }
+      } finally { term.dispose(); }
+    }
+  }
 });
 
 test('ESC[m (empty-param SGR) resets the plain convention like ESC[0m', () => {
