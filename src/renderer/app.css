@@ -613,9 +613,16 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ssh-mgr-group-title .group-name-input:focus{border-color:rgb(var(--accent-rgb))}
 .ssh-mgr-group-items{display:flex;flex-direction:column;gap:1px}
 .ssh-mgr-group-items.collapsed{display:none}
-.ssh-mgr-row{display:flex;align-items:center;gap:14px;padding:10px 13px;min-height:60px;border-radius:7px}
-.ssh-mgr-row:hover{background:rgba(255,255,255,.04)}
-.ssh-mgr-server{display:flex;align-items:center;justify-content:center;width:31px;height:34px;color:var(--text-3);flex:none}
+.ssh-mgr-row{display:flex;align-items:center;gap:14px;padding:10px 13px;min-height:60px;border-radius:7px;position:relative;transition:background-color 120ms ease-out}
+/* Shared hover combo (flat manager overlay + settings cards): rounded wash
+   plus an accent edge bar — one language everywhere .ssh-mgr-row appears.
+   The settings cards override only the geometry (radius/margin/padding and
+   the bar's left offset) for their inset layout. */
+.ssh-mgr-row::before{content:"";position:absolute;left:2px;top:50%;translate:0 -50%;width:3px;height:26px;border-radius:2px;background:rgb(var(--accent-rgb));opacity:0;scale:1 .4;transition:opacity 140ms ease-out,scale 140ms ease-out}
+.ssh-mgr-row:hover{background:rgba(255,255,255,.05)}
+.ssh-mgr-row:hover::before{opacity:.85;scale:1 1}
+.ssh-mgr-server{display:flex;align-items:center;justify-content:center;width:31px;height:34px;color:var(--text-3);flex:none;transition:color 120ms ease-out}
+.ssh-mgr-row:hover .ssh-mgr-server{color:var(--text-2)}
 .ssh-mgr-identity{flex:1;min-width:0;cursor:pointer;border-radius:4px;outline-offset:2px;display:flex;flex-direction:column}
 .ssh-mgr-primary{display:block;font-size:14px;line-height:21px;font-weight:500;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ssh-mgr-primary.host{font-family:"Cascadia Code",Consolas,monospace;font-weight:400;font-size:13px;letter-spacing:.15px}
@@ -661,17 +668,12 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 /* One card per group; a collapsed group hides the whole card (the shared
    .collapsed{display:none} rule), leaving just the section title. */
 .settings-card-list .ssh-mgr-group-items{background:var(--surface-card);border-radius:14px;padding:6px 16px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);gap:0}
-/* Card-row hover (user-picked combo of prototype V2+V3): a rounded wash for
-   row-level positioning plus an accent edge bar for direction — the same
-   language as the overlay list's selected row. The row box extends 8px past
-   its content so the wash never touches the card edge; the flat overlay
-   manager keeps its full-width hover unchanged. */
-.settings-card-list .ssh-mgr-row{position:relative;border-radius:9px;margin:0 -8px;padding:10px 8px;min-height:62px;gap:12px;transition:background-color 120ms ease-out}
-.settings-card-list .ssh-mgr-row::before{content:"";position:absolute;left:1px;top:50%;translate:0 -50%;width:3px;height:26px;border-radius:2px;background:rgb(var(--accent-rgb));opacity:0;scale:1 .4;transition:opacity 140ms ease-out,scale 140ms ease-out}
-.settings-card-list .ssh-mgr-row:hover{background:rgba(255,255,255,.05)}
-.settings-card-list .ssh-mgr-row:hover::before{opacity:.85;scale:1 1}
-.settings-card-list .ssh-mgr-server{transition:color 120ms ease-out}
-.settings-card-list .ssh-mgr-row:hover .ssh-mgr-server{color:var(--text-2)}
+/* Card-row geometry override: the row box extends 8px past its content so
+   the shared hover wash never touches the card edge; the bar nudges to
+   left:1px to match the wider box. The hover combo itself (wash + bar +
+   icon tint) comes from the base .ssh-mgr-row rules. */
+.settings-card-list .ssh-mgr-row{border-radius:9px;margin:0 -8px;padding:10px 8px;min-height:62px;gap:12px}
+.settings-card-list .ssh-mgr-row::before{left:1px}
 
 @media(max-width:560px){
   .ssh-mgr-searchrow{padding-left:12px;padding-right:12px}
