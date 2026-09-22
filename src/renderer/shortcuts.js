@@ -741,6 +741,15 @@ async function resetDataDir() {
     loadDataDirInfo();
 }
 
+// Browser-accelerator guard (WebView2 gap): see browserAcceleratorDenied in
+// shortcut-utils.js. preventDefault marks the key consumed in every focus
+// context, including the textarea-blurred corner case that opened the Edge
+// downloads hub in the field. Combos ZTerm binds itself are already consumed
+// by the dispatcher below; the denylist is only for Edge-OOUI keys.
+document.addEventListener('keydown', e => {
+    if (browserAcceleratorDenied(e)) e.preventDefault();
+}, true);
+
 document.addEventListener('keydown', e => {
     if (_shortcutCapture) return; // 正在录制新快捷键，交给录制监听器处理
     // Escape：弹窗/最大化恢复的优先级最高，其余情况放行给 xterm（vim 等程序要用）

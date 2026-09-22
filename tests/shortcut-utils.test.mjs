@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { comboFromEvent, comboDisplay, mergeShortcutBindings } =
+const { comboFromEvent, comboDisplay, mergeShortcutBindings, BROWSER_ACCELERATOR_DENYLIST, browserAcceleratorDenied } =
     require('../src/renderer/shortcut-utils.js');
 
 // ── comboFromEvent ──
@@ -69,4 +69,28 @@ test('mergeShortcutBindings 无覆盖/空覆盖时保持默认', () => {
     // 返回新对象，不修改入参
     const merged = mergeShortcutBindings(defaults, {});
     assert.notEqual(merged, defaults);
+});
+
+// ── browserAcceleratorDenied（Edge-OOUI 加速键拦截）──
+
+test('browserAcceleratorDenied Ctrl+J 命中拦截名单', () => {
+    assert.equal(browserAcceleratorDenied(ev({ ctrlKey: true, key: 'j' })), true);
+    assert.equal(browserAcceleratorDenied(ev({ ctrlKey: true, key: 'J' })), true);
+});
+
+test('browserAcceleratorDenied 非名单组合放行', () => {
+    assert.equal(browserAcceleratorDenied(ev({ ctrlKey: true, key: 'h' })), false);
+    assert.equal(browserAcceleratorDenied(ev({ ctrlKey: true, key: 'p' })), false);
+    assert.equal(browserAcceleratorDenied(ev({ key: 'j' })), false);
+    assert.equal(browserAcceleratorDenied(ev({ ctrlKey: true, shiftKey: true, key: 'j' })), false);
+    assert.equal(browserAcceleratorDenied(ev({ ctrlKey: true, altKey: true, key: 'j' })), false);
+});
+
+test('browserAcceleratorDenied IME 合成中放行', () => {
+    assert.equal(browserAcceleratorDenied(ev({ ctrlKey: true, key: 'j', isComposing: true })), false);
+    assert.equal(browserAcceleratorDenied(ev({ ctrlKey: true, key: 'j', keyCode: 229 })), false);
+});
+
+test('BROWSER_ACCELERATOR_DENYLIST 当前仅含 ctrl+j（扩项需证据）', () => {
+    assert.deepEqual([...BROWSER_ACCELERATOR_DENYLIST], ['ctrl+j']);
 });

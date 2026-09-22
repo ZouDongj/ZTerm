@@ -29,6 +29,22 @@ function mergeShortcutBindings(defaults, userOverrides) {
     return { ...defaults, ...(userOverrides || {}) };
 }
 
+// Edge-OOUI accelerator combos that WebView2's
+// AreBrowserAcceleratorKeysEnabled=false does NOT cover (the downloads hub
+// still pops edge://downloads-hub on an unconsumed Ctrl+J, runtime
+// 153.0.4234.48). A trusted key only reaches browser accelerators when the
+// page returns it unconsumed, so shortcuts.js preventDefaults matches.
+// Terminal delivery is unaffected: neither xterm nor the win32-input hook
+// checks defaultPrevented.
+const BROWSER_ACCELERATOR_DENYLIST = new Set(['ctrl+j']);
+
+function browserAcceleratorDenied(e) {
+    if (!e || e.isComposing || e.keyCode === 229) return false;
+    const combo = (e.ctrlKey ? 'ctrl+' : '') + (e.altKey ? 'alt+' : '') +
+        (e.shiftKey ? 'shift+' : '') + (e.metaKey ? 'meta+' : '') + (e.key || '').toLowerCase();
+    return BROWSER_ACCELERATOR_DENYLIST.has(combo);
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { comboFromEvent, comboDisplay, mergeShortcutBindings };
+    module.exports = { comboFromEvent, comboDisplay, mergeShortcutBindings, BROWSER_ACCELERATOR_DENYLIST, browserAcceleratorDenied };
 }
