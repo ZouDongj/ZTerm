@@ -111,7 +111,21 @@ async fn main() {
             .additional_browser_args(
                 "--disable-lcd-text --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
             )
+            // ZTerm owns every key combo itself: its own Ctrl+F search,
+            // Ctrl+P palette and Ctrl+Shift+I sync-input collide with the
+            // browser find/print/devtools UI that WebView2 answers before
+            // the page. zoom_hotkeys=false pins wry's default off so a tauri
+            // upgrade cannot silently re-enable Ctrl+wheel / Ctrl+± UI zoom;
+            // devtools stays on in debug builds for open_devtools.
+            // The remaining browser accelerators (F5, Ctrl+R, Ctrl+J
+            // downloads popup, browser back/forward, F12) are disabled
+            // below via ICoreWebView2Settings3 once the webview exists.
+            .zoom_hotkeys_enabled(false)
+            .devtools(cfg!(debug_assertions))
             .build()?;
+
+            #[cfg(windows)]
+            disable_browser_accelerator_keys(&window);
 
             // 窗口状态恢复 + show 移到 renderer_ready command：
             // renderer 加载完成并注册好 window-shown 监听后才通知主进程显示窗口，
@@ -158,4 +172,31 @@ async fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Turn off every WebView2 accelerator key that opens browser UI instead of
+/// reaching the page (Ctrl+F find, Ctrl+P print, Ctrl+R/F5 reload, Ctrl+J
+/// downloads popup, F12, browser back/forward/search keys). With them off,
+/// the key events fall through to the page untouched, so ZTerm's own
+/// shortcuts always win. Failure is logged and non-fatal: the app still
+/// works, it just keeps the browser keys.
+#[cfg(windows)]
+fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+    use windows_core::Interface;
+
+    let dispatch = window.with_webview(|webview| unsafe {
+        let applied = webview
+            .controller()
+            .CoreWebView2()
+            .and_then(|core| core.Settings())
+            .and_then(|settings| settings.cast::<ICoreWebView2Settings3>())
+            .and_then(|s3| s3.SetAreBrowserAcceleratorKeysEnabled(false));
+        if let Err(e) = applied {
+            eprintln!("[zterm] disable browser accelerator keys failed: {e}");
+        }
+    });
+    if let Err(e) = dispatch {
+        eprintln!("[zterm] with_webview dispatch failed: {e}");
+    }
 }

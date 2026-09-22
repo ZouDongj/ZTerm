@@ -30,6 +30,11 @@ ureq = { version = "3", features = ["json", "win-system-proxy"] }
 # Update installer integrity check (sha256 of the downloaded setup exe).
 # Already in the lockfile as an indirect dep; declared here for direct use.
 sha2 = "0.10"
+# Disable WebView2's built-in browser accelerator keys (Ctrl+F/P/R, F5, F12,
+# Ctrl+J downloads popup, ...) via ICoreWebView2Settings3. Versions are pinned
+# by the lockfile to the same ones wry 0.55 pulls in, so no tree changes.
+webview2-com = "0.38"
+windows-core = "0.61"
 
 # PoC 2: 验证 portable-pty 本地 shell + Tauri Channel 通信
 # russh 0.60 re-exports russh_keys as russh::key, 不需要单独依赖 russh-keys
