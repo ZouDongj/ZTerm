@@ -18,11 +18,20 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { createServer } from 'node:net';
-import { createE2eSandbox, ownsProcess, restartOwnedApp } from './e2e-isolation.mjs';
+import { createE2eSandbox, ownsProcess, restartOwnedApp, killSandboxBrowsers, killPortHolder, sweepDebugPortRange } from './e2e-isolation.mjs';
 
 const SOURCE_EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
 let EXE = SOURCE_EXE;
 const PORT = Number(process.argv[3] ?? 9222);
+// Each launch gets its own debug port (and browser profile): a force-killed
+// WebView2 can leave a zombie LISTEN socket whose owning PID no longer exists
+// — nothing left to kill, only the kernel releases it — so reusing one port
+// across restarts is a deterministic EADDRINUSE under load. Per-launch ports
+// make restarts immune. BASE_PORT is resolved in main(): the launch range
+// BASE..BASE+4 is swept first (stale listeners from PREVIOUS runs) and the
+// base shifts by 10 while any port stays occupied.
+let BASE_PORT = PORT;
+let launchPort = PORT;
 let sandbox = null;
 let ownedChild = null;
 let launchCount = 0;
@@ -78,20 +87,59 @@ function restoreConfig() {
 // Never use an image-name kill: even a failed preflight runs the exit hook.
 function killExisting() {
   const child = ownedChild;
-  if (!sandbox || !child?.pid || child.exitCode !== null) { ownedChild = null; return true; }
+  // The port sweep is only safe once this run has actually launched an
+  // instance: on a failed preflight (never launched) a foreign listener on
+  // PORT is someone else's process and must not be killed.
+  const sweepPort = () => { if (launchCount > 0) killPortHolder(launchPort); };
+  if (!sandbox || !child?.pid || child.exitCode !== null) {
+    ownedChild = null;
+    // The host may be gone while its WebView2 browsers still hold the CDP
+    // port — sweep them by sandbox path and by port or the restart below
+    // collides.
+    killSandboxBrowsers(sandbox?.directory);
+    sweepPort();
+    return true;
+  }
   try {
     const output = execFileSync('powershell.exe', ['-NoProfile', '-Command',
       `Get-CimInstance Win32_Process -Filter 'ProcessId=${child.pid}' | Select-Object ProcessId,ExecutablePath | ConvertTo-Json -Compress`], { encoding: 'utf8' }).trim();
     const actual = output ? JSON.parse(output) : null;
-    if (!actual) { ownedChild = null; return true; }
+    if (!actual) { ownedChild = null; killSandboxBrowsers(sandbox.directory); sweepPort(); return true; }
     if (!ownsProcess(child, EXE, actual)) {
       console.error('[e2e] refusing cleanup: process ownership mismatch');
       return false;
     }
     execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    killSandboxBrowsers(sandbox.directory);
+    sweepPort();
     ownedChild = null;
     return true;
-  } catch (error) { console.error('[e2e] owned process cleanup failed:', error.message); return false; }
+  } catch (error) {
+    // taskkill can lose the race against a process that is already exiting;
+    // confirm via WMI and only refuse the restart when the host provably
+    // survives a second attempt.
+    try {
+      const alive = () => {
+        const out = execFileSync('powershell.exe', ['-NoProfile', '-Command',
+          `Get-CimInstance Win32_Process -Filter 'ProcessId=${child.pid}' | Select-Object -ExpandProperty ProcessId`], { encoding: 'utf8' }).trim();
+        return !!out;
+      };
+      if (alive()) {
+        try { execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* fall through */ }
+      }
+      if (alive()) {
+        console.error('[e2e] owned process cleanup failed:', error.message);
+        return false;
+      }
+      killSandboxBrowsers(sandbox.directory);
+      sweepPort();
+      ownedChild = null;
+      return true;
+    } catch (inner) {
+      console.error('[e2e] owned process cleanup failed:', inner.message);
+      return false;
+    }
+  }
 }
 // Safety net for exit paths that skip the explicit killExisting() calls
 // (unexpected early throw, unhandled rejection): never leave a PTY tree behind.
@@ -105,6 +153,7 @@ function startApp() {
   // port then never opens (30s+ hangs). A never-used profile has no stale
   // browser to attach to.
   const udf = join(sandbox.directory, `webview-${++launchCount}`);
+  launchPort = BASE_PORT + launchCount - 1;
   const child = spawn(EXE, [], {
     detached: true,
     stdio: 'ignore',
@@ -112,7 +161,7 @@ function startApp() {
       ...process.env,
       APPDATA: sandbox.appData,
       LOCALAPPDATA: sandbox.appData,
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${PORT}`,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${launchPort}`,
       WEBVIEW2_USER_DATA_FOLDER: udf,
     },
   });
@@ -121,12 +170,12 @@ function startApp() {
   child.unref();
 }
 
-async function assertUnusedPort() {
-  if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) throw new Error('Invalid CDP port');
+async function assertUnusedPort(port) {
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid CDP port');
   await new Promise((resolvePromise, reject) => {
     const server = createServer();
     server.once('error', reject);
-    server.listen(PORT, '127.0.0.1', () => server.close(resolvePromise));
+    server.listen(port, '127.0.0.1', () => server.close(resolvePromise));
   });
 }
 
@@ -134,7 +183,7 @@ async function waitForPage(timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`http://127.0.0.1:${PORT}/json`);
+      const res = await fetch(`http://127.0.0.1:${launchPort}/json`);
       if (res.ok) {
         const pages = await res.json();
         const page = pages.find((p) => p.type === 'page' && p.url.includes('renderer.html'));
@@ -147,8 +196,17 @@ async function waitForPage(timeoutMs = 30000) {
   let procInfo = '(不可用)';
   try { procInfo = execSync('tasklist /FI "IMAGENAME eq zterm.exe" /FO CSV /NH', { encoding: 'utf8' }).trim() || '(无 zterm 进程)'; } catch {}
   let portInfo = '(不可用)';
-  try { const r = await fetch(`http://127.0.0.1:${PORT}/json/version`); portInfo = r.ok ? '调试端口已开放' : `HTTP ${r.status}`; } catch { portInfo = '调试端口未开放'; }
-  throw new Error(`页面在 ${timeoutMs}ms 内未就绪。进程: ${procInfo}; ${portInfo}`);
+  try { const r = await fetch(`http://127.0.0.1:${launchPort}/json/version`); portInfo = r.ok ? '调试端口已开放' : `HTTP ${r.status}`; } catch { portInfo = '调试端口未开放'; }
+  // Target list: distinguishes "port served by a stale browser" (empty or
+  // foreign targets) from "app alive but renderer stuck" (targets present,
+  // renderer.html missing).
+  let targetsInfo = '(不可用)';
+  try {
+    const r = await fetch(`http://127.0.0.1:${launchPort}/json`);
+    const list = await r.json();
+    targetsInfo = list.length ? list.map(t => `${t.type}:${String(t.url).slice(0, 90)}`).join(' | ') : '(空目标列表)';
+  } catch { targetsInfo = '(目标列表获取失败)'; }
+  throw new Error(`页面在 ${timeoutMs}ms 内未就绪。进程: ${procInfo}; ${portInfo}; 目标: ${targetsInfo}`);
 }
 
 // ── CDP 会话 ──
@@ -210,7 +268,17 @@ async function waitForValue(cdp, expression, expected, timeoutMs = 8000, mode = 
 
 async function main() {
   if (!existsSync(SOURCE_EXE)) throw new Error(`exe 不存在: ${SOURCE_EXE}`);
-  await assertUnusedPort();
+  // The launch range BASE..BASE+4 must be fully free: sweep stale holders
+  // from previous runs (image-verified msedgewebview2/zterm only), and shift
+  // the base by 10 while anything remains (foreign listener or an unkillable
+  // dead-PID zombie socket — final run: launch 3 hit a stale port that served
+  // /json yet never listed the renderer page).
+  for (let shift = 0; ; shift += 10) {
+    const occupied = sweepDebugPortRange(PORT + shift, 5);
+    if (occupied.length === 0) { BASE_PORT = PORT + shift; launchPort = BASE_PORT; break; }
+    if (shift >= 20) throw new Error(`调试端口段均被占用（${occupied.join(', ')}），无法启动 E2E`);
+  }
+  await assertUnusedPort(BASE_PORT);
   sandbox = createE2eSandbox(SOURCE_EXE);
   EXE = sandbox.exe;
   DATA_CONFIG = join(sandbox.directory, 'data', 'config.json');
@@ -1008,6 +1076,34 @@ async function main() {
       newPwdProbe.eyeShown === true && newPwdProbe.eyeRight === '8px' &&
       newPwdProbe.padRight === '32px' && newPwdProbe.statusHidden === true,
       JSON.stringify(newPwdProbe));
+    // Instrument the save chain so a failure payload shows WHERE it stopped:
+    // did saveSSHEdit fire, did encrypt-password resolve (and how long did it
+    // take), was a toast shown. (final8 failed opaque: saved=false after 4s
+    // while the isolated probe passes 3/3 with 4-8ms encrypt.)
+    await cdp.eval(`(() => {
+      window.__e2eSaveTrace = { saves: 0, ipc: [], toasts: [] };
+      if (!window.__e2eOrigSaveSSHEdit) {
+        window.__e2eOrigSaveSSHEdit = window.saveSSHEdit;
+        window.saveSSHEdit = function (...a) {
+          window.__e2eSaveTrace.saves++;
+          return window.__e2eOrigSaveSSHEdit.apply(this, a);
+        };
+      }
+      if (!window.__e2eTraceInvokePatched) {
+        window.__e2eTraceInvokePatched = true;
+        const prev = ipcRenderer.invoke.bind(ipcRenderer);
+        ipcRenderer.invoke = (cmd, args) => {
+          if (cmd !== 'encrypt-password' && cmd !== 'save-ssh-profiles') return prev(cmd, args);
+          const t0 = Date.now();
+          return prev(cmd, args).then(
+            v => { window.__e2eSaveTrace.ipc.push({ cmd, ms: Date.now() - t0, ok: true }); return v; },
+            e => { window.__e2eSaveTrace.ipc.push({ cmd, ms: Date.now() - t0, ok: false, err: String(e).slice(0, 120) }); return Promise.reject(e); });
+        };
+        const prevToast = window.showToast;
+        window.showToast = (msg, isErr) => { window.__e2eSaveTrace.toasts.push(String(msg)); return prevToast(msg, isErr); };
+      }
+      return 'traced';
+    })()`).catch(() => null);
     const enterSave = await cdp.eval(`(async () => {
       document.getElementById('ssh-edit-name').value = 'e2e-tmp-pwd';
       document.getElementById('ssh-edit-host').value = '198.51.100.7';
@@ -1026,7 +1122,8 @@ async function main() {
         saved = (TabManager.sshProfiles || []).find(p => p.host === '198.51.100.7') || null;
         closed = !document.getElementById('overlay-ssh-edit').classList.contains('open');
       }
-      return { saved: !!saved, hasPwd: !!(saved && saved.encryptedPassword), overlayOpen: !closed };
+      return { saved: !!saved, hasPwd: !!(saved && saved.encryptedPassword), overlayOpen: !closed,
+        trace: window.__e2eSaveTrace };
     })()`).catch(() => null);
     check('SSH 新建：密码框 Enter 保存整个表单（含密码）', !!enterSave && enterSave.saved === true && enterSave.hasPwd === true && enterSave.overlayOpen === false, JSON.stringify(enterSave));
     // Drop the temp profile and restore the 3-row fixture: the session
@@ -1052,7 +1149,7 @@ async function main() {
     })()`).catch(() => null);
     check('SSH 新建：密码框 Esc 关闭对话框', !!escProbe && escProbe.overlayOpen === false, JSON.stringify(escProbe));
     // Edit-existing regression: status row → 修改 → input → blur cancels back.
-    const editPwdProbe = await cdp.eval(`(() => {
+    const editPwdProbe = await cdp.eval(`(async () => {
       const fx = TabManager.sshProfiles.find(p => p.id === 'e2essh1');
       fx.encryptedPassword = 'e2e-cipher';
       openSSHEdit(false, 'e2essh1');
@@ -1067,11 +1164,24 @@ async function main() {
       pwd.value = 'newpass';
       pwd.dispatchEvent(new Event('input', { bubbles: true }));
       const saveShown = document.getElementById('ssh-pwd-inline-save').classList.contains('show');
-      document.getElementById('ssh-edit-name').focus(); // blur cancels back to view
-      const backToView = st.style.display === 'flex' && pwd.style.display === 'none' && pwd.value === '';
+      // Blur cancel requires the field to actually hold focus. The edit-mode
+      // render does focus() it, but an OS-unfocused sandbox window can drop
+      // that (observed once in the field: backToView=false with everything
+      // else green). Focus explicitly, record whether the auto-focus worked,
+      // then poll the cancel-back briefly instead of reading synchronously.
+      pwd.focus();
+      const hadFocus = document.activeElement === pwd;
+      document.getElementById('ssh-edit-name').focus();
+      let backToView = false;
+      for (let i = 0; i < 20 && !backToView; i++) {
+        await new Promise(r => setTimeout(r, 50));
+        backToView = st.style.display === 'flex' && pwd.style.display === 'none' && pwd.value === '';
+      }
+      const diag = { hadFocus, activeAfter: document.activeElement && document.activeElement.id,
+        stDisplay: st.style.display, pwdDisplay: pwd.style.display, pwdVal: pwd.value };
       delete fx.encryptedPassword; // restore fixture
       closeOverlay('overlay-ssh-edit');
-      return { viewMode, editMode, saveShown, backToView };
+      return { viewMode, editMode, saveShown, backToView, diag };
     })()`).catch(() => null);
     check('SSH 编辑：已配密码 view→修改→输入→失焦回退 回归', !!editPwdProbe && editPwdProbe.viewMode === true && editPwdProbe.editMode === true && editPwdProbe.saveShown === true && editPwdProbe.backToView === true, JSON.stringify(editPwdProbe));
     // Template flow (issue #5): the "添加连接" buttons open a small menu —
@@ -1087,18 +1197,48 @@ async function main() {
       const r = btn.getBoundingClientRect();
       const open = menu.classList.contains('open');
       const topOk = Math.abs(parseFloat(menu.style.top) - (r.bottom + 6)) < 2;
+      // Opens toward bottom-right when the menu fits (left edge aligns with
+      // the trigger's left edge); otherwise right-aligned fallback. At the
+      // default 1100px window the settings-page button is too far right, so
+      // the fallback branch is what runs here — assert the formula, and use
+      // the overlay button (below) to pin the primary branch.
+      const mw = menu.offsetWidth;
+      const expect = Math.max(8, Math.min(
+        (r.left + mw + 8 <= window.innerWidth) ? r.left : r.right - mw,
+        window.innerWidth - mw - 8));
+      const leftOk = Math.abs(parseFloat(menu.style.left) - expect) < 2;
       const expanded = btn.getAttribute('aria-expanded') === 'true';
       const labels = items.map(i => i.textContent.trim());
       // Esc closes the menu and returns focus to the trigger.
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
       const closedByEsc = !menu.classList.contains('open') &&
         btn.getAttribute('aria-expanded') === 'false' && document.activeElement === btn;
-      return { open, topOk, expanded, labels, closedByEsc };
+      return { open, topOk, leftOk, expanded, labels, closedByEsc };
     })()`).catch(() => null);
     check('添加连接菜单：开合/位置/双项/aria-expanded', !!addMenuProbe &&
-      addMenuProbe.open === true && addMenuProbe.topOk === true && addMenuProbe.expanded === true &&
+      addMenuProbe.open === true && addMenuProbe.topOk === true && addMenuProbe.leftOk === true && addMenuProbe.expanded === true &&
       JSON.stringify(addMenuProbe.labels) === JSON.stringify(['从模板新建…', '完全新建']),
       JSON.stringify(addMenuProbe));
+    // The overlay trigger has room to its right at 1100px — pin the primary
+    // bottom-right (left-anchored) branch there.
+    const addMenuOverlayProbe = await cdp.eval(`(() => {
+      openSSHManager();
+      const btn = document.querySelector('[data-ssh-add="overlay"]');
+      if (!btn) return { err: 'no overlay trigger' };
+      btn.click();
+      const menu = document.getElementById('ssh-add-menu');
+      const r = btn.getBoundingClientRect();
+      const mw = menu.offsetWidth;
+      const fits = r.left + mw + 8 <= window.innerWidth;
+      const leftOk = fits && Math.abs(parseFloat(menu.style.left) - r.left) < 2;
+      const open = menu.classList.contains('open');
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      closeOverlay('overlay-ssh-manager');
+      return { fits, leftOk, open };
+    })()`).catch(() => null);
+    check('添加连接菜单（浮层入口）：向右下展开（左缘锚定按钮）', !!addMenuOverlayProbe &&
+      addMenuOverlayProbe.fits === true && addMenuOverlayProbe.leftOk === true && addMenuOverlayProbe.open === true,
+      JSON.stringify(addMenuOverlayProbe));
     check('添加连接菜单：Esc 关闭且焦点回触发按钮', !!addMenuProbe && addMenuProbe.closedByEsc === true, JSON.stringify(addMenuProbe));
     const blankProbe = await cdp.eval(`(() => {
       document.querySelector('[data-ssh-add="settings"]').click();
@@ -1955,60 +2095,80 @@ async function main() {
       cardStruct.addH === '32px' && cardStruct.addRadius === '9px' &&
       cardStruct.quietBtns.join(',') === '折叠全部,展开全部';
     check('SSH 设置页：每组一张设置卡片 + 分节标题 + 工具栏', cardOk === true, JSON.stringify(cardStruct));
-    // Card-row hover is the user-picked combo: rounded wash + accent edge bar
-    // (rule existence), while the flat overlay manager keeps its row hover.
-    // The identity carries no redundant native title tooltip (aria-label
-    // retained).
+    // Card-row hover is the user-picked combo (rounded wash + accent edge
+    // bar), now provided by the BASE .ssh-mgr-row rules so the flat manager
+    // overlay shares the exact same hover; the card scope only overrides
+    // the geometry (inset box + bar offset). The identity carries no
+    // redundant native title tooltip (aria-label retained).
     const hoverRule = await cdp.eval(`(() => {
       const rules = [...document.styleSheets].flatMap(s => { try { return [...s.cssRules]; } catch { return []; } });
-      const wash = rules.some(r => r.selectorText === '.settings-card-list .ssh-mgr-row:hover' && (r.style.backgroundColor || '') !== '');
-      const bar = rules.some(r => r.selectorText === '.settings-card-list .ssh-mgr-row:hover::before' && (r.style.opacity || '') !== '');
-      const flatHover = rules.some(r => r.selectorText === '.ssh-mgr-row:hover' && r.style.backgroundColor);
+      const wash = rules.some(r => r.selectorText === '.ssh-mgr-row:hover' && (r.style.backgroundColor || '') !== '');
+      const bar = rules.some(r => r.selectorText === '.ssh-mgr-row:hover::before' && (r.style.opacity || '') !== '');
+      const cardGeom = rules.some(r => r.selectorText === '.settings-card-list .ssh-mgr-row' && (r.style.margin || '').includes('-8px'));
+      const cardBar = rules.some(r => r.selectorText === '.settings-card-list .ssh-mgr-row::before' && (r.style.left || '') !== '');
       const idEl = document.querySelector('#settings-ssh-list .ssh-mgr-identity');
-      return { wash, bar, flatHover,
+      return { wash, bar, cardGeom, cardBar,
                identityNoTitle: idEl ? !idEl.hasAttribute('title') && !!idEl.getAttribute('aria-label') : null };
     })()`).catch(() => null);
-    check('设置卡片行 hover：圆角色块+指示条规则存在（浮层保留行 hover，无冗余 title）', !!hoverRule && hoverRule.wash === true && hoverRule.bar === true && hoverRule.flatHover === true && hoverRule.identityNoTitle === true, JSON.stringify(hoverRule));
-    // Live hover: force :hover on a card row, poll for the bar's transition
-    // end-state (fixed sleeps can read mid-transition values under load),
-    // then read the computed wash + bar. The forced state is reset in
+    check('设置卡片行 hover：组合规则由基础类统一提供 + 卡片几何覆盖（无冗余 title）', !!hoverRule && hoverRule.wash === true && hoverRule.bar === true && hoverRule.cardGeom === true && hoverRule.cardBar === true && hoverRule.identityNoTitle === true, JSON.stringify(hoverRule));
+    // Live hover: force :hover on both a settings-card row and a flat
+    // manager-overlay row (the overlay list is re-rendered here so the probe
+    // does not depend on stale DOM from earlier sections), poll for the bar's
+    // transition end-state (fixed sleeps can read mid-transition values under
+    // load), then assert the computed combo. The forced state is reset in
     // finally so a failed read cannot leak :hover into later checks.
+    await cdp.eval(`renderSSHManager(); 'rerender'`).catch(() => null);
     const hoverLive = await (async () => {
-      let rowNode = null;
+      const nodes = [];
       try {
         await cdp.send('DOM.enable');
         await cdp.send('CSS.enable');
         const doc = await cdp.send('DOM.getDocument');
-        rowNode = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId,
-          selector: '#settings-ssh-list .ssh-mgr-row' });
-        await cdp.send('CSS.forcePseudoState', { nodeId: rowNode.nodeId, forcedPseudoClasses: ['hover'] });
+        for (const sel of ['#settings-ssh-list .ssh-mgr-row', '#ssh-manager-list .ssh-mgr-row']) {
+          const n = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: sel });
+          if (n && n.nodeId) nodes.push(n.nodeId);
+        }
+        for (const nodeId of nodes) {
+          await cdp.send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: ['hover'] });
+        }
         let v = null;
         for (let i = 0; i < 20; i++) {
           await sleep(100);
           v = await cdp.eval(`(() => {
-            const row = document.querySelector('#settings-ssh-list .ssh-mgr-row');
-            const cs = getComputedStyle(row);
-            const bar = getComputedStyle(row, '::before');
+            const read = (sel) => {
+              const row = document.querySelector(sel);
+              if (!row) return null;
+              const cs = getComputedStyle(row);
+              const bar = getComputedStyle(row, '::before');
+              return { bg: cs.backgroundColor, radius: cs.borderRadius,
+                       barOpacity: bar.opacity, barW: bar.width, barColor: bar.backgroundColor,
+                       barH: bar.height };
+            };
             const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent-rgb').trim();
-            return { bg: cs.backgroundColor, radius: cs.borderRadius,
-                     barOpacity: bar.opacity, barW: bar.width, barColor: bar.backgroundColor,
-                     barH: bar.height, expectedBar: 'rgb(' + accent.split(/\\s*,\\s*|\\s+/).join(', ') + ')' };
+            return { card: read('#settings-ssh-list .ssh-mgr-row'),
+                     flat: read('#ssh-manager-list .ssh-mgr-row'),
+                     expectedBar: 'rgb(' + accent.split(/\\s*,\\s*|\\s+/).join(', ') + ')' };
           })()`);
-          if (v && v.barOpacity === '0.85') break;
+          if (v && v.card && v.flat && v.card.barOpacity === '0.85' && v.flat.barOpacity === '0.85') break;
         }
         return v;
       } catch { return null; }
       finally {
-        if (rowNode && rowNode.nodeId) {
-          await cdp.send('CSS.forcePseudoState', { nodeId: rowNode.nodeId, forcedPseudoClasses: [] }).catch(() => null);
+        for (const nodeId of nodes) {
+          await cdp.send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: [] }).catch(() => null);
         }
       }
     })();
-    check('设置卡片行 hover：实测圆角色块 + accent 指示条（计算值）', !!hoverLive &&
-      hoverLive.bg === 'rgba(255, 255, 255, 0.05)' && hoverLive.radius === '9px' &&
-      hoverLive.barOpacity === '0.85' && hoverLive.barW === '3px' && hoverLive.barH === '26px' &&
-      hoverLive.barColor === hoverLive.expectedBar,
+    check('设置卡片行 hover：实测圆角色块 + accent 指示条（计算值）', !!hoverLive && !!hoverLive.card &&
+      hoverLive.card.bg === 'rgba(255, 255, 255, 0.05)' && hoverLive.card.radius === '9px' &&
+      hoverLive.card.barOpacity === '0.85' && hoverLive.card.barW === '3px' && hoverLive.card.barH === '26px' &&
+      hoverLive.card.barColor === hoverLive.expectedBar,
       JSON.stringify(hoverLive));
+    check('SSH 管理浮层行 hover：同款圆角色块 + accent 指示条（计算值）', !!hoverLive && !!hoverLive.flat &&
+      hoverLive.flat.bg === 'rgba(255, 255, 255, 0.05)' && hoverLive.flat.radius === '7px' &&
+      hoverLive.flat.barOpacity === '0.85' && hoverLive.flat.barW === '3px' && hoverLive.flat.barH === '26px' &&
+      hoverLive.flat.barColor === hoverLive.expectedBar,
+      JSON.stringify(hoverLive && hoverLive.flat));
     // Floating surfaces must carry the inset hairline border (zt-tip parity)
     // so menus read as distinct from the dark terminal background.
     const menuEdge = await cdp.eval(`(() => {
@@ -2380,22 +2540,19 @@ async function main() {
     async function restartAndConnect() {
       await restartOwnedApp({ stop: killExisting, start: startApp, waitUntilQuiet: async () => {
       await sleep(800);
-      // Wait out the WebView2 teardown before relaunching: taskkill /T /F
-      // signals the whole tree, but the browser processes can outlive the
-      // fixed gap while releasing the user-data-folder singleton — a new
-      // instance then attaches to the half-dead browser and its debug port
-      // never opens (deterministic 30s timeout under load). The old browser
-      // ANSWERS the debug port while alive, so poll until it goes silent.
-      const portQuiet = Date.now() + 45000;
+      // The relaunch gets a fresh debug port and browser profile, so a
+      // slow-to-die old browser cannot collide with the new instance. This
+      // poll is best-effort settle time only: after a force kill the old
+      // LISTEN socket can linger in the kernel with no owning PID left to
+      // kill, so never gate the restart on the old port.
+      const portQuiet = Date.now() + 15000;
       while (Date.now() < portQuiet) {
         try {
-          await fetch(`http://127.0.0.1:${PORT}/json/version`, { signal: AbortSignal.timeout(1000) });
+          await fetch(`http://127.0.0.1:${launchPort}/json/version`, { signal: AbortSignal.timeout(1000) });
           await sleep(400);
           continue;
         } catch { break; } // connection refused → old browser is gone
       }
-      // A timed-out probe is not proof that the listener exited.
-      await assertUnusedPort();
       } });
       const url = await waitForPage();
       const c2 = new Cdp(url);
