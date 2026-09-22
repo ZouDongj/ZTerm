@@ -5,7 +5,14 @@ function convertSelects() {
     document.querySelectorAll('select.styled-select').forEach(sel => {
         // Remove existing custom dropdown wrapper if present (so we can rebuild with new options)
         const existingWrapper = sel.parentNode && sel.parentNode.querySelector('.cust-dropdown');
+        // Skip the rebuild when options + selection are unchanged: with ~1000
+        // system fonts, rebuilding every visit recreates thousands of
+        // .dd-option nodes on a timer that can fire after the settings tab
+        // already closed (the post-close tab-hover jank report).
+        const sig = sel.selectedIndex + '|' + sel.options.length + '|' + Array.from(sel.options, o => o.value).join(' ');
+        if (existingWrapper && sel._convSig === sig) return;
         if (existingWrapper) existingWrapper.remove();
+        sel._convSig = sig;
 
         const wrapper = document.createElement('div');
         wrapper.className = 'cust-dropdown';
@@ -369,10 +376,36 @@ function renderAccentSwatches() {
     });
 }
 
+// Font lists barely change while the app runs; cache them so each settings
+// visit does not re-enumerate fonts and rebuild thousands of <option> nodes.
+let _systemFontsCache = null;
+// The tab-activation path and the page-switch path both call populateFontList
+// on open; share one in-flight enumeration so the pair cannot race the cache.
+let _systemFontsPromise = null;
+
 function populateFontList() {
-    // Fetch all system fonts from main process (fontmanager-redux)
-    ipcRenderer.invoke('get-system-fonts').then(fonts => {
-        const allFonts = fonts && fonts.length > 0 ? fonts : ['monospace'];
+    if (_systemFontsCache) {
+        _buildFontSelects(_systemFontsCache);
+        return;
+    }
+    if (!_systemFontsPromise) {
+        // Fetch all system fonts from main process (fontmanager-redux). On
+        // failure reset the promise so the next settings visit retries the
+        // enumeration instead of latching a rejected promise forever.
+        _systemFontsPromise = ipcRenderer.invoke('get-system-fonts').then(fonts => {
+            _systemFontsCache = fonts && fonts.length > 0 ? fonts : ['monospace'];
+            return _systemFontsCache;
+        }, () => {
+            _systemFontsPromise = null;
+            return null;
+        });
+    }
+    _systemFontsPromise.then(fonts => { if (fonts) _buildFontSelects(fonts); });
+}
+
+// Split from populateFontList so the cached path can rebuild synchronously.
+function _buildFontSelects(allFonts) {
+    {
 
         // Populate terminal font dropdown with ALL system fonts
         // 恢复值以 _settingsConfig 为准：首次打开设置页时 select 还是空的，
@@ -478,7 +511,7 @@ function populateFontList() {
 
         // Re-convert selects to custom dropdowns with new options
         setTimeout(convertSelects, 50);
-    });
+    }
 }
 
 // 界面字体默认值：系统字体栈（不依赖外部字体，内网/离线环境稳定）

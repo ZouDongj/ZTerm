@@ -646,6 +646,49 @@ async function main() {
     await cdp.eval(`_settingsConfig.uiFollowTerminal = true; syncUiFollowUI(); applyUiFont(); closeSettingsTab()`);
     await sleep(500);
 
+    // 11d. Settings-open cost guards (post-close tab-hover jank report): the
+    // system-font IPC result is cached after the first visit, and
+    // convertSelects skips wrapper rebuilds while options + selection are
+    // unchanged (rebuild only on a real change).
+    await cdp.eval(`(() => {
+      window.__e2eFontCalls = 0;
+      window.__e2ePrevInvokeFonts = ipcRenderer.invoke;
+      _systemFontsCache = null;
+      _systemFontsPromise = null;
+      ipcRenderer.invoke = (cmd, args) => { if (cmd === 'get-system-fonts') window.__e2eFontCalls++; return window.__e2ePrevInvokeFonts(cmd, args); };
+      openSettings('appearance');
+      return 'armed';
+    })()`);
+    await sleep(900);
+    await cdp.eval(`closeSettingsTab(); 'fc1'`);
+    await sleep(300);
+    await cdp.eval(`openSettings('appearance'); 'fc2'`);
+    await sleep(600);
+    const fontCacheProbe = await cdp.eval(`({
+      calls: window.__e2eFontCalls,
+      options: document.getElementById('set-font')?.options.length || 0,
+      wrapper: !!document.querySelector('#set-font')?.parentNode?.querySelector('.cust-dropdown')
+    })`).catch(() => null);
+    check('设置页字体列表缓存：二次打开不重复枚举', !!fontCacheProbe && fontCacheProbe.calls === 1 && fontCacheProbe.options > 0 && fontCacheProbe.wrapper === true, JSON.stringify(fontCacheProbe));
+    const convGuard = await cdp.eval(`(() => {
+      const sel = document.getElementById('set-font');
+      const origIdx = sel.selectedIndex;
+      const w1 = sel.parentNode.querySelector('.cust-dropdown');
+      convertSelects();
+      const same = sel.parentNode.querySelector('.cust-dropdown') === w1;
+      sel.selectedIndex = (origIdx + 1) % sel.options.length;
+      convertSelects();
+      const w2 = sel.parentNode.querySelector('.cust-dropdown');
+      const rebuilt = w2 !== w1;
+      const triggerShows = w2.querySelector('.dd-trigger').textContent === sel.options[sel.selectedIndex].text;
+      sel.selectedIndex = origIdx; // restore (no change event → nothing persisted)
+      convertSelects();
+      return { same, rebuilt, triggerShows };
+    })()`).catch(() => null);
+    check('convertSelects 签名守卫：未变跳过 / 选择变化重建', !!convGuard && convGuard.same === true && convGuard.rebuilt === true && convGuard.triggerShows === true, JSON.stringify(convGuard));
+    await cdp.eval(`(() => { ipcRenderer.invoke = window.__e2ePrevInvokeFonts; closeSettingsTab(); return 'restored'; })()`).catch(() => null);
+    await sleep(300);
+
     // 12. SFTP 面板：打开 → 面板可见 → 关闭
     await cdp.eval(`SFTP.open('e2e-dummy-tab')`);
     await sleep(800);
@@ -816,6 +859,23 @@ async function main() {
     })`);
     check('更新卡片：ready 直跳安装态不触发重下', updShortDesc === 'v9.9.9 已下载完成，随时可安装' && updShortUi.applyShown === true && updShortUi.applyText === '重启并安装 v9.9.9' && updShortUi.dlHidden === true && updShortUi.dlCalls === 0,
       JSON.stringify({ desc: updShortDesc, ...updShortUi }));
+    // Failure mapping: the backend's stable [tag] must surface as friendly
+    // guidance with the raw detail kept; unknown errors pass through as-is.
+    await cdp.eval(`(() => {
+      const prevInvoke = ipcRenderer.invoke;
+      ipcRenderer.invoke = (cmd, args) => {
+        if (cmd === 'check-update') return Promise.reject(new Error('update check failed [timeout]: timeout: global'));
+        return prevInvoke(cmd, args);
+      };
+      checkForUpdates();
+      return 'armed-fail';
+    })()`);
+    const updFailDesc = await waitForValue(cdp, `document.getElementById('update-check-desc')?.textContent || ''`, '检查失败：网络超时，无法连接更新服务器（请检查网络或代理设置）。详细信息：update check failed [timeout]: timeout: global');
+    const updPassThrough = await cdp.eval(`_friendlyUpdateError('update check: bad response json: xyz')`).catch(() => null);
+    check('更新卡片：超时错误映射友好文案（未知错误透传）',
+      typeof updFailDesc === 'string' && updFailDesc.includes('网络超时，无法连接更新服务器') && updFailDesc.includes('[timeout]: timeout: global') &&
+      updPassThrough === 'update check: bad response json: xyz',
+      JSON.stringify({ updFailDesc, updPassThrough }));
     await cdp.eval(`(() => { ipcRenderer.invoke = window.__e2eOrigInvoke; closeSettingsTab(); return 'restored'; })()`).catch(() => null);
     await sleep(300);
 
@@ -921,6 +981,299 @@ async function main() {
     })()`).catch(() => null);
     check('SSH 管理：编辑动作打开预填表单', !!editProbe && editProbe.open === true && editProbe.host === '192.0.2.10' && editProbe.user === 'deploy', JSON.stringify(editProbe));
     await cdp.eval(`closeOverlay('overlay-ssh-edit'); closeOverlay('overlay-ssh-manager'); 'c9'`);
+    // New-profile password flow (user-reported bug): the typed password must
+    // survive blur, Enter saves the whole dialog, Esc closes it — the global
+    // Esc handler skips inline-edit inputs, so the field handles it itself.
+    const newPwdProbe = await cdp.eval(`(() => {
+      openSSHEdit(true);
+      const pwd = document.getElementById('ssh-edit-password');
+      pwd.value = 's3cret-e2e';
+      pwd.dispatchEvent(new Event('input', { bubbles: true }));
+      document.getElementById('ssh-edit-name').focus(); // blurs the password field
+      const eye = document.getElementById('ssh-pwd-inline-eye');
+      return {
+        visible: pwd.style.display !== 'none',
+        kept: pwd.value === 's3cret-e2e',
+        saveShown: document.getElementById('ssh-pwd-inline-save').classList.contains('show'),
+        cancelShown: document.getElementById('ssh-pwd-inline-cancel').classList.contains('show'),
+        eyeShown: eye.classList.contains('show'),
+        eyeRight: eye.style.right,
+        padRight: pwd.style.paddingRight,
+        statusHidden: document.getElementById('ssh-pwd-status').style.display === 'none'
+      };
+    })()`).catch(() => null);
+    check('SSH 新建：密码输入跨失焦保留（无内联按钮）', !!newPwdProbe &&
+      newPwdProbe.visible === true && newPwdProbe.kept === true &&
+      newPwdProbe.saveShown === false && newPwdProbe.cancelShown === false &&
+      newPwdProbe.eyeShown === true && newPwdProbe.eyeRight === '8px' &&
+      newPwdProbe.padRight === '32px' && newPwdProbe.statusHidden === true,
+      JSON.stringify(newPwdProbe));
+    const enterSave = await cdp.eval(`(async () => {
+      document.getElementById('ssh-edit-name').value = 'e2e-tmp-pwd';
+      document.getElementById('ssh-edit-host').value = '198.51.100.7';
+      document.getElementById('ssh-edit-user').value = 'probe';
+      const pwd = document.getElementById('ssh-edit-password');
+      pwd.focus();
+      pwd.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      // saveSSHEdit awaits DPAPI encryption, then pushes the profile and
+      // closes the dialog. Wait for the WHOLE save to settle — under load
+      // the encrypt can outlast a short fixed sleep, and a late in-flight
+      // save would re-add the profile after the fixture-restore below (a
+      // leaked 4th profile then fails every downstream row-count check).
+      let saved = null, closed = false;
+      for (let i = 0; i < 40 && !(saved && closed); i++) {
+        await new Promise(r => setTimeout(r, 100));
+        saved = (TabManager.sshProfiles || []).find(p => p.host === '198.51.100.7') || null;
+        closed = !document.getElementById('overlay-ssh-edit').classList.contains('open');
+      }
+      return { saved: !!saved, hasPwd: !!(saved && saved.encryptedPassword), overlayOpen: !closed };
+    })()`).catch(() => null);
+    check('SSH 新建：密码框 Enter 保存整个表单（含密码）', !!enterSave && enterSave.saved === true && enterSave.hasPwd === true && enterSave.overlayOpen === false, JSON.stringify(enterSave));
+    // Drop the temp profile and restore the 3-row fixture: the session
+    // selector below asserts sshRows === 3. If the save above failed and is
+    // still in flight, let it settle first so its late push cannot re-leak
+    // the temp profile after this filter.
+    await cdp.eval(`(async () => {
+      for (let i = 0; i < 30; i++) {
+        if (!document.getElementById('overlay-ssh-edit').classList.contains('open')) break;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      TabManager.sshProfiles = (TabManager.sshProfiles || []).filter(p => p.host !== '198.51.100.7');
+      await ipcRenderer.invoke('save-ssh-profiles', { sshProfiles: TabManager.sshProfiles });
+      renderSSHManager();
+      return TabManager.sshProfiles.length;
+    })()`).catch(() => null);
+    const escProbe = await cdp.eval(`(() => {
+      openSSHEdit(true);
+      const pwd = document.getElementById('ssh-edit-password');
+      pwd.focus();
+      pwd.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      return { overlayOpen: document.getElementById('overlay-ssh-edit').classList.contains('open') };
+    })()`).catch(() => null);
+    check('SSH 新建：密码框 Esc 关闭对话框', !!escProbe && escProbe.overlayOpen === false, JSON.stringify(escProbe));
+    // Edit-existing regression: status row → 修改 → input → blur cancels back.
+    const editPwdProbe = await cdp.eval(`(() => {
+      const fx = TabManager.sshProfiles.find(p => p.id === 'e2essh1');
+      fx.encryptedPassword = 'e2e-cipher';
+      openSSHEdit(false, 'e2essh1');
+      const pwd = document.getElementById('ssh-edit-password');
+      const st = document.getElementById('ssh-pwd-status');
+      const viewMode = st.style.display === 'flex' && pwd.style.display === 'none';
+      document.getElementById('ssh-pwd-edit-btn').click();
+      const cancelBtn = document.getElementById('ssh-pwd-inline-cancel');
+      const eye = document.getElementById('ssh-pwd-inline-eye');
+      const editMode = pwd.style.display !== 'none' && cancelBtn.classList.contains('show') &&
+        eye.style.right === '44px' && pwd.style.paddingRight === '64px';
+      pwd.value = 'newpass';
+      pwd.dispatchEvent(new Event('input', { bubbles: true }));
+      const saveShown = document.getElementById('ssh-pwd-inline-save').classList.contains('show');
+      document.getElementById('ssh-edit-name').focus(); // blur cancels back to view
+      const backToView = st.style.display === 'flex' && pwd.style.display === 'none' && pwd.value === '';
+      delete fx.encryptedPassword; // restore fixture
+      closeOverlay('overlay-ssh-edit');
+      return { viewMode, editMode, saveShown, backToView };
+    })()`).catch(() => null);
+    check('SSH 编辑：已配密码 view→修改→输入→失焦回退 回归', !!editPwdProbe && editPwdProbe.viewMode === true && editPwdProbe.editMode === true && editPwdProbe.saveShown === true && editPwdProbe.backToView === true, JSON.stringify(editPwdProbe));
+    // Template flow (issue #5): the "添加连接" buttons open a small menu —
+    // blank new, or new-from-template via a picker overlay that mirrors the
+    // session selector. The prefill/save behavior (DPAPI ciphertext carried
+    // via the "已保存" status row, login scripts copied) is unchanged from the
+    // original row-action design.
+    const addMenuProbe = await cdp.eval(`(() => {
+      const btn = document.querySelector('[data-ssh-add="settings"]');
+      btn.click();
+      const menu = document.getElementById('ssh-add-menu');
+      const items = [...menu.querySelectorAll('.menu-item')];
+      const r = btn.getBoundingClientRect();
+      const open = menu.classList.contains('open');
+      const topOk = Math.abs(parseFloat(menu.style.top) - (r.bottom + 6)) < 2;
+      const expanded = btn.getAttribute('aria-expanded') === 'true';
+      const labels = items.map(i => i.textContent.trim());
+      // Esc closes the menu and returns focus to the trigger.
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      const closedByEsc = !menu.classList.contains('open') &&
+        btn.getAttribute('aria-expanded') === 'false' && document.activeElement === btn;
+      return { open, topOk, expanded, labels, closedByEsc };
+    })()`).catch(() => null);
+    check('添加连接菜单：开合/位置/双项/aria-expanded', !!addMenuProbe &&
+      addMenuProbe.open === true && addMenuProbe.topOk === true && addMenuProbe.expanded === true &&
+      JSON.stringify(addMenuProbe.labels) === JSON.stringify(['从模板新建…', '完全新建']),
+      JSON.stringify(addMenuProbe));
+    check('添加连接菜单：Esc 关闭且焦点回触发按钮', !!addMenuProbe && addMenuProbe.closedByEsc === true, JSON.stringify(addMenuProbe));
+    const blankProbe = await cdp.eval(`(() => {
+      document.querySelector('[data-ssh-add="settings"]').click();
+      document.getElementById('ssh-add-blank').click();
+      return {
+        menuOpen: document.getElementById('ssh-add-menu').classList.contains('open'),
+        open: document.getElementById('overlay-ssh-edit').classList.contains('open'),
+        title: document.getElementById('ssh-edit-title').textContent,
+        host: document.getElementById('ssh-edit-host').value,
+        name: document.getElementById('ssh-edit-name').value
+      };
+    })()`).catch(() => null);
+    check('添加连接菜单：完全新建打开空白对话框', !!blankProbe &&
+      blankProbe.menuOpen === false && blankProbe.open === true &&
+      blankProbe.title === '添加 SSH 连接' && blankProbe.host === '' && blankProbe.name === '',
+      JSON.stringify(blankProbe));
+    await cdp.eval(`closeOverlay('overlay-ssh-edit'); 'closed'`).catch(() => null);
+    // Picker: opens from the menu, lists only SSH profiles, searches, and a
+    // click prefills the dialog from the chosen template.
+    const tplPickerProbe = await cdp.eval(`(async () => {
+      const fx = TabManager.sshProfiles.find(p => p.id === 'e2essh1');
+      fx.encryptedPassword = 'e2e-tpl-cipher';
+      fx.loginScripts = [{ expect: 'ogin:', send: 'root', isRegex: false, optional: false }];
+      document.querySelector('[data-ssh-add="settings"]').click();
+      document.getElementById('ssh-add-template').click();
+      await new Promise(r => setTimeout(r, 250));
+      const rows = () => [...document.querySelectorAll('#ssh-template-list .ss-row')].map(r2 => r2.dataset.id);
+      const open = document.getElementById('overlay-ssh-template').classList.contains('open');
+      const title = document.getElementById('ssh-template-title').textContent;
+      const menuClosed = !document.getElementById('ssh-add-menu').classList.contains('open');
+      const all = rows();
+      const selFirst = document.querySelector('#ssh-template-list .ss-row[aria-selected="true"]')?.dataset.id || null;
+      filterSSHTemplates('构建');
+      const narrowed = rows();
+      filterSSHTemplates('');
+      const restored = rows();
+      document.querySelector('#ssh-template-list .ss-row[data-id="ssh_e2essh1"]').click();
+      const pwd = document.getElementById('ssh-edit-password');
+      const st = document.getElementById('ssh-pwd-status');
+      return {
+        open, title, menuClosed, all, selFirst, narrowed, restored,
+        pickerClosed: !document.getElementById('overlay-ssh-template').classList.contains('open'),
+        editOpen: document.getElementById('overlay-ssh-edit').classList.contains('open'),
+        editTitle: document.getElementById('ssh-edit-title').textContent,
+        name: document.getElementById('ssh-edit-name').value,
+        host: document.getElementById('ssh-edit-host').value,
+        user: document.getElementById('ssh-edit-user').value,
+        group: document.getElementById('ssh-edit-group').value,
+        port: document.getElementById('ssh-edit-port').value,
+        viewMode: st.style.display === 'flex' && pwd.style.display === 'none',
+        scripts: document.querySelectorAll('#login-scripts-container .login-script-row').length
+      };
+    })()`).catch(() => null);
+    check('模板选择浮层：打开/列表/搜索/清空恢复', !!tplPickerProbe &&
+      tplPickerProbe.open === true && tplPickerProbe.title === '选择模板连接' && tplPickerProbe.menuClosed === true &&
+      JSON.stringify(tplPickerProbe.all) === JSON.stringify(['ssh_e2essh1', 'ssh_e2essh2', 'ssh_e2essh3']) &&
+      tplPickerProbe.selFirst === 'ssh_e2essh1' &&
+      JSON.stringify(tplPickerProbe.narrowed) === JSON.stringify(['ssh_e2essh2']) &&
+      tplPickerProbe.restored.length === 3,
+      JSON.stringify(tplPickerProbe));
+    check('模板选择→预填新连接对话框（密码状态行+登录脚本携带）', !!tplPickerProbe &&
+      tplPickerProbe.pickerClosed === true && tplPickerProbe.editOpen === true &&
+      tplPickerProbe.editTitle === '从模板新建 SSH 连接' &&
+      tplPickerProbe.name === '' && tplPickerProbe.host === '192.0.2.10' && tplPickerProbe.user === 'deploy' &&
+      tplPickerProbe.group === '生产' && String(tplPickerProbe.port) === '22' &&
+      tplPickerProbe.viewMode === true && tplPickerProbe.scripts === 1,
+      JSON.stringify(tplPickerProbe));
+    const tplSave = await cdp.eval(`(async () => {
+      document.getElementById('ssh-edit-name').value = 'e2e-tpl';
+      document.getElementById('ssh-edit-host').value = '198.51.100.9';
+      saveSSHEdit();
+      await new Promise(r => setTimeout(r, 600));
+      const tpl = (TabManager.sshProfiles || []).find(p => p.name === 'e2e-tpl');
+      const src = TabManager.sshProfiles.find(p => p.id === 'e2essh1');
+      return { found: !!tpl, id: tpl && tpl.id, host: tpl && tpl.host,
+        pwd: tpl && tpl.encryptedPassword, group: tpl && tpl.group,
+        user: tpl && tpl.username, port: tpl && tpl.port,
+        scripts: tpl && tpl.loginScripts && tpl.loginScripts.length,
+        srcHost: src && src.host,
+        overlayOpen: document.getElementById('overlay-ssh-edit').classList.contains('open') };
+    })()`).catch(() => null);
+    check('模板新建：保存为新 profile（密码密文/分组/脚本携带，id 全新，源不变）', !!tplSave &&
+      tplSave.found === true && tplSave.id && tplSave.id !== 'e2essh1' &&
+      tplSave.host === '198.51.100.9' && tplSave.pwd === 'e2e-tpl-cipher' &&
+      tplSave.group === '生产' && tplSave.user === 'deploy' && Number(tplSave.port) === 22 &&
+      tplSave.scripts === 1 && tplSave.srcHost === '192.0.2.10' && tplSave.overlayOpen === false,
+      JSON.stringify(tplSave));
+    // Restore the 3-row fixture (drop the template-created profile + the
+    // seeded fields) so the session selector's sshRows === 3 assertion below
+    // still holds.
+    await cdp.eval(`(async () => {
+      TabManager.sshProfiles = (TabManager.sshProfiles || []).filter(p => p.name !== 'e2e-tpl');
+      const fx = TabManager.sshProfiles.find(p => p.id === 'e2essh1');
+      delete fx.encryptedPassword;
+      delete fx.loginScripts;
+      await ipcRenderer.invoke('save-ssh-profiles', { sshProfiles: TabManager.sshProfiles });
+      renderSSHManager();
+      return TabManager.sshProfiles.length;
+    })()`).catch(() => null);
+    // Keyboard path from the manager overlay's add button: menu -> template ->
+    // ArrowDown/Enter picks the second profile (named + key auth), covering
+    // the "副本" suffix branch and the private-key carry (password row hidden).
+    const tplKeyProbe = await cdp.eval(`(async () => {
+      openSSHManager();
+      await new Promise(r => setTimeout(r, 200));
+      const ovBtn = document.querySelector('[data-ssh-add="overlay"]');
+      ovBtn.click();
+      const menuOpen = document.getElementById('ssh-add-menu').classList.contains('open');
+      document.getElementById('ssh-add-template').click();
+      await new Promise(r => setTimeout(r, 250));
+      const pickerOpen = document.getElementById('overlay-ssh-template').classList.contains('open');
+      const mgrClosed = !document.getElementById('overlay-ssh-manager').classList.contains('open');
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+      const sel = document.querySelector('#ssh-template-list .ss-row[aria-selected="true"]')?.dataset.id || null;
+      const actDesc = document.getElementById('ssh-template-search').getAttribute('aria-activedescendant');
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      await new Promise(r => setTimeout(r, 50));
+      const r2 = {
+        menuOpen, pickerOpen, mgrClosed, sel, actDesc,
+        editTitle: document.getElementById('ssh-edit-title').textContent,
+        name: document.getElementById('ssh-edit-name').value,
+        host: document.getElementById('ssh-edit-host').value,
+        port: document.getElementById('ssh-edit-port').value,
+        user: document.getElementById('ssh-edit-user').value,
+        auth: document.getElementById('ssh-edit-auth').value,
+        keypath: document.getElementById('ssh-edit-keypath').value,
+        pwdRowHidden: document.getElementById('ssh-pwd-row').style.display === 'none'
+      };
+      closeOverlay('overlay-ssh-edit');
+      return r2;
+    })()`).catch(() => null);
+    check('模板选择：管理浮层入口+键盘导航 Enter 选中（" 副本"后缀/keypath 携带/密码行隐藏）', !!tplKeyProbe &&
+      tplKeyProbe.menuOpen === true && tplKeyProbe.pickerOpen === true && tplKeyProbe.mgrClosed === true &&
+      tplKeyProbe.sel === 'ssh_e2essh2' && tplKeyProbe.actDesc === 'ssh-tpl-opt-ssh_e2essh2' &&
+      tplKeyProbe.editTitle === '从模板新建 SSH 连接' &&
+      tplKeyProbe.name === '构建机 副本' && tplKeyProbe.host === 'builder.example.com' &&
+      String(tplKeyProbe.port) === '2222' && tplKeyProbe.user === 'ci' &&
+      tplKeyProbe.auth === '密钥' && tplKeyProbe.keypath === 'C:/keys/ci' &&
+      tplKeyProbe.pwdRowHidden === true,
+      JSON.stringify(tplKeyProbe));
+    // Picker Esc closes only the picker and restores focus to the invoking
+    // add button (opener restore, same contract as the session selector).
+    const tplEscProbe = await cdp.eval(`(async () => {
+      const btn = document.querySelector('[data-ssh-add="settings"]');
+      btn.click();
+      document.getElementById('ssh-add-template').click();
+      await new Promise(r => setTimeout(r, 250));
+      const open = document.getElementById('overlay-ssh-template').classList.contains('open');
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await new Promise(r => setTimeout(r, 50));
+      return { open,
+        closed: !document.getElementById('overlay-ssh-template').classList.contains('open'),
+        focusBack: document.activeElement === btn };
+    })()`).catch(() => null);
+    check('模板选择浮层：Esc 关闭且焦点回添加按钮', !!tplEscProbe &&
+      tplEscProbe.open === true && tplEscProbe.closed === true && tplEscProbe.focusBack === true,
+      JSON.stringify(tplEscProbe));
+    // Zero profiles: the template entry is disabled and the pick guard does
+    // not open the picker (mouse is already blocked by pointer-events:none).
+    const tplDisabledProbe = await cdp.eval(`(() => {
+      const saved = TabManager.sshProfiles;
+      TabManager.sshProfiles = [];
+      const btn = document.querySelector('[data-ssh-add="settings"]');
+      btn.click();
+      const tpl = document.getElementById('ssh-add-template');
+      const disabled = tpl.classList.contains('disabled') && tpl.getAttribute('aria-disabled') === 'true';
+      sshAddMenuPick('template'); // guard: must not open the picker
+      const pickerStayedClosed = !document.getElementById('overlay-ssh-template').classList.contains('open');
+      closeSSHAddMenu(false);
+      TabManager.sshProfiles = saved;
+      return { disabled, pickerStayedClosed };
+    })()`).catch(() => null);
+    check('添加连接菜单：零连接时"从模板新建"禁用且守卫不打开选择器', !!tplDisabledProbe &&
+      tplDisabledProbe.disabled === true && tplDisabledProbe.pickerStayedClosed === true,
+      JSON.stringify(tplDisabledProbe));
     // Session selector: combobox semantics, default-local preselection, wrap
     // navigation, IME guard, button-Enter guard and click/Enter dispatch
     // (createTab stubbed — a real dispatch would dial the fixture host).
@@ -1454,6 +1807,9 @@ async function main() {
       const panel = document.querySelector('#overlay-qc .qc-panel');
       const items = [...document.querySelectorAll('#qc-list .v3-item')];
       const sel = document.querySelector('#qc-list .v3-item[data-selected]');
+      const unsel = document.querySelector('#qc-list .v3-item:not([data-selected])');
+      const itemCs = items.length ? getComputedStyle(items[0]) : null;
+      const barCs = sel ? getComputedStyle(sel, '::before') : null;
       return {
         open: document.getElementById('overlay-qc').classList.contains('open'),
         title: document.getElementById('qc-title')?.textContent,
@@ -1466,6 +1822,11 @@ async function main() {
         selAria: sel ? sel.getAttribute('aria-selected') : '',
         selAccent: sel ? getComputedStyle(sel).backgroundColor : '',
         selBar: sel ? getComputedStyle(sel, '::before').width : '',
+        itemTransProp: itemCs ? itemCs.transitionProperty : '',
+        itemTransDur: itemCs ? itemCs.transitionDuration : '',
+        barOp: barCs ? barCs.opacity : '',
+        barTransProp: barCs ? barCs.transitionProperty : '',
+        unselBarOp: unsel ? getComputedStyle(unsel, '::before').opacity : '',
         manage: panel.querySelector('.ss-manage')?.textContent,
         hints: panel.querySelectorAll('.ss-hints kbd').length
       };
@@ -1476,6 +1837,14 @@ async function main() {
       qcStruct.selAccent.includes('0.14') && qcStruct.selBar === '2px' &&
       (qcStruct.manage || '').includes('管理命令') && qcStruct.hints === 3;
     check('快捷命令浮窗：选择器风格结构 + 数据与选中态', qcOk === true, JSON.stringify(qcStruct));
+    // Selection chrome transitions in one synced 70ms ease-out (background +
+    // border on the row, opacity on the always-rendered indicator bar — a bar
+    // created/destroyed with the selection state cannot transition).
+    const qcTransOk = !!qcStruct &&
+      qcStruct.itemTransProp.includes('background-color') && qcStruct.itemTransProp.includes('border-color') &&
+      qcStruct.itemTransDur.includes('0.07s') &&
+      qcStruct.barTransProp.includes('opacity') && qcStruct.barOp === '1' && qcStruct.unselBarOp === '0';
+    check('快捷命令浮窗：选中态 70ms 同步过渡 + 指示条渐显', qcTransOk === true, JSON.stringify(qcStruct));
     await shot('qc-overlay');
     const qcEsc = await cdp.eval(`(() => {
       document.getElementById('qc-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
@@ -1495,6 +1864,8 @@ async function main() {
       const narrowedItems = [...document.querySelectorAll('#palette-list .v3-item')];
       const narrowed = narrowedItems.length;
       const sel = document.querySelector('#palette-list .v3-item[data-selected]');
+      const itemCs = narrowedItems.length ? getComputedStyle(narrowedItems[0]) : null;
+      const barCs = sel ? getComputedStyle(sel, '::before') : null;
       return {
         open: document.getElementById('overlay-palette').classList.contains('open'),
         title: document.getElementById('palette-title')?.textContent,
@@ -1505,13 +1876,18 @@ async function main() {
         selAria: sel ? sel.getAttribute('aria-selected') : '',
         hasKbd: !!document.querySelector('#palette-list .v3-kbd'),
         selAccent: sel ? getComputedStyle(sel).backgroundColor : '',
+        itemTransProp: itemCs ? itemCs.transitionProperty : '',
+        itemTransDur: itemCs ? itemCs.transitionDuration : '',
+        barOp: barCs ? barCs.opacity : '',
         hints: panel.querySelectorAll('.ss-hints kbd').length
       };
     })()`).catch(() => null);
     const palOk = !!palStruct && palStruct.open === true && palStruct.title === '命令面板' && palStruct.close === true &&
       palStruct.focus === 'palette-input' && palStruct.all >= 10 && palStruct.narrowed >= 1 && palStruct.narrowed < palStruct.all &&
       palStruct.roleOpt === true && palStruct.selAria === 'true' &&
-      palStruct.hasKbd === true && palStruct.selAccent.includes('0.14') && palStruct.hints === 3;
+      palStruct.hasKbd === true && palStruct.selAccent.includes('0.14') && palStruct.hints === 3 &&
+      palStruct.itemTransProp.includes('background-color') && palStruct.itemTransProp.includes('border-color') &&
+      palStruct.itemTransDur.includes('0.07s') && palStruct.barOp === '1';
     check('命令面板浮窗：选择器风格结构 + 搜索过滤', palOk === true, JSON.stringify(palStruct));
     await shot('palette-overlay');
     const palEsc = await cdp.eval(`(() => {
@@ -1525,8 +1901,9 @@ async function main() {
 
     // 13.10 Settings SSH page: section titles + one settings-card per group
     // (design/ssh-settings-card-design.md). Shared renderer/DOM untouched —
-    // the card chrome must be scoped to #settings-ssh-list while the overlay
-    // manager stays flat. Re-seed fixtures (13.9 cleaned them out).
+    // the card chrome is scoped to the .settings-card-list class (shared with
+    // the quick-commands settings page, 13.11) while the overlay manager
+    // stays flat. Re-seed fixtures (13.9 cleaned them out).
     await cdp.eval(`(() => {
       TabManager.sshProfiles = [
         { id: 'e2essh1', name: '', host: '192.0.2.10', port: 22, username: 'deploy', group: '生产', authType: 'password' },
@@ -1545,9 +1922,10 @@ async function main() {
       const rule = title && title.querySelector('.group-rule');
       const row = document.querySelector('#settings-ssh-list .ssh-mgr-row');
       const refCard = document.querySelector('.settings-card');
-      const heading = document.querySelector('.ssh-settings-heading');
-      const toolbar = document.querySelector('.ssh-settings-toolbar');
-      const add = document.querySelector('.ssh-settings-add');
+      const page = document.querySelector('[data-page="ssh"]');
+      const heading = page.querySelector('.settings-page-heading');
+      const toolbar = page.querySelector('.settings-toolbar');
+      const add = page.querySelector('.settings-primary-add');
       const addCs = add ? getComputedStyle(add) : null;
       return {
         groups: groups.length, cards: cards.length,
@@ -1561,7 +1939,7 @@ async function main() {
         rowBg: row && getComputedStyle(row).backgroundColor,
         headingBtns: heading ? heading.querySelectorAll('button').length : -1,
         addBtn: !!add, addH: addCs && addCs.height, addRadius: addCs && addCs.borderRadius,
-        quietBtns: toolbar ? [...toolbar.querySelectorAll('.ssh-quiet-action')].map(b => b.textContent) : []
+        quietBtns: toolbar ? [...toolbar.querySelectorAll('.settings-quiet-action')].map(b => b.textContent) : []
       };
     })()`).catch(() => null);
     // Card surface must equal the appearance page's .settings-card surface
@@ -1577,11 +1955,77 @@ async function main() {
       cardStruct.addH === '32px' && cardStruct.addRadius === '9px' &&
       cardStruct.quietBtns.join(',') === '折叠全部,展开全部';
     check('SSH 设置页：每组一张设置卡片 + 分节标题 + 工具栏', cardOk === true, JSON.stringify(cardStruct));
+    // Card-row hover is the user-picked combo: rounded wash + accent edge bar
+    // (rule existence), while the flat overlay manager keeps its row hover.
+    // The identity carries no redundant native title tooltip (aria-label
+    // retained).
+    const hoverRule = await cdp.eval(`(() => {
+      const rules = [...document.styleSheets].flatMap(s => { try { return [...s.cssRules]; } catch { return []; } });
+      const wash = rules.some(r => r.selectorText === '.settings-card-list .ssh-mgr-row:hover' && (r.style.backgroundColor || '') !== '');
+      const bar = rules.some(r => r.selectorText === '.settings-card-list .ssh-mgr-row:hover::before' && (r.style.opacity || '') !== '');
+      const flatHover = rules.some(r => r.selectorText === '.ssh-mgr-row:hover' && r.style.backgroundColor);
+      const idEl = document.querySelector('#settings-ssh-list .ssh-mgr-identity');
+      return { wash, bar, flatHover,
+               identityNoTitle: idEl ? !idEl.hasAttribute('title') && !!idEl.getAttribute('aria-label') : null };
+    })()`).catch(() => null);
+    check('设置卡片行 hover：圆角色块+指示条规则存在（浮层保留行 hover，无冗余 title）', !!hoverRule && hoverRule.wash === true && hoverRule.bar === true && hoverRule.flatHover === true && hoverRule.identityNoTitle === true, JSON.stringify(hoverRule));
+    // Live hover: force :hover on a card row, poll for the bar's transition
+    // end-state (fixed sleeps can read mid-transition values under load),
+    // then read the computed wash + bar. The forced state is reset in
+    // finally so a failed read cannot leak :hover into later checks.
+    const hoverLive = await (async () => {
+      let rowNode = null;
+      try {
+        await cdp.send('DOM.enable');
+        await cdp.send('CSS.enable');
+        const doc = await cdp.send('DOM.getDocument');
+        rowNode = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId,
+          selector: '#settings-ssh-list .ssh-mgr-row' });
+        await cdp.send('CSS.forcePseudoState', { nodeId: rowNode.nodeId, forcedPseudoClasses: ['hover'] });
+        let v = null;
+        for (let i = 0; i < 20; i++) {
+          await sleep(100);
+          v = await cdp.eval(`(() => {
+            const row = document.querySelector('#settings-ssh-list .ssh-mgr-row');
+            const cs = getComputedStyle(row);
+            const bar = getComputedStyle(row, '::before');
+            const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent-rgb').trim();
+            return { bg: cs.backgroundColor, radius: cs.borderRadius,
+                     barOpacity: bar.opacity, barW: bar.width, barColor: bar.backgroundColor,
+                     barH: bar.height, expectedBar: 'rgb(' + accent.split(/\\s*,\\s*|\\s+/).join(', ') + ')' };
+          })()`);
+          if (v && v.barOpacity === '0.85') break;
+        }
+        return v;
+      } catch { return null; }
+      finally {
+        if (rowNode && rowNode.nodeId) {
+          await cdp.send('CSS.forcePseudoState', { nodeId: rowNode.nodeId, forcedPseudoClasses: [] }).catch(() => null);
+        }
+      }
+    })();
+    check('设置卡片行 hover：实测圆角色块 + accent 指示条（计算值）', !!hoverLive &&
+      hoverLive.bg === 'rgba(255, 255, 255, 0.05)' && hoverLive.radius === '9px' &&
+      hoverLive.barOpacity === '0.85' && hoverLive.barW === '3px' && hoverLive.barH === '26px' &&
+      hoverLive.barColor === hoverLive.expectedBar,
+      JSON.stringify(hoverLive));
+    // Floating surfaces must carry the inset hairline border (zt-tip parity)
+    // so menus read as distinct from the dark terminal background.
+    const menuEdge = await cdp.eval(`(() => {
+      const rules = [...document.styleSheets].flatMap(s => { try { return [...s.cssRules]; } catch { return []; } });
+      // WebView2 keeps the var()-containing declaration verbatim (no rgba
+      // whitespace normalization), so compare with whitespace stripped.
+      const hasEdge = sel => rules.some(r => r.selectorText === sel &&
+        (r.style.boxShadow || '').replace(/\\s+/g, '').includes('inset0001pxrgba(255,255,255,0.06)'));
+      return { popup: hasEdge('.menu-popup'), tabCtx: hasEdge('.tab-context-menu'),
+               dd: hasEdge('.cust-dropdown .dd-menu'), combo: hasEdge('.cust-combo .dd-menu') };
+    })()`).catch(() => null);
+    check('浮层菜单：四处下拉均带 inset 描边', !!menuEdge && menuEdge.popup === true && menuEdge.tabCtx === true && menuEdge.dd === true && menuEdge.combo === true, JSON.stringify(menuEdge));
     // The container's focus-within accent border is the search field's only
     // focus indicator (the inner input's ring is intentionally off). Read
     // after a real sleep: border-color has a 120ms transition.
     const searchFocusPre = await cdp.eval(`(() => {
-      const box = document.querySelector('.ssh-settings-toolbar .ssh-mgr-search');
+      const box = document.querySelector('[data-page="ssh"] .settings-toolbar .ssh-mgr-search');
       const input = document.querySelector('[data-ssh-search="settings-ssh-list"]');
       if (!box || !input) return null;
       const before = getComputedStyle(box).borderColor;
@@ -1590,7 +2034,7 @@ async function main() {
     })()`).catch(() => null);
     await sleep(250);
     const searchFocusPost = await cdp.eval(`(() => {
-      const box = document.querySelector('.ssh-settings-toolbar .ssh-mgr-search');
+      const box = document.querySelector('[data-page="ssh"] .settings-toolbar .ssh-mgr-search');
       if (!box) return null;
       const r = { after: getComputedStyle(box).borderColor,
                   focused: document.activeElement === document.querySelector('[data-ssh-search="settings-ssh-list"]') };
@@ -1612,7 +2056,7 @@ async function main() {
     // keeps the section titles; expand-all restores. Real button clicks, not
     // the bare functions, so the rewired toolbar itself is exercised.
     const collapseAll = await cdp.eval(`(() => {
-      const btns = [...document.querySelectorAll('.ssh-settings-toolbar .ssh-quiet-action')];
+      const btns = [...document.querySelectorAll('[data-page="ssh"] .settings-toolbar .settings-quiet-action')];
       btns[0].click();
       const cards = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-items')];
       const titles = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-title')];
@@ -1625,7 +2069,7 @@ async function main() {
     check('SSH 设置页：折叠全部隐藏整张卡片保留组标题', !!collapseAll && collapseAll.hidden === true && collapseAll.titlesUp === true && collapseAll.n === 2, JSON.stringify(collapseAll));
     await shot('ssh-settings-collapsed');
     const expandAllBack = await cdp.eval(`(() => {
-      const btns = [...document.querySelectorAll('.ssh-settings-toolbar .ssh-quiet-action')];
+      const btns = [...document.querySelectorAll('[data-page="ssh"] .settings-toolbar .settings-quiet-action')];
       btns[1].click();
       const cards = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-items')];
       return cards.every(c => !c.classList.contains('collapsed') && c.offsetHeight > 0);
@@ -1678,8 +2122,8 @@ async function main() {
     try {
       await sleep(400);
       const narrowCard = await cdp.eval(`(() => {
-        const toolbar = document.querySelector('.ssh-settings-toolbar');
-        const actions = document.querySelector('.ssh-settings-toolbar-actions');
+        const toolbar = document.querySelector('[data-page="ssh"] .settings-toolbar');
+        const actions = document.querySelector('[data-page="ssh"] .settings-toolbar-actions');
         const search = toolbar && toolbar.querySelector('.ssh-mgr-search');
         const card = document.querySelector('#settings-ssh-list .ssh-mgr-group-items');
         return { w: window.innerWidth,
@@ -1697,7 +2141,7 @@ async function main() {
         return { dpr: window.devicePixelRatio, radius: cs && cs.borderRadius,
                  rows: document.querySelectorAll('#settings-ssh-list .ssh-mgr-row').length };
       })()`).catch(() => null);
-      check('150% 缩放：卡片圆角与行渲染保持', !!zoomCard && zoomCard.dpr === 1.5 && zoomCard.radius === '14px' && zoomCard.rows === 3, JSON.stringify(zoomCard));
+      check('150% 缩放：卡片圆角与行渲染保持', !!zoomCard && Math.abs(zoomCard.dpr - 1.5) < 0.01 && zoomCard.radius === '14px' && zoomCard.rows === 3, JSON.stringify(zoomCard));
       await shot('ssh-settings-cards-zoom150');
     } finally {
       await cdp.send('Emulation.clearDeviceMetricsOverride').catch(() => null);
@@ -1705,6 +2149,224 @@ async function main() {
     await sleep(300);
     // Leave 13.10 as found: fixtures out, settings page closed.
     await cdp.eval(`(() => { TabManager.sshProfiles = []; _sshMgrViews.clear(); closeSettingsTab(); return 'clean-13.10'; })()`).catch(() => null);
+    await sleep(250);
+
+    // 13.11 Settings quick-commands page: same card chrome as the SSH settings
+    // page (section titles + one settings-card per group), live search with
+    // force-expand + collapse restore, delegated edit/delete routing, rename
+    // derived from data-group, and focus continuity across redraws.
+    await cdp.eval(`(() => {
+      window.__qcBackup = _qcCommands;
+      _qcCommands = [
+        { id: 'e2eqc1', name: '查看系统信息', command: 'htop', group: '常用' },
+        { id: 'e2eqc2', name: '查看磁盘使用', command: 'df -h', group: '常用' },
+        { id: 'e2eqc3', name: '同步仓库', command: 'git pull', group: '运维' }
+      ];
+      _qcSettingsView.query = '';
+      _qcSettingsView.collapsed.clear();
+      openSettings('quickcommands');
+      return 'seeded-13.11';
+    })()`).catch(() => null);
+    await sleep(450);
+    const qcCard = await cdp.eval(`(() => {
+      const list = document.getElementById('qc-commands-list');
+      const page = document.querySelector('[data-page="quickcommands"]');
+      const groups = [...list.querySelectorAll('.ssh-mgr-group')];
+      const cards = [...list.querySelectorAll('.ssh-mgr-group-items')];
+      const cs = cards[0] ? getComputedStyle(cards[0]) : null;
+      const refCard = document.querySelector('.settings-card');
+      const heading = page.querySelector('.settings-page-heading');
+      const toolbar = page.querySelector('.settings-toolbar');
+      const row = list.querySelector('.ssh-mgr-row');
+      const rule = list.querySelector('.group-rule');
+      return {
+        groups: groups.length, cards: cards.length,
+        rows: list.querySelectorAll('.ssh-mgr-row').length,
+        cardBg: cs && cs.backgroundColor,
+        refCardBg: refCard ? getComputedStyle(refCard).backgroundColor : 'missing',
+        cardRadius: cs && cs.borderRadius,
+        ruleDisplay: rule ? getComputedStyle(rule).display : 'missing',
+        headingBtns: heading ? heading.querySelectorAll('button').length : -1,
+        addTxt: heading ? (heading.querySelector('.settings-primary-add') || {}).textContent : '',
+        quietBtns: toolbar ? [...toolbar.querySelectorAll('.settings-quiet-action')].map(b => b.textContent) : [],
+        count: (page.querySelector('[data-qc-count]') || {}).textContent,
+        hasSshListClass: list.classList.contains('ssh-mgr-list'),
+        rowName: row ? row.querySelector('.ssh-mgr-primary').textContent : '',
+        rowCmd: row ? row.querySelector('.ssh-mgr-meta .mono').textContent : ''
+      };
+    })()`).catch(() => null);
+    const qcCardOk = !!qcCard && qcCard.groups === 2 && qcCard.cards === 2 && qcCard.rows === 3 &&
+      qcCard.refCardBg.startsWith('rgb') && qcCard.cardBg === qcCard.refCardBg &&
+      qcCard.cardRadius === '14px' && qcCard.ruleDisplay === 'none' &&
+      qcCard.headingBtns === 1 && (qcCard.addTxt || '').includes('添加命令') &&
+      qcCard.quietBtns.join(',') === '折叠全部,展开全部' && qcCard.count === '3 个命令' &&
+      qcCard.hasSshListClass === false && qcCard.rowName === '查看系统信息' && qcCard.rowCmd === 'htop';
+    check('快捷命令设置页：分节标题 + 每组一张设置卡片', qcCardOk === true, JSON.stringify(qcCard));
+    // Same card-hover parity as the SSH page: no row fill, no redundant title.
+    const qcHover = await cdp.eval(`(() => {
+      const idEl = document.querySelector('#qc-commands-list .ssh-mgr-identity');
+      return { identityNoTitle: idEl ? !idEl.hasAttribute('title') && !!idEl.getAttribute('aria-label') : null };
+    })()`).catch(() => null);
+    check('快捷命令设置页：行无冗余 title tooltip', !!qcHover && qcHover.identityNoTitle === true, JSON.stringify(qcHover));
+    await shot('qc-settings-page');
+    // Collapse-all via the real toolbar buttons hides each whole card but
+    // keeps the section titles; expand-all restores.
+    const qcCollapse = await cdp.eval(`(() => {
+      const btns = [...document.querySelectorAll('[data-page="quickcommands"] .settings-toolbar .settings-quiet-action')];
+      btns[0].click();
+      const cards = [...document.querySelectorAll('#qc-commands-list .ssh-mgr-group-items')];
+      const titles = [...document.querySelectorAll('#qc-commands-list .ssh-mgr-group-title')];
+      return {
+        hidden: cards.every(c => c.classList.contains('collapsed') && getComputedStyle(c).display === 'none'),
+        titlesUp: titles.every(t => t.offsetHeight > 0),
+        n: cards.length
+      };
+    })()`).catch(() => null);
+    check('快捷命令设置页：折叠全部隐藏整张卡片保留组标题', !!qcCollapse && qcCollapse.hidden === true && qcCollapse.titlesUp === true && qcCollapse.n === 2, JSON.stringify(qcCollapse));
+    await shot('qc-settings-collapsed');
+    const qcExpandBack = await cdp.eval(`(() => {
+      const btns = [...document.querySelectorAll('[data-page="quickcommands"] .settings-toolbar .settings-quiet-action')];
+      btns[1].click();
+      const cards = [...document.querySelectorAll('#qc-commands-list .ssh-mgr-group-items')];
+      return cards.every(c => !c.classList.contains('collapsed') && c.offsetHeight > 0);
+    })()`).catch(() => false);
+    check('快捷命令设置页：展开全部恢复卡片', qcExpandBack === true, '');
+    // Collapse one group, then search: matched groups force-expand and the
+    // count switches to M / N; clearing the query restores the collapse.
+    const qcSearch = await cdp.eval(`(() => {
+      const title = document.querySelector('#qc-commands-list .ssh-mgr-group-title[data-group="运维"]');
+      title.click();
+      // The click re-renders the list, so re-query instead of trusting the
+      // now-detached title reference.
+      const collapsedBefore = document.querySelector('#qc-commands-list .ssh-mgr-group-title[data-group="运维"]').classList.contains('collapsed');
+      const input = document.querySelector('[data-qc-search]');
+      input.value = 'htop';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      const groups = [...document.querySelectorAll('#qc-commands-list .ssh-mgr-group')];
+      const rows = [...document.querySelectorAll('#qc-commands-list .ssh-mgr-row')];
+      return {
+        collapsedBefore,
+        groupsDuring: groups.map(g => g.querySelector('.ssh-mgr-group-title').dataset.group),
+        rowsDuring: rows.map(r => r.dataset.qcId),
+        countDuring: document.querySelector('[data-qc-count]').textContent
+      };
+    })()`).catch(() => null);
+    const qcSearchOk = !!qcSearch && qcSearch.collapsedBefore === true &&
+      qcSearch.groupsDuring.join(',') === '常用' && qcSearch.rowsDuring.join(',') === 'e2eqc1' &&
+      qcSearch.countDuring === '1 / 3 个命令';
+    check('快捷命令设置页：搜索过滤 + 命中组强制展开 + 计数', qcSearchOk === true, JSON.stringify(qcSearch));
+    const qcSearchClear = await cdp.eval(`(() => {
+      const input = document.querySelector('[data-qc-search]');
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      const t = document.querySelector('#qc-commands-list .ssh-mgr-group-title[data-group="运维"]');
+      return { collapsedAfter: t.classList.contains('collapsed'),
+               rows: document.querySelectorAll('#qc-commands-list .ssh-mgr-row').length,
+               count: document.querySelector('[data-qc-count]').textContent };
+    })()`).catch(() => null);
+    check('快捷命令设置页：清空搜索恢复折叠态', !!qcSearchClear && qcSearchClear.collapsedAfter === true && qcSearchClear.rows === 2 && qcSearchClear.count === '3 个命令', JSON.stringify(qcSearchClear));
+    // Delegated row actions: identity click opens the edit overlay prefilled.
+    const qcEdit = await cdp.eval(`(() => {
+      const row = document.querySelector('#qc-commands-list .ssh-mgr-row[data-qc-id="e2eqc2"]');
+      row.querySelector('.ssh-mgr-identity').click();
+      const opened = document.getElementById('overlay-qc-edit').classList.contains('open');
+      const title = document.getElementById('qc-edit-title').textContent;
+      const name = document.getElementById('qc-edit-name').value;
+      const cmd = document.getElementById('qc-edit-command').value;
+      closeQCEdit();
+      return { opened, title, name, cmd };
+    })()`).catch(() => null);
+    check('快捷命令设置页：点击行打开编辑并预填', !!qcEdit && qcEdit.opened === true && qcEdit.title === '编辑命令' && qcEdit.name === '查看磁盘使用' && qcEdit.cmd === 'df -h', JSON.stringify(qcEdit));
+    // Delete routes through the confirm dialog; cancelling keeps the command.
+    const qcDelete = await cdp.eval(`(() => {
+      const row = document.querySelector('#qc-commands-list .ssh-mgr-row[data-qc-id="e2eqc1"]');
+      row.querySelector('.ssh-mgr-btn[data-action="delete"]').click();
+      const opened = document.getElementById('overlay-confirm').classList.contains('open');
+      const msg = document.getElementById('confirm-msg').textContent;
+      document.getElementById('confirm-cancel').click();
+      return { opened, msg, still: _qcCommands.some(c => c.id === 'e2eqc1') };
+    })()`).catch(() => null);
+    check('快捷命令设置页：删除走确认弹窗且取消保留', !!qcDelete && qcDelete.opened === true && qcDelete.msg.includes('删除') && qcDelete.still === true, JSON.stringify(qcDelete));
+    // Rename entry derives the group name from data-group (no inline JS
+    // interpolation); Esc cancels and restores the title DOM.
+    const qcRename = await cdp.eval(`(() => {
+      const title = document.querySelector('#qc-commands-list .ssh-mgr-group-title[data-group="常用"]');
+      title.querySelector('.group-rename').click();
+      const input = title.querySelector('input.group-name-input');
+      const val = input ? input.value : null;
+      if (input) input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      return { val, restored: !!title.querySelector('.group-name-text'),
+               noInput: !title.querySelector('input') };
+    })()`).catch(() => null);
+    check('快捷命令设置页：重命名从 data-group 派生且 Esc 还原', !!qcRename && qcRename.val === '常用' && qcRename.restored === true && qcRename.noInput === true, JSON.stringify(qcRename));
+    // Focus continuity: re-rendering lands focus on the same logical control.
+    const qcFocus = await cdp.eval(`(() => {
+      const btn = document.querySelector('#qc-commands-list .ssh-mgr-row[data-qc-id="e2eqc2"] .ssh-mgr-btn[data-action="edit"]');
+      btn.focus();
+      renderQCCommandsList();
+      const after = document.activeElement;
+      const row = after && after.closest('.ssh-mgr-row');
+      return { isBtn: !!after && after.classList.contains('ssh-mgr-btn'),
+               action: after && after.dataset.action,
+               qcId: row && row.dataset.qcId };
+    })()`).catch(() => null);
+    check('快捷命令设置页：重绘后焦点还原到同一逻辑控件', !!qcFocus && qcFocus.isBtn === true && qcFocus.action === 'edit' && qcFocus.qcId === 'e2eqc2', JSON.stringify(qcFocus));
+    // Empty states: no data at all vs. no search match.
+    const qcEmpty = await cdp.eval(`(() => {
+      const backup = _qcCommands;
+      const list = document.getElementById('qc-commands-list');
+      _qcCommands = [];
+      renderQCCommandsList();
+      const noData = list.textContent.includes('暂无命令');
+      const addBtn = !!list.querySelector('.ssh-mgr-empty-actions .btn-primary');
+      _qcCommands = backup;
+      // Decouple from earlier steps' collapse state: assert a fully expanded
+      // restore instead of whatever the search step left behind.
+      _qcSettingsView.collapsed.clear();
+      renderQCCommandsList();
+      const input = document.querySelector('[data-qc-search]');
+      input.value = 'zzzz-no-match';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      const noMatch = list.textContent.includes('没有匹配的命令');
+      input.value = '';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return { noData, addBtn, noMatch,
+               restored: list.querySelectorAll('.ssh-mgr-row').length === 3 };
+    })()`).catch(() => null);
+    check('快捷命令设置页：双空态（无数据/无匹配）', !!qcEmpty && qcEmpty.noData === true && qcEmpty.addBtn === true && qcEmpty.noMatch === true && qcEmpty.restored === true, JSON.stringify(qcEmpty));
+    // Narrow (560px) pass: toolbar actions wrap to their own row and the card
+    // padding tightens (same shared classes as the SSH settings page).
+    const emu11 = await cdp.send('Emulation.setDeviceMetricsOverride', { width: 560, height: 720, deviceScaleFactor: 1, mobile: false }).then(() => true).catch(() => false);
+    try {
+      await sleep(400);
+      const narrowQc = await cdp.eval(`(() => {
+        const page = document.querySelector('[data-page="quickcommands"]');
+        const toolbar = page.querySelector('.settings-toolbar');
+        const actions = page.querySelector('.settings-toolbar-actions');
+        const search = toolbar && toolbar.querySelector('.ssh-mgr-search');
+        const card = document.querySelector('#qc-commands-list .ssh-mgr-group-items');
+        return { w: window.innerWidth,
+                 wrapped: actions && search ? actions.getBoundingClientRect().top > search.getBoundingClientRect().top : null,
+                 cardPadding: card ? getComputedStyle(card).padding : '' };
+      })()`).catch(() => null);
+      check('窄窗口（560px）：快捷命令页工具栏换行且卡片内边距收窄', emu11 === true && !!narrowQc && narrowQc.w === 560 && narrowQc.wrapped === true && narrowQc.cardPadding === '6px 12px', JSON.stringify(narrowQc));
+      await shot('qc-settings-narrow');
+    } finally {
+      await cdp.send('Emulation.clearDeviceMetricsOverride').catch(() => null);
+    }
+    await sleep(300);
+    // Leave 13.11 as found: real commands back, view state cleared, page closed.
+    await cdp.eval(`(() => {
+      _qcCommands = window.__qcBackup || [];
+      delete window.__qcBackup;
+      _qcSettingsView.query = '';
+      _qcSettingsView.collapsed.clear();
+      const input = document.querySelector('[data-qc-search]');
+      if (input) input.value = '';
+      renderQCCommandsList();
+      closeSettingsTab();
+      return 'clean-13.11';
+    })()`).catch(() => null);
     await sleep(250);
 
     // 14. 窗口状态恢复：写入 config 的 window 字段 → 重启 → 验证最大化/尺寸恢复

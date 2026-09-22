@@ -532,6 +532,23 @@ function _renderUpdateReady(tag) {
     _setUpdateDesc((tag || '新版本') + ' 已下载完成，随时可安装', 'rgba(120,200,120,0.9)');
 }
 
+// Map the backend's stable error tag ([timeout]/[resolve]/[connect]/[http])
+// to friendly guidance; unknown errors pass through with their raw detail so
+// diagnosis stays possible. The tag is classified from typed ureq errors in
+// Rust, so it does not depend on ureq's display wording.
+function _friendlyUpdateError(raw) {
+    const s = (raw && raw !== '未知错误') ? String(raw) : '';
+    const m = /\[(\w+)\]/.exec(s);
+    const tag = m && m[1];
+    let msg = '';
+    if (tag === 'timeout') msg = '网络超时，无法连接更新服务器（请检查网络或代理设置）';
+    else if (tag === 'resolve') msg = '无法解析更新服务器域名（请检查网络或 DNS 设置）';
+    else if (tag === 'connect') msg = '无法连接更新服务器（请检查网络或代理设置）';
+    else if (tag === 'http') msg = '更新服务器返回错误';
+    if (!msg) return s || '未知错误';
+    return msg + '。详细信息：' + s;
+}
+
 function _renderUpdateFailed(err) {
     const dl = document.getElementById('btn-update-download');
     const apply = document.getElementById('btn-update-apply');
@@ -539,7 +556,7 @@ function _renderUpdateFailed(err) {
     if (apply) apply.style.display = 'none';
     if (check) { check.disabled = false; check.textContent = '检查更新'; }
     if (dl) { dl.style.display = ''; dl.disabled = false; dl.textContent = '重试下载'; }
-    _setUpdateDesc('下载失败：' + (err || '未知错误'), 'rgba(220,120,120,0.9)');
+    _setUpdateDesc('下载失败：' + _friendlyUpdateError(err), 'rgba(220,120,120,0.9)');
 }
 
 function _startUpdatePoll() {
@@ -621,7 +638,7 @@ async function checkForUpdates() {
             desc.textContent = '检查失败：空响应';
         }
     } catch (e) {
-        desc.textContent = '检查失败：' + (e && e.message ? e.message : String(e));
+        desc.textContent = '检查失败：' + _friendlyUpdateError(e && e.message ? e.message : String(e));
         desc.style.color = 'rgba(220,120,120,0.9)';
     } finally {
         btn.disabled = false;
@@ -732,6 +749,17 @@ document.addEventListener('keydown', e => {
         // The session selector routes Esc/IME/focus through its own capture listener (registered on open in ssh.js); let it pass here to avoid double handling.
         const sessionsOv = document.getElementById('overlay-sessions');
         if (sessionsOv && sessionsOv.classList.contains('open')) {
+            return;
+        }
+        // The SSH template picker and the add-connection menu run their own
+        // capture listeners in ssh.js (Esc closes just them and restores
+        // focus to the opener); do not closeAllOverlays underneath them.
+        const sshTplOv = document.getElementById('overlay-ssh-template');
+        if (sshTplOv && sshTplOv.classList.contains('open')) {
+            return;
+        }
+        const sshAddMenu = document.getElementById('ssh-add-menu');
+        if (sshAddMenu && sshAddMenu.classList.contains('open')) {
             return;
         }
         const menuPopup = document.getElementById('menu-popup');

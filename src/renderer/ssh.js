@@ -456,7 +456,6 @@ function _sshFocusRestore(listEl, snap) {
 function _sshRowHtml(p) {
     const m = SshDisplay.sshDisplayModel(p);
     const metaText = m.named ? `${m.endpoint} · ${m.user}` : `${m.user} · 端口 ${m.port}`;
-    const title = `${m.primary} — ${metaText}`;
     const keyBadge = m.keyAuth
         ? `<span class="ssh-mgr-key" role="img" aria-label="密钥认证" title="密钥认证">${Icons.iconSvg('key', 11)}</span>` : '';
     const meta = m.named
@@ -464,9 +463,10 @@ function _sshRowHtml(p) {
         : `<span>${escHtml(m.user)}</span><span class="dot">·</span><span>端口 <span class="mono">${escHtml(String(m.port))}</span></span>`;
     // No profile values in inline JS (design §3): clicks resolve the action
     // and profile id from data attributes via the container delegation below.
+    // No title tooltip on the identity: it would just repeat the visible text.
     return `<article class="ssh-mgr-row" data-profile-id="${escAttr(p.id)}">
       <span class="ssh-mgr-server" aria-hidden="true">${Icons.iconSvg('server', 21)}</span>
-      <div class="ssh-mgr-identity" role="button" tabindex="0" data-action="edit" title="${escAttr(title)}" aria-label="编辑 ${escAttr(m.primary)}">
+      <div class="ssh-mgr-identity" role="button" tabindex="0" data-action="edit" aria-label="编辑 ${escAttr(m.primary)} — ${escAttr(metaText)}">
         <span class="ssh-mgr-primary ${m.primaryIsHost ? 'host' : ''}">${escHtml(m.primary)}</span>
         <span class="ssh-mgr-meta">${meta}${keyBadge}</span>
       </div>
@@ -585,14 +585,7 @@ function filterSSHManager(containerId, query) {
 function toggleSSHGroup(header) {
     if (header.querySelector('input')) return; // group rename in progress
     const list = header.closest('.ssh-mgr-list');
-    if (!list) {
-        // Reused by the quick-commands panel (.ssh-group-header without a
-        // manager list): keep the legacy DOM-only toggle there.
-        header.classList.toggle('collapsed');
-        const items = header.nextElementSibling;
-        if (items) items.classList.toggle('collapsed');
-        return;
-    }
+    if (!list) return;
     const view = _sshMgrView(list.id);
     // Force-expansion during search is display-only; collapse toggles resume
     // once the query is cleared, so ignore them while a query is active.
@@ -691,13 +684,19 @@ function startRenameGroup(btn, oldName) {
 // 已配密码的状态控制：dirty=true 表示用户在"已配"状态下点过修改按钮
 // 之后才允许 saveSSHEdit 真正写新密码；false 表示保留原 encryptedPassword
 let _sshPwdDirty = false;
+// Encrypted password carried into a template-created profile: the DPAPI
+// ciphertext stays decryptable for the same user, so a copied connection
+// keeps its credential without the user retyping it. Reset by openSSHEdit.
+let _sshTemplatePwd = '';
 
 function _updatePwdBtnVisibility() {
     const inputEl = document.getElementById('ssh-edit-password');
     const eyeBtn = document.getElementById('ssh-pwd-inline-eye');
     const saveBtn = document.getElementById('ssh-pwd-inline-save');
     const hasText = inputEl && inputEl.value.length > 0;
-    // 👁 和 ✓ 有内容时显示；× 始终显示（无条件退出）
+    // Eye shows whenever the field has text; ✓ only for an existing profile
+    // (a new profile is saved with the whole dialog — there is no existing
+    // profile to write inline); × is the edit-existing cancel-back path.
     if (eyeBtn) eyeBtn.classList.toggle('show', hasText);
     if (saveBtn) saveBtn.classList.toggle('show', hasText && !!_editingSSHId);
 }
@@ -722,8 +721,14 @@ function _renderPasswordField(mode) {
         if (eyeBtn) { eyeBtn.classList.remove('active'); eyeBtn.title = '显示密码'; }
         inputEl.value = '';
         inputEl.focus();
-        // × 取消始终显示
-        if (cancelBtn) cancelBtn.classList.add('show');
+        // New profile (no _editingSSHId): the password is saved together with
+        // the dialog, so the inline ✓ (saves into an existing profile) and ×
+        // (restores the "已加密保存" status row — meaningless for a new
+        // profile) both stay hidden; the eye moves to the trailing slot.
+        const isNew = !_editingSSHId;
+        if (cancelBtn) cancelBtn.classList.toggle('show', !isNew);
+        if (eyeBtn) eyeBtn.style.right = isNew ? '8px' : '44px';
+        inputEl.style.paddingRight = isNew ? '32px' : '64px';
         // 👁 和 ✓ 根据内容显示（由 input 事件驱动）
         _updatePwdBtnVisibility();
     }
@@ -778,8 +783,358 @@ async function _savePasswordInline() {
     }
 }
 
+// Open the editor as a NEW connection prefilled from an existing profile
+// (issue #5: create-from-template — the user typically only changes the
+// host). Reached from the add menu's "从模板新建" picker, never from a row
+// action. The encrypted password carries over via the "已保存" status row;
+// everything else (group/auth/login scripts/toggles) is copied verbatim.
+function openSSHEditFromTemplate(profileId) {
+    const src = (TabManager.sshProfiles || []).find(p => p.id === profileId);
+    if (!src) return;
+    openSSHEdit(true);
+    document.getElementById('ssh-edit-title').textContent = '从模板新建 SSH 连接';
+    document.getElementById('ssh-edit-name').value = src.name ? src.name + ' 副本' : '';
+    document.getElementById('ssh-edit-host').value = src.host || '';
+    document.getElementById('ssh-edit-port').value = src.port || '22';
+    document.getElementById('ssh-edit-user').value = src.username || '';
+    document.getElementById('ssh-edit-note').value = src.note || '';
+    document.getElementById('ssh-edit-keypath').value = src.privateKeyPath || '';
+    document.getElementById('ssh-edit-group').value = src.group || '';
+    document.getElementById('ssh-edit-auth').value = src.authType === 'key' ? '密钥' : '密码';
+    document.getElementById('ssh-edit-followcwd').classList.toggle('on', !!src.followCwd);
+    document.getElementById('ssh-edit-clearonconnect').classList.toggle('on', src.clearOnConnect !== false);
+    updateAuthFields();
+    _sshTemplatePwd = src.encryptedPassword || '';
+    if (_sshTemplatePwd) {
+        _sshPwdDirty = false; // untouched = keep the carried password on save
+        _renderPasswordField('view');
+    }
+    if (src.loginScripts && src.loginScripts.length > 0) {
+        src.loginScripts.forEach(s => addLoginScriptRow(s.expect, s.send, s.isRegex, s.optional));
+    }
+    // The field the user almost always edits next — preselect it (runs after
+    // openSSHEdit's own 100ms name focus).
+    setTimeout(() => {
+        const hostEl = document.getElementById('ssh-edit-host');
+        hostEl.focus();
+        hostEl.select();
+    }, 120);
+}
+
+// ── Add-connection menu + template picker (issue #5) ──
+// The "添加连接" buttons (settings page + manager overlay, both marked
+// data-ssh-add) open a small menu: blank new, or new-from-template. The
+// template choice opens a picker overlay that mirrors the session selector's
+// chrome and keyboard model but lists only SSH profiles and dispatches to
+// openSSHEditFromTemplate.
+
+let _sshAddMenu = null; // { trigger } while the add menu is open
+
+function openSSHAddMenu(trigger) {
+    const menu = document.getElementById('ssh-add-menu');
+    if (!menu || !trigger) return;
+    if (_sshAddMenu && _sshAddMenu.trigger === trigger) { closeSSHAddMenu(true); return; }
+    closeSSHAddMenu(false);
+    _sshAddMenu = { trigger };
+    const tpl = document.getElementById('ssh-add-template');
+    // No profiles yet -> nothing can serve as a template.
+    const noTemplates = (TabManager.sshProfiles || []).length === 0;
+    tpl.classList.toggle('disabled', noTemplates);
+    tpl.setAttribute('aria-disabled', String(noTemplates));
+    // Right-aligned under the trigger, clamped into the viewport. The
+    // .menu-popup base style keeps it measurable while closed (opacity 0).
+    const r = trigger.getBoundingClientRect();
+    const mw = menu.offsetWidth, mh = menu.offsetHeight;
+    menu.style.left = Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8)) + 'px';
+    menu.style.top = Math.max(8, Math.min(r.bottom + 6, window.innerHeight - mh - 8)) + 'px';
+    menu.classList.add('open');
+    trigger.setAttribute('aria-expanded', 'true');
+    document.addEventListener('keydown', _sshAddMenuKeys, true);
+    // The menu is position:fixed while its trigger lives in scrollable
+    // settings content — close on scroll/resize instead of floating detached
+    // (the toolbar menu-popup gets this for free from its full-screen
+    // backdrop; this menu has none).
+    document.addEventListener('scroll', _sshAddMenuDetach, true);
+    window.addEventListener('resize', _sshAddMenuDetach);
+}
+
+function _sshAddMenuDetach() {
+    closeSSHAddMenu(false);
+}
+
+function closeSSHAddMenu(restoreFocus) {
+    if (!_sshAddMenu) return;
+    const trigger = _sshAddMenu.trigger;
+    _sshAddMenu = null;
+    document.removeEventListener('keydown', _sshAddMenuKeys, true);
+    document.removeEventListener('scroll', _sshAddMenuDetach, true);
+    window.removeEventListener('resize', _sshAddMenuDetach);
+    const menu = document.getElementById('ssh-add-menu');
+    if (menu) menu.classList.remove('open');
+    if (trigger) trigger.setAttribute('aria-expanded', 'false');
+    if (restoreFocus && trigger && trigger.isConnected) trigger.focus({ preventScroll: true });
+}
+
+function _sshAddMenuKeys(e) {
+    const menu = document.getElementById('ssh-add-menu');
+    if (!_sshAddMenu || !menu || !menu.classList.contains('open')) {
+        document.removeEventListener('keydown', _sshAddMenuKeys, true);
+        return;
+    }
+    if (e.isComposing || e.keyCode === 229) return;
+    const items = [...menu.querySelectorAll('.menu-item:not(.disabled)')];
+    if (e.key === 'Escape') {
+        e.preventDefault(); e.stopPropagation();
+        closeSSHAddMenu(true);
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault(); e.stopPropagation();
+        if (!items.length) return;
+        const idx = items.indexOf(document.activeElement);
+        const next = e.key === 'ArrowDown'
+            ? items[(idx + 1) % items.length]
+            : items[(idx - 1 + items.length) % items.length];
+        next.focus();
+    } else if ((e.key === 'Enter' || e.key === ' ') && items.includes(document.activeElement)) {
+        e.preventDefault(); e.stopPropagation();
+        document.activeElement.click();
+    } else if (e.key === 'Tab') {
+        closeSSHAddMenu(false); // let focus move on naturally
+    }
+}
+
+// Outside clicks close the menu; clicks on any add trigger re-target or
+// toggle it inside openSSHAddMenu, so they are excluded here.
+document.addEventListener('click', (e) => {
+    if (!_sshAddMenu) return;
+    if (e.target.closest('#ssh-add-menu') || e.target.closest('[data-ssh-add]')) return;
+    closeSSHAddMenu(false);
+}, true);
+
+function sshAddMenuPick(choice) {
+    const trigger = _sshAddMenu && _sshAddMenu.trigger;
+    closeSSHAddMenu(false);
+    if (choice === 'template') {
+        if (!(TabManager.sshProfiles || []).length) return; // disabled entry guard
+        openSSHTemplatePicker(trigger);
+    } else {
+        openSSHEdit(true);
+    }
+}
+
+// Selection tracked by stable item id ('ssh_' + profile id), never by
+// filtered DOM index — same discipline as the session selector.
+let _sshTpl = null;
+
+function openSSHTemplatePicker(opener) {
+    _sshTpl = {
+        activeId: null,
+        opener: opener && opener.isConnected ? opener : null,
+        keysBound: false,
+    };
+    const search = document.getElementById('ssh-template-search');
+    search.value = '';
+    _updateSshTemplateClearBtn();
+    const items = renderSSHTemplateList('');
+    _sshTpl.activeId = items.length ? items[0].id : null;
+    _syncSshTemplateSelection(true);
+    openOverlay('overlay-ssh-template');
+    _bindSshTemplateKeys();
+    // Focus only while this exact opening is still live.
+    const openToken = _sshTpl;
+    setTimeout(() => {
+        if (_sshTpl !== openToken) return;
+        const s = document.getElementById('ssh-template-search');
+        if (s) s.focus();
+    }, 100);
+}
+
+function _closeSSHTemplatePicker(restoreFocus) {
+    _unbindSshTemplateKeys();
+    closeOverlay('overlay-ssh-template');
+    const opener = _sshTpl ? _sshTpl.opener : null;
+    _sshTpl = null;
+    if (!restoreFocus) return;
+    if (opener && opener.isConnected && opener.getClientRects().length > 0) {
+        opener.focus({ preventScroll: true });
+    } else if (typeof _refocusActiveTerminal === 'function') {
+        _refocusActiveTerminal();
+    }
+}
+
+function _bindSshTemplateKeys() {
+    if (!_sshTpl || _sshTpl.keysBound) return;
+    _sshTpl.keysBound = true;
+    document.addEventListener('keydown', _sshTemplateKeyHandler, true);
+}
+function _unbindSshTemplateKeys() {
+    if (_sshTpl) _sshTpl.keysBound = false;
+    document.removeEventListener('keydown', _sshTemplateKeyHandler, true);
+}
+
+function _sshTemplateKeyHandler(e) {
+    const overlay = document.getElementById('overlay-ssh-template');
+    if (!overlay || !overlay.classList.contains('open')) {
+        _unbindSshTemplateKeys(); // closed via an external path: self-clean
+        return;
+    }
+    // IME composition: never select or close; confirming a candidate is not
+    // "use this template".
+    if (e.isComposing || e.keyCode === 229) return;
+    const onButton = e.target && e.target.closest && e.target.closest('button');
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault(); e.stopPropagation();
+        _moveSshTemplateActive(e.key === 'ArrowDown' ? 1 : -1);
+    } else if (e.key === 'Enter') {
+        if (onButton) return; // native buttons (clear/close) run their own action
+        e.preventDefault(); e.stopPropagation();
+        if (_sshTpl && _sshTpl.activeId) selectSSHTemplate(_sshTpl.activeId);
+    } else if (e.key === 'Escape') {
+        e.preventDefault(); e.stopPropagation();
+        _closeSSHTemplatePicker(true);
+    } else if (e.key === 'Tab') {
+        _trapSshTemplateTab(e);
+    }
+}
+
+function _moveSshTemplateActive(delta) {
+    if (!_sshTpl) return;
+    const search = document.getElementById('ssh-template-search');
+    const items = getSshTemplateItems(search ? search.value : '');
+    if (!items.length) return;
+    const idx = items.findIndex(i => i.id === _sshTpl.activeId);
+    const next = idx < 0
+        ? (delta > 0 ? items[0] : items[items.length - 1])
+        : items[(idx + delta + items.length) % items.length];
+    _sshTpl.activeId = next.id;
+    _syncSshTemplateSelection(true);
+}
+
+function _trapSshTemplateTab(e) {
+    const panel = document.querySelector('#overlay-ssh-template .panel');
+    if (!panel) return;
+    const focusables = [...panel.querySelectorAll('input, button')]
+        .filter(el => !el.hidden && el.offsetParent !== null);
+    if (!focusables.length) return;
+    const first = focusables[0], last = focusables[focusables.length - 1];
+    if (!panel.contains(document.activeElement)) {
+        e.preventDefault(); first.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault(); first.focus();
+    } else if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault(); last.focus();
+    }
+}
+
+// Delegated row interaction: mousedown must not steal the search field's
+// focus; a click picks exactly the clicked row's stable id.
+(function bindSshTemplateListDelegation() {
+    const wire = () => {
+        const list = document.getElementById('ssh-template-list');
+        if (!list) return;
+        list.addEventListener('mousedown', e => {
+            if (e.target.closest('.ss-row')) e.preventDefault();
+        });
+        list.addEventListener('click', e => {
+            const row = e.target.closest('.ss-row');
+            if (!row) return;
+            const id = row.dataset.id;
+            if (id) selectSSHTemplate(id);
+        });
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire);
+    else wire();
+})();
+
+function selectSSHTemplate(itemId) {
+    const profileId = String(itemId).slice(4); // 'ssh_' prefix from buildSessionItems
+    _closeSSHTemplatePicker(false);
+    openSSHEditFromTemplate(profileId);
+}
+
+function getSshTemplateItems(filter) {
+    const items = buildSessionItems([], TabManager.sshProfiles || []);
+    return filterSessionItems(items, filter);
+}
+
+function renderSSHTemplateList(filter) {
+    const list = document.getElementById('ssh-template-list');
+    const status = document.getElementById('ssh-template-status');
+    const items = getSshTemplateItems(filter);
+    if (!items.length) {
+        list.innerHTML = '<div class="ss-empty" role="presentation"><strong>没有匹配的连接</strong><p>试试名称、地址、用户名或分组。</p></div>';
+        if (status) status.textContent = '没有匹配的连接';
+        return items;
+    }
+    list.innerHTML = items.map(_sshTemplateRowHtml).join('');
+    if (status) status.textContent = `${items.length} 个可用模板`;
+    return items;
+}
+
+// Same display algorithm as the SSH manager (ssh-display.js); only the
+// selection presentation differs.
+function _sshTemplateRowHtml(item) {
+    const selected = !!_sshTpl && _sshTpl.activeId === item.id;
+    const m = SshDisplay.sshDisplayModel(item.sshProfile);
+    const keyBadge = m.keyAuth
+        ? `<span class="ss-key" role="img" aria-label="密钥认证" title="密钥认证">${Icons.iconSvg('key', 11)}</span>` : '';
+    const primary = `<span class="ss-primary ${m.primaryIsHost ? 'host' : ''}">${escHtml(m.primary)}</span>`;
+    const meta = m.named
+        ? `<span class="mono">${escHtml(m.endpoint)}</span><span class="dot">·</span><span>${escHtml(m.user)}</span>${keyBadge}`
+        : `<span>${escHtml(m.user)}</span><span class="dot">·</span><span>端口 <span class="mono">${escHtml(String(m.port))}</span></span>${keyBadge}`;
+    const titleText = m.named ? `${m.primary} — ${m.endpoint} · ${m.user}` : `${m.primary} — ${m.user} · 端口 ${m.port}`;
+    const group = item.badge || '';
+    return `<div class="ss-row" role="option" id="ssh-tpl-opt-${escAttr(item.id)}" aria-selected="${selected}" data-id="${escAttr(item.id)}" title="${escAttr(titleText)}">
+      <span class="ss-row-icon" aria-hidden="true">${Icons.iconSvg('server', 19)}</span>
+      <span class="ss-identity">${primary}<span class="ss-meta">${meta}</span></span>
+      ${group ? `<span class="ss-group-name">${escHtml(group)}</span>` : ''}
+      <span class="ss-open" aria-hidden="true">${Icons.iconSvg('enter-arrow', 15)}</span>
+    </div>`;
+}
+
+function _syncSshTemplateSelection(scroll) {
+    const list = document.getElementById('ssh-template-list');
+    const search = document.getElementById('ssh-template-search');
+    const activeId = _sshTpl ? _sshTpl.activeId : null;
+    let activeEl = null;
+    list.querySelectorAll('.ss-row').forEach(row => {
+        const on = !!activeId && row.dataset.id === activeId;
+        row.setAttribute('aria-selected', String(on));
+        if (on) activeEl = row;
+    });
+    if (search) {
+        if (activeEl) search.setAttribute('aria-activedescendant', activeEl.id);
+        else search.removeAttribute('aria-activedescendant');
+    }
+    if (activeEl && scroll) activeEl.scrollIntoView({ block: 'nearest' });
+}
+
+function filterSSHTemplates(query) {
+    const items = renderSSHTemplateList(query || '');
+    _updateSshTemplateClearBtn();
+    if (!_sshTpl) return;
+    if (!(_sshTpl.activeId && items.some(i => i.id === _sshTpl.activeId))) {
+        _sshTpl.activeId = items.length ? items[0].id : null;
+    }
+    _syncSshTemplateSelection(true);
+}
+
+function _updateSshTemplateClearBtn() {
+    const search = document.getElementById('ssh-template-search');
+    const clear = document.getElementById('ssh-template-clear');
+    if (clear && search) clear.hidden = !search.value;
+}
+
+function clearSSHTemplateSearch() {
+    const search = document.getElementById('ssh-template-search');
+    if (!search) return;
+    search.value = '';
+    filterSSHTemplates('');
+    search.focus();
+}
+
 function openSSHEdit(isNew, profileId) {
     _editingSSHId = isNew ? null : profileId;
+    _sshTemplatePwd = '';
     document.getElementById('ssh-edit-title').textContent = isNew ? '添加 SSH 连接' : '编辑 SSH 连接';
 
     // Remove old custom dropdown wrappers
@@ -816,19 +1171,38 @@ function openSSHEdit(isNew, profileId) {
             if (e.key === 'Escape') {
                 e.preventDefault();
                 e.stopPropagation();
+                if (!_editingSSHId) {
+                    // New profile: nothing to cancel back to. The global Esc
+                    // handler skips inline-edit inputs, so close the dialog
+                    // here — same as Esc on the name/host/user fields.
+                    closeAllOverlays();
+                    const tab = TabManager.getActive();
+                    if (tab && tab.term) setTimeout(() => tab.term.focus(), 50);
+                    return;
+                }
                 _sshPwdDirty = false;
                 _renderPasswordField('view');
                 showToast('已取消密码修改');
             } else if (e.key === 'Enter') {
                 e.preventDefault();
                 e.stopPropagation();
-                if (document.getElementById('ssh-pwd-inline-save').classList.contains('show')) {
-                    _savePasswordInline();
+                if (_editingSSHId) {
+                    if (document.getElementById('ssh-pwd-inline-save').classList.contains('show')) {
+                        _savePasswordInline();
+                    }
+                } else {
+                    // New profile: Enter saves the whole dialog (the password
+                    // is read from the input by saveSSHEdit).
+                    saveSSHEdit();
                 }
             }
         };
         pwdInput.onblur = () => {
-            if (_sshPwdDirty) {
+            // Only the edit-existing flow cancels back to the status row on
+            // blur. For a new profile the typed password must survive until
+            // the dialog saves — discarding it here silently saved the
+            // profile without a password.
+            if (_editingSSHId && _sshPwdDirty) {
                 _sshPwdDirty = false;
                 _renderPasswordField('view');
                 showToast('已取消密码修改');
@@ -1116,7 +1490,9 @@ async function saveSSHEdit() {
             showToast('密码加密失败', true);
         }
     } else {
-        await doSave(_editingSSHId ? (TabManager.sshProfiles.find(p => p.id === _editingSSHId) || {}).encryptedPassword || '' : '');
+        // No new password typed: editing keeps the profile's own ciphertext;
+        // a template-created profile keeps the template's carried ciphertext.
+        await doSave(_editingSSHId ? (TabManager.sshProfiles.find(p => p.id === _editingSSHId) || {}).encryptedPassword || '' : _sshTemplatePwd || '');
     }
 }
 

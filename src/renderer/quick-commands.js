@@ -124,52 +124,202 @@ function toggleQCAutoEnter() {
     persistSettings();
 }
 
+// ── 设置页快捷命令列表（对齐 SSH 设置页：分节标题 + 每组一张设置卡片） ──
+// View state survives redraws: query text and the collapsed-group set.
+const _qcSettingsView = { query: '', collapsed: new Set() };
+
+// Focus continuity across a redraw: remember the focused control, re-focus
+// the same logical control afterwards; a vanished control falls back to the
+// page's stable search field (never strands focus on a removed node).
+function _qcFocusSnapshot(listEl) {
+    const el = document.activeElement;
+    if (!el || !listEl || !listEl.contains(el)) return null;
+    const row = el.closest('.ssh-mgr-row');
+    if (row) {
+        // Identity (row body) and icon buttons both carry data-action; record
+        // which kind held focus so the restore lands on the same control.
+        if (el.closest('.ssh-mgr-identity') && row.contains(el)) {
+            return { qcId: row.dataset.qcId, action: '' };
+        }
+        const btn = el.closest('.ssh-mgr-btn');
+        if (btn && row.contains(btn)) {
+            return { qcId: row.dataset.qcId, action: btn.dataset.action || '' };
+        }
+        return { qcId: row.dataset.qcId, action: '' };
+    }
+    const group = el.closest('.ssh-mgr-group-title');
+    if (group) return { group: group.dataset.group || '' };
+    return null;
+}
+function _qcFocusRestore(listEl, snap) {
+    if (!snap) return;
+    let target = null;
+    if (snap.qcId) {
+        const row = [...listEl.querySelectorAll('.ssh-mgr-row')]
+            .find(r => r.dataset.qcId === snap.qcId);
+        if (row) {
+            const known = ['edit', 'delete'].includes(snap.action);
+            target = snap.action === '' || !known
+                ? row.querySelector('.ssh-mgr-identity')
+                : row.querySelector(`.ssh-mgr-btn[data-action="${snap.action}"]`);
+        }
+    } else if (snap.group) {
+        target = [...listEl.querySelectorAll('.ssh-mgr-group-title')]
+            .find(h => h.dataset.group === snap.group);
+    }
+    if (target) { target.focus({ preventScroll: true }); return; }
+    const search = document.querySelector('[data-qc-search]');
+    if (search) search.focus({ preventScroll: true });
+}
+
+// No command values in inline JS: clicks resolve the action and command id
+// from data attributes via the container delegation below. No title tooltip
+// on the identity: it would just repeat the visible text.
+function _qcRowHtml(c) {
+    const name = c.name || '';
+    return `<article class="ssh-mgr-row" data-qc-id="${escAttr(c.id)}">
+      <span class="ssh-mgr-server" aria-hidden="true">${Icons.iconSvg('command', 21)}</span>
+      <div class="ssh-mgr-identity" role="button" tabindex="0" data-action="edit" aria-label="编辑 ${escAttr(name)}">
+        <span class="ssh-mgr-primary">${escHtml(name)}</span>
+        <span class="ssh-mgr-meta"><span class="mono">${escHtml(c.command || '')}</span></span>
+      </div>
+      <div class="ssh-mgr-actions">
+        <button class="ssh-mgr-btn" data-action="edit" title="编辑" aria-label="编辑 ${escAttr(name)}">${Icons.iconSvg('pencil', 14)}</button>
+        <button class="ssh-mgr-btn danger" data-action="delete" title="删除" aria-label="删除 ${escAttr(name)}">${Icons.iconSvg('trash', 14)}</button>
+      </div>
+    </article>`;
+}
+
+function _qcGroupHtml(gname, matched, expanded) {
+    const rows = expanded ? matched.map(_qcRowHtml).join('') : '';
+    return `<section class="ssh-mgr-group" aria-label="${escAttr(gname)}">
+      <div class="ssh-mgr-group-title${expanded ? '' : ' collapsed'}" role="button" tabindex="0" aria-expanded="${expanded}"
+           data-group="${escAttr(gname)}" onclick="toggleQCGroup(this)" onkeydown="qcGroupHeaderKey(event)">
+        <svg class="group-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+        <span class="group-name-text">${escHtml(gname)}</span>
+        <button class="group-rename" title="重命名分组" aria-label="重命名分组 ${escAttr(gname)}" onclick="event.stopPropagation();startRenameQCGroup(this)">${Icons.iconSvg('pencil', 11)}</button>
+        <span class="ssh-group-count">${matched.length}</span>
+        <span class="group-rule" aria-hidden="true"></span>
+      </div>
+      <div class="ssh-mgr-group-items${expanded ? '' : ' collapsed'}">${rows}</div>
+    </section>`;
+}
+
+function _qcUpdateCount(matched, total) {
+    const el = document.querySelector('[data-qc-count]');
+    if (!el) return;
+    el.textContent = matched === total ? `${total} 个命令` : `${matched} / ${total} 个命令`;
+}
+
 function renderQCCommandsList() {
     const container = document.getElementById('qc-commands-list');
     if (!container) return;
     // 同步“末尾回车自动执行”开关状态
     const qcToggle = document.getElementById('qc-auto-enter');
     if (qcToggle) qcToggle.classList.toggle('on', !!_settingsConfig.qcAutoEnter);
+    const snap = _qcFocusSnapshot(container);
+    const querying = _qcSettingsView.query.trim().length > 0;
     if (_qcCommands.length === 0) {
-        container.innerHTML = '<div style="padding:30px;text-align:center;color:rgba(171,178,191,0.25);font-size:13px">暂无命令</div>';
+        container.innerHTML = `<div class="ssh-mgr-empty">暂无命令
+          <div class="ssh-mgr-empty-hint">通过 Ctrl+Shift+P 快速执行</div>
+          <div class="ssh-mgr-empty-actions"><button class="btn-primary" onclick="openQCEdit(true)">+ 添加第一个命令</button></div></div>`;
+        _qcUpdateCount(0, 0);
+        _qcFocusRestore(container, snap);
         return;
     }
-    // Group by group name (collapsible, like SSH manager)
     const groups = {};
     _qcCommands.forEach(c => {
         const g = c.group || '未分组';
-        if (!groups[g]) groups[g] = [];
-        groups[g].push(c);
+        (groups[g] = groups[g] || []).push(c);
     });
-    let html = '';
+    let html = '', totalMatches = 0;
     Object.keys(groups).sort().forEach(g => {
-        html += `<div class="ssh-group">
-          <div class="ssh-group-header" onclick="toggleSSHGroup(this)">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
-            <span class="group-name-text">${escHtml(g)}</span>
-            <button class="group-rename" title="重命名分组" onclick="event.stopPropagation();startRenameQCGroup(this,'${escJsString(g)}')"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-            <span class="ssh-group-count">${groups[g].length}</span>
-          </div>
-          <div class="ssh-group-items">`;
-        groups[g].forEach(c => {
-            html += `<div class="ssh-item">
-              <div class="ssh-item-icon" style="background:rgba(var(--accent-rgb),0.08);color:rgb(var(--accent-rgb))">${Icons.iconSvg('command', 14)}</div>
-              <div class="ssh-item-info" style="cursor:pointer" onclick="openQCEdit(false,'${c.id}')">
-                <div class="ssh-item-name">${escHtml(c.name)}</div>
-                <div class="ssh-item-detail">${escHtml(c.command)}</div>
-              </div>
-              <button class="ssh-item-btn" title="编辑" onclick="openQCEdit(false,'${c.id}')"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-              <button class="ssh-item-btn danger" title="删除" onclick="deleteQC('${c.id}')">×</button>
-            </div>`;
-        });
-        html += '</div></div>';
+        const matched = filterQuickCommands(groups[g], _qcSettingsView.query);
+        if (!matched.length) return;
+        totalMatches += matched.length;
+        // While querying, matched groups are force-expanded so results stay
+        // visible; the collapse set itself is untouched and reappears as-is
+        // once the query is cleared.
+        const expanded = querying || !_qcSettingsView.collapsed.has(g);
+        html += _qcGroupHtml(g, matched, expanded);
     });
-    container.innerHTML = html;
+    container.innerHTML = totalMatches === 0
+        ? `<div class="ssh-mgr-empty">没有匹配的命令<div class="ssh-mgr-empty-hint">试试调整或清空搜索。</div></div>`
+        : html;
+    _qcUpdateCount(totalMatches, _qcCommands.length);
+    _qcFocusRestore(container, snap);
 }
 
-function startRenameQCGroup(btn, oldName) {
-    const header = btn.closest('.ssh-group-header');
+function filterQCCommands(query) {
+    _qcSettingsView.query = query || '';
+    renderQCCommandsList();
+}
+
+function toggleQCGroup(header) {
+    if (header.querySelector('input')) return; // group rename in progress
+    // Force-expansion during search is display-only; collapse toggles resume
+    // once the query is cleared, so ignore them while a query is active.
+    if (_qcSettingsView.query.trim()) return;
+    const gname = header.dataset.group || '';
+    if (_qcSettingsView.collapsed.has(gname)) _qcSettingsView.collapsed.delete(gname);
+    else _qcSettingsView.collapsed.add(gname);
+    // Re-render through the single render path: a collapsed group then has no
+    // rows in the DOM at all, and focus continuity comes from the
+    // snapshot/restore inside the renderer.
+    renderQCCommandsList();
+}
+
+function qcGroupHeaderKey(e) {
+    if (e.target !== e.currentTarget) return; // inner rename button keeps native behavior
+    if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleQCGroup(e.currentTarget);
+    }
+}
+
+// Delegated row interaction for the settings list: no inline handlers, so
+// command values (ids, names) never enter an HTML/JS quoting context. The
+// container deliberately does NOT carry .ssh-mgr-list — that class is the SSH
+// profiles delegation hook and would double-handle these clicks.
+(function bindQCSettingsDelegation() {
+    const wire = () => {
+        const list = document.getElementById('qc-commands-list');
+        if (!list || list._qcBound) return;
+        list._qcBound = true;
+        list.addEventListener('click', e => {
+            const row = e.target.closest('.ssh-mgr-row');
+            if (!row || !list.contains(row)) return;
+            const actionEl = e.target.closest('[data-action]');
+            if (!actionEl || !row.contains(actionEl)) return;
+            const id = row.dataset.qcId;
+            if (!id) return;
+            const action = actionEl.dataset.action;
+            if (action === 'edit') openQCEdit(false, id);
+            else if (action === 'delete') deleteQC(id);
+        });
+        list.addEventListener('keydown', e => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            const identity = e.target.closest('.ssh-mgr-identity');
+            if (!identity || !list.contains(identity)) return;
+            const row = identity.closest('.ssh-mgr-row');
+            const id = row && row.dataset.qcId;
+            if (!id) return;
+            e.preventDefault();
+            openQCEdit(false, id);
+        });
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire);
+    else wire();
+})();
+
+function startRenameQCGroup(btn) {
+    const header = btn.closest('.ssh-mgr-group-title');
+    if (!header) return;
     const nameSpan = header.querySelector('.group-name-text');
+    if (!nameSpan) return;
+    // Derive the name from the header's data attribute so group names never
+    // enter an inline-JS quoting context.
+    const oldName = header.dataset.group || '';
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'group-name-input inline-edit';
@@ -190,7 +340,7 @@ function startRenameQCGroup(btn, oldName) {
         span.className = 'group-name-text';
         span.textContent = newName || oldName;
         input.replaceWith(span);
-        btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+        btn.innerHTML = Icons.iconSvg('pencil', 11);
         btn.style.color = '';
         // 还原原始 onclick（被 startRenameQCGroup 覆盖的 HTML 属性）
         btn.onclick = null;
@@ -198,7 +348,7 @@ function startRenameQCGroup(btn, oldName) {
 
         if (save && newName && newName !== oldName) {
             _qcCommands.forEach(c => {
-                if (c.group === oldName) c.group = newName;
+                if ((c.group || '未分组') === oldName) c.group = newName;
             });
             saveQuickCommands();
             renderQCCommandsList();
@@ -210,18 +360,19 @@ function startRenameQCGroup(btn, oldName) {
     input.addEventListener('blur', () => finish(true));
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
-        if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
     });
 }
 
+// Collapse/expand-all applies to the settings list only.
 function collapseAllQC() {
-    document.querySelectorAll('#qc-commands-list .ssh-group-header').forEach(h => h.classList.add('collapsed'));
-    document.querySelectorAll('#qc-commands-list .ssh-group-items').forEach(i => i.classList.add('collapsed'));
+    _qcCommands.forEach(c => _qcSettingsView.collapsed.add(c.group || '未分组'));
+    renderQCCommandsList();
 }
 
 function expandAllQC() {
-    document.querySelectorAll('#qc-commands-list .ssh-group-header').forEach(h => h.classList.remove('collapsed'));
-    document.querySelectorAll('#qc-commands-list .ssh-group-items').forEach(i => i.classList.remove('collapsed'));
+    _qcSettingsView.collapsed.clear();
+    renderQCCommandsList();
 }
 
 function deleteQC(id) {

@@ -1905,14 +1905,23 @@ pub async fn pty_destroy(
 // ── Config persistence commands ──
 
 #[tauri::command]
-pub fn save_last_tabs(args: Vec<Value>) -> Result<(), String> {
+pub async fn save_last_tabs(args: Vec<Value>) -> Result<(), String> {
     let tabs = args.into_iter().next().unwrap_or(json!([]));
-    let mut config = load_config();
-    if let Value::Object(ref mut c) = config {
+    // Runs every 15s carrying full scrollback payloads: keep the config read +
+    // rewrite off the window UI thread, otherwise input stalls until it ends.
+    tokio::task::spawn_blocking(move || {
+        // Hold the lock across the whole load->insert->save: off the main
+        // thread this genuinely interleaves with the other config writers, so
+        // a narrow insert-only scope would lose their updates on disk.
         let _config_guard = CONFIG_WRITE_LOCK.lock();
-        c.insert("lastTabs".into(), tabs);
-    }
-    save_config(&config);
+        let mut config = load_config();
+        if let Value::Object(ref mut c) = config {
+            c.insert("lastTabs".into(), tabs);
+        }
+        save_config(&config);
+    })
+    .await
+    .map_err(|e| format!("save last tabs task: {e}"))?;
     Ok(())
 }
 
@@ -2503,7 +2512,7 @@ pub async fn check_update(args: Vec<Value>) -> Result<Value, String> {
                     "none": true,
                 }));
             }
-            Err(e) => return Err(format!("update check failed: {e}")),
+            Err(e) => return Err(format!("update check failed [{}]: {e}", update_net_error_tag(&e))),
         };
         let body: Value = resp
             .body_mut()
@@ -2769,6 +2778,21 @@ fn update_http_agent(timeout_secs: u64) -> ureq::Agent {
         .into()
 }
 
+/// Classify update-channel network errors into a stable tag the frontend maps
+/// to friendly guidance — raw ureq displays like "timeout: global" mean
+/// nothing to users on networks that cannot reach GitHub. The tag derives
+/// from the typed error, not the display string, so it survives ureq upgrades.
+fn update_net_error_tag(e: &ureq::Error) -> &'static str {
+    match e {
+        ureq::Error::Timeout(_) => "timeout",
+        ureq::Error::HostNotFound => "resolve",
+        ureq::Error::Io(io) if io.kind() == std::io::ErrorKind::TimedOut => "timeout",
+        ureq::Error::Io(_) => "connect",
+        ureq::Error::StatusCode(_) => "http",
+        _ => "other",
+    }
+}
+
 /// Fetch the latest-release JSON from GitHub (shared by check/download).
 fn fetch_latest_release() -> Result<Value, String> {
     let agent = update_http_agent(10);
@@ -2777,7 +2801,7 @@ fn fetch_latest_release() -> Result<Value, String> {
         .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
         .header("Accept", "application/vnd.github+json")
         .call();
-    let mut resp = resp.map_err(|e| format!("update: release query failed: {e}"))?;
+    let mut resp = resp.map_err(|e| format!("update: release query failed [{}]: {e}", update_net_error_tag(&e)))?;
     resp.body_mut()
         .read_json()
         .map_err(|e| format!("update: bad release json: {e}"))
@@ -2809,7 +2833,7 @@ fn download_setup_exe(url: &str, name: &str, size_hint: u64, sha256: &str) -> Re
         .get(url)
         .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
         .call()
-        .map_err(|e| format!("update: download failed: {e}"))?;
+        .map_err(|e| format!("update: download failed [{}]: {e}", update_net_error_tag(&e)))?;
     let total = resp
         .headers()
         .get("content-length")
@@ -3103,11 +3127,16 @@ pub fn open_url(args: Vec<Value>) -> Result<Value, String> {
 
 
 #[tauri::command]
-pub fn get_system_fonts(args: Vec<Value>) -> Result<Value, String> {
+pub async fn get_system_fonts(args: Vec<Value>) -> Result<Value, String> {
     let _ = args;
-    // 用 Win32 EnumFontFamiliesExW 枚举系统字体，避免 spawn 控制台子进程
-    // （GUI 进程 spawn powershell 会触发系统默认终端激活，弹出 Windows Terminal）
-    let fonts = filter_system_fonts(enumerate_system_fonts());
+    // Enumerate via Win32 EnumFontFamiliesExW instead of spawning a console
+    // subprocess (a GUI process spawning powershell activates the default
+    // terminal and pops open Windows Terminal). Enumeration walks every
+    // installed font; run it off the UI thread so the window message loop
+    // (and with it all input delivery) is not blocked.
+    let fonts = tokio::task::spawn_blocking(|| filter_system_fonts(enumerate_system_fonts()))
+        .await
+        .map_err(|e| format!("font enumeration task: {e}"))?;
     if fonts.is_empty() {
         return Ok(json!([
             "JetBrains Mono",
@@ -3144,10 +3173,20 @@ fn enumerate_system_fonts() -> Vec<String> {
         };
         use winapi::um::winuser::{GetDC, ReleaseDC};
 
-        let mut fonts: Vec<String> = Vec::new();
+        // Membership set alongside the output vec: the enum callback fires
+        // once per (face, charset) pair, and a Vec::contains dedup there is
+        // O(n^2) over every installed font.
+        struct Collector {
+            seen: std::collections::HashSet<String>,
+            fonts: Vec<String>,
+        }
+        let mut collector = Collector {
+            seen: std::collections::HashSet::new(),
+            fonts: Vec::new(),
+        };
         let hdc = GetDC(std::ptr::null_mut());
         if hdc.is_null() {
-            return fonts;
+            return collector.fonts;
         }
         let mut lf: LOGFONTW = std::mem::zeroed();
         lf.lfCharSet = 1; // DEFAULT_CHARSET
@@ -3157,7 +3196,7 @@ fn enumerate_system_fonts() -> Vec<String> {
             _font_type: DWORD,
             lparam: LPARAM,
         ) -> i32 {
-            let fonts = &mut *(lparam as *mut Vec<String>);
+            let collector = &mut *(lparam as *mut Collector);
             let face = (*lplf).lfFaceName;
             let mut len = 0usize;
             while len < LF_FACESIZE && face[len] != 0 {
@@ -3165,8 +3204,8 @@ fn enumerate_system_fonts() -> Vec<String> {
             }
             if len > 0 {
                 let name = String::from_utf16_lossy(&face[..len]);
-                if !fonts.contains(&name) {
-                    fonts.push(name);
+                if collector.seen.insert(name.clone()) {
+                    collector.fonts.push(name);
                 }
             }
             1
@@ -3176,11 +3215,11 @@ fn enumerate_system_fonts() -> Vec<String> {
             hdc,
             &mut lf,
             proc,
-            &mut fonts as *mut Vec<String> as LPARAM,
+            &mut collector as *mut Collector as LPARAM,
             0,
         );
         ReleaseDC(std::ptr::null_mut(), hdc);
-        fonts
+        collector.fonts
     }
 }
 

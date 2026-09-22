@@ -88,7 +88,7 @@ body.tab-dragging{user-select:none}
 .tab.drag-over-left{box-shadow:inset 2px 0 0 0 rgba(var(--accent-rgb),0.6)}
 .tab.drag-over-right{box-shadow:inset -2px 0 0 0 rgba(var(--accent-rgb),0.6)}
 .tab-rename-input{background:rgba(var(--accent-rgb),0.1);border:1px solid rgba(var(--accent-rgb),0.35);border-radius:6px;padding:2px 6px;color:var(--text-1);font-size:13px;font-family:inherit;outline:none;width:110px}
-.tab-context-menu{position:fixed;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float);z-index:200;overflow:hidden;min-width:180px;padding:4px;user-select:none}
+.tab-context-menu{position:fixed;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);z-index:200;overflow:hidden;min-width:180px;padding:4px;user-select:none}
 .tab-context-item{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:8px 12px;font-size:12px;color:var(--text-2);cursor:pointer;border-radius:8px;transition:background 0.12s}
 .tab-context-item:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 .tab-context-shortcut{font-size:10px;font-family:inherit;color:var(--text-3);background:rgba(255,255,255,0.05);padding:2px 7px;border-radius:4px;flex-shrink:0}
@@ -379,7 +379,7 @@ body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
 .menu-backdrop.open{display:block}
 /* Suppress hover on tabbar buttons while menu is open */
 body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none!important;color:var(--text-3)!important}
-.menu-popup{position:fixed;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float);z-index:300;min-width:220px;padding:6px;opacity:0;pointer-events:none;transform:translateY(-8px);transition:opacity 0.2s cubic-bezier(0.05,0.7,0.1,1),transform 0.2s cubic-bezier(0.05,0.7,0.1,1);user-select:none}
+.menu-popup{position:fixed;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);z-index:300;min-width:220px;padding:6px;opacity:0;pointer-events:none;transform:translateY(-8px);transition:opacity 0.2s cubic-bezier(0.05,0.7,0.1,1),transform 0.2s cubic-bezier(0.05,0.7,0.1,1);user-select:none}
 .menu-popup.open{opacity:1;pointer-events:auto;transform:translateY(0)}
 .menu-item{display:flex;align-items:center;gap:12px;padding:8px 12px;font-size:14px;color:var(--text-2);cursor:pointer;border-radius:8px;transition:background 0.12s,color 0.12s;user-select:none}
 .menu-item:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
@@ -415,11 +415,15 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 /* V3 分组标题（快捷命令/命令面板共用），镜像 .ss-section-label */
 .v3-section{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--text-3);min-height:29px;padding:1px 13px 5px;user-select:none}
 .v3-section:not(:first-child){margin-top:12px;padding-top:3px}
-/* V3 表项，镜像 .ss-row：透明边框预留选中描边，左侧 accent 条标示选中 */
-.v3-item{position:relative;display:flex;align-items:center;gap:11px;padding:9px 11px;border:1px solid transparent;border-radius:7px;cursor:pointer;user-select:none;margin-bottom:1px;transition:background 0.12s}
+/* V3 表项，镜像 .ss-row：透明边框预留选中描边，左侧 accent 条标示选中。
+   选中态的三处视觉变化（背景/描边/指示条）共用一段 70ms ease-out 同步过渡；
+   指示条常驻渲染、用 opacity 渐显——伪元素随选中态创建/销毁是无法过渡的，
+   异步出现正是快速切换时“拖沓感”的来源。 */
+.v3-item{position:relative;display:flex;align-items:center;gap:11px;padding:9px 11px;border:1px solid transparent;border-radius:7px;cursor:pointer;user-select:none;margin-bottom:1px;transition:background-color .07s ease-out,border-color .07s ease-out}
 .v3-item:hover:not([data-selected]){background:rgba(255,255,255,.045)}
 .v3-item[data-selected]{background:rgba(var(--accent-rgb),.14);border-color:rgba(var(--accent-rgb),.28)}
-.v3-item[data-selected]::before{content:"";position:absolute;left:-1px;top:9px;bottom:9px;width:2px;background:rgb(var(--accent-rgb));border-radius:2px}
+.v3-item::before{content:"";position:absolute;left:-1px;top:9px;bottom:9px;width:2px;background:rgb(var(--accent-rgb));border-radius:2px;opacity:0;transition:opacity .07s ease-out}
+.v3-item[data-selected]::before{opacity:1}
 .v3-name{flex:1;min-width:0;font-size:13.5px;font-weight:500;line-height:19px;color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* No hardcoded font stack: the command text inherits the UI font, which in
    follow mode IS the configured terminal font. */
@@ -629,39 +633,51 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ssh-mgr-empty-actions{margin-top:14px}
 
 /* ── Settings host only: section titles + one settings-card per group ──
-   (design/ssh-settings-card-design.md; the overlay manager stays flat) */
-.ssh-settings-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:4px}
+   (design/ssh-settings-card-design.md; the overlay manager stays flat).
+   Shared by the SSH and quick-commands settings pages: both mount the
+   ssh-mgr-* structure inside their own .settings-card-list container. */
+.settings-page-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:4px}
 /* Chained to .btn-primary (defined later in this file) so the 9px radius and
    32px height actually win the cascade. */
-.btn-primary.ssh-settings-add{height:32px;border-radius:9px;padding:0 14px;flex-shrink:0}
-.ssh-mgr-searchrow.ssh-settings-toolbar{padding:0 2px;margin:14px 0 4px;flex-wrap:wrap;row-gap:8px}
-.ssh-settings-toolbar .ssh-mgr-search{border:1px solid rgba(255,255,255,.075);border-radius:9px;background:rgba(255,255,255,.025)}
+.btn-primary.settings-primary-add{height:32px;border-radius:9px;padding:0 14px;flex-shrink:0}
+.ssh-add-chevron{margin-left:5px;vertical-align:-1px}
+.ssh-mgr-searchrow.settings-toolbar{padding:0 2px;margin:14px 0 4px;flex-wrap:wrap;row-gap:8px}
+.settings-toolbar .ssh-mgr-search{border:1px solid rgba(255,255,255,.075);border-radius:9px;background:rgba(255,255,255,.025)}
 /* The scoped border above sits after the shared :focus-within rule at equal
    specificity — restate it or the settings search loses its focus border. */
-.ssh-settings-toolbar .ssh-mgr-search:focus-within{border-color:rgba(var(--accent-rgb),.55)}
-.ssh-settings-toolbar-actions{margin-left:auto;display:flex;gap:14px}
-.ssh-quiet-action{background:none;border:none;padding:4px 2px;font-size:11px;font-family:inherit;color:var(--text-2);cursor:pointer;border-radius:4px;transition:color .12s}
-.ssh-quiet-action:hover{color:rgb(var(--accent-rgb))}
+.settings-toolbar .ssh-mgr-search:focus-within{border-color:rgba(var(--accent-rgb),.55)}
+.settings-toolbar-actions{margin-left:auto;display:flex;gap:14px}
+.settings-quiet-action{background:none;border:none;padding:4px 2px;font-size:11px;font-family:inherit;color:var(--text-2);cursor:pointer;border-radius:4px;transition:color .12s}
+.settings-quiet-action:hover{color:rgb(var(--accent-rgb))}
 /* Group title reads as a settings-section (structure layer), not a strip:
    12/600 + tracking, no rule line, quiet hover. min-height keeps the rename
    inline editor from growing the title. */
-#settings-ssh-list .ssh-mgr-group{margin-bottom:0}
-#settings-ssh-list .ssh-mgr-group-title{margin:30px 0 10px;padding:1px 2px;border-radius:4px;font-weight:600;letter-spacing:.06em;gap:7px;min-height:22px;box-sizing:border-box}
-#settings-ssh-list .ssh-mgr-group:first-child .ssh-mgr-group-title{margin-top:12px}
-#settings-ssh-list .ssh-mgr-group-title:hover{background:none;color:var(--text-1)}
-#settings-ssh-list .ssh-mgr-group-title .group-rule{display:none}
-#settings-ssh-list .ssh-mgr-group-title .group-name-input{font-size:12px;padding:1px 8px}
+.settings-card-list .ssh-mgr-group{margin-bottom:0}
+.settings-card-list .ssh-mgr-group-title{margin:30px 0 10px;padding:1px 2px;border-radius:4px;font-weight:600;letter-spacing:.06em;gap:7px;min-height:22px;box-sizing:border-box}
+.settings-card-list .ssh-mgr-group:first-child .ssh-mgr-group-title{margin-top:12px}
+.settings-card-list .ssh-mgr-group-title:hover{background:none;color:var(--text-1)}
+.settings-card-list .ssh-mgr-group-title .group-rule{display:none}
+.settings-card-list .ssh-mgr-group-title .group-name-input{font-size:12px;padding:1px 8px}
 /* One card per group; a collapsed group hides the whole card (the shared
    .collapsed{display:none} rule), leaving just the section title. */
-#settings-ssh-list .ssh-mgr-group-items{background:var(--surface-card);border-radius:14px;padding:6px 16px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);gap:0}
-#settings-ssh-list .ssh-mgr-row{padding:10px 0;min-height:62px;gap:12px}
+.settings-card-list .ssh-mgr-group-items{background:var(--surface-card);border-radius:14px;padding:6px 16px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);gap:0}
+/* Card-row hover (user-picked combo of prototype V2+V3): a rounded wash for
+   row-level positioning plus an accent edge bar for direction — the same
+   language as the overlay list's selected row. The row box extends 8px past
+   its content so the wash never touches the card edge; the flat overlay
+   manager keeps its full-width hover unchanged. */
+.settings-card-list .ssh-mgr-row{position:relative;border-radius:9px;margin:0 -8px;padding:10px 8px;min-height:62px;gap:12px;transition:background-color 120ms ease-out}
+.settings-card-list .ssh-mgr-row::before{content:"";position:absolute;left:1px;top:50%;translate:0 -50%;width:3px;height:26px;border-radius:2px;background:rgb(var(--accent-rgb));opacity:0;scale:1 .4;transition:opacity 140ms ease-out,scale 140ms ease-out}
+.settings-card-list .ssh-mgr-row:hover{background:rgba(255,255,255,.05)}
+.settings-card-list .ssh-mgr-row:hover::before{opacity:.85;scale:1 1}
+.settings-card-list .ssh-mgr-server{transition:color 120ms ease-out}
+.settings-card-list .ssh-mgr-row:hover .ssh-mgr-server{color:var(--text-2)}
 
 @media(max-width:560px){
   .ssh-mgr-searchrow{padding-left:12px;padding-right:12px}
-  .ssh-settings-toolbar-actions{width:100%;justify-content:flex-end}
-  #settings-ssh-list .ssh-mgr-group-items{padding:6px 12px}
+  .settings-toolbar-actions{width:100%;justify-content:flex-end}
+  .settings-card-list .ssh-mgr-group-items{padding:6px 12px}
   .ssh-mgr-row{padding:10px 8px;gap:8px}
-  #settings-ssh-list .ssh-mgr-row{padding:10px 0}
   .ssh-mgr-actions{margin-left:6px;gap:2px}
   .ssh-mgr-btn{width:28px;height:28px}
   .ss-header{padding:17px 15px 12px}
@@ -713,7 +729,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .cust-dropdown.open .dd-trigger::after{transform:translateY(-50%) rotate(180deg)}
 .cust-dropdown .dd-trigger:hover{background:rgba(255,255,255,0.07)}
 .cust-dropdown.open .dd-trigger{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
-.cust-dropdown .dd-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float);z-index:50;overflow:hidden;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 0.2s,transform 0.2s;max-height:240px;overflow-y:auto}
+.cust-dropdown .dd-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);z-index:50;overflow:hidden;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 0.2s,transform 0.2s;max-height:240px;overflow-y:auto}
 .cust-dropdown.open .dd-menu{opacity:1;pointer-events:auto;transform:translateY(0)}
 .cust-dropdown .dd-option{padding:8px 12px;font-size:14px;color:var(--text-2);cursor:pointer;transition:background 0.12s;font-family:inherit}
 .cust-dropdown .dd-option:hover{background:rgba(var(--accent-rgb),0.1);color:var(--text-1)}
@@ -725,7 +741,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .cust-combo input{background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:10px;padding:8px 12px;color:var(--text-1);font-size:12px;font-family:inherit;outline:none;transition:all 0.12s;width:100%}
 .cust-combo input:focus{border-color:rgba(var(--accent-rgb),0.4);background-color:rgba(var(--accent-rgb),0.08)}
 .cust-combo input::placeholder{color:var(--text-3)}
-.cust-combo .dd-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float);z-index:50;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 0.2s,transform 0.2s;max-height:180px;overflow-y:auto}
+.cust-combo .dd-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);z-index:50;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 0.2s,transform 0.2s;max-height:180px;overflow-y:auto}
 .cust-combo .dd-menu.open{opacity:1;pointer-events:auto;transform:translateY(0)}
 .cust-combo .dd-option{padding:8px 12px;font-size:12px;color:var(--text-2);cursor:pointer;transition:background 0.12s;font-family:inherit}
 .cust-combo .dd-option:hover,.cust-combo .dd-option.active{background:rgba(var(--accent-rgb),0.1);color:var(--text-1)}

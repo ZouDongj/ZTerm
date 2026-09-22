@@ -54,6 +54,11 @@
     <div class="menu-item" onclick="closeMenuPopup();openSettings()"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span><span class="menu-label">设置</span><span class="menu-shortcut" data-action="openSettings"></span></div>
     <div class="menu-item" onclick="closeMenuPopup();openSettings('about')"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg></span><span class="menu-label">关于</span></div>
   </div>
+  <!-- Add-connection menu (SSH): blank new vs new-from-template -->
+  <div class="menu-popup" id="ssh-add-menu" role="menu" aria-label="新建连接方式">
+    <div class="menu-item" id="ssh-add-template" role="menuitem" tabindex="-1" onclick="sshAddMenuPick('template')"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg></span><span class="menu-label">从模板新建…</span></div>
+    <div class="menu-item" id="ssh-add-blank" role="menuitem" tabindex="-1" onclick="sshAddMenuPick('blank')"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span><span class="menu-label">完全新建</span></div>
+  </div>
 
   <!-- SFTP Overlay -->
   <div class="overlay" id="overlay-sftp" onclick="SFTP.close()">
@@ -460,22 +465,22 @@
           </div>
           <!-- SSH page -->
           <div class="settings-page" data-page="ssh">
-            <div class="ssh-settings-heading">
+            <div class="settings-page-heading">
               <div><h2>SSH 配置管理</h2><p class="desc">管理远程服务器连接。密码使用 Windows DPAPI 加密存储。</p></div>
-              <button class="btn-primary ssh-settings-add" onclick="openSSHEdit(true)">+ 添加连接</button>
+              <button class="btn-primary settings-primary-add" data-ssh-add="settings" aria-haspopup="menu" aria-expanded="false" aria-controls="ssh-add-menu" onclick="openSSHAddMenu(this)">+ 添加连接<svg class="ssh-add-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
             </div>
-            <div class="ssh-mgr-searchrow ssh-settings-toolbar">
+            <div class="ssh-mgr-searchrow settings-toolbar">
               <label class="ssh-mgr-search">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
                 <input type="search" data-ssh-search="settings-ssh-list" aria-label="搜索连接名称、地址、用户或端口" placeholder="搜索名称、地址、用户或端口" autocomplete="off" oninput="filterSSHManager('settings-ssh-list', this.value)">
               </label>
               <span class="ssh-mgr-count" data-ssh-count="settings-ssh-list"></span>
-              <div class="ssh-settings-toolbar-actions">
-                <button class="ssh-quiet-action" onclick="collapseAllGroups('settings-ssh-list')">折叠全部</button>
-                <button class="ssh-quiet-action" onclick="expandAllGroups('settings-ssh-list')">展开全部</button>
+              <div class="settings-toolbar-actions">
+                <button class="settings-quiet-action" onclick="collapseAllGroups('settings-ssh-list')">折叠全部</button>
+                <button class="settings-quiet-action" onclick="expandAllGroups('settings-ssh-list')">展开全部</button>
               </div>
             </div>
-            <div id="settings-ssh-list" class="ssh-mgr-list"></div>
+            <div id="settings-ssh-list" class="ssh-mgr-list settings-card-list"></div>
           </div>
           <!-- Highlight page -->
           <div class="settings-page" data-page="highlight">
@@ -511,22 +516,29 @@
           </div>
           <!-- Quick Commands page -->
           <div class="settings-page" data-page="quickcommands">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <div class="settings-page-heading">
               <div><h2>快捷命令</h2><p class="desc">保存常用命令，通过 Ctrl+Shift+P 快速执行。</p></div>
-              <div style="display:flex;gap:6px;flex-shrink:0">
-                <button class="btn-outline" style="font-size:12px;padding:4px 10px" onclick="expandAllQC()">展开全部</button>
-                <button class="btn-outline" style="font-size:12px;padding:4px 10px" onclick="collapseAllQC()">折叠全部</button>
-                <button class="btn-primary" style="font-size:12px;padding:5px 12px" onclick="openQCEdit(true)">+ 添加命令</button>
-              </div>
+              <button class="btn-primary settings-primary-add" onclick="openQCEdit(true)">+ 添加命令</button>
             </div>
-            <div class="toggle-row" style="margin-bottom:10px">
+            <div class="toggle-row">
               <div class="toggle-info">
                 <div class="toggle-label">末尾回车自动执行</div>
                 <div class="toggle-desc">开启：命令末尾的回车会发送到终端（自动执行）；关闭：仅注入命令文本</div>
               </div>
               <div class="toggle-switch" id="qc-auto-enter" onclick="toggleQCAutoEnter()"></div>
             </div>
-            <div id="qc-commands-list"></div>
+            <div class="ssh-mgr-searchrow settings-toolbar">
+              <label class="ssh-mgr-search">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+                <input type="search" data-qc-search aria-label="搜索命令名称、分组或命令内容" placeholder="搜索名称、分组或命令内容" autocomplete="off" oninput="filterQCCommands(this.value)">
+              </label>
+              <span class="ssh-mgr-count" data-qc-count></span>
+              <div class="settings-toolbar-actions">
+                <button class="settings-quiet-action" onclick="collapseAllQC()">折叠全部</button>
+                <button class="settings-quiet-action" onclick="expandAllQC()">展开全部</button>
+              </div>
+            </div>
+            <div id="qc-commands-list" class="settings-card-list"></div>
           </div>
           <!-- Shortcuts page -->
           <div class="settings-page" data-page="keys">
@@ -636,13 +648,34 @@
       <button onclick="collapseAllGroups('ssh-manager-list')">折叠全部</button>
       <button onclick="expandAllGroups('ssh-manager-list')">展开全部</button>
       <div class="spacer"></div>
-      <button class="primary" onclick="openSSHEdit(true)">+ 添加连接</button>
+      <button class="primary" data-ssh-add="overlay" aria-haspopup="menu" aria-expanded="false" aria-controls="ssh-add-menu" onclick="openSSHAddMenu(this)">+ 添加连接<svg class="ssh-add-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
     </div>
     <div class="panel-list ssh-mgr-list" id="ssh-manager-list"></div>
     <div class="panel-footer">
       <span>密码使用 Windows DPAPI 加密存储</span>
       <button class="ss-manage" style="margin-left:auto" onclick="closeOverlay('overlay-ssh-manager');openSessionSelector()">← 返回会话选择</button>
     </div>
+  </div>
+</div>
+
+<!-- ── SSH Template Picker Overlay (new-from-template) ── -->
+<div class="overlay" id="overlay-ssh-template">
+  <div class="overlay-backdrop" onclick="_closeSSHTemplatePicker(true)"></div>
+  <div class="panel session-selector" role="dialog" aria-modal="true" aria-labelledby="ssh-template-title" onclick="event.stopPropagation()">
+    <div class="ss-header">
+      <h3 id="ssh-template-title">选择模板连接</h3>
+      <button class="ss-close" aria-label="关闭模板选择" title="关闭" onclick="_closeSSHTemplatePicker(true)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="ss-search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+      <input id="ssh-template-search" type="search" role="combobox" aria-expanded="true" aria-controls="ssh-template-list" aria-autocomplete="list" aria-label="搜索模板名称、地址或分组" placeholder="搜索名称、地址或分组" autocomplete="off" spellcheck="false" oninput="filterSSHTemplates(this.value)">
+      <button id="ssh-template-clear" class="ss-clear" aria-label="清空搜索" title="清空搜索" hidden onclick="clearSSHTemplateSearch()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div id="ssh-template-list" class="ss-results" role="listbox" aria-label="可作为模板的连接"></div>
+    <div id="ssh-template-status" class="sr-only" aria-live="polite"></div>
+    <footer class="ss-footer">
+      <div class="ss-hints" aria-hidden="true"><span><kbd>↑ ↓</kbd> 选择</span><span><kbd>Enter</kbd> 用作模板</span><span><kbd>Esc</kbd> 关闭</span></div>
+    </footer>
   </div>
 </div>
 
