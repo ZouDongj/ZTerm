@@ -841,11 +841,14 @@ function openSSHAddMenu(trigger) {
     const noTemplates = (TabManager.sshProfiles || []).length === 0;
     tpl.classList.toggle('disabled', noTemplates);
     tpl.setAttribute('aria-disabled', String(noTemplates));
-    // Right-aligned under the trigger, clamped into the viewport. The
-    // .menu-popup base style keeps it measurable while closed (opacity 0).
+    // Left-aligned under the trigger (opens toward bottom-right) when the menu
+    // fits to the right; otherwise fall back to right-aligned (mirrors the
+    // toolbar popup). The .menu-popup base style keeps it measurable while
+    // closed (opacity 0).
     const r = trigger.getBoundingClientRect();
     const mw = menu.offsetWidth, mh = menu.offsetHeight;
-    menu.style.left = Math.max(8, Math.min(r.right - mw, window.innerWidth - mw - 8)) + 'px';
+    const left = (r.left + mw + 8 <= window.innerWidth) ? r.left : r.right - mw;
+    menu.style.left = Math.max(8, Math.min(left, window.innerWidth - mw - 8)) + 'px';
     menu.style.top = Math.max(8, Math.min(r.bottom + 6, window.innerHeight - mh - 8)) + 'px';
     menu.classList.add('open');
     trigger.setAttribute('aria-expanded', 'true');
