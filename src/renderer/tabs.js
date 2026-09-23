@@ -683,6 +683,9 @@ const TabManager = {
             existing._smoothCursor = tab._smoothCursor;
             existing.tabId = tab.tabId;
             existing.focused = false;
+            // The stored OSC title travels with the terminal onto its new pane
+            // wrapper — the split branch of resolveTabName only reads pane slots.
+            if (tab._oscTitle !== undefined) { existing._oscTitle = tab._oscTitle; delete tab._oscTitle; }
             // 重新绑定 onData：terminal 已搬到 pane，需用 pane.tabId 而非已清空的 tab.tabId
             if (tab._onDataDisp) { tab._onDataDisp.dispose(); tab._onDataDisp = null; }
             existing._onDataDisp = existing.term?.onData(data => {
@@ -1232,6 +1235,7 @@ const TabManager = {
             } else if (rem.length === 1) {
                 tab.name = rem[0]?.name || tab.name;
                 this._exitSplit(tab);
+                this._updateTabName(tab);
                 this.render();
             } else {
                 if (!rem.some(p => p.focused)) rem[0].focused = true;
@@ -1324,6 +1328,8 @@ const TabManager = {
         nt._onDataDisp = pane.term?.onData(data => {
             _sendPaneInput(nt, { tabId: nt.tabId }, data);
         });
+        // The pane's OSC title follows its terminal onto the new single tab.
+        if (pane._oscTitle !== undefined) nt._oscTitle = pane._oscTitle;
         if (isSSH) {
             nt.host = pane._sshHost || st.host;
             nt.port = pane._sshPort || st.port;
@@ -1357,6 +1363,7 @@ const TabManager = {
             st.tabId = rp.tabId;
             st.name = rp.name || st.name;
             st.type = rp.type || st.type;
+            if (rp._oscTitle !== undefined) st._oscTitle = rp._oscTitle; else delete st._oscTitle;
             if (st.term) {
                 st._onDataDisp = st.term.onData(data => {
                     _sendPaneInput(st, { tabId: st.tabId }, data);
@@ -1384,6 +1391,7 @@ const TabManager = {
             if (nt.fitAddon) setTimeout(() => _fitWithScroll(nt.term, nt.fitAddon, nInner), 50);
         }
         this._updateTabName(st);
+        this._updateTabName(nt);
         this.render();
         this.switchTo(nt.id);
         this.updateStatus();
@@ -1400,6 +1408,7 @@ const TabManager = {
         if (targetPaneId && !focusedPane) return;
         let mt = null, mf = null, mid = null, sc = null;
         let paneName = sourceTab.name, paneType = sourceTab.type || 'local';
+        let oscTitle = sourceTab._oscTitle;
         let sshHost = sourceTab.host, sshPort = sourceTab.port, sshUser = sourceTab.user;
         let sshCredId = sourceTab._credId, sshProfileId = sourceTab.sshProfileId;
         if (sourceTab.splitRoot) {
@@ -1415,6 +1424,7 @@ const TabManager = {
             if (focused._onDataDisp) { focused._onDataDisp.dispose(); focused._onDataDisp = null; }
             paneName = focused.name || sourceTab.name;
             paneType = focused.type || sourceTab.type || 'local';
+            oscTitle = focused._oscTitle;
             sshHost = focused._sshHost || sourceTab.host;
             sshPort = focused._sshPort || sourceTab.port;
             sshUser = focused._sshUser || sourceTab.user;
@@ -1439,6 +1449,7 @@ const TabManager = {
                         sourceTab.splitRoot = null;
                         sourceTab.name = rp.name || sourceTab.name;
                         sourceTab.type = rp.type || sourceTab.type;
+                        if (rp._oscTitle !== undefined) sourceTab._oscTitle = rp._oscTitle; else delete sourceTab._oscTitle;
                         if (sourceTab.term) {
                             sourceTab._onDataDisp = sourceTab.term.onData(data => {
                                 _sendPaneInput(sourceTab, { tabId: sourceTab.tabId }, data);
@@ -1453,6 +1464,7 @@ const TabManager = {
                             setupWrapResizeObserver(w, sourceTab);
                             if (sourceTab.fitAddon) setTimeout(() => _fitWithScroll(sourceTab.term, sourceTab.fitAddon, wInner), 50);
                         }
+                        this._updateTabName(sourceTab);
                     };
                 } else if (rem.length === 0) {
                     sc = () => {
@@ -1462,7 +1474,7 @@ const TabManager = {
                         if (s2) s2.remove();
                     };
                 } else {
-                    sc = () => { this._renderSplit(sourceTab); };
+                    sc = () => { this._renderSplit(sourceTab); this._updateTabName(sourceTab); };
                 }
             }
         } else {
@@ -1497,6 +1509,8 @@ const TabManager = {
             fp._onDataDisp = fp.term?.onData(data => {
                 _sendPaneInput(targetTab, fp, data);
             });
+            // Same transfer rule as the terminal: the OSC title moves onto fp.
+            if (targetTab._oscTitle !== undefined) { fp._oscTitle = targetTab._oscTitle; delete targetTab._oscTitle; }
             targetTab.splitRoot = this._createContainer('h');
             targetTab.splitRoot.children = [fp];
             targetTab.splitRoot.ratios = [1];
@@ -1524,6 +1538,7 @@ const TabManager = {
         np._onDataDisp = mt?.onData(data => {
             _sendPaneInput(targetTab, np, data);
         });
+        if (oscTitle !== undefined) np._oscTitle = oscTitle;
         this.add(targetTab, np, focusedPane, side);
         getAllPanes(targetTab).forEach(p => p.focused = false);
         np.focused = true;
@@ -1577,6 +1592,9 @@ const TabManager = {
         // terminal — otherwise the tab keeps the disposed original wrapper
         // and the software caret silently dies for this tab's whole life.
         tab._smoothCursor = fp?._smoothCursor ?? null;
+        // The surviving pane's OSC title comes back onto the tab with its term.
+        if (fp && fp._oscTitle !== undefined) tab._oscTitle = fp._oscTitle;
+        else delete tab._oscTitle;
         tab.connected = fp?.connected !== false && (fp?.connected || !!fp?.tabId); // L1：同步连接状态，否则标签点/重连按钮错误
         tab.splitRoot = null;
         tab._maximizedPaneId = null;
@@ -2156,16 +2174,20 @@ const TabManager = {
     },
 
     _updateTabName(tab) {
-        if (!tab.splitRoot || tab._customName) return;
-        const panes = getAllPanes(tab);
-        if (panes.length <= 1) {
-            tab.name = panes[0]?.name || tab.name;
-        } else {
-            // Tabby updateTitle 语义：pane 名拼接前去重（同一连接/终端的多个 pane 只显示一次）
-            const names = panes.map(p => p.name || '').filter(n => n);
-            tab.name = [...new Set(names)].join(' | ');
-        }
-        // 合并写盘：拖动 / 拆建 pane 等连续触发场景下，idle 内只写一次（不再每次同步 IPC 阻塞渲染）
+        if (!tab || tab._customName) return;
+        const panes = tab.splitRoot ? getAllPanes(tab) : [];
+        const next = resolveTabName(tab, panes);
+        const changed = next != null && next !== tab.name;
+        if (changed) tab.name = next;
+        // Split-tree callers rely on this hook to persist layout mutations even
+        // when the computed name is unchanged, so the save stays unconditional
+        // for split tabs; a single-terminal tab only saves when its name moved
+        // (e.g. an OSC title arrived).
+        if (tab.splitRoot || changed) this._scheduleSaveConfig();
+    },
+
+    // 合并写盘：拖动 / 拆建 pane 等连续触发场景下，idle 内只写一次（不再每次同步 IPC 阻塞渲染）
+    _scheduleSaveConfig() {
         if (typeof requestIdleCallback !== 'undefined') {
             if (this._saveConfigIdleHandle) cancelIdleCallback(this._saveConfigIdleHandle);
             this._saveConfigIdleHandle = requestIdleCallback(() => {

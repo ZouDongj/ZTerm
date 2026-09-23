@@ -2617,6 +2617,85 @@ async function main() {
       hlRestore.wipes === false && hlRestore.kwColored === true,
       JSON.stringify(hlRestore));
 
+    // 13.14 Issue #10 regression: an OSC 0/2 window title written by the
+    // session (remote shell, an AI agent, ...) must become the tab name and
+    // reach the tab bar label; a manual rename (_customName) must keep
+    // winning over later title sequences; and the title must keep following
+    // the terminal across the tab→split migration (the term moves onto a
+    // pane wrapper, so both the stored title and the event-time owner
+    // resolution must move with it).
+    const oscTitle = await cdp.eval(`(async () => {
+      const T = TabManager;
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const poll = async (fn, n = 40) => { for (let i = 0; i < n; i++) { if (fn()) return true; await sleep(100); } return false; };
+      const baseActive = T.activeId;
+      const baseCount = T.tabs.length;
+      const p = getDefaultLocalProfile();
+      T.createTab({ name: p.name, type: 'local', command: p.command, args: p.args });
+      const tab = T.tabs[T.tabs.length - 1];
+      const out = { wired: false, followed: false, lockedHeld: false, unlockedFollows: false,
+                    titleMovedToPane: false, splitFollows: false, collapsedBack: false,
+                    collapseFollows: false, settled: false };
+      try {
+        out.wired = await poll(() => tab.term && tab.tabId);
+        if (!out.wired) return out;
+        // Wait out the shell's own startup title (Git Bash emits one with the
+        // first prompt; PowerShell never does — then this is just a 2.5s
+        // settle). After the first prompt the shell only re-titles on input,
+        // which this probe never sends.
+        await poll(() => !!tab._oscTitle, 25);
+        await sleep(200);
+        const label = () => document.querySelector('.tab[data-tab="' + tab.id + '"] .tab-name')?.textContent || '';
+        const origTerm = tab.term;
+        origTerm.write('\\x1b]0;E2E_OSC_TITLE\\x07');
+        out.followed = await poll(() => tab.name === 'E2E_OSC_TITLE' && label() === 'E2E_OSC_TITLE');
+        tab._customName = true;
+        origTerm.write('\\x1b]2;E2E_LOCKED\\x07');
+        await sleep(400);
+        out.lockedHeld = tab.name === 'E2E_OSC_TITLE';
+        delete tab._customName;
+        T._updateTabName(tab);
+        out.unlockedFollows = tab.name === 'E2E_LOCKED';
+        // Split: the original terminal moves onto a pane wrapper. Its stored
+        // title and its future titles must keep driving the tab name.
+        T.addPaneRelativeTo(tab, 'r');
+        const splitReady = await poll(() => tab.splitRoot && getAllPanes(tab).length === 2, 50);
+        if (splitReady) {
+          const origPane = getAllPanes(tab).find(pp => pp.term === origTerm);
+          // Invariant: the title moved onto the pane slot (tab slot cleared).
+          // Don't assert the exact string — a late shell re-title may replace it.
+          out.titleMovedToPane = !!origPane && typeof origPane._oscTitle === 'string' &&
+            origPane._oscTitle.length > 0 && tab._oscTitle === undefined;
+          origTerm.write('\\x1b]0;E2E_AFTER_SPLIT\\x07');
+          out.splitFollows = await poll(() => tab.name.includes('E2E_AFTER_SPLIT'));
+          // Collapse back to a single terminal: the stored title must move
+          // back onto the tab slot and keep following new titles.
+          const other = getAllPanes(tab).find(pp => pp.term !== origTerm);
+          if (other) T._closePane(tab.id, other.id);
+          out.collapsedBack = await poll(() => !tab.splitRoot && tab.term === origTerm, 40);
+          if (out.collapsedBack) {
+            origTerm.write('\\x1b]0;E2E_AFTER_COLLAPSE\\x07');
+            out.collapseFollows = await poll(() => tab.name === 'E2E_AFTER_COLLAPSE');
+          }
+        }
+      } finally {
+        if (T.tabs.includes(tab)) T.closeTab(tab.id);
+        for (let i = 0; i < 40; i++) {
+          await sleep(100);
+          if (T.tabs.length === baseCount && T._closingTabs.size === 0) break;
+        }
+        if (T.activeId !== baseActive && T.tabs.some(t => t.id === baseActive)) T.switchTo(baseActive);
+        out.settled = T.tabs.length === baseCount && T._closingTabs.size === 0;
+      }
+      return out;
+    })()`).catch((e) => ({ evalError: String((e && e.message) || e) }));
+    check('OSC 标题序列跟随为标签名且尊重手动重命名（issue #10 回归）',
+      !!oscTitle && oscTitle.wired === true && oscTitle.followed === true &&
+      oscTitle.lockedHeld === true && oscTitle.unlockedFollows === true &&
+      oscTitle.titleMovedToPane === true && oscTitle.splitFollows === true &&
+      oscTitle.collapsedBack === true && oscTitle.collapseFollows === true && oscTitle.settled === true,
+      JSON.stringify(oscTitle));
+
     // 14. 窗口状态恢复：写入 config 的 window 字段 → 重启 → 验证最大化/尺寸恢复
     async function writeWindowState(state) {
       // 读现有 config（若存在）并注入 window 字段

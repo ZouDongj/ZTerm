@@ -385,6 +385,7 @@ function wireTerminal(tab, tabId) {
         // 动态读取 tab.tabId（重连保留内容模式下，终端复用但后端 tabId 已更新）
         _sendPaneInput(tab, { tabId: tab.tabId }, data);
     });
+    _wireOscTitleFollow(term);
     _bindSyncExitOnClick(tab, term.element);
 
     // ── Bell notification ──
@@ -456,6 +457,35 @@ function _sendPaneInput(tab, pane, data) {
         });
     } else if (pane.tabId) {
         ipcRenderer.send('pty-input', { tabId: pane.tabId, data });
+    }
+}
+
+// OSC 0/2 window title → tab name (issue #10). The owner is resolved at
+// EVENT TIME by terminal identity: split/unsplit/extract/drag migrations move
+// a term between tab and pane wrappers without re-wiring this hook, so a
+// closure over the original tab/pane pair would keep writing the stale
+// wrapper (and `_updateTabName` reads `_oscTitle` from whichever slot the
+// term is owned by NOW — tab for single-terminal tabs, pane for splits).
+function _wireOscTitleFollow(term) {
+    term.onTitleChange(title => {
+        const resolved = _resolveTermOwner(term);
+        if (resolved) _applyOscTitle(resolved.tab, resolved.owner, title);
+    });
+}
+
+// The title is stored on the pane (or on the tab itself for single-terminal
+// tabs) so _updateTabName can rank it above the profile/default name; a
+// manual rename (_customName) still wins and leaves the tab untouched. An
+// empty title is treated as "no information", not as a reset request.
+function _applyOscTitle(ownerTab, paneLike, title) {
+    const t = (title || '').trim();
+    if (!t || !ownerTab || paneLike._oscTitle === t) return;
+    paneLike._oscTitle = t;
+    const oldName = ownerTab.name;
+    TabManager._updateTabName(ownerTab);
+    if (ownerTab.name !== oldName) {
+        TabManager.render();
+        if (TabManager.activeId === ownerTab.id) TabManager.updateStatus();
     }
 }
 
@@ -563,6 +593,7 @@ function wireTerminalToPane(tab, pane) {
     pane._onDataDisp = term.onData(data => {
         _sendPaneInput(tab, pane, data);
     });
+    _wireOscTitleFollow(term);
     _bindSyncExitOnClick(tab, term.element);
 
     // ── Bell notification ──
