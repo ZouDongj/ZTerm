@@ -2178,9 +2178,10 @@ async function main() {
       const hasEdge = sel => rules.some(r => r.selectorText === sel &&
         (r.style.boxShadow || '').replace(/\\s+/g, '').includes('inset0001pxrgba(255,255,255,0.06)'));
       return { popup: hasEdge('.menu-popup'), tabCtx: hasEdge('.tab-context-menu'),
-               dd: hasEdge('.cust-dropdown .dd-menu'), combo: hasEdge('.cust-combo .dd-menu') };
+               dd: hasEdge('.cust-dropdown .dd-menu'), combo: hasEdge('.cust-combo .dd-menu'),
+               transfer: hasEdge('.transfer-window') };
     })()`).catch(() => null);
-    check('浮层菜单：四处下拉均带 inset 描边', !!menuEdge && menuEdge.popup === true && menuEdge.tabCtx === true && menuEdge.dd === true && menuEdge.combo === true, JSON.stringify(menuEdge));
+    check('浮层菜单：下拉与传输记录面板均带 inset 描边', !!menuEdge && menuEdge.popup === true && menuEdge.tabCtx === true && menuEdge.dd === true && menuEdge.combo === true && menuEdge.transfer === true, JSON.stringify(menuEdge));
     // The container's focus-within accent border is the search field's only
     // focus indicator (the inner input's ring is intentionally off). Read
     // after a real sleep: border-color has a 120ms transition.

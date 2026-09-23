@@ -525,7 +525,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 
 /* Transfer flyout: anchored below the top-bar button (position set inline),
    grouped-by-session collapsible list. */
-.transfer-window{position:absolute;top:42px;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float);overflow:hidden;width:360px;max-height:440px;display:flex;flex-direction:column;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1)}
+.transfer-window{position:absolute;top:42px;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);overflow:hidden;width:360px;max-height:440px;display:flex;flex-direction:column;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1)}
 .transfer-header{display:flex;align-items:center;gap:6px;padding:10px 10px 6px 14px;flex-shrink:0}
 .transfer-header h2{font-size:10.5px;color:var(--text-3);font-weight:600;letter-spacing:0.8px;margin:0}
 .transfer-header-count{min-width:16px;padding:1px 7px;border-radius:7px;background:rgba(255,255,255,0.08);color:var(--text-3);font-size:10px;text-align:center;font-variant-numeric:tabular-nums}
