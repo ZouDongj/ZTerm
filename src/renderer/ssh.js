@@ -1,7 +1,8 @@
-// ZTerm - 会话选择器 + SSH 管理 + 菜单弹窗（拆自 renderer.html，纯代码搬运，未改逻辑）
+// ZTerm - session selector + SSH manager + menu popup (moved verbatim from renderer.html, logic unchanged)
 
-// 动态填充顶栏"⋮"菜单的快捷键文本：必须用 _getShortcutBindings() 拿当前绑定，
-// 否则用户改过快捷键后菜单显示跟实际不一致
+// Dynamically fills the shortcut text in the top-bar "⋮" menu: must read the
+// current bindings via _getShortcutBindings(), otherwise the menu display
+// diverges from the actual shortcuts after the user rebinds them
 function updateMenuShortcuts() {
     const bindings = _getShortcutBindings();
     document.querySelectorAll('.menu-shortcut[data-action]').forEach(el => {
@@ -169,7 +170,7 @@ function _moveSessionActive(delta) {
     if (!_sessionSel) return;
     const search = document.getElementById('sessions-search');
     const items = getSessionItems(search ? search.value : '');
-    if (!items.length) return; // 零结果不执行选择、不报错
+    if (!items.length) return; // no results: no selection change, no error
     const idx = items.findIndex(i => i.id === _sessionSel.activeId);
     // No current selection (edge): Down lands on the first item, Up on the
     // last — never a wrapped-around middle item.
@@ -217,7 +218,8 @@ function _trapSessionTab(e) {
     else wire();
 })();
 
-// 默认本地终端：defaultShell 配置（兼容旧值存 command 的情况）→ 第一个 profile → 兜底 pwsh
+// Default local terminal: the defaultShell setting (also matching legacy
+// values stored as command) -> first profile -> fall back to pwsh
 function getDefaultLocalProfile() {
     const profiles = TabManager.profiles || [];
     const cur = _settingsConfig.defaultShell || '';
@@ -345,7 +347,8 @@ function selectSession(sessionId) {
     if (item.type === 'local') {
         TabManager.createTab({ name: item.name, type: 'local', command: item.profile.command, args: item.profile.args });
     } else {
-        // SSH: 注册凭据到主进程拿 credentialId，明文密码不回传 renderer
+        // SSH: register the credential in the main process for a credentialId;
+        // the plaintext password never comes back to the renderer
         const p = item.sshProfile;
         if (p.encryptedPassword || p.privateKeyPath) {
             ipcRenderer.invoke('register-credential', {
@@ -461,7 +464,7 @@ function _sshRowHtml(p) {
     const meta = m.named
         ? `<span class="mono">${escHtml(m.endpoint)}</span><span class="dot">·</span><span>${escHtml(m.user)}</span>`
         : `<span>${escHtml(m.user)}</span><span class="dot">·</span><span>端口 <span class="mono">${escHtml(String(m.port))}</span></span>`;
-    // No profile values in inline JS (design §3): clicks resolve the action
+    // No profile values in inline JS: clicks resolve the action
     // and profile id from data attributes via the container delegation below.
     // No title tooltip on the identity: it would just repeat the visible text.
     return `<article class="ssh-mgr-row" data-profile-id="${escAttr(p.id)}">
@@ -638,9 +641,10 @@ function startRenameGroup(btn, oldName) {
     btn.style.color = '';
     input.focus();
     input.select();
-    // 保留原始 onclick 字符串（HTML 属性），Esc 时还原——
-    // 否则 finish(false) 后残留的 btn.onclick 闭包会在下次点击时执行 finish(true) 完成路径，
-    // 而非重新进入重命名
+    // Keep the original onclick string (the HTML attribute) and restore it on
+    // Esc — otherwise after finish(false) the leftover btn.onclick closure
+    // would run the finish(true) save path on the next click instead of
+    // re-entering rename mode
     const originalOnClick = btn.getAttribute('onclick');
 
     const finish = (save) => {
@@ -651,8 +655,9 @@ function startRenameGroup(btn, oldName) {
         input.replaceWith(span);
         btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
         btn.style.color = '';
-        // 还原原始 onclick（被 startRenameGroup 覆盖的 HTML 属性），
-        // 否则下次点击残留的 finish 闭包走完成路径而非重新重命名
+        // Restore the original onclick (the HTML attribute overridden by
+        // startRenameGroup), otherwise the leftover finish closure would take
+        // the save path on the next click instead of restarting the rename
         btn.onclick = null;
         if (originalOnClick) btn.setAttribute('onclick', originalOnClick);
 
@@ -681,8 +686,10 @@ function startRenameGroup(btn, oldName) {
     });
 }
 
-// 已配密码的状态控制：dirty=true 表示用户在"已配"状态下点过修改按钮
-// 之后才允许 saveSSHEdit 真正写新密码；false 表示保留原 encryptedPassword
+// State control for an already-configured password: dirty=true means the user
+// clicked the edit button in the "configured" state — only then may
+// saveSSHEdit actually write a new password; false means keep the original
+// encryptedPassword
 let _sshPwdDirty = false;
 // Encrypted password carried into a template-created profile: the DPAPI
 // ciphertext stays decryptable for the same user, so a copied connection
@@ -729,7 +736,7 @@ function _renderPasswordField(mode) {
         if (cancelBtn) cancelBtn.classList.toggle('show', !isNew);
         if (eyeBtn) eyeBtn.style.right = isNew ? '8px' : '44px';
         inputEl.style.paddingRight = isNew ? '32px' : '64px';
-        // 👁 和 ✓ 根据内容显示（由 input 事件驱动）
+        // Eye and ✓ visibility is content-driven (via the input event)
         _updatePwdBtnVisibility();
     }
 }
@@ -739,13 +746,15 @@ function _togglePasswordVisibility() {
     const eyeBtn = document.getElementById('ssh-pwd-inline-eye');
     if (!inputEl || !eyeBtn) return;
     const showing = inputEl.type === 'text';
-    // 切换 type 会重置光标位置，先记住原位置再恢复
+    // Switching type resets the cursor position; remember it and restore below
     const pos = inputEl.selectionStart != null ? inputEl.selectionStart : inputEl.value.length;
     inputEl.type = showing ? 'password' : 'text';
-    // 激活态持久高亮（类似 hover 的视觉），提示"显示明文"已开启
+    // Persistent active-state highlight (hover-like visual) indicating
+    // "show plaintext" is on
     eyeBtn.classList.toggle('active', !showing);
     eyeBtn.title = showing ? '显示密码' : '隐藏密码';
-    // 恢复光标（等一帧让 type 切换生效），保持焦点
+    // Restore the cursor (wait a frame for the type switch to take effect) and
+    // keep focus
     inputEl.focus();
     requestAnimationFrame(() => {
         try { inputEl.setSelectionRange(pos, pos); } catch(e) {}
@@ -784,7 +793,7 @@ async function _savePasswordInline() {
 }
 
 // Open the editor as a NEW connection prefilled from an existing profile
-// (issue #5: create-from-template — the user typically only changes the
+// (create-from-template — the user typically only changes the
 // host). Reached from the add menu's "从模板新建" picker, never from a row
 // action. The encrypted password carries over via the "已保存" status row;
 // everything else (group/auth/login scripts/toggles) is copied verbatim.
@@ -821,7 +830,7 @@ function openSSHEditFromTemplate(profileId) {
     }, 120);
 }
 
-// ── Add-connection menu + template picker (issue #5) ──
+// ── Add-connection menu + template picker ──
 // The "添加连接" buttons (settings page + manager overlay, both marked
 // data-ssh-add) open a small menu: blank new, or new-from-template. The
 // template choice opens a picker overlay that mirrors the session selector's
@@ -1148,8 +1157,8 @@ function openSSHEdit(isNew, profileId) {
     document.getElementById('ssh-edit-host').value = '';
     document.getElementById('ssh-edit-port').value = '22';
     document.getElementById('ssh-edit-user').value = '';
-    _sshPwdDirty = true; // 新建场景默认 true：用户输入即视为新密码要保存
-    _renderPasswordField('edit'); // 默认显示输入框（新建场景）
+    _sshPwdDirty = true; // new profile: default true so any typed input counts as a password to save
+    _renderPasswordField('edit'); // show the input field by default (new profile)
     document.getElementById('ssh-edit-note').value = '';
     document.getElementById('ssh-edit-keypath').value = '';
     document.getElementById('ssh-edit-group').value = '';
@@ -1164,7 +1173,8 @@ function openSSHEdit(isNew, profileId) {
     initGroupCombo();
     clearLoginScripts();
 
-    // 密码字段：每次 openSSHEdit 重绑（避免被覆盖）
+    // Password field: rebind handlers on every openSSHEdit (they may have been
+    // overwritten)
     const pwdEditBtn = document.getElementById('ssh-pwd-edit-btn');
     if (pwdEditBtn) pwdEditBtn.onclick = () => { _sshPwdDirty = true; _renderPasswordField('edit'); };
     const pwdInput = document.getElementById('ssh-edit-password');
@@ -1212,10 +1222,13 @@ function openSSHEdit(isNew, profileId) {
             }
         };
     }
-    // 保存按钮 mousedown 阻止 input 失焦：避免 blur handler 在保存读取 input.value 之前
-    // 把它还原成 view 模式（清空 value + 切回状态行），导致保存丢失密码。
-    // mousedown 时机早于 blur（mousedown → button focus → input blur），用 preventDefault 阻止默认
-    // 焦点切换，input 保持 focus，保存能正常读 value；保存成功后 closeSSHEdit 关面板即可。
+    // Save-button mousedown must prevent the input from blurring: otherwise the
+    // blur handler reverts the field to view mode (clearing the value and
+    // switching back to the status row) before the save reads input.value,
+    // losing the password. mousedown fires before blur (mousedown -> button
+    // focus -> input blur), so preventDefault stops the default focus shift,
+    // the input keeps focus, and the save reads the value normally; after a
+    // successful save closeSSHEdit closes the panel anyway.
     const saveBtn = document.querySelector('#overlay-ssh-edit button.btn-primary');
     if (saveBtn) {
         saveBtn.addEventListener('mousedown', (e) => {
@@ -1224,7 +1237,7 @@ function openSSHEdit(isNew, profileId) {
             }
         });
     }
-    // 内联保存/取消按钮同样阻止 blur 抢跑
+    // The inline save/cancel buttons likewise block blur from racing ahead
     const inlineSave = document.getElementById('ssh-pwd-inline-save');
     const inlineCancel = document.getElementById('ssh-pwd-inline-cancel');
     const inlineEye = document.getElementById('ssh-pwd-inline-eye');
@@ -1248,11 +1261,13 @@ function openSSHEdit(isNew, profileId) {
                 document.getElementById('ssh-edit-auth').value = '密钥';
             }
             updateAuthFields();
-            // 已配密码：显示状态行（🔒 密码已加密保存 + 修改按钮），隐藏输入框
-            // _renderPasswordField 必须在 updateAuthFields 之后调用——它操作的就是 updateAuthFields 控制的密码行
+            // Password configured: show the status row (🔒 password saved
+            // encrypted + edit button), hide the input field.
+            // _renderPasswordField must run after updateAuthFields — it operates
+            // on the password row whose visibility updateAuthFields controls
             if (p.encryptedPassword) {
                 _renderPasswordField('view');
-                _sshPwdDirty = false; // 已配密码且用户未点修改 = 不视为修改，保留原密码
+                _sshPwdDirty = false; // password set and user didn't click edit = unchanged, keep the original
             }
             // Restore login scripts
             if (p.loginScripts && p.loginScripts.length > 0) {
@@ -1312,8 +1327,9 @@ function initGroupCombo() {
 
     input.addEventListener('focus', () => renderOptions(input.value));
     input.addEventListener('input', () => renderOptions(input.value));
-    // mousedown 触发 renderOptions：用户 Esc 关掉 menu 后再点 input 时
-    // （input 没失焦，focus/input 事件不触发）能重新弹出下拉框
+    // mousedown re-triggers renderOptions: after the user closes the menu with
+    // Esc, clicking the input again (input never blurred, so focus/input events
+    // don't fire) must reopen the dropdown
     input.addEventListener('mousedown', () => renderOptions(input.value));
     input.addEventListener('blur', () => setTimeout(() => menu.classList.remove('open'), 150));
     input.addEventListener('keydown', (e) => {
@@ -1436,8 +1452,10 @@ async function saveSSHEdit() {
     const host = document.getElementById('ssh-edit-host').value.trim();
     const port = parseInt(document.getElementById('ssh-edit-port').value) || 22;
     const username = document.getElementById('ssh-edit-user').value.trim();
-    // 密码：仅当用户点过"修改"按钮（_sshPwdDirty=true）才读 input 值；
-    // 已配状态下未点修改 = 保留原密码；点过修改但清空 input = 保留原密码（清空=不删）
+    // Password: read the input only when the user clicked "edit"
+    // (_sshPwdDirty=true); in configured state without clicking edit = keep the
+    // original password; clicked edit but cleared the input = keep the original
+    // (clearing does not delete it)
     const password = _sshPwdDirty ? document.getElementById('ssh-edit-password').value : '';
     const note = document.getElementById('ssh-edit-note').value.trim();
     const group = document.getElementById('ssh-edit-group').value.trim();

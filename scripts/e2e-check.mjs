@@ -1,17 +1,19 @@
 #!/usr/bin/env node
-// ZTerm E2E 检查：验证打包版前端的核心交互可用性。
+// ZTerm E2E checks: verify the packaged frontend's core interactions work.
 //
-// 背景：CSP 的 script-src 一旦被注入 hash（Tauri 自动行为），'unsafe-inline'
-// 会被规范忽略，导致所有 inline onclick 静默失效（按钮 hover 正常、点击无反应、
-// 无任何报错）。cargo test 与语法检查都抓不到这类问题，只能靠运行时验证。
+// Background: once a hash is injected into the CSP script-src (Tauri does
+// this automatically), the spec ignores 'unsafe-inline', so every inline
+// onclick silently stops working (buttons hover fine, clicks do nothing, no
+// error is reported). cargo test and syntax checks cannot catch this class
+// of issue — only runtime verification can.
 //
-// 用法：
+// Usage:
 //   node scripts/e2e-check.mjs [exe-path] [port]
-//     exe-path  要验证的 zterm.exe 路径（默认 src-tauri/target/release/zterm.exe）
-//     port      WebView2 远程调试端口（默认 9222）
+//     exe-path  path to the zterm.exe under test (default src-tauri/target/release/zterm.exe)
+//     port      WebView2 remote debugging port (default 9222)
 //
-// 退出码：全部通过为 0，任一失败为 1。
-// 依赖：Node 22+（全局 fetch / WebSocket），无第三方包。
+// Exit code: 0 when all checks pass, 1 on any failure.
+// Dependencies: Node 22+ (global fetch / WebSocket); no third-party packages.
 
 import { spawn, execSync, execFileSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -36,7 +38,7 @@ let sandbox = null;
 let ownedChild = null;
 let launchCount = 0;
 
-// ── 启动 exe（带 WebView2 远程调试）──
+// ── Launch the exe (with WebView2 remote debugging) ──
 let DATA_CONFIG = null;
 let configBackup = null;
 // null = unknown (backup never ran or failed) — restoreConfig must NEVER
@@ -46,8 +48,9 @@ let configBackup = null;
 let configExistedAtStart = null;
 
 function backupConfig() {
-  // E2E 创建的 tab/ssh profile 会被前端 15s 周期保存进 data/config.json，
-  // 污染下次启动的标签恢复；启动前备份、结束时恢复。
+  // Tabs/SSH profiles created by the E2E run are persisted into
+  // data/config.json by the frontend's 15s periodic save and would pollute
+  // the next launch's tab restore — back up before launch, restore at the end.
   try {
     configExistedAtStart = existsSync(DATA_CONFIG);
     if (configExistedAtStart) {
@@ -192,7 +195,8 @@ async function waitForPage(timeoutMs = 30000) {
     } catch {}
     await sleep(500);
   }
-  // 诊断：进程与调试端口状态，帮助区分"exe 未启动"与"WebView2 不可用"
+  // Diagnostics: process and debug-port state, to tell "exe never started"
+  // apart from "WebView2 unavailable"
   let procInfo = '(不可用)';
   try { procInfo = execSync('tasklist /FI "IMAGENAME eq zterm.exe" /FO CSV /NH', { encoding: 'utf8' }).trim() || '(无 zterm 进程)'; } catch {}
   let portInfo = '(不可用)';
@@ -209,7 +213,7 @@ async function waitForPage(timeoutMs = 30000) {
   throw new Error(`页面在 ${timeoutMs}ms 内未就绪。进程: ${procInfo}; ${portInfo}; 目标: ${targetsInfo}`);
 }
 
-// ── CDP 会话 ──
+// ── CDP session ──
 class Cdp {
   constructor(wsUrl) { this.wsUrl = wsUrl; this.id = 0; this.pending = new Map(); }
   async connect() {
@@ -244,7 +248,7 @@ class Cdp {
   close() { try { this.ws.close(); } catch {} }
 }
 
-// ── 检查项 ──
+// ── Checks ──
 const results = [];
 function check(name, pass, detail = '') {
   results.push({ name, pass, detail });
@@ -252,9 +256,11 @@ function check(name, pass, detail = '') {
 }
 
 async function waitForValue(cdp, expression, expected, timeoutMs = 8000, mode = 'eq') {
-  // 轮询等待表达式达到期望值（分屏等异步操作在慢机上需要时间，固定 sleep 会假失败）。
-  // mode='gt0'：等待数值 > 0（SSH 失败事件这类只增计数——串行连接队列里排在
-  // 恢复 tab 的重连退避后面时，事件可能十几秒后才出现）。
+  // Poll until the expression reaches the expected value (async work such as
+  // splitting takes time on slow machines; a fixed sleep would fail
+  // spuriously). mode='gt0': wait for a number > 0 (monotonic counters such
+  // as the SSH failure event — queued behind a restored tab's reconnect
+  // backoff in the serial connection queue, it may only fire after 10+ s).
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
@@ -271,8 +277,8 @@ async function main() {
   // The launch range BASE..BASE+4 must be fully free: sweep stale holders
   // from previous runs (image-verified msedgewebview2/zterm only), and shift
   // the base by 10 while anything remains (foreign listener or an unkillable
-  // dead-PID zombie socket — final run: launch 3 hit a stale port that served
-  // /json yet never listed the renderer page).
+  // dead-PID zombie socket — a stale port can serve /json yet never list the
+  // renderer page).
   for (let shift = 0; ; shift += 10) {
     const occupied = sweepDebugPortRange(PORT + shift, 5);
     if (occupied.length === 0) { BASE_PORT = PORT + shift; launchPort = BASE_PORT; break; }
@@ -292,18 +298,23 @@ async function main() {
   await cdp.connect();
 
   try {
-    // 等页面完全加载（CDP 页面一出现即可连，但此时网络栈可能未就绪，
-    // 立即 fetch 自身会 Failed to fetch——先等 readyState=complete 再开始检查）。
-    // WebView2 启动期间页面会 reload 一次：complete 状态下旧文档仍在时
-    // renderer/*.js 尚未执行，_settingsConfig 未定义——以 settings 就绪
-    // （loadSettings 已跑）作为"脚本已执行"的硬标志，防止 eval 打在旧文档上。
+    // Wait for the page to fully load (the CDP page is connectable as soon as
+    // it appears, but the network stack may not be ready yet — an immediate
+    // fetch of itself fails with "Failed to fetch", so wait for
+    // readyState=complete before running checks). WebView2 reloads the page
+    // once during startup: while readyState is complete on the old document,
+    // renderer/*.js has not executed there and _settingsConfig is undefined —
+    // use settings readiness (loadSettings has run) as the hard "scripts have
+    // executed" signal so evals never land on the old document.
     await waitForValue(cdp, `document.readyState === 'complete' && typeof _settingsConfig === 'object' && !!TabManager`, true, 20000);
     const runtimeData = await cdp.eval(`ipcRenderer.invoke('get-data-dir-info')`);
     if (resolve(runtimeData.current).toLowerCase() !== resolve(dirname(DATA_CONFIG)).toLowerCase()) {
       throw new Error('Connected runtime is not using the isolated E2E configuration');
     }
 
-    // 0. 启动界面：结构正确（只显示图标 + 绿点动画）+ 首帧渲染后自动淡出（最多等 5s）；兜底主动隐藏防遮挡后续检查
+    // 0. Startup splash: correct structure (icon + green-dot animation only)
+    // plus auto fade-out after the first frame (wait at most 5s); force-hide
+    // as a fallback so it cannot block later checks
     const splashExists = await cdp.eval(`!!document.getElementById('startup-splash')`);
     const splashStruct = await cdp.eval(`(() => {
       const s = document.getElementById('startup-splash');
@@ -317,12 +328,15 @@ async function main() {
         hasLogo: !!s.querySelector('svg.startup-logo')
       };
     })()`);
-    // 只验静态结构（动画运行有独立的轮询检查；startSplashLoader 在 async Init 中启动，可能晚于此检查）
+    // Verify static structure only (the running animation has its own poll
+    // check; startSplashLoader starts inside async Init and may run later
+    // than this check)
     const structOk = splashStruct.missing === true || (splashStruct.cells === 13 &&
       !splashStruct.hasName && !splashStruct.hasHint && splashStruct.hasLogo);
     check('启动界面结构：仅图标 + 13 格 Z', structOk === true, JSON.stringify(splashStruct));
-    // 动画验证：splash 存在时轮询绿点出现（startSplashLoader 在 async Init 中启动，
-    // 可能晚于结构检查）；splash 已被移除同样视为通过
+    // Animation check: while the splash exists, poll for the green dots to
+    // appear (startSplashLoader starts inside async Init, possibly after the
+    // structure check); a splash already removed also counts as passing
     let animOk = true;
     if (!splashStruct.missing) {
       animOk = false;
@@ -361,8 +375,9 @@ async function main() {
     if (!splashGone) await cdp.eval(`hideStartupSplash()`);
     check('启动界面首帧渲染后自动淡出', splashGone === true, `splash存在=${splashExists}, 自动移除=${splashGone}`);
 
-    // 1. CSP：'unsafe-inline' 必须真正生效（未被 Tauri 注入的 hash 挤掉）
-    // fetch 自身在页面刚就绪时偶发失败，重试几次
+    // 1. CSP: 'unsafe-inline' must actually be in effect (not pushed out by a
+    // Tauri-injected hash). Fetching the page itself can fail sporadically
+    // right after readiness — retry a few times
     let csp = null;
     for (let i = 0; i < 5 && csp === null; i++) {
       try { csp = await cdp.eval(`fetch(location.href, {cache:'no-store'}).then(r => r.headers.get('content-security-policy'))`); }
@@ -372,7 +387,7 @@ async function main() {
     const hasHash = /script-src[^;]*'sha256-/.test(csp ?? '');
     check('CSP script-src 含生效的 unsafe-inline', hasUnsafeInline && !hasHash, (csp ?? '').slice(0, 80) + '...');
 
-    // 2. inline onclick 编译成功（CSP 拦截时这里会是 undefined/null）
+    // 2. inline onclick compiled (these would be undefined/null when the CSP blocks them)
     for (const id of ['win-minimize', 'win-maximize', 'win-close']) {
       const t = await cdp.eval(`typeof document.getElementById('${id}').onclick`);
       check(`按钮 #${id} onclick 已编译`, t === 'function', `typeof=${t}`);
@@ -380,18 +395,18 @@ async function main() {
     const menuOnclick = await cdp.eval(`typeof document.querySelector('.menu-item').onclick`);
     check('菜单项 onclick 已编译', menuOnclick === 'function', `typeof=${menuOnclick}`);
 
-    // 3. 核心交互函数可用（顶层全局函数链完整）
+    // 3. Core interaction functions available (top-level global function chain intact)
     const fns = await cdp.eval(`['openPalette','openSettings','openSFTPFromMenu','TabManager'].map(n => n + '=' + typeof (n==='TabManager' ? TabManager : eval(n))).join(', ')`);
     check('核心交互函数存在', fns.includes('openPalette=function') && fns.includes('openSettings=function') && fns.includes('TabManager=object'), fns);
 
-    // 4. 最小化按钮：合成点击 → 窗口真正最小化
+    // 4. Minimize button: synthetic click → window actually minimizes
     await cdp.eval(`document.getElementById('win-minimize').click()`);
     // Poll instead of a fixed sleep: on a loaded machine the minimize
     // transition outlasts 1.5s and a single query fails spuriously.
     const minimized = await waitForValue(cdp, `window.__TAURI__.window.getCurrentWindow().isMinimized().then(r => r)`, true, 8000);
     check('点击最小化后窗口最小化', minimized === true, `isMinimized=${minimized}`);
 
-    // 恢复窗口：优先 CDP 直接操作（避免 Tauri ACL 限制 unminimize）
+    // Restore the window: prefer direct CDP window ops (avoids the Tauri ACL limits on unminimize)
     let restored = false;
     try {
       const { windowId } = await cdp.send('Browser.getWindowForTarget');
@@ -399,13 +414,14 @@ async function main() {
       restored = true;
     } catch {}
     if (!restored) {
-      // 备选：Windows 对最小化窗口执行最大化会先恢复再最大化
+      // Fallback: maximizing a minimized window on Windows restores it first
       await cdp.eval(`document.getElementById('win-maximize').click()`);
       await sleep(1500);
     }
     await sleep(1000);
 
-    // 5. 最大化按钮：点击 → 最大化（CDP 恢复成功则从 normal 状态点；否则窗口已随备选恢复并最大化）
+    // 5. Maximize button: click → maximized (when the CDP restore succeeded we
+    // click from the normal state; otherwise the fallback already restored and maximized)
     if (restored) {
       await cdp.eval(`document.getElementById('win-maximize').click()`);
       await sleep(1500);
@@ -417,7 +433,7 @@ async function main() {
     const isRestored = await cdp.eval(`window.__TAURI__.window.getCurrentWindow().isMaximized().then(r => r)`);
     check('再次点击后还原', isRestored === false, `isMaximized=${isRestored}`);
 
-    // 6. 菜单项点击：命令面板 overlay 打开
+    // 6. Menu item click: command palette overlay opens
     await cdp.eval(`document.querySelector('.menu-item[onclick*="openPalette"]')?.click()`);
     await sleep(800);
     const paletteOpen = await cdp.eval(`document.getElementById('overlay-palette').classList.contains('open')`);
@@ -425,13 +441,13 @@ async function main() {
     await cdp.eval(`closePalette()`);
     await sleep(300);
 
-    // 7. IPC 链路：窗口命令真实可达（回调式验证，避免只测点击）
+    // 7. IPC path: window commands genuinely reachable (verified via callback, not just the click)
     const ipcOk = await cdp.eval(`window.__TAURI__.core.invoke('window_maximize').then(() => 'ok').catch(e => 'err: ' + e)`);
     check('IPC invoke window_maximize 可达', ipcOk === 'ok', String(ipcOk));
-    await cdp.eval(`document.getElementById('win-maximize').click()`); // 还原
+    await cdp.eval(`document.getElementById('win-maximize').click()`); // restore
     await sleep(1000);
 
-    // 8. 标签页：新增 tab
+    // 8. Tabs: add a new tab
     const tabCountBefore = await cdp.eval(`document.querySelectorAll('#tabbar .tab').length`);
     await cdp.eval(`document.getElementById('btn-add-tab').click()`);
     await sleep(2000);
@@ -459,7 +475,8 @@ async function main() {
     const addBtnSvg = await cdp.eval(`!!document.querySelector('#btn-add-tab svg')`);
     check('新建标签按钮为 SVG 图标', addBtnSvg === true, `svg=${addBtnSvg}`);
 
-    // 9. 分屏：水平分割 → 2 个 pane；再垂直分割 → 3 个 pane（轮询等待，防 pty 未 attach 假失败）
+    // 9. Split: horizontal split → 2 panes; then vertical split → 3 panes
+    // (poll, so a not-yet-attached pty cannot fail spuriously)
     await cdp.eval(`TabManager.splitHorizontal()`);
     const panesAfterH = await waitForValue(cdp, `getAllPanes(TabManager.getActive()).length`, 2);
     check('水平分割产生 2 个 pane', panesAfterH === 2, `panes=${panesAfterH}`);
@@ -467,12 +484,15 @@ async function main() {
     const panesAfterV = await waitForValue(cdp, `getAllPanes(TabManager.getActive()).length`, 3);
     check('垂直分割产生 3 个 pane', panesAfterV === 3, `panes=${panesAfterV}`);
 
-    // 9.5 本地 PTY 数据全链路：pty-input → ConPTY 回显 → 4ms flusher →
-    //     pty-output → xterm buffer。Rust flusher 回归（不 emit/死锁）时回显丢失，
-    //     这条会假死——它是本地 tab 内容唯一的自动化失败信号。
-    //     注入层用 pty-input 而非合成 KeyboardEvent：xterm 5 对合成 keydown
-    //     大面积丢字（实测 echo 后仅个别字符产生 onData），键盘→onData 半截
-    //     属于 xterm 自身代码，由 Ghostty 输入链路检查另行覆盖。
+    // 9.5 Local PTY data path end to end: pty-input → ConPTY echo → 4ms
+    //     flusher → pty-output → xterm buffer. When the Rust flusher regresses
+    //     (no emit / deadlock) the echo is lost and this check stalls — it is
+    //     the only automated failure signal for local-tab content. Injection
+    //     uses pty-input rather than synthetic KeyboardEvents: xterm 5 drops
+    //     most synthetic keydown characters (measured: after the echo only a
+    //     few characters produce onData); the keyboard→onData half belongs to
+    //     xterm's own code and is covered separately by the Ghostty input-path
+    //     check.
     const MARKER = 'ZTERM-E2E-42';
     const diagnosticArm = await cdp.eval(`(async () => {
       const pane = getAllPanes(TabManager.getActive())[0];
@@ -518,14 +538,18 @@ async function main() {
     check('本地诊断记录实际读写边界', ['input-invoke', 'write-begin', 'write-end', 'raw-read', 'output-emit'].every(k => diagnosticResult.nativeKinds.includes(k)), JSON.stringify(diagnosticResult.nativeKinds));
     check('前端诊断记录实际接收与解析', ['input-send', 'receive', 'parsed'].every(k => diagnosticResult.frontendKinds.includes(k)), JSON.stringify(diagnosticResult.frontendKinds));
     check('普通诊断不包含终端正文且可停止', !diagnosticResult.hasTerminalContent && diagnosticResult.frontendStopped && diagnosticResult.nativeStopped);
-    // 平滑光标 adapter 真实挂载断言：bind 失败只 console.warn，旧检查（overlay DOM
-    // count===0）对 adapter 恒真，无法区分"动画在跑"和"静默降级到原生光标"。
+    // Real mount assertion for the smooth-cursor adapter: a failed bind only
+    // console.warns, and the old check (overlay DOM count === 0) is always
+    // true for the adapter — it cannot tell "animation running" apart from
+    // "silently fell back to the native cursor".
     check('WebGL 平滑光标 adapter 已挂载', chainProbe.ok === true && chainProbe.hasAdapter === true, JSON.stringify(chainProbe));
 
-    // 月相/plane-1 emoji 宽度：zterm6 provider 必须已激活且把 plane-1 emoji
-    // 计为 2 格（kimi tip 行实测 U+1F311 按 2 格布局；vendored UnicodeV6 算
-    // 1，导致 2 格字形溢出到从不擦除的邻格、旧字符叠进月亮——现场截图）。
-    // term.write 走同一个 InputHandler->charProperties 路径，钉住 buffer 布局。
+    // Moon-phase / plane-1 emoji width: the zterm6 provider must be active and
+    // count plane-1 emoji as 2 cells (kimi's tip line lays U+1F311 out as
+    // 2 cells; the vendored UnicodeV6 counts it as 1, so the 2-cell glyph
+    // overflows into a neighbor cell that is never erased and old characters
+    // bleed into the moon glyph). term.write goes through the same
+    // InputHandler->charProperties path, pinning the buffer layout.
     const moonProbe = await cdp.eval(`(async () => {
       const pane = getAllPanes(TabManager.getActive())[0];
       const term = pane?.term;
@@ -545,13 +569,18 @@ async function main() {
       moonProbe.active === 'zterm6' && moonProbe.w0 === 2 && moonProbe.w1 === 0 && moonProbe.c2 === 'a' && moonProbe.cx === 4,
       JSON.stringify(moonProbe));
 
-    // IME 锚点：协议光标可见时原生跟随；隐藏且无软件光标时回退原生协议锚定
-    //（现场探针实证：输入阶段协议光标精确跟随插入点——冻结策略会把锚点钉在
-    // textarea 的 DOM 默认位或刚被覆盖的旧 caret 格，候选窗卡左上/拼音覆盖
-    // 已提交内容）；隐藏且软件光标（用户实际看到的 app 自绘 caret）位置已知
-    // 时，锚点必须落在软件光标格——kimi 整段会话不显示协议光标，无 caret 时
-    // 回退原生是最坏基线。该检查同时钉住 patch 的内部锚点
-    //（_core/_syncTextArea/isCursorHidden）存在。
+    // IME anchor: while the protocol cursor is visible the textarea follows it
+    // natively; while hidden with no software cursor, fall back to native
+    // protocol anchoring (during input the protocol cursor tracks the
+    // insertion point exactly — freezing the anchor would pin it to the
+    // textarea's default DOM position or a just-overwritten stale caret cell,
+    // stranding the candidate window top-left or letting pinyin overwrite
+    // committed text); while hidden with a software cursor (the app-drawn
+    // caret the user actually sees) whose position is known, the anchor must
+    // land on the software cursor cell — kimi never shows the protocol cursor
+    // for a whole session, so the no-caret native fallback is the worst-case
+    // baseline. The check also pins the patch's internal anchors
+    // (_core/_syncTextArea/isCursorHidden) as present.
     const imeProbe = await cdp.eval(`(async () => {
       const pane = getAllPanes(TabManager.getActive())[0];
       const term = pane?.term;
@@ -568,8 +597,9 @@ async function main() {
       const p2 = pos();
       await write('\\u001b[?25h\\u001b[12;12H');
       const p3 = pos();
-      // 软件光标分支：临时把 provider 换成固定格（模拟 adapter 已接管），
-      // 隐藏 CUP 到别处，textarea 必须锚在软件光标格而非协议 park 位。
+      // Software-cursor branch: temporarily swap the provider for a fixed cell
+      // (simulating an adapter that has taken over), hide-CUP elsewhere — the
+      // textarea must anchor at the software cursor cell, not the protocol park position.
       const prevProvider = core?.__imeAnchorPerceivedCaret;
       let p4 = null;
       if (core && cell) {
@@ -597,7 +627,7 @@ async function main() {
         && imeProbe.p4 !== null && nearPx(imeProbe.p4.left, imeProbe.e4.left) && nearPx(imeProbe.p4.top, imeProbe.e4.top),
       JSON.stringify(imeProbe));
 
-    // 10. 设置页：打开 → settings tab 出现；页面切换
+    // 10. Settings page: open → a settings tab appears; switch pages
     await cdp.eval(`openSettings()`);
     await sleep(1000);
     const settingsOpen = await cdp.eval(`TabManager.tabs.some(t => t.type === 'settings')`);
@@ -609,8 +639,10 @@ async function main() {
     await cdp.eval(`closeSettingsTab()`);
     await sleep(800);
 
-    // 11. SSH 失败路径：连接立即拒绝的地址 → ssh-error 事件被处理、前端不崩溃
-    // 用 Tauri event API 直接计数 ssh-error（不依赖 UI 临时状态如 toast，更稳定）
+    // 11. SSH failure path: connect to an address that refuses immediately →
+    // the ssh-error event is handled and the frontend does not crash. Count
+    // ssh-error directly via the Tauri event API (does not depend on transient
+    // UI state like toasts — more stable)
     await cdp.eval(`window.__sshErrCount = 0; window.__TAURI__.event.listen('ssh-error', () => { window.__sshErrCount = (window.__sshErrCount || 0) + 1; })`);
     await cdp.eval(`
       (() => {
@@ -647,7 +679,7 @@ async function main() {
     })()`);
     check('SSH 重试后 wrap 层仍无重复且 active 归属正确', wrapAudit2.dup.length === 0 && wrapAudit2.ownerOk === true, JSON.stringify(wrapAudit2));
 
-    // 11b. 快捷命令“末尾回车自动执行”开关：UI 存在、toggle 生效、注入语义正确
+    // 11b. Quick-command "auto-execute trailing newline" toggle: UI exists, toggle works, injection semantics correct
     await cdp.eval(`openSettings('quickcommands')`);
     await sleep(1000);
     const qcToggleExists = await cdp.eval(`!!document.getElementById('qc-auto-enter')`);
@@ -658,15 +690,16 @@ async function main() {
     const qcToggleOn = await cdp.eval(`document.getElementById('qc-auto-enter').classList.contains('on')`);
     const qcSetting = await cdp.eval(`_settingsConfig.qcAutoEnter`);
     check('开关 toggle 生效', qcToggleOn === true && qcSetting === true, `classOn=${qcToggleOn}, config=${qcSetting}`);
-    // 注入语义：关闭时剥末尾回车，开启时保留
+    // Injection semantics: off strips the trailing newline, on keeps it
     const stripOff = await cdp.eval(`_settingsConfig.qcAutoEnter = false; stripTrailingNewline('echo hi\\n')`);
     const stripOn = await cdp.eval(`_settingsConfig.qcAutoEnter = true; 'echo hi\\n'`);
     check('注入语义：关剥开保', stripOff === 'echo hi' && stripOn === 'echo hi\n', JSON.stringify({ stripOff, stripOn }));
-    // 恢复默认（关闭）并关闭设置页
+    // Restore the default (off) and close the settings page
     await cdp.eval(`_settingsConfig.qcAutoEnter = false; document.getElementById('qc-auto-enter').classList.remove('on'); closeSettingsTab()`);
     await sleep(600);
 
-    // 11c. 字体：枚举无 @ 竖排变体；界面字体设置项存在且应用生效
+    // 11c. Fonts: enumeration contains no @ vertical variants; the UI font
+    // setting exists and applying it takes effect
     const fontList = await cdp.eval(`window.electron.ipcRenderer.invoke('get-system-fonts').then(f => f).catch(e => 'ERR: ' + e)`);
     check('字体枚举可用', Array.isArray(fontList), String(fontList).slice(0, 60));
     const atFonts = (Array.isArray(fontList) ? fontList : []).filter(f => f.startsWith('@'));
@@ -678,39 +711,41 @@ async function main() {
     const uiFontSelect = await cdp.eval(`!!document.getElementById('set-ui-font')`);
     const uiFontOptions = await cdp.eval(`document.getElementById('set-ui-font')?.options.length || 0`);
     check('界面字体设置项存在且有选项', uiFontSelect && uiFontOptions > 0, `options=${uiFontOptions}`);
-    // 界面字体跟随开关：默认开 → 界面字体行隐藏
+    // UI-font follow toggle: default on → the UI font row is hidden
     const followDefault = await cdp.eval(`document.getElementById('toggle-ui-follow').classList.contains('on')`);
     const uiRowHidden = await cdp.eval(`document.getElementById('row-ui-font').style.display === 'none'`);
     const fontBefore = await cdp.eval(`document.body.style.fontFamily || '(css默认)'`);
     check('界面字体跟随开关默认开且隐藏设置行', followDefault === true && uiRowHidden === true, `follow=${followDefault}, rowHidden=${uiRowHidden}`);
-    // 跟随模式下 body 应用终端字体组合
+    // In follow mode body gets the terminal font stack
     const followApplied = await cdp.eval(`document.body.style.fontFamily.includes('monospace') || document.body.style.fontFamily.includes('JetBrains') || document.body.style.fontFamily.includes('Consolas') || getComputedStyle(document.body).fontFamily.includes('JetBrains') || getComputedStyle(document.body).fontFamily.includes('monospace')`);
     check('跟随模式下界面使用终端字体', followApplied === true, `body=${fontBefore.slice(0, 60)}`);
-    // 关闭跟随 → 界面字体行显示 → 选界面字体应用
+    // Turn follow off → the UI font row appears → pick a UI font and apply
     await cdp.eval(`toggleUiFollowTerminal()`);
     await sleep(500);
     const uiRowShown = await cdp.eval(`document.getElementById('row-ui-font').style.display !== 'none'`);
     check('关闭跟随后面临字体行显示', uiRowShown === true, `rowShown=${uiRowShown}`);
     const setResult = await cdp.eval(`document.getElementById('set-ui-font').value = "'Consolas',sans-serif"; saveAppearance(); document.body.style.fontFamily`);
     check('界面字体选择应用生效', setResult.includes('Consolas'), `after=${setResult.slice(0, 60)}`);
-    // 输入框跟随界面字体：强调色输入框/快捷命令命令框的计算字体应含界面字体
+    // Inputs follow the UI font: the computed font of the accent-color input
+    // and the quick-command command input must contain the UI font
     const accentFont = await cdp.eval(`getComputedStyle(document.getElementById('set-accent')).fontFamily`);
     const qcFont = await cdp.eval(`getComputedStyle(document.getElementById('qc-edit-command')).fontFamily`);
     check('输入框跟随界面字体', accentFont.includes('Consolas') && qcFont.includes('Consolas'),
       `accent=${accentFont.slice(0, 40)}, qc=${qcFont.slice(0, 40)}`);
-    // 自定义下拉列表字体跟随界面字体（dd-option 曾硬编码 Segoe UI 不随界面字体）
+    // Custom dropdown options follow the UI font (dd-option used to hardcode
+    // Segoe UI and ignore the UI font)
     const ddOptionFont = await cdp.eval(`(() => {
       const el = document.querySelector('.cust-dropdown .dd-option');
       return el ? getComputedStyle(el).fontFamily : '(无 dd-option)';
     })()`);
     check('自定义下拉列表字体跟随界面字体', ddOptionFont.includes('Consolas'), `dd-option=${ddOptionFont.slice(0, 50)}`);
-    // 按钮跟随界面字体（btn-primary 等曾硬编码 Segoe UI）
+    // Buttons follow the UI font (btn-primary etc. used to hardcode Segoe UI)
     const btnFont = await cdp.eval(`(() => {
       const el = document.querySelector('.btn-primary');
       return el ? getComputedStyle(el).fontFamily : '(无 .btn-primary)';
     })()`);
     check('按钮字体跟随界面字体', btnFont.includes('Consolas'), `btn=${btnFont.slice(0, 50)}`);
-    // 恢复默认（跟随开）
+    // Restore the default (follow on)
     await cdp.eval(`_settingsConfig.uiFollowTerminal = true; syncUiFollowUI(); applyUiFont(); closeSettingsTab()`);
     await sleep(500);
 
@@ -757,7 +792,7 @@ async function main() {
     await cdp.eval(`(() => { ipcRenderer.invoke = window.__e2ePrevInvokeFonts; closeSettingsTab(); return 'restored'; })()`).catch(() => null);
     await sleep(300);
 
-    // 12. SFTP 面板：打开 → 面板可见 → 关闭
+    // 12. SFTP panel: open → panel visible → close
     await cdp.eval(`SFTP.open('e2e-dummy-tab')`);
     await sleep(800);
     const sftpOpen = await cdp.eval(`document.getElementById('overlay-sftp').classList.contains('open')`);
@@ -768,9 +803,11 @@ async function main() {
     const sftpClosed = await cdp.eval(`!document.getElementById('overlay-sftp').classList.contains('open')`);
     check('SFTP 面板关闭', sftpClosed === true, `overlay-sftp.open=${!sftpClosed}`);
 
-    // 13.5 xterm 键盘→onData 链路（attachCustomKeyEventHandler 语义防回归：
-    // 放行逻辑返回值写反会吞掉所有按键）。合成小写字母 keydown 在 xterm 5 上可靠
-    // （大写/符号大面积丢字，勿扩展字符集）；PTY→回显→buffer 由 9.5 覆盖。
+    // 13.5 xterm keyboard→onData path (regression guard for the
+    // attachCustomKeyEventHandler semantics: an inverted pass-through return
+    // value swallows every key). Synthetic lowercase keydown is reliable on
+    // xterm 5 (uppercase/symbols drop massively — do not widen the charset);
+    // PTY→echo→buffer is covered by 9.5.
     const inputProbe = await cdp.eval(`(() => {
       const tab = TabManager.tabs.find(t => t.type === 'local');
       if (!tab?.term?.textarea) return { ok: false, why: 'no-textarea' };
@@ -791,9 +828,9 @@ async function main() {
     check('xterm 键盘链路：合成按键→onData 编码', inputOk === true, inputProbe.why || JSON.stringify(gotInput));
 
     // 13.6 About-page update card state machine (mocked IPC: no real
-    // download, no real exit). Covers the full flow 新版发现 → 下载更新 →
-    // 就绪 → 重启并安装, plus the SSH-blocker confirm dialog (open / cancel /
-    // button-label restore).
+    // download, no real exit). Covers the full flow: new version found →
+    // download update → ready → restart and install, plus the SSH-blocker
+    // confirm dialog (open / cancel / button-label restore).
     const updMock = await cdp.eval(`(() => {
       window.__e2eOrigInvoke = ipcRenderer.invoke.bind(ipcRenderer);
       window.__e2eDlState = { phase: 'idle' };
@@ -845,7 +882,7 @@ async function main() {
       JSON.stringify({ desc: updNewer, ...updNewerUi }));
     await cdp.eval(`startUpdateDownload(); 'downloading'`);
     // The 500ms poll must render the downloading phase before ready arrives
-    // (mock holds ready back for ~4 ticks): sample until 下载中 50% appears.
+    // (mock holds ready back for ~4 ticks): sample until '下载中 50%' appears.
     let updDlPhase = null;
     for (let i = 0; i < 16 && !updDlPhase; i++) {
       const s = await cdp.eval(`({
@@ -865,12 +902,13 @@ async function main() {
     })`);
     check('更新卡片：下载完成进入就绪态', updReadyDesc === 'v9.9.9 已下载完成，随时可安装' && updReadyUi.applyShown === true && updReadyUi.applyText === '重启并安装 v9.9.9' && updReadyUi.dlHidden === true,
       JSON.stringify({ desc: updReadyDesc, ...updReadyUi }));
-    // 无阻断：直接 apply，不弹确认框
+    // No blocker: apply directly, no confirm dialog
     await cdp.eval(`applyUpdate(); 'applying'`);
     await sleep(400);
     const updApplied = await cdp.eval(`({ n: window.__e2eApplied, overlayOpen: document.getElementById('overlay-confirm').classList.contains('open') })`);
     check('更新卡片：无 SSH/SFTP 阻断直接安装', updApplied.n === 1 && updApplied.overlayOpen === false, JSON.stringify(updApplied));
-    // 有阻断（临时伪 SSH tab）：弹确认框；取消后恢复按钮默认文案
+    // With a blocker (temporary fake SSH tab): the confirm dialog appears;
+    // cancelling restores the button's default label
     const updConfirm = await cdp.eval(`(() => {
       const fake = { id: '__e2e_fake_ssh', type: 'ssh', connected: true, name: 'fake' };
       TabManager.tabs.push(fake);
@@ -947,7 +985,8 @@ async function main() {
     await cdp.eval(`(() => { ipcRenderer.invoke = window.__e2eOrigInvoke; closeSettingsTab(); return 'restored'; })()`).catch(() => null);
     await sleep(300);
 
-    // 13.7 SSH manager + session selector (design/ssh-session-ui-design.md).
+    // 13.7 SSH manager page + session selector: grouped rows, live search,
+    // collapse state, and a combobox-style picker.
     // Fixtures use documentation-only addresses (TEST-NET-1 / 2001:db8 / .example):
     // no real connection is ever opened — SSH dispatch is captured with a
     // createTab stub and the edit overlay is pure UI.
@@ -1078,8 +1117,8 @@ async function main() {
       JSON.stringify(newPwdProbe));
     // Instrument the save chain so a failure payload shows WHERE it stopped:
     // did saveSSHEdit fire, did encrypt-password resolve (and how long did it
-    // take), was a toast shown. (final8 failed opaque: saved=false after 4s
-    // while the isolated probe passes 3/3 with 4-8ms encrypt.)
+    // take), was a toast shown. (This path once failed opaquely — saved=false
+    // after 4s — while the encrypt step itself takes only 4-8ms.)
     await cdp.eval(`(() => {
       window.__e2eSaveTrace = { saves: 0, ipc: [], toasts: [] };
       if (!window.__e2eOrigSaveSSHEdit) {
@@ -1148,7 +1187,7 @@ async function main() {
       return { overlayOpen: document.getElementById('overlay-ssh-edit').classList.contains('open') };
     })()`).catch(() => null);
     check('SSH 新建：密码框 Esc 关闭对话框', !!escProbe && escProbe.overlayOpen === false, JSON.stringify(escProbe));
-    // Edit-existing regression: status row → 修改 → input → blur cancels back.
+    // Edit-existing regression: status row → '修改' → input → blur cancels back.
     const editPwdProbe = await cdp.eval(`(async () => {
       const fx = TabManager.sshProfiles.find(p => p.id === 'e2essh1');
       fx.encryptedPassword = 'e2e-cipher';
@@ -1166,9 +1205,9 @@ async function main() {
       const saveShown = document.getElementById('ssh-pwd-inline-save').classList.contains('show');
       // Blur cancel requires the field to actually hold focus. The edit-mode
       // render does focus() it, but an OS-unfocused sandbox window can drop
-      // that (observed once in the field: backToView=false with everything
-      // else green). Focus explicitly, record whether the auto-focus worked,
-      // then poll the cancel-back briefly instead of reading synchronously.
+      // that focus (leaving backToView=false with everything else green).
+      // Focus explicitly, record whether the auto-focus worked, then poll the
+      // cancel-back briefly instead of reading synchronously.
       pwd.focus();
       const hadFocus = document.activeElement === pwd;
       document.getElementById('ssh-edit-name').focus();
@@ -1718,7 +1757,7 @@ async function main() {
     await cdp.eval(`(() => { TabManager.sshProfiles = []; _sshMgrViews.clear(); closeSettingsTab(); return 'clean'; })()`).catch(() => null);
     await sleep(300);
 
-    // 13.8 Terminal link opening (ADR-0003): plain links reach the open-url
+    // 13.8 Terminal link opening: plain links reach the open-url
     // IPC only via bare Ctrl+click; OSC 8 links confirm first and show the
     // real target; hover shows target + gesture hint; the release-notes link
     // shares the unified entry and toasts on failure. The IPC is wrapped, so
@@ -2039,11 +2078,11 @@ async function main() {
     await cdp.eval(`(() => { TabManager.sshProfiles = []; _sshMgrViews.clear(); closeSettingsTab(); return 'clean-13.9'; })()`).catch(() => null);
     await sleep(250);
 
-    // 13.10 Settings SSH page: section titles + one settings-card per group
-    // (design/ssh-settings-card-design.md). Shared renderer/DOM untouched —
-    // the card chrome is scoped to the .settings-card-list class (shared with
-    // the quick-commands settings page, 13.11) while the overlay manager
-    // stays flat. Re-seed fixtures (13.9 cleaned them out).
+    // 13.10 Settings SSH page: section titles + one settings-card per group.
+    // Shared renderer/DOM untouched — the card chrome is scoped to the
+    // .settings-card-list class (shared with the quick-commands settings page,
+    // 13.11) while the overlay manager stays flat. Re-seed fixtures (13.9
+    // cleaned them out).
     await cdp.eval(`(() => {
       TabManager.sshProfiles = [
         { id: 'e2essh1', name: '', host: '192.0.2.10', port: 22, username: 'deploy', group: '生产', authType: 'password' },
@@ -2763,9 +2802,10 @@ async function main() {
       updProxyRoundTrip === 'http://127.0.0.1:9' && proxyCleared === true,
       JSON.stringify({ setup: updProxySetup, persisted: proxyPersisted, dead: updProxyDead, invalid: updProxyInvalid, roundTrip: updProxyRoundTrip, cleared: proxyCleared }));
 
-    // 14. 窗口状态恢复：写入 config 的 window 字段 → 重启 → 验证最大化/尺寸恢复
+    // 14. Window state restore: write the window field into config → restart →
+    // verify maximized/size restore
     async function writeWindowState(state) {
-      // 读现有 config（若存在）并注入 window 字段
+      // Read the existing config (if any) and inject the window field
       let cfg = {};
       try { cfg = JSON.parse(readFileSync(DATA_CONFIG, 'utf8')); } catch {}
       cfg.window = state;
@@ -2793,9 +2833,11 @@ async function main() {
       await c2.connect();
       return c2;
     }
-    // 窗口状态恢复由 renderer-ready 触发（页面加载完成后异步执行），轮询等待。
-    // 注意：innerWidth 是 CSS 像素，set_size 恢复的是物理像素（outer_size 保存值），
-    // 期望宽度 = expectW / devicePixelRatio，比较时按 DPR 换算避免缩放缩放下误报失败。
+    // Window state restore is triggered by renderer-ready (runs async after
+    // page load), so poll for it. Note: innerWidth is in CSS pixels while
+    // set_size restores physical pixels (the saved outer_size value), so the
+    // expected width is expectW / devicePixelRatio — convert by DPR when
+    // comparing to avoid false failures under display scaling.
     async function assertWindowRestored(cdp, expectMax, expectW) {
       for (let i = 0; i < 25; i++) {
         const max = await cdp.eval(`window.__TAURI__.window.getCurrentWindow().isMaximized().then(r => r)`).catch(() => false);

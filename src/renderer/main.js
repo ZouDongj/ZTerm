@@ -1,4 +1,4 @@
-// ZTerm - 启动序列 + 定时保存 + window.electronAPI（拆自 renderer.html，纯代码搬运，未改逻辑）
+// ZTerm - startup sequence + periodic save + window.electronAPI (moved verbatim out of renderer.html, logic unchanged)
 // ── Window controls ──
 function _refocusActiveTerminal() {
     const tab = TabManager.getActive();
@@ -25,7 +25,7 @@ window.electronAPI = {
     close: () => { saveConfig(); ipcRenderer.send('window-close'); },
 };
 
-// 窗口最大化/还原时更新图标
+// Update the maximize/restore icon when the window state changes
 ipcRenderer.on('window-state-changed', (event, { maximized }) => {
     const btn = document.getElementById('win-maximize');
     if (btn) btn.textContent = maximized ? '\uE923' : '\uE922'; // Restore ↔ Maximize
@@ -33,10 +33,10 @@ ipcRenderer.on('window-state-changed', (event, { maximized }) => {
     if (winEl) winEl.classList.toggle('is-maximized', maximized);
 });
 
-// ── 全局禁用表单补全/拼写建议 ──
-// WebView2 的 autofill 已在主进程关闭（general_autofill_enabled(false)）；
-// 这里再兜一层：所有输入框关闭 autocomplete/autocorrect/spellcheck，
-// 防止动态创建的输入框（登录脚本行、重命名输入等）触发浏览器式建议弹窗
+// ── Globally disable form autofill / spellcheck suggestions ──
+// WebView2 autofill is already disabled in the main process (general_autofill_enabled(false));
+// this adds a second layer: turn off autocomplete/autocorrect/spellcheck on all inputs,
+// so dynamically created inputs (login script rows, rename fields, etc.) cannot trigger browser-style suggestion popups
 function _disableFormEnhancements(root) {
     (root.querySelectorAll ? root.querySelectorAll('input, textarea') : []).forEach(el => {
         if (!el.hasAttribute('autocomplete')) el.setAttribute('autocomplete', 'off');
@@ -54,7 +54,7 @@ new MutationObserver(muts => {
 _disableFormEnhancements(document);
 
 // ── Save / Periodic ──
-// L4：返回 Promise——退出流程需要等待落盘完成，不能 fire-and-forget
+// Returns a Promise: the quit flow must wait for the save to hit disk, so this cannot be fire-and-forget
 function saveConfig() {
     const tabs = TabManager.tabs
         .filter(t => t.type !== 'settings')
@@ -70,43 +70,43 @@ function saveConfig() {
             }
             return entry;
         });
-    // 无内容/全部关闭时也要保存当前状态，否则旧 lastTabs 残留导致已关闭 tab 复活
-    // invoke 等待 Rust 侧写盘完成（save_last_tabs 同步落盘），退出前调用可确保数据持久化
+    // Save the current state even when there is no content / all tabs are closed, otherwise stale lastTabs would resurrect closed tabs
+    // invoke waits until the Rust side has written to disk (save_last_tabs flushes synchronously), so calling it before quit guarantees persistence
     return ipcRenderer.invoke('save-last-tabs', tabs).catch(e => console.error('[saveConfig]', e));
 }
 
 setInterval(() => { saveConfig(); }, 15000);
 
-// 窗口关闭前主进程给一次保存机会（app-before-quit → quit-ready）
+// The main process grants one final save before the window closes (app-before-quit → quit-ready)
 ipcRenderer.on('app-before-quit', async () => {
     try { await saveConfig(); } catch(e) {}
     ipcRenderer.send('quit-ready');
 });
 
-// 启动动画：窗口状态（位置/大小/最大化）恢复并显示后，主进程 emit 此事件，
-// 触发 .window 的淡入动画（克制的 0.4s，避免启动突兀）
+// Startup animation: once the window state (position/size/maximized) has been restored and the window shown,
+// the main process emits this event to trigger the .window fade-in (a restrained 0.4s so startup does not feel abrupt)
 ipcRenderer.on('window-shown', () => {
     const winEl = document.querySelector('.window');
     if (winEl && !winEl.classList.contains('win-in')) {
         winEl.classList.add('win-in');
         setTimeout(() => winEl.classList.remove('win-in'), 400);
     }
-    // 窗口已显示：解除 splash 隐藏禁令；若此前有被推迟的隐藏请求（首帧早于窗口弹出），立即重试
+    // Window shown: lift the splash-hide ban; if a hide was deferred earlier (first frame beat the window), retry it now
     _windowShownAt = Date.now();
     if (_splashHidePending) { _splashHidePending = false; hideStartupSplash(); }
 });
 
-// renderer 加载完成且监听器已注册：通知主进程恢复窗口状态并显示窗口。
-// 主进程据此保证 window-shown 一定在监听就绪后 emit（否则启动界面会卡住）
+// Renderer finished loading and listeners are registered: tell the main process to restore the window state and show the window.
+// This lets the main process guarantee window-shown is only emitted after listeners are ready (otherwise the splash would stall)
 ipcRenderer.invoke('renderer-ready').catch(() => {});
 
-// 启动界面：首个终端首帧渲染完成后淡出（xterm onRender 精确判定 + 3s 兜底）
+// Startup splash: fades out once the first terminal's first frame has rendered (precise xterm onRender detection + 3s fallback)
 let _splashHidden = false;
-// 窗口显示时间戳：splash 在窗口显示前禁止隐藏（防止窗口弹出前启动页就消失），
-// 窗口显示后终端首帧一到立即淡出，不额外停留
+// Window-shown timestamp: the splash must not hide before the window is shown (so it cannot vanish before the window appears);
+// after the window is shown, fade out the moment the terminal's first frame arrives, with no extra dwell
 let _windowShownAt = 0;
 let _splashHidePending = false;
-// 绿点加载动画：沿 Z 形方块单向循环移动，一格一格走（当前格变白、下一格变绿），慢速
+// Green-dot loader animation: cycles one-way along the Z-shaped cells, one cell per step (current cell turns white, next turns green), slow
 let _splashLoaderTimer = null;
 function startSplashLoader() {
     const cells = document.querySelectorAll('#splash-cells .cell');
@@ -117,13 +117,13 @@ function startSplashLoader() {
         cells[idx].classList.remove('loading');
         idx = (idx + 1) % cells.length;
         cells[idx].classList.add('loading');
-    }, 450); // 450ms/格，13 格一圈约 5.9s，慢速一格一格走
+    }, 450); // 450ms per cell; 13 cells ≈ 5.9s per lap, stepping slowly one cell at a time
 }
 function hideStartupSplash(force) {
     if (_splashHidden) return;
-    // 窗口未显示（还在恢复状态/未 show）：推迟到 window-shown 后再隐藏
+    // Window not shown yet (still restoring state / not visible): defer the hide until window-shown
     if (!force && !_windowShownAt) { _splashHidePending = true; return; }
-    // 终端首帧已渲染 → 立即淡出（不额外停留，force 兜底路径同样立即）
+    // Terminal first frame rendered → fade out immediately (no extra dwell; the force fallback path is equally immediate)
     _splashHidden = true;
     _splashHidePending = false;
     if (_splashLoaderTimer) { clearInterval(_splashLoaderTimer); _splashLoaderTimer = null; }
@@ -147,8 +147,8 @@ function armSplashHide() {
         setTimeout(waitTerm, 200);
     };
     waitTerm();
-    // 兜底 1：window-shown 事件异常丢失时（正常路径主进程等页面加载完才 emit），
-    // 强制解除"窗口未显示"禁令并重试，避免 splash 永久滞留
+    // Fallback 1: if the window-shown event was lost (the normal path only emits it after the page loads),
+    // forcibly lift the "window not shown" ban and retry, so the splash cannot stick around forever
     setTimeout(() => {
         if (!_windowShownAt) {
             console.warn('[startup] window-shown 1.2s 未收到，假定窗口已显示并重试隐藏 splash');
@@ -156,9 +156,9 @@ function armSplashHide() {
         }
         if (_splashHidePending) { _splashHidePending = false; hideStartupSplash(); }
     }, 1200);
-    // 兜底 2：无论首帧/事件是否正常，3s 后强制隐藏（绕过停留限制）。
-    // 按 Tabby 调研 §10.4：超时不能无提示地移除启动页——记录启动诊断再隐藏；
-    // 仅当 splash 仍存在时记录（正常路径首帧早已移除，避免误导性日志）
+    // Fallback 2: force-hide after 3s regardless of first frame / events (bypassing the dwell restriction).
+    // Per Tabby's behavior, a timeout must not remove the splash silently — log startup diagnostics before hiding;
+    // only log when the splash still exists (on the normal path the first frame removed it long ago, so this avoids misleading logs)
     setTimeout(() => {
         if (_splashHidden) return;
         console.warn('[startup] splash 3s 兜底强制隐藏（未检测到终端首帧）', {
@@ -183,7 +183,7 @@ function armSplashHide() {
             document.fonts.load('400 16px "HarmonyOS Sans SC"', '中文'),
         ]);
     } catch(e) { /* missing fonts fall back silently */ }
-    // 数据目录以主进程解析为准（打包版默认安装目录/data，支持用户自定义指针）
+    // The data directory is resolved by the main process (packaged builds default to <install dir>/data; a user-defined pointer is supported)
     try {
         const info = await ipcRenderer.invoke('get-data-dir-info');
         if (info && info.current) CONFIG_FILE = path.join(info.current, 'config.json');
@@ -194,12 +194,12 @@ function armSplashHide() {
     applyAccentColor(_settingsConfig.accentColor || '#61afef');
     applyTerminalScheme();
     applyUiFont();
-    // 顶栏菜单的快捷键提示需反映用户自定义：loadSettings 之后立刻填
+    // Top-bar menu shortcut hints must reflect user customization: fill them right after loadSettings
     if (typeof updateMenuShortcuts === 'function') updateMenuShortcuts();
     const _winEl = document.querySelector('.window');
     if (_winEl && _settingsConfig.animations === false) {
         _winEl.classList.add('no-animations');
-        // 启动页在 .window 之外，兄弟选择器不可达：同步给 body 加锚点（app.css 依赖）
+        // The splash lives outside .window, so sibling selectors cannot reach it: mirror the anchor onto body (app.css depends on it)
         document.body.classList.add('no-animations');
     }
     TabManager.init();

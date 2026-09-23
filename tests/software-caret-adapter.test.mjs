@@ -1,8 +1,8 @@
-// ADR-0001 B2 adapter state-machine tests (§4.5 reverse tests + the
-// reviewer findings): trust/watermark/generation gating, neutral vs
-// contradictory units, cell style evidence, DECTCEM independence, and the
-// B1 regression (the restore overlay must draw the covering GLYPH, not just
-// a background rect — with the default bar style nothing else repaints it).
+// Software-caret adapter state-machine tests: trust/watermark/generation
+// gating, neutral vs contradictory units, cell style evidence, DECTCEM
+// independence, and the restore-overlay regression (the restore overlay must
+// draw the covering GLYPH, not just a background rect — with the default
+// bar style nothing else repaints it).
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';

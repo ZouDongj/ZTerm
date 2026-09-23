@@ -1,13 +1,13 @@
-// ZTerm - SFTP 面板 + 传输管理 + 拖拽上传（拆自 renderer.html，纯代码搬运，未改逻辑）
+// ZTerm - SFTP panel + transfer manager + drag-and-drop upload
 
 // ── SFTP Panel ──
 const SFTP = {
-    _tabId: null,      // 当前 SSH 连接的 main 进程 tabId（pty/ssh 的 tabId）
-    _path: '/',        // 当前远程路径
-    _files: [],        // 当前目录文件列表
-    _reqSeq: 0,        // 请求序号：异步响应归属校验（M3，防快速切 tab 错配）
-    _pinned: {},       // tabId -> boolean，每个 tab 独立的 pin 状态
-    _pinnedPath: {},   // tabId -> path，每个 tab 独立的 pin 路径
+    _tabId: null,      // main-process tabId of the current SSH connection (the pty/ssh tabId)
+    _path: '/',        // current remote path
+    _files: [],        // file list of the current directory
+    _reqSeq: 0,        // request sequence number: async response ownership check (prevents stale responses after fast tab switches)
+    _pinned: {},       // tabId -> boolean, per-tab pin state
+    _pinnedPath: {},   // tabId -> path, per-tab pinned path
 
     togglePin() {
         const tabId = this._tabId;
@@ -27,34 +27,34 @@ const SFTP = {
     },
 
     async open(tabId) {
-        // tabId 是 main 进程的 tabId，不是 TabManager 的 tab id
+        // tabId here is the main-process tabId, not TabManager's tab id
         this._tabId = tabId;
-        // 设置连接信息
+        // set connection info
         const tab = TabManager.tabs.find(t => t.tabId === tabId);
         const connEl = document.getElementById('sftp-conn');
         if (connEl && tab) connEl.textContent = tab.name || '';
-        // 总是显示加载中，然后获取文件列表
+        // always show the loading state first, then fetch the file list
         this._path = '/';
         document.getElementById('sftp-breadcrumb').innerHTML = '<span>/</span>';
         document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载中…</div>';
         document.getElementById('overlay-sftp').classList.add('open');
-        // 恢复该 tab 的 pin 状态到按钮
+        // restore this tab's pin state onto the button
         const pinBtn = document.getElementById('sftp-pin-btn');
         if (pinBtn) pinBtn.classList.toggle('pinned', this._isPinned(tabId));
-        // 如果该 tab pin 住了，直接用 pin 住的目录
+        // if this tab is pinned, navigate straight to the pinned directory
         if (this._isPinned(tabId) && this._pinnedPath[tabId]) {
             await this.navigate(this._pinnedPath[tabId]);
             return;
         }
-        // M3：请求序号 + 归属校验——期间用户可能切到别的 tab 或关闭面板，
-        // 旧请求的响应不得覆盖当前面板状态
+        // Request sequence + ownership check: the user may switch tabs or close
+        // the panel meanwhile; a stale response must not overwrite the current panel state
         const myTab = tabId;
         const seq = ++SFTP._reqSeq;
         let result;
         try {
             result = await ipcRenderer.invoke('sftp-open', { tabId });
         } catch (e) {
-            // 会话不存在/已断开时 Rust 返回 Err（invoke reject），不能留下未处理 rejection
+            // Rust returns Err (invoke rejects) when the session is missing/disconnected; do not leave an unhandled rejection
             showToast('无法打开 SFTP: ' + (e?.message || '会话不可用'), true);
             document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载失败</div>';
             return;
@@ -97,17 +97,17 @@ const SFTP = {
 async navigate(path) {
     if (!this._tabId) return;
     const prevPath = this._path;
-    // 先验证路径合法性再刷新页面
+    // validate the path before refreshing the view
     const body = document.getElementById('sftp-body');
     body.innerHTML = '<div class="sftp-empty">加载中…</div>';
-    // M3：请求序号 + 归属校验（同 open）
+    // Request sequence + ownership check (same as open)
     const myTab = this._tabId;
     const seq = ++SFTP._reqSeq;
     let result;
     try {
         result = await ipcRenderer.invoke('sftp-readdir', { tabId: myTab, path });
     } catch (e) {
-        // 会话断开时 Rust 返回 Err（invoke reject），显示错误并恢复原内容
+        // Rust returns Err (invoke rejects) on session disconnect; show the error and restore the previous content
         showToast('无法访问: ' + (e?.message || '会话不可用'), true);
         if (seq === SFTP._reqSeq && this._tabId === myTab) {
             this._renderBreadcrumb();
@@ -119,14 +119,14 @@ async navigate(path) {
     const { files, error } = result;
     if (error) {
         showToast('无法访问: ' + error, true);
-        // 恢复之前的内容
+        // restore the previous content
         this._renderBreadcrumb();
         this._renderFiles();
         return;
     }
     this._path = path;
     this._renderBreadcrumb();
-        // 目录在前，同类按名称字母序
+        // directories first, then alphabetical by name within each kind
         this._files = (files || []).sort((a, b) => {
             if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
             return a.name.localeCompare(b.name);
@@ -150,18 +150,18 @@ async navigate(path) {
             sep.textContent = '/';
             el.appendChild(sep);
             const seg = document.createElement('span');
-            seg.textContent = p; // textContent 赋值，杜绝文件名注入
+            seg.textContent = p; // assign via textContent to prevent filename injection
             seg.addEventListener('click', () => this.navigate(path));
             el.appendChild(seg);
         });
-        // 双击地址栏进入路径编辑（参考 tabby）：面包屑整体替换为输入框，
-        // 预填当前路径，回车导航，Esc/blur 恢复面包屑
+        // Double-click the address bar to edit the path (as in tabby): the breadcrumb is
+        // replaced by an input prefilled with the current path; Enter navigates, Esc/blur restores the breadcrumb
         el.ondblclick = () => this._editPath();
     },
 
     _editPath() {
         const el = document.getElementById('sftp-breadcrumb');
-        if (!el || el.querySelector('input')) return; // 已在编辑态
+        if (!el || el.querySelector('input')) return; // already in edit mode
         const input = document.createElement('input');
         input.className = 'sftp-path-input inline-edit';
         input.value = this._path || '/';
@@ -169,7 +169,7 @@ async navigate(path) {
         el.innerHTML = '';
         el.appendChild(input);
         input.focus();
-        // 选中末尾的目录名，方便覆盖输入
+        // select the trailing directory name so typing overwrites it
         const lastSlash = input.value.lastIndexOf('/');
         if (lastSlash >= 0 && lastSlash < input.value.length - 1) {
             input.setSelectionRange(lastSlash + 1, input.value.length);
@@ -197,7 +197,7 @@ async navigate(path) {
     _renderFiles() {
         const body = document.getElementById('sftp-body');
         body.innerHTML = '';
-        // ".." 行
+        // ".." row
         if (this._path !== '/') {
             const up = document.createElement('div');
             up.className = 'sftp-item';
@@ -216,7 +216,7 @@ async navigate(path) {
                 '<span class="sftp-item-name">' + escHtml(f.name) + '</span>' +
                 '<span class="sftp-item-size">' + size + '</span>' +
                 '<span class="sftp-item-date">' + date + '</span>';
-            // 不用内联 onclick 拼接路径——恶意服务器文件名可注入 HTML 属性
+            // no inline onclick with concatenated paths — a malicious server filename could inject HTML attributes
             el.addEventListener('click', () => {
                 if (f.isDir) this.navigate(fullPath);
                 else this.download(fullPath, f.name);
@@ -296,7 +296,7 @@ async navigate(path) {
     },
 
     mkdir() {
-        // Electron 不支持 window.prompt()——用文件列表顶部的内联输入行代替
+        // Electron does not support window.prompt() — use an inline input row at the top of the file list instead
         const body = document.getElementById('sftp-body');
         if (document.getElementById('sftp-mkdir-row')) return;
         const row = document.createElement('div');
@@ -371,9 +371,9 @@ const TransferManager = {
         if (!t) return;
         t.transferred = transferred;
         t.total = total;
-        // 节流渲染：sftp-progress 事件频率远超人眼可感知刷新率，
-        // 每次事件都重建整个面板会让速度/进度文字高频抖动（抽搐）；
-        // 合并为 300ms 一次，速度与进度每帧只变化一次，视觉稳定
+        // Throttled rendering: sftp-progress events arrive far faster than the eye can perceive,
+        // and rebuilding the whole panel per event makes the speed/progress text flicker;
+        // coalescing to one render per 300ms keeps speed and progress visually stable
         if (this._panelTimer) return;
         this._panelTimer = setTimeout(() => {
             this._panelTimer = null;
@@ -426,7 +426,7 @@ const TransferManager = {
             const panelOpen = document.getElementById('transfer-panel')?.classList.contains('open');
             btn.classList.toggle('has-active', active > 0 && !panelOpen);
         }
-        // 更新面板内容
+        // update panel content
         const panel = document.getElementById('transfer-panel');
         if (panel && panel.classList.contains('open')) {
             this._renderPanel();
@@ -551,8 +551,8 @@ const TransferManager = {
         const btn = t.done
             ? '<button class="transfer-item-btn" onclick="TransferManager.remove(' + t.id + ')">' + Icons.iconSvg('check', 12) + '</button>'
             : '<button class="transfer-item-btn" onclick="TransferManager.cancel(' + t.id + ')">' + Icons.iconSvg('x', 12) + '</button>';
-        // 速度用 EMA 平滑（最近窗口的瞬时速率），替代全程平均值：
-        // 平均值在传输中单调漂移、字节突发时跳变，是文字抽搐的主要来源
+        // Speed is smoothed with an EMA (instantaneous rate over the recent window) instead of
+        // a whole-transfer average, which drifts monotonically and jumps on bursts — a main source of text jitter
         const now = Date.now();
         let speed = t._speed || 0;
         if (!t.done && !t.cancelled) {
@@ -615,27 +615,27 @@ const TransferManager = {
     },
 };
 
-// SFTP 传输进度
+// SFTP transfer progress
 ipcRenderer.on('sftp-progress', (event, { tabId, transferred, total, transferId }) => {
     TransferManager.update(transferId, transferred, total);
 });
 
-// SFTP cwd 跟随：SSH 终端 cd 时自动跳转（除非该 tab pin 住）
+// SFTP cwd follow: auto-navigate when the SSH terminal cd's (unless the tab is pinned)
 ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd }) => {
     if (SFTP.isOpen && !SFTP._pinned[tabId] && SFTP._tabId === tabId) {
         SFTP.navigate(cwd);
     }
 });
 
-// ── SFTP 拖拽上传（拖文件到面板即上传到当前远程目录）──
+// ── SFTP drag-and-drop upload (drop files onto the panel to upload into the current remote directory) ──
 (() => {
     const win = document.querySelector('#overlay-sftp .sftp-window');
     if (!win) return;
-    // Tauri(WebView2) 没有 webUtils.getPathForFile, 文件路径改由窗口级 tauri://drag-* 事件提供
+    // Tauri (WebView2) has no webUtils.getPathForFile; file paths come from window-level tauri://drag-* events instead
     const isTauri = !!(window.__TAURI__ && window.__TAURI__.event);
     let dragDepth = 0;
 
-    // 统一处理一批本地路径: 文件夹拦截 + 逐个上传
+    // Handle a batch of local paths uniformly: reject folders + upload files one by one
     function _handleDroppedPaths(paths) {
         if (!SFTP.isOpen || !SFTP._tabId) return;
         (paths || []).forEach(p => {
@@ -650,8 +650,8 @@ ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd }) => {
         });
     }
 
-    // Tauri 拖拽事件是窗口级的, 需要判断释放点是否落在 SFTP 面板内
-    // 注意: payload.position 是物理像素, 需除以 devicePixelRatio 换算成 CSS 坐标
+    // Tauri drag events are window-level, so we must check whether the drop point falls inside the SFTP panel
+    // Note: payload.position is in physical pixels; divide by devicePixelRatio to get CSS coordinates
     function _pointInPanel(x, y) {
         const dpr = window.devicePixelRatio || 1;
         const el = document.elementFromPoint(x / dpr, y / dpr);
@@ -665,10 +665,10 @@ ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd }) => {
         e.preventDefault();
         dragDepth = 0;
         win.classList.remove('drag-over');
-        if (isTauri) return; // Tauri 下 dataTransfer.files 拿不到路径, 走 tauri://drag-drop 事件
+        if (isTauri) return; // under Tauri, dataTransfer.files has no paths; use the tauri://drag-drop event instead
         if (!SFTP.isOpen || !SFTP._tabId) return;
         [...(e.dataTransfer.files || [])].forEach(f => {
-            // Electron 32+ 移除了 File.path，必须用 webUtils.getPathForFile
+            // Electron 32+ removed File.path; must use webUtils.getPathForFile
             let localPath = '';
             try { localPath = webUtils.getPathForFile(f); } catch(err) {}
             if (!localPath) return;
@@ -678,15 +678,15 @@ ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd }) => {
 
     if (isTauri) {
         const tauriEvent = window.__TAURI__.event;
-        // 悬停面板上时显示高亮 (drag-over payload 只有 position)
+        // highlight while hovering over the panel (drag-over payload only carries position)
         tauriEvent.listen('tauri://drag-over', (event) => {
             const pos = event.payload && event.payload.position;
             if (pos && _pointInPanel(pos.x, pos.y)) win.classList.add('drag-over');
             else win.classList.remove('drag-over');
         });
-        // 拖出窗口/取消
+        // dragged out of the window / cancelled
         tauriEvent.listen('tauri://drag-leave', () => { win.classList.remove('drag-over'); });
-        // 释放: 只在面板内才上传
+        // drop: upload only when released inside the panel
         tauriEvent.listen('tauri://drag-drop', (event) => {
             win.classList.remove('drag-over');
             const payload = event.payload || {};

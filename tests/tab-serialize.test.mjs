@@ -1,4 +1,4 @@
-// ZTerm - 分屏树持久化序列化/反序列化单测（node --test）
+// ZTerm - split-tree persistence serialize/deserialize unit tests (node --test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -71,7 +71,7 @@ test('deserializeSplitNode 深度超限截断且不产生 null 子节点', () =>
     }
     const out = deserializeSplitNode(deep, { defaultName: 'Tab', nextPaneId });
     assert.ok(out, '根节点（depth 0）应正常返回');
-    // 遍历整棵树：不得有 null 子节点（否则 normalize 会崩溃），不得崩溃
+    // walk the whole tree: no null children (normalize would crash on them) and no crash
     const stack = [out];
     while (stack.length) {
         const n = stack.pop();
@@ -146,7 +146,7 @@ test('序列化 → 反序列化 → 序列化 等价（roundtrip 保真）', ()
     const saved = serializeSplitNode(original);
     const restored = deser(saved, 'Tab');
     const resaved = serializeSplitNode(restored);
-    // 序列化结果应完全一致（paneType/command/args/ratios/结构）
+    // the re-serialized result must be identical (paneType/command/args/ratios/structure)
     assert.deepEqual(resaved, saved);
 });
 

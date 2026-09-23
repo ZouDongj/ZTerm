@@ -1,4 +1,4 @@
-// win32-input-mode serialization tests (ADR-0002 item: local Ctrl+J).
+// win32-input-mode serialization tests for local Ctrl+J.
 // The wire format is pinned against Microsoft's own source:
 //   encode:  terminal/src/terminal/input/terminalInput.cpp::_makeWin32Output
 //   decode:  terminal/src/terminal/parser/InputStateMachineEngine.cpp::_GenerateWin32Key

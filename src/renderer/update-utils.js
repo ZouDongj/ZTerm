@@ -1,4 +1,4 @@
-// ZTerm - 应用内更新纯逻辑（无 DOM 依赖，浏览器全局 + CommonJS 双导出，node:test 可测）
+// ZTerm - in-app update pure logic (no DOM dependency; browser global + CommonJS dual export, node:test-able)
 
 // Count the activities that an update install would interrupt: live SSH
 // sessions (including split panes) and in-flight SFTP transfers. Local

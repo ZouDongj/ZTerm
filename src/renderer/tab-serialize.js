@@ -1,6 +1,6 @@
-// ZTerm - 分屏树持久化序列化/反序列化纯逻辑（无 DOM 依赖，双导出，node:test 可测）
-// 序列化：split tree → 保存格式（lastTabs 落盘）
-// 反序列化：保存格式 → 运行期树（含深度上限防御）
+// ZTerm - split tree persistence serialize/deserialize pure logic (no DOM dependency, dual export, node:test-able)
+// Serialize: split tree → saved format (lastTabs written to disk)
+// Deserialize: saved format → runtime tree (with depth-limit defense)
 
 const MAX_TREE_DEPTH = 50;
 
@@ -31,12 +31,12 @@ function serializeSplitNode(node) {
 function deserializeSplitNode(saved, opts) {
     if (!saved) return null;
     const depth = opts.depth ?? 0;
-    // 深度上限：恶意/损坏的 config 嵌套过深会栈溢出；50 层远超任何正常使用
+    // Depth limit: a malicious/corrupt config nested too deeply would overflow the stack; 50 levels far exceeds any normal use
     if (depth > MAX_TREE_DEPTH) return null;
     if (saved.orientation) {
         return {
             orientation: saved.orientation,
-            // 超限子节点返回 null，过滤掉——否则 normalize 会在 null 上崩溃
+            // Over-limit children return null and get filtered out — otherwise normalize would crash on null
             children: saved.children
                 .map(c => deserializeSplitNode(c, { ...opts, depth: depth + 1 }))
                 .filter(Boolean),
@@ -50,7 +50,7 @@ function deserializeSplitNode(saved, opts) {
         tabId: null, term: null, fitAddon: null, focused: false,
         name: saved.name || opts.defaultName,
         type: isSSH ? 'ssh' : (saved.paneType || 'local'),
-        connected: !isSSH, // local 直接在线，SSH 等握手
+        connected: !isSSH, // local starts online immediately; SSH waits for the handshake
         _sshHost: saved.sshHost, _sshPort: saved.sshPort, _sshUser: saved.sshUser,
         _sshProfileId: saved.sshProfileId,
         _command: isSSH ? '' : (saved.command || ''),

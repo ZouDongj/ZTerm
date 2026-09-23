@@ -1,5 +1,5 @@
-// ZTerm - 分屏树纯逻辑（无 DOM 依赖，浏览器全局 + CommonJS 双导出，node:test 可测）
-// 浏览器通过 script 标签加载得到全局函数；node 通过 module.exports 导入。
+// ZTerm - split tree pure logic (no DOM dependency; browser global + CommonJS dual export, node:test-able)
+// The browser gets global functions via a script tag; node imports via module.exports.
 
 function getAllPanes(tab) {
     if (!tab.splitRoot) return [];
@@ -62,8 +62,10 @@ function normalize(container) {
                     container.ratios.splice(i, 0, child.ratios[j] * ratio);
                     i++;
                 }
-                // 内层循环把 i 推进到了合并区之后；回退一步让外层 i++ 重新
-                // 检查合并区后的下一个兄弟（否则相邻的同向容器会被跳过不合并）
+                // The inner loop advanced i past the merged region; step back
+                // so the outer i++ re-checks the sibling right after it
+                // (otherwise adjacent same-orientation containers get skipped
+                // and never merged)
                 i--;
             }
         }
@@ -73,13 +75,13 @@ function normalize(container) {
     container.ratios = container.ratios.map(x => x / s);
 }
 
-// 拖拽调整相邻两个 pane 的 ratio，最小比例钳制（拖动不会把 pane 压没）
+// Drag-adjust the ratios of two adjacent panes with a minimum-ratio clamp (dragging can never shrink a pane away)
 function applyDragRatios(r1, r2, deltaRatio, minRatio) {
     let a = r1 + deltaRatio;
     let b = r2 - deltaRatio;
     if (a < minRatio) { b -= minRatio - a; a = minRatio; }
     if (b < minRatio) { a -= minRatio - b; b = minRatio; }
-    // 极端输入（两侧初始和 < minRatio）双钳制会过冲为负，裁到 0 防负尺寸
+    // Extreme input (initial sum of both sides < minRatio) makes the double clamp overshoot negative; clamp to 0 to prevent negative sizes
     const sum = a + b;
     if (a < 0) { a = 0; b = sum; }
     if (b < 0) { b = 0; a = sum; }

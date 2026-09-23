@@ -1,4 +1,4 @@
-// ZTerm - 高亮规则纯逻辑单测（node --test）
+// ZTerm - highlight rule pure-logic unit tests (node --test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -8,7 +8,7 @@ const { buildHighlightRegex, applySgrParams, sgrStatesAt, buildHighlightEndSeq, 
     require('../src/renderer/highlight-utils.js');
 
 test('buildHighlightRegex 普通关键字被转义（正则元字符无效）', () => {
-    // 关键字 "a.b" 应匹配字面量 a.b，而不是任意字符
+    // keyword "a.b" must match the literal a.b, not any character
     const re = buildHighlightRegex('a.b', false, false);
     assert.ok(re, 'regex should compile');
     assert.ok(re.test('a.b'));
@@ -39,7 +39,7 @@ test('buildHighlightRegex 空文本编译为永不匹配（空串匹配）', () 
     assert.equal(re.exec('abc').index, 0, 'empty regex matches at position 0');
 });
 
-// ── issue #9：高亮结束序列必须恢复匹配位置原有的 SGR 状态 ──
+// ── issue #9: the highlight end sequence must restore the SGR state active at the match position ──
 
 const fgRule = { text: 'ERROR', enabled: true, foreground: true, foregroundColor: '#e06c75',
                  background: false, backgroundColor: '', bold: false, italic: false, underline: false };
@@ -93,22 +93,22 @@ test('buildHighlightEndSeq 原行加粗时不再误关粗体', () => {
 
 test('sgrStatesAt 按位置给出当时的渲染状态', () => {
     const line = 'a\x1b[31mbc\x1b[1mde';
-    // 可打印字符位置：'a'=0、'b'=6、'd'=12
+    // printable character offsets: 'a'=0, 'b'=6, 'd'=12
     const [s1, s2, s3] = sgrStatesAt(line, [0, 6, 12]);
-    assert.equal(s1.fg, null);           // 'a' 之前无 SGR
-    assert.equal(s2.fg, '31');           // 'b' 处已见 31
+    assert.equal(s1.fg, null);           // no SGR before 'a'
+    assert.equal(s2.fg, '31');           // 31 already seen at 'b'
     assert.equal(s2.bold, false);
     assert.equal(s3.fg, '31');
-    assert.equal(s3.bold, true);         // 'd' 处已见 1
+    assert.equal(s3.bold, true);         // 1 already seen at 'd'
 });
 
 test('applyHighlightToLine 关键字后文本恢复原行颜色（issue #9 现场形态）', () => {
-    // 现场：一行自带颜色，中间单词命中高亮后，后面的字被洗成默认白
+    // a line carrying its own color: once a word in the middle is highlighted, the trailing text gets washed to default white
     const line = '\x1b[38;2;97;175;239minfo: build \x1b[1mERROR\x1b[22m happened\x1b[39m';
     const out = applyHighlightToLine(line, [fgRule]);
     const kw = out.indexOf('ERROR');
     const after = out.slice(kw + 'ERROR'.length);
-    // 匹配结束后必须先恢复 38;2;97;175;239，再跟原行的 \x1b[22m，而不是直接 \x1b[39m
+    // after the match ends, 38;2;97;175;239 must be restored first, then the original line's \x1b[22m follows, not a direct \x1b[39m
     assert.ok(after.startsWith('\x1b[38;2;97;175;239m'),
         'original fg must be restored right after the keyword, got: ' + JSON.stringify(after.slice(0, 30)));
     assert.ok(!after.startsWith('\x1b[39m'), 'default reset must not wipe the original color');

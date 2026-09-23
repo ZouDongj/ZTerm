@@ -1,23 +1,23 @@
-// ZTerm -> Tauri 2 ipcRenderer 兼容层
-// 用 IIFE 包裹, 不污染全局作用域
-// 使用 window.__TAURI__ (withGlobalTauri: true 自动注入, 同步可用)
-// 不需要 async import, 避免 404 / 竞态问题
+// ZTerm -> Tauri 2 ipcRenderer compatibility layer
+// Wrapped in an IIFE to avoid polluting the global scope
+// Uses window.__TAURI__ (auto-injected by withGlobalTauri: true, synchronously available)
+// No async import needed, avoiding 404 / race issues
 
 (function() {
-  // 等待 window.__TAURI__ 就绪 (Tauri 注入可能比 polyfill 稍晚)
+  // Wait for window.__TAURI__ to be ready (Tauri injection may land slightly after this polyfill)
   function getTauri() {
     if (window.__TAURI__) return window.__TAURI__;
-    // 兜底: __TAURI_INTERNALS__ 始终存在, 但只有 invoke (没 listen)
+    // Fallback: __TAURI_INTERNALS__ always exists, but only has invoke (no listen)
     return null;
   }
 
-  // Tauri 2 使用 Rust 函数名（snake_case），polyfill 收到 Electron IPC 是 kebab-case
-  // 转换: get-profiles → get_profiles, pty-create → pty_create 等
+  // Tauri 2 uses Rust function names (snake_case), while the polyfill receives Electron IPC names in kebab-case
+  // Conversion: get-profiles → get_profiles, pty-create → pty_create, etc.
   function kebabToSnake(cmd) {
     return cmd.replace(/-/g, '_');
   }
 
-  // invoke: 优先用 __TAURI__.core.invoke, 兜底 __TAURI_INTERNALS__.invoke
+  // invoke: prefer __TAURI__.core.invoke, fall back to __TAURI_INTERNALS__.invoke
   function doInvoke(cmd, args) {
     var tauriCmd = kebabToSnake(cmd);
     var t = getTauri();
@@ -28,7 +28,7 @@
     return Promise.reject(new Error('Tauri invoke not available'));
   }
 
-  // listen: 用 __TAURI__.event.listen
+  // listen: use __TAURI__.event.listen
   function doListen(channel, handler) {
     var t = getTauri();
     if (t && t.event && t.event.listen) return t.event.listen(channel, handler);
@@ -121,7 +121,7 @@
         var diagnosticInputId = window.ZTermDiagnostics.inputSent(args[0].tabId, args[0].data);
         if (diagnosticInputId != null) args[0] = Object.assign({}, args[0], { diagnosticInputId: diagnosticInputId });
       }
-      // 始终传 { args: [...] } — Tauri 2 忽略函数不需要的字段
+      // Always pass { args: [...] } — Tauri 2 ignores fields a command doesn't need
       doInvoke(channel, { args: args }).catch(function(e) {
         console.error('[ipc-polyfill] send', channel, e);
       });
@@ -136,7 +136,7 @@
   window.electron = { ipcRenderer: ipcRenderer };
   console.log('[ipc-polyfill] installed, __TAURI__ ' + (getTauri() ? 'ready' : 'pending'));
 
-  // 轮询等待 __TAURI__ 注入 (Tauri 的 withGlobalTauri 用 initialization script 注入, 可能稍晚)
+  // Poll until __TAURI__ is injected (Tauri's withGlobalTauri injects via initialization script, possibly slightly later)
   if (!getTauri()) {
     var attempts = 0;
     var timer = setInterval(function() {

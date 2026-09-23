@@ -1,9 +1,9 @@
-// ZTerm - 高亮规则（拆自 renderer.html，纯代码搬运，未改逻辑）
+// ZTerm - highlight rules (extracted from renderer.html unchanged)
 // ── Highlight Rules ──
 let _highlightRules = [];
 let _highlightSettings = { highlightEnabled: true, highlightAlternateDisable: true };
 let _editingHLId = null;
-// 按 backend tabId 隔离备用屏幕状态：之前用全局 boolean 会导致一个 tab 进了 vim 暂停所有 tab 的高亮
+// Alternate-screen state is tracked per backend tabId: a previous global boolean paused highlighting in every tab as soon as one tab entered vim
 const _hlAlternate = new Set();
 
 function clearAlternateScreen(tabId) {
@@ -60,7 +60,7 @@ function renderHighlightRulesList() {
         return;
     }
     container.innerHTML = _highlightRules.map(r => {
-        // 颜色值白名单校验：只允许 #hex 格式，防止通过颜色值注入 style 属性
+        // Whitelist-validate color values: only #hex is allowed, preventing style-attribute injection via a color value
         const colorRe = /^#[0-9a-f]{3,8}$/i;
         const fgColor = (r.foreground && r.foregroundColor && colorRe.test(r.foregroundColor)) ? r.foregroundColor : '';
         const bgColor = (r.background && r.backgroundColor && colorRe.test(r.backgroundColor)) ? r.backgroundColor : '';

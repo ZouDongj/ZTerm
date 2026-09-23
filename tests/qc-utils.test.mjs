@@ -1,4 +1,4 @@
-// ZTerm - 快捷命令纯逻辑单测（node --test）
+// ZTerm - quick-command pure-logic unit tests (node --test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -38,14 +38,14 @@ test('filterQuickCommands 无匹配返回空', () => {
 test('filterQuickCommands 缺字段命令不崩溃', () => {
     const dirty = [{ id: 'x' }, { id: 'y', name: 'ok' }];
     assert.equal(filterQuickCommands(dirty, 'ok').length, 1);
-    assert.equal(filterQuickCommands(dirty, 'x').length, 0); // 无 name/group/command 字段不匹配
+    assert.equal(filterQuickCommands(dirty, 'x').length, 0); // entries without name/group/command fields do not match
 });
 
-// ── stripTrailingNewline（末尾回车自动执行开关）──
+// ── stripTrailingNewline (trailing-Enter auto-run toggle) ──
 
 test('stripTrailingNewline 剥掉末尾一个换行', () => {
     assert.equal(stripTrailingNewline('tail -f /var/log/a.log\n'), 'tail -f /var/log/a.log');
-    // 多行命令：只剥最后一个，中间换行保留
+    // multi-line command: strip only the last newline; inner newlines are kept
     assert.equal(stripTrailingNewline('cd /app\nnpm run dev\n'), 'cd /app\nnpm run dev');
 });
 
@@ -58,7 +58,7 @@ test('stripTrailingNewline 无末尾换行原样返回', () => {
     assert.equal(stripTrailingNewline('ls -la'), 'ls -la');
     assert.equal(stripTrailingNewline(''), '');
     assert.equal(stripTrailingNewline('\n'), '');
-    // 末尾空格不受影响
+    // trailing spaces are not affected
     assert.equal(stripTrailingNewline('ls  '), 'ls  ');
 });
 

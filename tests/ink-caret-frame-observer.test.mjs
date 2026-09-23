@@ -1,8 +1,8 @@
-// Frame-form ink caret observer tests (ADR-0001 B2 gap rework).
-// Fixtures are REAL pre-filter captures from the CURRENT dsh-tui / kimi
-// builds on the 41.88 rig (2026-09-15): SSH-direct and herdr-relayed. The
-// apps switched from the B0-era truecolor+sync grammar to per-keystroke
-// minimal frames with a REVERSE-VIDEO caret char:
+// Frame-form ink caret observer tests.
+// Fixtures are real pre-filter captures of current dsh-tui / kimi builds,
+// both SSH-direct and herdr-relayed. Current app builds emit per-keystroke
+// minimal frames with a REVERSE-VIDEO caret char (older builds used a
+// truecolor+sync-block grammar instead):
 //   SGR0 OSC8-end HOME <relative moves> SGR(7) char SGR(27) [plain] CUP CUP
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -110,7 +110,7 @@ test('neutral frame that overwrites the candidate cell reports its writes', () =
 });
 
 test('attribute pollution from a styled frame does not poison the next caret frame', () => {
-  // Real dsh-tui case (2026-09-15 gap4 capture): a truecolor logo-animation
+  // Real dsh-tui case: a truecolor logo-animation
   // frame ends with non-default SGR state; the next frame's prefix SGR(0)
   // arrives BEFORE its unit opens. The observer must apply that reset as
   // stream-global state or the caret frame's plain restore write is
@@ -153,7 +153,7 @@ test('bottom-stick scrolling: LF past the last row keeps coordinates viewport-re
 
 test('ESC M/D/E (RI/IND/NEL) are modeled as cursor moves', () => {
   // Position is continuous stream state — an unmodeled move would skew every
-  // later candidate row (reviewer finding). RI clamps at the top; IND/NEL
+  // later candidate row. RI clamps at the top; IND/NEL
   // bottom-stick like LF.
   const base = '\u001b[?2026h\u001b[5;10H';
   const mk = (move) => base + move + '\u001b[7mx\u001b[0m \u001b[?2026l';
@@ -166,7 +166,7 @@ test('ESC M/D/E (RI/IND/NEL) are modeled as cursor moves', () => {
 });
 
 test('claude bare reverse-caret gestures (no sync, no frame prefix) are recognized', () => {
-  // Real rig capture: per keystroke the app emits relative moves + SGR(7)
+  // Captured real session: per keystroke the app emits relative moves + SGR(7)
   // single char SGR(27) with no enclosing unit at all. The gesture is
   // self-terminating: rev-ON, exactly ONE printable, rev-OFF.
   const { cands } = collect(FIX('claude-rig-bare-rev.txt'), null, { rows: 24, cols: 80 });
@@ -264,7 +264,7 @@ test('ESC[m (empty-param SGR) resets the plain convention like ESC[0m', () => {
   // claude's ❯ prompt styles with SGR(1;32) then resets with ESC[m. If the
   // empty parameter list is not treated as [0], the style tracker stays
   // dirty forever: bare gestures lose validity and every checkpoint
-  // recovery fails with 'non-default-style' (2026-09-17 live rig finding).
+  // recovery fails with 'non-default-style'.
   const gesture = '\r\x1b[3C\x1b[1A\x1b[7m \x1b[27m';
   assert.equal(collect('\x1b[5;10H\x1b[1;32m❯\x1b[m' + gesture).cands.length, 1, 'bare gesture after ESC[m');
   assert.equal(collect('\x1b[5;10H\x1b[1;32m❯\x1b[0m' + gesture).cands.length, 1, 'control: explicit SGR 0');
@@ -283,7 +283,7 @@ test('ESC[m unblocks checkpoint recovery after a styled prompt', () => {
 });
 
 test('partial style resets (38;5 colors, 1/22 bold, 39/49) return to the default convention', () => {
-  // claude's boot banner (live capture 2026-09-17): palette fg/bg colors
+  // claude's boot banner: palette fg/bg colors
   // cleared by 39/49, bold set with SGR 1 and cleared with SGR 22 — all
   // WITHOUT a full SGR 0. The tracker must derive the default state back;
   // the old monotonic isDefault flag stranded every checkpoint recovery

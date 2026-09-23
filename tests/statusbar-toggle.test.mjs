@@ -1,7 +1,7 @@
-// ZTerm - 状态栏显示/隐藏切换（toggle-statusbar）单测（node --test）
-// shortcuts.js / settings.js 是浏览器全局脚本（依赖 preload 注入的 ipcRenderer 等），
-// 无法在 node 里 import，按契约用源码正则校验接线；state.js 顶层只依赖
-// path + process，用 node:vm 加载真实源码做行为级测试。
+// ZTerm - statusbar show/hide toggle (toggle-statusbar) unit tests (node --test)
+// shortcuts.js / settings.js are browser global scripts (they rely on the preload-injected
+// ipcRenderer etc.) and cannot be imported in node, so their wiring is checked by source
+// regexes; state.js only needs path + process at top level, so node:vm loads the real source.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -17,7 +17,7 @@ const shortcutsSrc = read('src/renderer/shortcuts.js');
 const stateSrc = read('src/renderer/state.js');
 const settingsSrc = read('src/renderer/settings.js');
 
-// 解析 DEFAULT_SHORTCUTS 表为 { id: combo }（含带引号的 key）
+// parse the DEFAULT_SHORTCUTS table into { id: combo } (handles quoted keys)
 function parseDefaultShortcuts(src) {
     const block = src.match(/const DEFAULT_SHORTCUTS = \{([\s\S]*?)\n\};/);
     assert.ok(block, 'DEFAULT_SHORTCUTS table not found');
@@ -30,12 +30,12 @@ function parseDefaultShortcuts(src) {
     return out;
 }
 
-// ── 快捷键注册与冲突 ──
+// ── shortcut registration and conflicts ──
 
 test('DEFAULT_SHORTCUTS 含 toggle-statusbar 且组合键在候选集内', () => {
     const defaults = parseDefaultShortcuts(shortcutsSrc);
     assert.ok('toggle-statusbar' in defaults, 'toggle-statusbar entry missing');
-    // 候选链：Ctrl+Shift+S（被 sshPanel 占用则顺延）→ Ctrl+Shift+B → Ctrl+Alt+B
+    // candidate chain: Ctrl+Shift+S (falls through if taken by sshPanel) → Ctrl+Shift+B → Ctrl+Alt+B
     assert.match(defaults['toggle-statusbar'], /^Ctrl\+(?:Shift\+B|Alt\+B|Shift\+S)$/);
 });
 
@@ -43,7 +43,7 @@ test('toggle-statusbar 组合键与其它默认快捷键无冲突', () => {
     const defaults = parseDefaultShortcuts(shortcutsSrc);
     const combos = Object.values(defaults);
     assert.equal(new Set(combos).size, combos.length, 'duplicate combo in DEFAULT_SHORTCUTS');
-    // Ctrl+Shift+S 已被 SSH 面板占用：新条目不得使用它
+    // Ctrl+Shift+S is already taken by the SSH panel: the new entry must not use it
     if (defaults['toggle-statusbar'] === 'Ctrl+Shift+S') {
         assert.notEqual(defaults.sshPanel, 'Ctrl+Shift+S');
     }
@@ -68,10 +68,10 @@ test('SHORTCUT_LABELS 含 toggle-statusbar（设置页快捷键表格可自定�
     assert.match(block[1], /'toggle-statusbar'\s*:\s*'[^']+'/);
 });
 
-// ── state.js 行为（vm 加载真实源码）──
+// ── state.js behavior (real source loaded via vm) ──
 
-// 加载 state.js 到 vm：document 用极简 stub（只实现 body.classList.toggle），
-// persistSettings（真实定义在 settings.js）用计数 stub 注入
+// load state.js into vm: document is a minimal stub (only body.classList.toggle is implemented),
+// persistSettings (really defined in settings.js) is injected as a counting stub
 function loadStateModule() {
     const classes = new Set();
     let persistCalls = 0;
@@ -117,13 +117,13 @@ test('applyStatusbarVisibility：显式 false 才隐藏，true 显示', () => {
 
 test('toggleStatusbar：翻转可见性、写回配置并持久化', () => {
     const mod = loadStateModule();
-    // 第一次：默认显示 → 隐藏，返回 false
+    // first call: default visible → hidden, returns false
     const r1 = vm.runInContext('toggleStatusbar()', mod.context);
     assert.equal(r1, false);
     assert.equal(mod.classes.has('hide-statusbar'), true);
     assert.equal(vm.runInContext('_settingsConfig.showStatusbar', mod.context), false);
     assert.equal(mod.getPersistCalls(), 1);
-    // 第二次：隐藏 → 显示，返回 true
+    // second call: hidden → visible, returns true
     const r2 = vm.runInContext('toggleStatusbar()', mod.context);
     assert.equal(r2, true);
     assert.equal(mod.classes.has('hide-statusbar'), false);
@@ -131,7 +131,7 @@ test('toggleStatusbar：翻转可见性、写回配置并持久化', () => {
     assert.equal(mod.getPersistCalls(), 2);
 });
 
-// ── settings.js 持久化接线 ──
+// ── settings.js persistence wiring ──
 
 test('persistSettings 的 save-appearance 载荷包含 showStatusbar', () => {
     const fn = settingsSrc.match(/function persistSettings\(\) \{([\s\S]*?)\n\}/);

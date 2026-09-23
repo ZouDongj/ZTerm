@@ -1,7 +1,7 @@
-// Unit tests for the zterm6 unicode width provider (ADR-0002 item 2 rework:
-// kimi's tip line writes U+1F311 assuming 2 cells — field capture — while
-// the vendored UnicodeV6 returns 1 for every astral emoji; the 2-cell glyph
-// then overflows into the un-erased neighbor cell and shows stale text).
+// Unit tests for the zterm6 unicode width provider: kimi's tip line writes
+// U+1F311 assuming 2 cells while the vendored UnicodeV6 returns 1 for every
+// astral emoji; the 2-cell glyph then overflows into the un-erased neighbor
+// cell and shows stale text.
 // The provider retains V6 combining behavior, widens selected BMP characters
 // to the installed Tabby's Unicode11 widths, and keeps the existing astral rules.
 import { test } from 'node:test';

@@ -1,5 +1,5 @@
-// ZTerm PoC 7a: 本地终端 + SSH 连接 + 窗口控制 + 配置 IO + 登录脚本
-// SessionMap 统一管理 Local PTY 和 SSH 会话
+// ZTerm PoC 7a: local terminal + SSH connections + window control + config IO + login scripts
+// SessionMap manages both local PTY and SSH sessions uniformly
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,13 +14,13 @@ use tokio::sync::{mpsc, oneshot};
 #[path = "native_trace.rs"]
 mod native_trace;
 
-// 用于 emit config-corrupted 等需要 AppHandle 的事件（setup 时注册一次）
+// Registered once at setup; used to emit events that need an AppHandle (e.g. config-corrupted)
 static APP_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
-// 损坏配置只备份/通知一次，避免每次 load_config 重复处理
+// A corrupt config is backed up / reported only once, not re-handled on every load_config
 static CONFIG_CORRUPT_HANDLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-// 配置/known_hosts 串行写锁（A6）：多个 save_* 命令的 load-modify-save
-// 必须互斥，否则并发保存时后完成的旧快照覆盖先完成的修改
+// Serial write lock for config/known_hosts: the load-modify-save cycle of the
+// save_* commands must be atomic, or concurrent saves overwrite each other with stale snapshots
 static CONFIG_WRITE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 static KNOWN_HOSTS_WRITE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
@@ -181,18 +181,18 @@ pub type SessionMap = Arc<Mutex<HashMap<String, SessionType>>>;
 
 // ── SSH Handler ──
 
-/// 用户对 host key 变更的决定 (对齐 Electron pendingHostKeyDecisions)
+/// The user's decision on a host key change (parity with the Electron version's pendingHostKeyDecisions)
 pub struct HostKeyDecision {
     pub accept: bool,
     pub trust: bool,
 }
 
-/// tabId -> 等待用户决策的通道 (check_server_key 挂起时注册)
+/// tabId -> channel awaiting the user's decision (registered while check_server_key is suspended)
 pub type KeyDecisionMap = Arc<Mutex<HashMap<String, oneshot::Sender<HostKeyDecision>>>>;
 
-/// in-flight SSH 连接登记：rendererId -> 取消标志。
-/// 连接完成登记进 SessionMap 前，关闭 tab / 重连都通过它取消连接任务，
-/// 避免"连接中关闭"产生孤儿会话（H3）和"连接中重连"产生双连接（H4）。
+/// Registry of in-flight SSH connections: rendererId -> cancel flag.
+/// Before a connection is registered in SessionMap, tab close / reconnect both
+/// cancel the task through it, preventing orphan sessions and duplicate connections.
 pub struct PendingConnection {
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -270,7 +270,7 @@ impl russh::client::Handler for SshHandler {
         &mut self,
         server_public_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // TOFU (对齐 Electron known-hosts.js): 首次连接记录指纹, 已知且匹配放行, 不匹配需用户确认
+        // TOFU (parity with the Electron version's known-hosts.js): record the fingerprint on first connect, allow known matches, require user confirmation on mismatch
         use russh::keys::HashAlg;
         let fingerprint = server_public_key.fingerprint(HashAlg::Sha256).to_string();
         let algorithm = server_public_key.algorithm().to_string();
@@ -284,7 +284,7 @@ impl russh::client::Handler for SshHandler {
                 old_algorithm,
                 old_fingerprint,
             } => {
-                // 指纹变更, 可能 MITM: 挂起连接等待用户决定 (对齐 Electron onHostKey)
+                // Fingerprint changed, possible MITM: suspend the connection until the user decides (parity with the Electron version's onHostKey)
                 let (tx, rx) = oneshot::channel::<HostKeyDecision>();
                 self.decisions.lock().insert(self.tab_id.clone(), tx);
                 let _ = self.app.emit(
@@ -306,7 +306,7 @@ impl russh::client::Handler for SshHandler {
                         }
                         Ok(decision.accept)
                     }
-                    // 无响应 (tab 关闭/窗口退出被兜底拒绝) → 拒绝连接
+                    // No response (tab close / window exit force-rejects as fallback) → refuse the connection
                     Err(_) => Ok(false),
                 }
             }
@@ -344,8 +344,8 @@ impl russh::client::Handler for SshHandler {
 }
 
 // ── Known hosts (TOFU: Trust On First Use) ──
-// 对齐 Electron known-hosts.js: %APPDATA%/ZTerm/known_hosts.json
-// 格式: { "host:port": { "algorithm": "ssh-ed25519", "fingerprint": "SHA256:..." } }
+// Parity with the Electron version's known-hosts.js: %APPDATA%/ZTerm/known_hosts.json
+// Format: { "host:port": { "algorithm": "ssh-ed25519", "fingerprint": "SHA256:..." } }
 
 fn known_hosts_path() -> PathBuf {
     let base = std::env::var("APPDATA")
@@ -371,7 +371,7 @@ fn save_known_hosts(hosts: &Value) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // 原子写入: tmp + rename (对齐 known-hosts.js)
+    // Atomic write: tmp + rename (parity with known-hosts.js)
     let tmp = path.with_extension("json.tmp");
     if std::fs::write(
         &tmp,
@@ -393,8 +393,8 @@ enum HostKeyStatus {
     },
 }
 
-/// 已知主机记录比较（纯逻辑，便于单测）：无记录 → Unknown；
-/// 指纹一致 → Known；不一致 → Mismatch（带旧算法与旧指纹）。
+/// Known-host entry comparison (pure logic, unit-testable): no record → Unknown;
+/// matching fingerprint → Known; mismatch → Mismatch (carries the old algorithm and fingerprint).
 fn check_known_host_entry(entry: Option<&Value>, fingerprint: &str) -> HostKeyStatus {
     match entry {
         None => HostKeyStatus::Unknown,
@@ -426,7 +426,7 @@ fn known_hosts_check(host: &str, port: u16, fingerprint: &str) -> HostKeyStatus 
 }
 
 fn known_hosts_trust(host: &str, port: u16, algorithm: &str, fingerprint: &str) {
-    // A6：串行化 load-modify-save，避免并发 trust 互相覆盖记录
+    // Serialize load-modify-save so concurrent trusts cannot overwrite each other's records
     let _guard = KNOWN_HOSTS_WRITE_LOCK.lock();
     let id = format!("{}:{}", host, port);
     let mut hosts = load_known_hosts();
@@ -548,8 +548,8 @@ fn default_config() -> Value {
     })
 }
 
-/// 递归合并：对象字段逐键合并（用户值优先），非对象整体替换。
-/// 这样用户手写部分字段（如只改 appearance.fontSize）时不会丢掉默认字段。
+/// Recursive merge: object fields merge key by key (user value wins); non-objects are
+/// replaced wholesale, so hand-edited partial fields (e.g. only appearance.fontSize) keep the remaining defaults.
 fn merge_value(base: &mut Value, over: &Value) {
     if base.is_object() && over.is_object() {
         for (k, v) in over.as_object().unwrap() {
@@ -564,11 +564,11 @@ fn merge_value(base: &mut Value, over: &Value) {
     }
 }
 
-/// 校验并合并用户配置：根值非对象视为损坏（返回 Null + corrupt 标记），
-/// 对象则合并到默认配置之上。与 load_config 的文件 IO / 备份逻辑分离，便于单测。
+/// Validate and merge user config: a non-object root counts as corrupt (returns Null +
+/// corrupt flag); an object merges over the defaults. Split from load_config's file IO / backup logic for unit testing.
 fn sanitize_config(raw: Value) -> (Value, bool) {
-    // M2：根值必须是对象（数组/字符串/数字/null 均视为损坏，
-    // 否则字段被静默忽略且不触发备份，后续保存会覆盖用户数据）
+    // The root value must be an object (array/string/number/null all count as corrupt —
+    // otherwise fields are silently ignored, no backup triggers, and a later save overwrites user data)
     if !raw.is_object() {
         return (Value::Null, true);
     }
@@ -588,8 +588,8 @@ fn load_config() -> Value {
                 }
             }
         }
-        // 配置损坏：备份原文件并通知 renderer（仅一次），避免后续保存用默认值
-        // 无提示覆盖用户数据（SSH 配置/加密密码丢失）
+        // Corrupt config: back up the original file and notify the renderer (once only),
+        // so later saves don't silently overwrite user data (SSH profiles / encrypted passwords) with defaults
         if !CONFIG_CORRUPT_HANDLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -611,7 +611,7 @@ fn save_config(config: &Value) {
         let _ = std::fs::create_dir_all(parent);
     }
     let content = serde_json::to_string_pretty(config).unwrap_or_default();
-    // 原子写：tmp + rename，避免写一半崩溃留下损坏配置
+    // Atomic write: tmp + rename, so a mid-write crash cannot leave a corrupt config
     let tmp = path.with_extension("json.tmp");
     if std::fs::write(&tmp, &content).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
         return;
@@ -648,8 +648,8 @@ pub fn get_profiles(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
 
 // ── Command: pty_create (local shell, emits pty-created) ──
 
-/// 解析 OSC 7 cwd（`ESC]7;file://host/pathESC\`，见 _zt_cwd 的 printf 输出）。
-/// 纯函数便于单测；返回路径（含前导 /），未匹配返回 None。
+/// Parse an OSC 7 cwd (`ESC]7;file://host/pathESC\`, as printed by _zt_cwd's printf).
+/// Pure function for unit tests; returns the path (with leading /), or None when unmatched.
 fn parse_osc7_cwd(text: &str) -> Option<String> {
     let re = regex::Regex::new(r"\x1b\]7;file://[^/\x07\x1b\\]*(\/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)")
         .ok()?;
@@ -657,19 +657,19 @@ fn parse_osc7_cwd(text: &str) -> Option<String> {
     m.get(1).map(|g| g.as_str().to_string())
 }
 
-/// 解析 iTerm2 OSC 1337 CurrentDir（`ESC]1337;CurrentDir=<path>BEL` 或 `ST`）。
-/// fish ≥3.x 每次提示符原生输出该序列（无需任何 shell 集成），是 fish 下
-/// follow-cwd 的主来源；iTerm2 风格工具链也常发 `file://host/path` 变体。
-/// 纯函数便于单测；返回不含 scheme/host 的绝对路径，未匹配返回 None。
+/// Parse an iTerm2 OSC 1337 CurrentDir (`ESC]1337;CurrentDir=<path>BEL` or `ST`).
+/// fish ≥3.x emits this natively at every prompt (no shell integration needed),
+/// making it the primary follow-cwd source under fish; iTerm2-style toolchains
+/// often send the `file://host/path` variant. Pure function for unit tests; returns the absolute path without scheme/host, or None when unmatched.
 fn parse_1337_currentdir(text: &str) -> Option<String> {
-    // path 段：到终止符为止；允许 file://[host] 前缀（取首个 / 之后）
+    // path segment: up to the terminator; an optional file://[host] prefix is allowed (take from the first /)
     let re = regex::Regex::new(
         r"\x1b\]1337;CurrentDir=(?:file://[^/\x07\x1b\\]*)?(/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)",
     )
     .ok()?;
     let m = re.captures(text)?;
     let raw = m.get(1)?.as_str();
-    // fish 原样输出 $PWD（空格不转义）；iTerm2 变体可能 %XX 编码，尽量还原
+    // fish prints $PWD verbatim (spaces unescaped); iTerm2 variants may %XX-encode, so decode where possible
     let decoded = percent_decode_loose(raw);
     if decoded.starts_with('/') {
         Some(decoded)
@@ -678,7 +678,7 @@ fn parse_1337_currentdir(text: &str) -> Option<String> {
     }
 }
 
-/// 宽松 %XX 解码：仅还原合法的百分号转义，非法序列保持原样（路径里裸 % 很常见）。
+/// Lenient %XX decoding: only valid percent escapes are decoded; invalid sequences pass through unchanged (a bare % is common in real paths).
 fn percent_decode_loose(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -774,10 +774,10 @@ pub fn pty_diagnostics(state: State<'_, SessionMap>, args: Vec<Value>) -> Result
     )
 }
 
-/// 增量 UTF-8 解码：把新字节接到 carry 上，解码出所有完整字符并返回；
-/// 块尾不完整的多字节序列（error_len 为 None）留在 carry 等下一块补齐，
-/// 避免单块 from_utf8_lossy 把跨块字符（中文/emoji 等）替换成 U+FFFD（�）。
-/// 真非法字节（error_len 为 Some）按 U+FFFD 替换并跳过，与 from_utf8_lossy 一致。
+/// Incremental UTF-8 decoding: new bytes are appended to carry and all complete
+/// characters are decoded and returned; an incomplete multi-byte sequence at the
+/// block tail (error_len None) stays in carry for the next chunk, so per-chunk from_utf8_lossy cannot corrupt cross-chunk characters (Chinese/emoji) into U+FFFD (the � replacement character).
+/// Truly invalid bytes (error_len Some) become U+FFFD and are skipped, matching from_utf8_lossy.
 fn drain_utf8(carry: &mut Vec<u8>, data: &[u8]) -> String {
     carry.extend_from_slice(data);
     let mut out = String::new();
@@ -791,7 +791,7 @@ fn drain_utf8(carry: &mut Vec<u8>, data: &[u8]) -> String {
             Err(e) => {
                 let valid = e.valid_up_to();
                 if valid > 0 {
-                    // valid_up_to 保证 [..valid] 是有效 UTF-8 前缀
+                    // valid_up_to guarantees [..valid] is a valid UTF-8 prefix
                     out.push_str(
                         std::str::from_utf8(&carry[..valid])
                             .expect("valid_up_to prefix is valid UTF-8"),
@@ -799,12 +799,12 @@ fn drain_utf8(carry: &mut Vec<u8>, data: &[u8]) -> String {
                 }
                 match e.error_len() {
                     Some(n) => {
-                        // 真非法字节：替换并跳过，继续解码剩余部分
+                        // Truly invalid bytes: replace and skip, then keep decoding the rest
                         out.push('\u{FFFD}');
                         carry.drain(..valid + n);
                     }
                     None => {
-                        // 块尾不完整序列：保留，等下一块
+                        // Incomplete sequence at the block tail: keep it, wait for the next chunk
                         carry.drain(..valid);
                         break;
                     }
@@ -965,8 +965,8 @@ pub async fn pty_create(
         // Flusher thread: the only emitter. Coalesces micro-blocks into one
         // IPC message per tick and preserves output ordering. The UTF-8 carry
         // lives here so multi-byte characters split across reads survive.
-        // 跨块字符 carry：read 块边界可能切在 UTF-8 多字节序列中间，
-        // 单块 from_utf8_lossy 会把半截字符变成 U+FFFD（�）
+        // Cross-chunk character carry: a read boundary can split a UTF-8 multi-byte
+        // sequence, and per-chunk from_utf8_lossy would turn the halves into U+FFFD (the � replacement char)
         let mut utf8_carry: Vec<u8> = Vec::new();
         loop {
             std::thread::sleep(std::time::Duration::from_millis(flush_ms));
@@ -999,12 +999,12 @@ pub async fn pty_create(
 
 // ── Command: ssh_connect (emits ssh-connecting → ssh-connected / ssh-error) ──
 
-/// 解析凭据：返回 (密码, 私钥路径)。两者都为空表示无凭据。
+/// Resolve the credential: returns (password, private key path); both None means no credential.
 fn resolve_ssh_credential(
     profile: &Value,
     cred_store: &CredentialStore,
 ) -> (Option<String>, Option<String>) {
-    // 优先 credentialId
+    // credentialId takes priority
     if let Some(cred_id) = profile.get("credentialId").and_then(|v| v.as_str()) {
         let store = cred_store.lock();
         if let Some(cred) = store.get(cred_id) {
@@ -1111,8 +1111,8 @@ async fn detect_shell(sftp: &russh_sftp::client::SftpSession, username: &str) ->
     None
 }
 
-/// 生成 followCwd RC wrapper 文件（纯函数，便于单测）。
-/// 返回 (文件列表 [(远程路径, 内容)], exec 命令)；非 bash/zsh 返回 None。
+/// Generate the followCwd RC wrapper files (pure function, unit-testable).
+/// Returns (file list [(remote path, content)], exec command); None for non-bash/zsh shells.
 fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>, String)> {
     if shell.ends_with("/bash") {
         let rc_path = format!("/tmp/.zterm-rc-{}", stamp);
@@ -1160,7 +1160,7 @@ async fn prepare_cwd_wrapper(
     let stamp = format!("{}-{}", std::process::id(), rand_suffix());
     let (files, exec) = cwd_wrapper_files(&shell, &stamp)?;
     for (path, content) in &files {
-        // zsh 需要先建目录
+        // zsh needs its directory created first
         if let Some(dir) = path.rsplit_once('/').map(|(d, _)| d) {
             if dir != "/tmp" {
                 let _ = sftp.create_dir(dir).await;
@@ -1199,7 +1199,7 @@ pub async fn ssh_connect(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // B2：严格校验参数——拒绝非法输入而不是静默采用默认值
+    // Strict parameter validation: reject invalid input instead of silently falling back to defaults
     let host = profile
         .get("host")
         .and_then(|v| v.as_str())
@@ -1248,8 +1248,8 @@ pub async fn ssh_connect(
         json!({ "tabId": tab_id, "rendererId": renderer_id }),
     );
 
-    // in-flight 登记：同一 rendererId 的新连接请求会取消旧的（H4：连接中重连
-    // 不再产生双会话）。关闭 tab（pty_destroy/ssh_disconnect）也通过它取消连接。
+    // In-flight registration: a new connect for the same rendererId cancels the old
+    // one (no duplicate sessions on mid-connect reconnect); tab close (pty_destroy/ssh_disconnect) cancels through it too
     let cancel_flag = {
         let mut pm = pending_state.lock();
         if let Some(old) = pm.remove(&renderer_id) {
@@ -1259,12 +1259,12 @@ pub async fn ssh_connect(
         pm.insert(renderer_id.clone(), PendingConnection { cancel: c.clone() });
         c
     };
-    // 被取消时静默退出（前端已关 tab 或已发起新连接，不再 emit 任何事件）
+    // Exit silently when cancelled (the frontend already closed the tab or started a new connection; no more events)
     macro_rules! cancelled {
         ($h:expr) => {
             if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                // shell 之后 writer/reader task 已启动并持有 handle 克隆：
-                // 必须显式断开，否则连接任务因 handle 仍被引用而永不退出（泄漏）
+                // After shell start the writer/reader tasks are running and hold
+                // handle clones: disconnect explicitly or this task never exits (leak)
                 let _ = $h
                     .disconnect(russh::Disconnect::ByApplication, "ZTerm cancelled", "")
                     .await;
@@ -1314,9 +1314,9 @@ pub async fn ssh_connect(
         })?;
     cancelled!(handle);
 
-    // Authenticate (needs &mut self) — password or public key (H1)
+    // Authenticate (needs &mut self) — password or public key
     let auth_result = if let Some(ref key_path) = key_path {
-        // 私钥认证：读取 OpenSSH/PKCS8 私钥文件（暂不支持带 passphrase 的加密私钥）
+        // Private-key auth: read an OpenSSH/PKCS8 key file (passphrase-encrypted keys not supported yet)
         let contents = std::fs::read_to_string(key_path).map_err(|e| {
             let _ = app.emit(
                 "ssh-error",
@@ -1472,15 +1472,15 @@ pub async fn ssh_connect(
     // FollowCwd typed injection: fallback when RC wrapper unavailable
     let inject = follow_cwd && exec_cmd.is_none();
     let track_cwd = follow_cwd; // OSC 7 parsing active for both rc wrapper and typed injection
-                                // 注入过滤标志：注入发送时才激活，避免吞掉登录脚本的输出
+                                // Injection filter flag: only activates once the injection is sent, so login-script output is not swallowed
     let filtering = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let filtering_inject = Arc::clone(&filtering);
     if inject {
         let wtx = writer_tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-            // 所有行以空格开头：zsh 行内设置 HIST_IGNORE_SPACE 后本行不记录，完全无痕
-            // marker 在 stty -echo 状态下输出 → 只输出一次，无回显
+            // Every line starts with a space: once zsh sets HIST_IGNORE_SPACE inline, these lines are never recorded — fully traceless
+            // The marker is printed while stty -echo is active → printed once, with no echo
             filtering_inject.store(true, std::sync::atomic::Ordering::Relaxed);
             let script = " setopt HIST_IGNORE_SPACE 2>/dev/null; set +o history 2>/dev/null\n\
                            stty -echo\n\
@@ -1505,10 +1505,10 @@ pub async fn ssh_connect(
     let filtering_reader = Arc::clone(&filtering);
     let reason_reader = Arc::clone(&disconnect_reason);
     tokio::spawn(async move {
-        // 跨块字符 carry：SSH channel 数据可切在 UTF-8 多字节序列中间，
-        // 单块 from_utf8_lossy 会把半截字符变成 U+FFFD（�）
+        // Cross-chunk character carry: SSH channel data can split a UTF-8 multi-byte
+        // sequence, and per-chunk from_utf8_lossy would turn the halves into U+FFFD (the � replacement char)
         let mut utf8_carry: Vec<u8> = Vec::new();
-        // OSC 7 跨块窗口：序列被数据块切开时拼接匹配
+        // Cross-chunk OSC 7 window: join chunk tails so a sequence split across data chunks still matches
         let mut osc7_window = String::new();
         // Inject state machine: filter output until ZTERM_INJECTED marker.
         // Filtering only activates when the injection task sets the flag.
@@ -1554,8 +1554,8 @@ pub async fn ssh_connect(
                             } else {
                                 // Parse OSC 7 for cwd tracking (active for both rc wrapper and typed injection)
                                 if track_cwd {
-                                    // OSC 7 序列可能被 SSH 数据块切开：保留上一块尾部文本拼接匹配，
-                                    // 否则跨块序列被逐块正则静默丢弃（cwd 永远跟踪不到）
+                                    // An OSC 7 sequence can be split across SSH data chunks: keep the previous
+                                    // chunk's tail for a joined match, or per-chunk regexes silently drop it (cwd never tracked)
                                     osc7_window.push_str(&text);
                                     if osc7_window.chars().count() > 1024 {
                                         let keep = osc7_window
@@ -1565,10 +1565,10 @@ pub async fn ssh_connect(
                                             .unwrap_or(0);
                                         osc7_window.drain(..keep);
                                     }
-                                    // 两类 cwd 序列可能同时出现在窗口里（登录时
-                                    // wrapper 的 OSC 7 + fish 每个提示符的 1337）：
-                                    // 取窗口中出现位置更靠后的那个，避免陈旧的
-                                    // OSC 7 压住新路径
+                                    // Both cwd sequence kinds can coexist in the window
+                                    // (the login wrapper's OSC 7 plus fish's per-prompt
+                                    // 1337): take the one that appears later, so a stale
+                                    // OSC 7 cannot shadow the new path
                                     let osc7_cwd = parse_osc7_cwd(&osc7_window);
                                     let c1337_cwd = parse_1337_currentdir(&osc7_window);
                                     let new_cwd: Option<String> = match (&osc7_cwd, &c1337_cwd) {
@@ -1627,7 +1627,7 @@ pub async fn ssh_connect(
     let cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // 登记前最后检查：期间被取消（关 tab/重连）则不登记、不 emit，连接静默丢弃
+    // Final check before registering: if cancelled meanwhile (tab close/reconnect), skip registration and events — the connection is dropped silently
     cancelled!(handle);
     pending_state.lock().remove(&renderer_id);
 
@@ -1677,20 +1677,20 @@ pub async fn ssh_disconnect(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // 取消 in-flight 连接（H4：连接中重连时旧连接任务在此退出，不再产生双会话）
+    // Cancel the in-flight connection (on a mid-connect reconnect the old task exits here, so no duplicate session)
     if !renderer_id.is_empty() {
         if let Some(p) = pending_state.lock().remove(&renderer_id) {
             p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
-    // tab 关闭时若正卡在 hostkey 决策，拒绝以解除 check_server_key 挂起 (对齐 Electron)
+    // If the tab closes while a hostkey decision is pending, reject it to unblock check_server_key (parity with the Electron version)
     if let Some(tx) = decision_state.lock().remove(&tab_id) {
         let _ = tx.send(HostKeyDecision {
             accept: false,
             trust: false,
         });
     }
-    // 取出 handle 后立即释放 map 锁，再 await 断开（锁不跨 await）
+    // Release the map lock right after taking the handle, then await the disconnect (no lock held across await)
     let close_handle = {
         let mut map = state.lock();
         match map.remove(&tab_id) {
@@ -1705,7 +1705,7 @@ pub async fn ssh_disconnect(
         }
     };
     if let Some(h) = close_handle {
-        // 显式断开，让远端会话立即结束（H6：不能只靠 Drop 引用计数）
+        // Disconnect explicitly so the remote session ends at once (Drop refcounting alone is not enough)
         let _ = h
             .disconnect(russh::Disconnect::ByApplication, "ZTerm closed", "")
             .await
@@ -1717,8 +1717,8 @@ pub async fn ssh_disconnect(
     Ok(json!({ "ok": true }))
 }
 
-// 用户对 host key 变更的决定: accept(信任并连接/拒绝), trust(是否更新 known_hosts)
-// 同时供 tab 关闭/窗口退出时兜底拒绝, 否则 check_server_key 永久挂起
+// The user's decision on a host key change: accept (connect/refuse), trust (update known_hosts).
+// Also used to force-reject on tab close / window exit, otherwise check_server_key hangs forever
 #[tauri::command]
 pub fn ssh_hostkey_decision(
     decision_state: State<'_, KeyDecisionMap>,
@@ -1855,21 +1855,21 @@ pub async fn pty_destroy(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // 取消 in-flight SSH 连接（H3：连接握手完成前关闭 tab，会话尚未入 map，
-    // 只能通过 pending 取消让连接任务在下一个检查点退出）
+    // Cancel the in-flight SSH connection (closing the tab before the handshake
+    // completes means the session is not in the map yet; only the pending cancel makes the task exit at its next checkpoint)
     if !renderer_id.is_empty() {
         if let Some(p) = pending_state.lock().remove(&renderer_id) {
             p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
-    // 拒绝挂起的 hostkey 决策，解除 check_server_key 的 await（否则连接任务永久挂起）
+    // Reject any pending hostkey decision to unblock check_server_key's await (otherwise the connection task hangs forever)
     if let Some(tx) = decision_state.lock().remove(&tab_id) {
         let _ = tx.send(HostKeyDecision {
             accept: false,
             trust: false,
         });
     }
-    // 取出会话后立即释放 map 锁，再 await 断开（锁不跨 await）
+    // Release the map lock right after taking the session, then await the disconnect (no lock held across await)
     let close_handle = {
         let mut map = state.lock();
         match map.remove(&tab_id) {
@@ -1879,8 +1879,8 @@ pub async fn pty_destroy(
                     None
                 }
                 SessionType::Ssh(s) => {
-                    // A4：关闭 tab 时取消所有进行中的 SFTP 传输
-                    // （否则传输 task 继续写临时文件，且 renderer 已无法再取消它）
+                    // Cancel all in-progress SFTP transfers on tab close (otherwise
+                    // the transfer tasks keep writing temp files the renderer can no longer cancel)
                     {
                         let cancels = s.transfer_cancels.lock();
                         for c in cancels.values() {
@@ -1896,7 +1896,7 @@ pub async fn pty_destroy(
         }
     };
     if let Some(h) = close_handle {
-        // 显式断开，让远端会话立即结束（H6：不能只靠 Drop 引用计数）
+        // Disconnect explicitly so the remote session ends at once (Drop refcounting alone is not enough)
         let _ = h
             .disconnect(russh::Disconnect::ByApplication, "ZTerm closed", "")
             .await
@@ -1943,7 +1943,7 @@ pub fn save_appearance(args: Vec<Value>) -> Result<(), String> {
     Ok(())
 }
 
-// ── Window state persistence（与 Tabby 一致：记住上次的位置/大小/最大化状态）──
+// ── Window state persistence (Tabby-style: remember last position/size/maximized state) ──
 
 #[derive(Clone)]
 pub struct WindowState {
@@ -1954,7 +1954,7 @@ pub struct WindowState {
     pub maximized: bool,
 }
 
-// 从配置值解析窗口状态（纯函数，与文件 IO 分离便于单测；字段缺失/类型错误 → None）
+// Parse window state from a config value (pure function, split from file IO for unit tests; missing/wrong-typed fields → None)
 fn window_state_from_config(config: &Value) -> Option<WindowState> {
     let w = config.get("window")?;
     Some(WindowState {
@@ -1992,17 +1992,17 @@ pub fn save_window_state(state: &WindowState) {
     save_config(&config);
 }
 
-// renderer 加载完成（window-shown 监听已注册）后调用：恢复窗口状态 → 显示窗口 → 通知播放启动动画。
-// 用 renderer 主动上报而不是主进程 on_page_load：保证事件 emit 时监听器一定已就绪，
-// 否则事件丢失会导致启动界面无法隐藏（卡在启动页）
+// Called once the renderer has loaded (window-shown listener registered): restore window
+// state → show the window → tell it to play the startup animation. Renderer-initiated instead
+// of the main process's on_page_load, so the listener is guaranteed ready when the event fires — a lost event would leave the splash stuck on screen
 #[tauri::command]
 pub fn renderer_ready(app: AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
-    // 已由主进程 5s 兜底显示过（renderer-ready 迟到）则只恢复状态，不重复 emit 淡入
+    // If the main process's 5s fallback already showed the window (renderer-ready arrived late), only restore state; don't re-emit the fade-in
     let already_visible = window.is_visible().unwrap_or(false);
-    // 恢复上次关闭时的窗口状态（位置/大小/最大化，与 Tabby 一致）
+    // Restore the window state from last close (position/size/maximized, Tabby-style)
     if let Some(ws) = load_window_state() {
         if window_position_visible(ws.x, ws.y, ws.width, ws.height, &window) {
             let _ = window.set_position(tauri::PhysicalPosition::new(ws.x, ws.y));
@@ -2015,14 +2015,14 @@ pub fn renderer_ready(app: AppHandle) -> Result<(), String> {
     if already_visible {
         return Ok(());
     }
-    // 状态就绪后显示窗口（最大化/尺寸已应用，无闪现）
+    // Show the window once state is applied (maximize/size already set, no flash)
     let _ = window.show();
-    // 通知 renderer 播放启动动画（renderer 的监听器已注册，不会丢失）
+    // Tell the renderer to play the startup animation (its listener is registered, so the event cannot be lost)
     let _ = app.emit("window-shown", json!({}));
     Ok(())
 }
 
-// 显示器矩形（纯数据，便于单测）
+// Monitor rectangle (plain data, unit-testable)
 struct MonitorRect {
     x: i32,
     y: i32,
@@ -2030,15 +2030,15 @@ struct MonitorRect {
     h: u32,
 }
 
-// 窗口中心点是否落在任一显示器矩形内（纯函数，与窗口句柄分离便于单测）
+// Whether the window center falls inside any monitor rectangle (pure function, split from window handles for unit tests)
 fn center_on_any_monitor(cx: i32, cy: i32, monitors: &[MonitorRect]) -> bool {
     monitors
         .iter()
         .any(|m| cx >= m.x && cx < m.x + m.w as i32 && cy >= m.y && cy < m.y + m.h as i32)
 }
 
-// 窗口位置是否落在任一显示器的可见区域内（防止显示器配置变化后窗口"消失"，
-// 恢复位置前检查；无法枚举显示器时保守视为可见）
+// Whether the window position falls inside any monitor's visible area (checked before
+// restoring a position, so a changed monitor layout cannot make the window "disappear"; conservatively visible when monitors cannot be enumerated)
 pub fn window_position_visible(
     x: i32,
     y: i32,
@@ -2082,7 +2082,7 @@ pub fn window_maximize(app: AppHandle) {
         } else {
             let _ = w.maximize();
         }
-        // 通知 renderer 更新图标
+        // Tell the renderer to update the icon
         let _ = app.emit("window-state-changed", json!({ "maximized": !maximized }));
     }
 }
@@ -2187,7 +2187,7 @@ pub fn save_ssh_profiles(app: AppHandle, args: Vec<Value>) -> Result<Value, Stri
         c.insert("sshProfiles".into(), profiles);
     }
     save_config(&config);
-    // 渲染进程监听 ssh-profiles-saved 事件来刷新 UI
+    // The renderer listens for the ssh-profiles-saved event to refresh its UI
     let _ = app.emit("ssh-profiles-saved", json!({}));
     Ok(json!({ "ok": true }))
 }
@@ -2221,7 +2221,7 @@ pub fn load_settings(args: Vec<Value>) -> Value {
 
 // ── Shell / Font / Info ──
 
-// PATH 中查找可执行文件（返回所有匹配，供 git.exe 推导使用）
+// Find an executable in PATH (returns all matches, used for git.exe-based derivation)
 fn which_all(exe: &str) -> Vec<String> {
     let path = std::env::var("PATH").unwrap_or_default();
     let mut out = Vec::new();
@@ -2250,7 +2250,7 @@ fn path_which(exe: &str) -> Option<String> {
     which_all(exe).into_iter().next()
 }
 
-// 读注册表字符串值（Win32 API，避免 spawn reg.exe 控制台子进程拖慢启动）
+// Read a registry string value (Win32 API, avoids spawning a reg.exe console subprocess that would slow startup)
 fn reg_get_string(
     hive: winapi::shared::minwindef::HKEY,
     subkey: &str,
@@ -2282,18 +2282,18 @@ fn reg_get_string(
     if ret != 0 || buf_size < 2 {
         return None;
     }
-    let len = (buf_size as usize / 2).saturating_sub(1); // 去掉结尾 NUL
+    let len = (buf_size as usize / 2).saturating_sub(1); // drop the trailing NUL
     Some(String::from_utf16_lossy(&buf[..len]))
 }
 
-// 本地 shell 自动探测（对齐 Electron 版 detectLocalShells）:
-// - pwsh: PATH 检测
-// - Git Bash: 注册表 GitForWindows InstallPath -> 常见安装路径 -> PATH 里 git.exe 推导
-// - WSL: PATH 检测
-// 本地 shell 自动探测（对齐 Electron 版 detectLocalShells）:
-// - pwsh: PATH 检测
-// - Git Bash: 注册表 GitForWindows InstallPath -> 常见安装路径 -> PATH 里 git.exe 推导
-// - WSL: PATH 检测
+// Local shell auto-detection (parity with the Electron version's detectLocalShells):
+// - pwsh: PATH detection
+// - Git Bash: registry GitForWindows InstallPath -> common install paths -> derive from git.exe in PATH
+// - WSL: PATH detection
+// Local shell auto-detection (parity with the Electron version's detectLocalShells):
+// - pwsh: PATH detection
+// - Git Bash: registry GitForWindows InstallPath -> common install paths -> derive from git.exe in PATH
+// - WSL: PATH detection
 #[tauri::command]
 pub fn get_local_shells(args: Vec<Value>) -> Result<Value, String> {
     let _ = args;
@@ -2302,14 +2302,14 @@ pub fn get_local_shells(args: Vec<Value>) -> Result<Value, String> {
         json!({ "id": "cmd", "name": "Command Prompt", "type": "local", "command": "cmd.exe", "icon": "local" }),
     ];
 
-    // PowerShell 7（需单独安装，检测 PATH）
+    // PowerShell 7 (installed separately; detect via PATH)
     if path_which("pwsh.exe").is_some() {
         shells_arr.push(json!({ "id": "pwsh", "name": "PowerShell", "type": "local", "command": "pwsh.exe", "icon": "local" }));
     }
 
-    // Git Bash 候选路径（按优先级）
+    // Git Bash candidate paths (in priority order)
     let mut git_bash_candidates: Vec<String> = Vec::new();
-    // 1) 注册表 GitForWindows InstallPath（官方安装器必写，装任意盘都能找到）
+    // 1) Registry GitForWindows InstallPath (the official installer always writes it, whatever drive it installs to)
     use winapi::um::winreg::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
     for hive in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
         if let Some(p) = reg_get_string(hive, "SOFTWARE\\GitForWindows", "InstallPath") {
@@ -2318,7 +2318,7 @@ pub fn get_local_shells(args: Vec<Value>) -> Result<Value, String> {
             }
         }
     }
-    // 2) 常见安装路径（ProgramFiles / ProgramFiles(x86) / winget -> LOCALAPPDATA）
+    // 2) Common install paths (ProgramFiles / ProgramFiles(x86) / winget -> LOCALAPPDATA)
     for base in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
         if let Ok(dir) = std::env::var(base) {
             let p = if base == "LOCALAPPDATA" {
@@ -2329,7 +2329,7 @@ pub fn get_local_shells(args: Vec<Value>) -> Result<Value, String> {
             git_bash_candidates.push(p);
         }
     }
-    // 3) PATH 里 git.exe 推导: <root>\cmd\git.exe -> <root>\bin\bash.exe
+    // 3) Derive from git.exe in PATH: <root>\cmd\git.exe -> <root>\bin\bash.exe
     for git_path in which_all("git.exe") {
         if let Some(parent) = std::path::Path::new(&git_path).parent() {
             if let Some(grand) = parent.parent() {
@@ -2343,7 +2343,7 @@ pub fn get_local_shells(args: Vec<Value>) -> Result<Value, String> {
             }
         }
     }
-    // 去重后取第一个存在的
+    // Dedupe, then take the first that exists
     let mut seen = std::collections::HashSet::new();
     let git_bash = git_bash_candidates.into_iter().find(|p| {
         if seen.contains(p) {
@@ -3166,8 +3166,8 @@ pub async fn apply_update(args: Vec<Value>) -> Result<Value, String> {
     std::process::exit(0);
 }
 
-// ADR-0003: pure validation for URLs the renderer asks us to open with the OS
-// shell. Every rejection carries a stable category prefix (invalidUrl /
+// Pure validation for URLs the renderer asks us to open with the OS shell.
+// Every rejection carries a stable category prefix (invalidUrl /
 // blockedProtocol) the UI can key on; OS-level failures are osOpenFailed.
 fn validate_open_url(raw: &str) -> Result<tauri::Url, &'static str> {
     if raw.is_empty() {
@@ -3304,8 +3304,8 @@ pub async fn get_system_fonts(args: Vec<Value>) -> Result<Value, String> {
     Ok(Value::Array(fonts.into_iter().map(|s| json!(s)).collect()))
 }
 
-// 过滤系统字体列表：排除 "@" 竖排变体（@宋体 等 Windows 垂直书写字体）
-// 和系统保留字体（System/Terminal/Fixedsys 等），避免污染字体下拉列表
+// Filter the system font list: drop "@" vertical variants (e.g. @宋体, Windows
+// vertical-writing fonts) and reserved system fonts (System/Terminal/Fixedsys etc.) so the font dropdown stays clean
 fn filter_system_fonts(fonts: Vec<String>) -> Vec<String> {
     fonts
         .into_iter()
@@ -3431,7 +3431,7 @@ fn base64_encode_bytes(data: &[u8]) -> String {
     result
 }
 
-// ── DPAPI password encryption (对齐 Electron safeStorage) ──
+// ── DPAPI password encryption (parity with Electron safeStorage) ──
 
 fn dpapi_encrypt(plaintext: &str) -> Result<Vec<u8>, String> {
     unsafe {
@@ -3500,13 +3500,13 @@ fn dpapi_decrypt(data: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-// ── Electron safeStorage (OSCrypt) 兼容 ──
-// Electron 的 safeStorage 在 Windows 上使用 Chromium OSCrypt：
-// 输出 = "v10"/"v11" 3 字节版本头 + nonce(12) + AES-256-GCM 密文；
-// AES 密钥由 DPAPI 加密后存在 Electron userData 的 Local State
-// （os_crypt.encrypted_key = base64("DPAPI" + DPAPI 密文)）。
+// ── Electron safeStorage (OSCrypt) compatibility ──
+// Electron's safeStorage uses Chromium OSCrypt on Windows:
+// output = "v10"/"v11" 3-byte version header + nonce(12) + AES-256-GCM ciphertext;
+// the AES key is DPAPI-encrypted and stored in Electron userData's Local State
+// (os_crypt.encrypted_key = base64("DPAPI" + DPAPI ciphertext)).
 
-// AES-256-GCM 解密 payload（nonce 12 字节 + 密文，AAD 为空）
+// AES-256-GCM decrypt a payload (12-byte nonce + ciphertext, empty AAD)
 fn aes_gcm_decrypt_payload(key: &[u8], payload: &[u8]) -> Option<Vec<u8>> {
     use aes_gcm::aead::{Aead, KeyInit};
     if key.len() != 32 || payload.len() < 12 + 16 {
@@ -3518,7 +3518,7 @@ fn aes_gcm_decrypt_payload(key: &[u8], payload: &[u8]) -> Option<Vec<u8>> {
         .ok()
 }
 
-// 读取 Electron Local State 中的 OSCrypt AES key（DPAPI 解密）
+// Read the OSCrypt AES key from Electron's Local State (DPAPI-decrypt it)
 fn load_oscrypt_key() -> Option<Vec<u8>> {
     let appdata = std::env::var("APPDATA").ok()?;
     let path = std::path::Path::new(&appdata)
@@ -3528,25 +3528,25 @@ fn load_oscrypt_key() -> Option<Vec<u8>> {
     let v: Value = serde_json::from_str(&content).ok()?;
     let enc = v.get("os_crypt")?.get("encrypted_key")?.as_str()?;
     let all = base64_decode_raw(enc);
-    // 前 5 字节是 "DPAPI" 标记，其余为 DPAPI 加密的 AES key
+    // The first 5 bytes are the "DPAPI" marker; the rest is the DPAPI-encrypted AES key
     if all.len() < 6 || &all[..5] != b"DPAPI" {
         return None;
     }
     dpapi_decrypt(&all[5..]).ok()
 }
 
-// Electron OSCrypt blob 解密（v10/v11 头 + nonce + AES-GCM）
+// Decrypt an Electron OSCrypt blob (v10/v11 header + nonce + AES-GCM)
 fn electron_oscrypt_decrypt(blob: &[u8]) -> Option<String> {
     let key = load_oscrypt_key()?;
     let plain = aes_gcm_decrypt_payload(&key, &blob[3..])?;
     Some(String::from_utf8_lossy(&plain).to_string())
 }
 
-// 解密已加密的密码值，兼容三种格式：
-// 1) "dpapi:<b64>" — Tauri 当前格式（DPAPI 加密）
-// 2) Electron safeStorage（Windows = OSCrypt）："v10"/"v11" 头 + nonce + AES-GCM
-//    —— 老 Electron 用户升级后 config 里保存的密码（纯 base64，无前缀）
-// 3) 早期 Tauri 的明文 base64（"tauri:" 前缀或无前缀）
+// Decrypt a stored password value, accepting three formats:
+// 1) "dpapi:<b64>" — current Tauri format (DPAPI-encrypted)
+// 2) Electron safeStorage (Windows = OSCrypt): "v10"/"v11" header + nonce + AES-GCM
+//    — passwords saved in config by former Electron installs (plain base64, no prefix)
+// 3) Early Tauri plaintext base64 ("tauri:" prefix or no prefix)
 fn decrypt_password_value(value: &str) -> Option<String> {
     if let Some(rest) = value.strip_prefix("dpapi:") {
         return dpapi_decrypt(&base64_decode_raw(rest))
@@ -3555,10 +3555,10 @@ fn decrypt_password_value(value: &str) -> Option<String> {
     }
     let rest = value.strip_prefix("tauri:").unwrap_or(value);
     let bytes = base64_decode_raw(rest);
-    // Electron OSCrypt 格式探测：3 字节版本头 "v10"/"v11"
+    // Electron OSCrypt format probe: 3-byte version header "v10"/"v11"
     if bytes.len() >= 3 && (&bytes[0..3] == b"v10" || &bytes[0..3] == b"v11") {
-        // 优先 AES-GCM（Local State key）；失败回退剥头 DPAPI（部分实现/早期变体）。
-        // 两者都失败不降级为明文——带版本头说明是密文，降级只会把乱码当密码
+        // Try AES-GCM first (Local State key); fall back to header-stripped DPAPI (some implementations/early variants).
+        // If both fail, do NOT degrade to plaintext — a version header means ciphertext; degrading would treat garbage as the password
         if let Some(plain) = electron_oscrypt_decrypt(&bytes) {
             return Some(plain);
         }
@@ -3566,8 +3566,8 @@ fn decrypt_password_value(value: &str) -> Option<String> {
             .ok()
             .map(|plain| String::from_utf8_lossy(&plain).to_string());
     }
-    // 无版本头：先试纯 DPAPI（Electron 早期 safeStorage 直接 DPAPI），
-    // 失败回退明文（早期 Tauri 的明文 base64）
+    // No version header: try plain DPAPI first (early Electron safeStorage used DPAPI
+    // directly); on failure fall back to plaintext (early Tauri plaintext base64)
     if let Ok(plain) = dpapi_decrypt(&bytes) {
         return Some(String::from_utf8_lossy(&plain).to_string());
     }
@@ -3581,14 +3581,14 @@ pub fn encrypt_password(app: AppHandle, args: Vec<Value>) -> Result<Value, Strin
         .get("plaintext")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    // DPAPI 加密 (对齐 Electron safeStorage), 输出 "dpapi:<base64>"
+    // DPAPI-encrypt (parity with Electron safeStorage), output "dpapi:<base64>"
     let encrypted = match dpapi_encrypt(plaintext) {
         Ok(cipher) => format!("dpapi:{}", base64_encode_bytes(&cipher)),
         Err(e) => return Err(format!("Password encryption failed: {e}")),
     };
-    // emit 事件（兼容 ssh.js 里 saveSSHEdit 的 once 监听）
+    // Emit the event (ssh.js's saveSSHEdit listens for it with once)
     let _ = app.emit("encrypt-password-result", json!({ "encrypted": encrypted }));
-    // 返回值供 invoke 直接读取
+    // Also return the value so the invoke caller can read it directly
     Ok(json!({ "encrypted": encrypted }))
 }
 
@@ -3678,7 +3678,7 @@ fn find_sftp_transfer(
 pub async fn sftp_open(state: State<'_, SessionMap>, args: Vec<Value>) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
     let tab_id = params.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
-    // 初始路径：优先 SSH 会话已跟踪的 cwd（OSC 7），否则 home 目录
+    // Initial path: prefer the SSH session's tracked cwd (OSC 7), else the home directory
     let tracked_cwd = {
         let map = state.lock();
         match map.get(tab_id) {
@@ -3801,8 +3801,8 @@ pub async fn sftp_download(
         c.insert(transfer_id_key.clone(), cancelled.clone());
     }
 
-    // 初始化（打开远端/本地文件）失败时清理 cancel registry（M1），
-    // 避免长期运行后残留失效条目
+    // Clean up the cancel registry when init (opening remote/local files) fails,
+    // so dead entries don't accumulate over a long run
     let init_result: Result<_, String> = async {
         use russh_sftp::protocol::OpenFlags;
         let file = sftp
@@ -3813,8 +3813,8 @@ pub async fn sftp_download(
             .metadata()
             .await
             .map_err(|e| format!("metadata: {e}"))?;
-        // L3：先写本地临时文件，成功后 rename——取消/失败时删除临时文件，
-        // 不再残留半截文件冒充完整文件
+        // Write to a local temp file first and rename on success — on cancel/failure
+        // the temp file is deleted, so a partial file never masquerades as complete
         let tmp_local = format!("{}.zterm-tmp-{}", local_path, transfer_id_num);
         let local = tokio::fs::File::create(&tmp_local)
             .await
@@ -3837,7 +3837,7 @@ pub async fn sftp_download(
     let tid_num = transfer_id_num; // number for JSON event
     let key = transfer_id_key.clone();
     let cancels3 = cancels.clone();
-    let local_final = local_path.to_string(); // 'static，供 rename
+    let local_final = local_path.to_string(); // 'static, for the rename
     tokio::spawn(async move {
         let result = async {
             let mut buf = vec![0u8; 262144];
@@ -3868,7 +3868,7 @@ pub async fn sftp_download(
                     }),
                 );
             }
-            // 成功后原子落位
+            // Atomically move into place on success
             local.sync_all().await.map_err(|e| format!("sync: {e}"))?;
             drop(local);
             tokio::fs::rename(&tmp_local, &local_final)
@@ -3877,7 +3877,7 @@ pub async fn sftp_download(
             Ok::<_, String>(total)
         }
         .await;
-        // 失败/取消：清理临时文件
+        // On failure/cancel: remove the temp file
         if result.is_err() {
             let _ = tokio::fs::remove_file(&tmp_local).await;
         }
@@ -3925,18 +3925,18 @@ pub async fn sftp_upload(
         c.insert(transfer_id_key.clone(), cancelled.clone());
     }
 
-    // 初始化失败时清理 cancel registry（M1）
+    // Clean up the cancel registry when init fails
     let init_result: Result<_, String> = async {
         use russh_sftp::protocol::OpenFlags;
-        // 拦截本地目录（拖拽上传时前端只做同步判断，这里兜底，Electron 端行为一致）
+        // Reject local directories (drag-drop upload only checks synchronously in the frontend; this is the backstop, matching the Electron version's behavior)
         let local_meta = tokio::fs::metadata(local_path)
             .await
             .map_err(|e| format!("stat: {e}"))?;
         if local_meta.is_dir() {
             return Err("暂不支持上传文件夹".to_string());
         }
-        // L3：先写远端临时文件，成功后 rename——取消/失败时删除远端临时文件，
-        // 不再残留半截文件（也避免 TRUNCATE 直接破坏已存在的同名文件）
+        // Write to a remote temp file first and rename on success — on cancel/failure
+        // the remote temp file is deleted, so no partial file remains (and TRUNCATE never clobbers an existing same-name file)
         let tmp_remote = format!("{}.zterm-tmp-{}", remote_path, transfer_id_num);
         let file = sftp
             .open_with_flags(
@@ -3967,7 +3967,7 @@ pub async fn sftp_upload(
     let key = transfer_id_key.clone();
     let cancels3 = cancels.clone();
     let sftp2 = sftp.clone();
-    let remote_final = remote_path.to_string(); // 'static，供 rename
+    let remote_final = remote_path.to_string(); // 'static, for the rename
     tokio::spawn(async move {
         let result = async {
             let mut buf = vec![0u8; 262144];
@@ -3998,7 +3998,7 @@ pub async fn sftp_upload(
             }
             file.sync_all().await.map_err(|e| format!("sync: {e}"))?;
             drop(file);
-            // 成功后原子落位
+            // Atomically move into place on success
             sftp2
                 .rename(&tmp_remote, &remote_final)
                 .await
@@ -4006,7 +4006,7 @@ pub async fn sftp_upload(
             Ok::<_, String>(total)
         }
         .await;
-        // 失败/取消：清理远端临时文件
+        // On failure/cancel: remove the remote temp file
         if result.is_err() {
             let _ = sftp2.remove_file(&tmp_remote).await;
         }
@@ -4119,8 +4119,8 @@ pub fn quit_ready() -> Value {
 }
 
 // ── Clipboard (OSC 52 copy/paste) ──
-// OSC 52 由终端输出触发（vim/tmux yank），不在 WebView2 用户手势内，
-// navigator.clipboard 会抛 NotAllowedError，必须走系统剪贴板 API
+// OSC 52 is triggered by terminal output (vim/tmux yank), outside any WebView2 user
+// gesture, so navigator.clipboard throws NotAllowedError — the system clipboard API is required
 
 #[tauri::command]
 pub fn clipboard_write_text(args: Vec<Value>) -> Result<Value, String> {
@@ -4160,7 +4160,7 @@ mod tests {
 
     #[test]
     fn base64_padding() {
-        // 单字节与双字节输入的 padding 正确性
+        // Padding correctness for 1-byte and 2-byte inputs
         assert_eq!(base64_encode_bytes(b"a"), "YQ==");
         assert_eq!(base64_encode_bytes(b"ab"), "YWI=");
         assert_eq!(base64_encode_bytes(b"abc"), "YWJj");
@@ -4185,7 +4185,7 @@ mod tests {
     fn parse_login_scripts_filters_empty() {
         let val = json!([
             { "expect": "Password:", "send": "secret", "isRegex": false },
-            { "expect": "", "send": "" }, // 空条目应被过滤
+            { "expect": "", "send": "" }, // empty entries must be filtered out
             { "expect": "Are you sure?", "send": "y\n", "optional": true },
         ]);
         let scripts = parse_login_scripts(&val);
@@ -4205,7 +4205,7 @@ mod tests {
 
     #[test]
     fn decrypt_password_legacy_tauri_format() {
-        // 旧格式 tauri:<base64> 兼容
+        // Legacy tauri:<base64> format compatibility
         let plain = "secret123";
         let enc = format!("tauri:{}", base64_encode_bytes(plain.as_bytes()));
         assert_eq!(decrypt_password_value(&enc).as_deref(), Some(plain));
@@ -4213,7 +4213,7 @@ mod tests {
 
     #[test]
     fn decrypt_password_plain_base64_no_prefix() {
-        // 早期 Tauri 无前缀明文 base64
+        // Early Tauri plaintext base64 with no prefix
         let plain = "pw-明文-🔑";
         let enc = base64_encode_bytes(plain.as_bytes());
         assert_eq!(decrypt_password_value(&enc).as_deref(), Some(plain));
@@ -4221,8 +4221,8 @@ mod tests {
 
     #[test]
     fn decrypt_password_electron_v10_format() {
-        // Electron OSCrypt："v10" 头 + nonce(12) + AES-GCM 密文（Local State 的 AES key）
-        // 本机存在 Electron 的 Local State 时验证完整链路；否则跳过
+        // Electron OSCrypt: "v10" header + nonce(12) + AES-GCM ciphertext (AES key from Local State)
+        // Verifies the full chain when an Electron Local State exists on this machine; skipped otherwise
         let Some(key) = load_oscrypt_key() else {
             eprintln!("skip: no Electron Local State on this machine");
             return;
@@ -4247,14 +4247,14 @@ mod tests {
 
     #[test]
     fn decrypt_password_electron_format_corrupt_not_fallback() {
-        // 带 v10 头但密文损坏：不降级为明文（避免把乱码当密码）
+        // v10 header with corrupt ciphertext: must not degrade to plaintext (garbage must not become the password)
         let enc = base64_encode_bytes(b"v10garbage-not-valid-cipher");
         assert_eq!(decrypt_password_value(&enc), None);
     }
 
     #[test]
     fn aes_gcm_payload_roundtrip() {
-        // 纯函数级验证：AES-256-GCM 加密 → 解密 roundtrip
+        // Pure-function check: AES-256-GCM encrypt → decrypt roundtrip
         use aes_gcm::aead::{Aead, KeyInit};
         let key = [7u8; 32];
         let plain = b"roundtrip payload";
@@ -4267,10 +4267,10 @@ mod tests {
         payload.extend_from_slice(&ct);
         let dec = aes_gcm_decrypt_payload(&key, &payload).expect("decrypt");
         assert_eq!(dec, plain);
-        // 错误 key 解密失败
+        // A wrong key fails decryption
         let bad_key = [8u8; 32];
         assert!(aes_gcm_decrypt_payload(&bad_key, &payload).is_none());
-        // 非法输入
+        // Invalid inputs
         assert!(aes_gcm_decrypt_payload(&key, &[]).is_none());
         assert!(aes_gcm_decrypt_payload(&[1u8; 16], &payload).is_none());
     }
@@ -4293,7 +4293,7 @@ mod tests {
             filtered,
             vec!["JetBrains Mono", "宋体", "Cascadia Code", "Consolas"]
         );
-        // 正常字体保留，@ 前缀与 System 类字体全部排除
+        // Normal fonts are kept; @-prefixed and System-class fonts are all excluded
         assert!(!filtered.iter().any(|f| f.starts_with('@')));
         assert!(!filtered
             .iter()
@@ -4303,14 +4303,14 @@ mod tests {
     #[test]
     fn filter_system_fonts_empty_input() {
         assert!(filter_system_fonts(vec![]).is_empty());
-        // 中文正常字体名不被误伤
+        // A normal Chinese font name must not be filtered out
         let filtered = filter_system_fonts(vec!["微软雅黑".into()]);
         assert_eq!(filtered, vec!["微软雅黑"]);
     }
 
     #[test]
     fn oscrypt_key_from_local_state() {
-        // 本机存在 Electron Local State 时：DPAPI 解出的 AES key 应为 32 字节
+        // When an Electron Local State exists on this machine: the DPAPI-decrypted AES key must be 32 bytes
         let appdata = std::env::var("APPDATA").unwrap_or_default();
         let ls = std::path::Path::new(&appdata)
             .join("ZTerm")
@@ -4325,7 +4325,7 @@ mod tests {
 
     #[test]
     fn known_hosts_id_format() {
-        // known_hosts 键格式：host:port
+        // known_hosts key format: host:port
         let id = format!("{}:{}", "example.com", 2222);
         assert_eq!(id, "example.com:2222");
     }
@@ -4364,7 +4364,7 @@ mod tests {
 
     #[test]
     fn known_host_entry_missing_fields_handled() {
-        // 记录缺少 fingerprint/algorithm 字段时不应 panic，且视为不匹配
+        // A record missing fingerprint/algorithm must not panic and counts as a mismatch
         let entry = json!({});
         match check_known_host_entry(Some(&entry), "fp") {
             HostKeyStatus::Mismatch {
@@ -4406,14 +4406,14 @@ mod tests {
         });
         let (cfg, corrupt) = sanitize_config(raw);
         assert!(!corrupt);
-        // 用户字段覆盖默认
+        // User fields override the defaults
         assert_eq!(cfg["profiles"].as_array().unwrap().len(), 1);
         assert_eq!(cfg["profiles"][0]["name"], "Git Bash");
         assert_eq!(cfg["appearance"]["fontSize"], 16);
-        // 默认字段保留
+        // Default fields are preserved
         assert_eq!(cfg["appearance"]["theme"], "dark");
         assert!(cfg["lastTabs"].is_array());
-        // 自定义字段保留
+        // Custom fields are preserved
         assert_eq!(cfg["customKey"]["nested"], true);
     }
 
@@ -4446,7 +4446,7 @@ mod tests {
         assert_eq!(ssh[0]["port"], 22);
     }
 
-    // ADR-0003 open_url validation matrix (pure; no OS side effects).
+    // open_url validation matrix (pure; no OS side effects).
     #[test]
     fn validate_open_url_accepts_realistic_targets() {
         for raw in [
@@ -4504,7 +4504,7 @@ mod tests {
         assert_eq!(url.as_str(), "https://example.com/a%20b?x=1");
     }
 
-    // ADR-0003 seam: rejected targets must never reach the dispatcher, and an
+    // open_url seam: rejected targets must never reach the dispatcher, and an
     // accepted target is dispatched exactly once with the normalized URL.
     #[test]
     fn open_url_dispatch_seam() {
@@ -4529,7 +4529,7 @@ mod tests {
         }
     }
 
-    // 测试辅助：构造 Electron OSCrypt blob（版本头 + nonce(12) + AES-GCM 密文）
+    // Test helper: build an Electron OSCrypt blob (version header + nonce(12) + AES-GCM ciphertext)
     fn build_oscrypt_blob(version: &[u8], key: &[u8], plaintext: &str) -> Vec<u8> {
         use aes_gcm::aead::{Aead, KeyInit};
         let nonce = [3u8; 12];
@@ -4572,7 +4572,7 @@ mod tests {
             is_regex: true,
             optional: false,
         }];
-        // 非法正则按不匹配处理：不 panic；非 optional 时脚本保留等待后续输入
+        // An invalid regex counts as no match: no panic; a non-optional script stays for later output
         let send = feed_login_scripts("anything", &mut scripts);
         assert_eq!(send, None);
         assert_eq!(scripts.len(), 1);
@@ -4599,7 +4599,7 @@ mod tests {
         let mut scripts = vec![script("Password:", "secret")];
         let send = feed_login_scripts("Hello", &mut scripts);
         assert_eq!(send, None);
-        // 非 optional 未命中：保留脚本，等待下一次输出再次尝试
+        // Non-optional miss: keep the script and retry on the next output
         assert_eq!(scripts.len(), 1);
         let send = feed_login_scripts("Password:", &mut scripts);
         assert_eq!(send.as_deref(), Some("secret\n"));
@@ -4608,7 +4608,7 @@ mod tests {
 
     #[test]
     fn feed_login_scripts_skips_unconditional_entries() {
-        // 空 expect 的条目由 execute_unconditional 负责，feed 阶段跳过
+        // Empty-expect entries are execute_unconditional's job; the feed stage skips them
         let mut scripts = vec![script("", "first"), script("Password:", "secret")];
         let send = feed_login_scripts("Password:", &mut scripts);
         assert_eq!(send.as_deref(), Some("secret\n"));
@@ -4639,7 +4639,7 @@ mod tests {
 
     #[test]
     fn base64_decode_invalid_input_no_panic() {
-        // 非法字符被跳过、'=' 截断，不应 panic
+        // Invalid characters are skipped and '=' truncates; must not panic
         assert!(base64_decode_raw("!!!").is_empty());
         assert!(base64_decode_raw("").is_empty());
         assert_eq!(base64_decode_raw("YWJj"), b"abc");
@@ -4648,7 +4648,7 @@ mod tests {
 
     #[test]
     fn dpapi_encrypt_decrypt_roundtrip() {
-        // DPAPI 绑定本机用户会话；加密解密同上下文，roundtrip 无副作用
+        // DPAPI is bound to the local user session; encrypt/decrypt run in the same context, so the roundtrip is side-effect free
         let plain = "secret-密码-🔑";
         let enc = dpapi_encrypt(plain).expect("dpapi encrypt");
         let dec = dpapi_decrypt(&enc).expect("dpapi decrypt");
@@ -4677,14 +4677,14 @@ mod tests {
     #[test]
     fn window_state_missing_field_returns_none() {
         assert!(window_state_from_config(&json!({})).is_none());
-        // window 存在但字段缺失
+        // window exists but fields are missing
         assert!(window_state_from_config(&json!({"window": {"x": 1}})).is_none());
-        // 字段类型错误（字符串而非数字）
+        // Wrong field types (strings instead of numbers)
         assert!(window_state_from_config(
             &json!({"window": {"x": "a", "y": 2, "width": 3, "height": 4}})
         )
         .is_none());
-        // maximized 缺失 → 默认 false
+        // missing maximized → defaults to false
         let s =
             window_state_from_config(&json!({"window": {"x": 1, "y": 2, "width": 3, "height": 4}}))
                 .unwrap();
@@ -4741,13 +4741,13 @@ mod tests {
 
     #[test]
     fn drain_utf8_multibyte_split_across_chunks() {
-        // "你好" = E4 BD A0 E5 A5 BD：切在 3 字节序列中间，不允许出现 U+FFFD
+        // "你好" = E4 BD A0 E5 A5 BD: split mid 3-byte sequence; no U+FFFD may appear
         let mut carry = Vec::new();
         let mut out = String::new();
-        out.push_str(&drain_utf8(&mut carry, &[0xE4])); // "你" 的第 1 字节
+        out.push_str(&drain_utf8(&mut carry, &[0xE4])); // first byte of "你"
         assert_eq!(out, "");
         assert_eq!(carry, vec![0xE4], "不完整序列必须留在 carry");
-        out.push_str(&drain_utf8(&mut carry, &[0xBD, 0xA0, 0xE5])); // 补全"你" + "好" 第 1 字节
+        out.push_str(&drain_utf8(&mut carry, &[0xBD, 0xA0, 0xE5])); // completes "你" + first byte of "好"
         assert_eq!(out, "你");
         assert_eq!(carry, vec![0xE5]);
         out.push_str(&drain_utf8(&mut carry, &[0xA5, 0xBD]));
@@ -4758,7 +4758,7 @@ mod tests {
 
     #[test]
     fn drain_utf8_emoji_split_across_chunks() {
-        // 😀 = F0 9F 98 80（4 字节）：切 3+1
+        // 😀 = F0 9F 98 80 (4 bytes): split 3+1
         let mut carry = Vec::new();
         let mut out = String::new();
         out.push_str(&drain_utf8(&mut carry, &[0xF0, 0x9F, 0x98]));
@@ -4770,13 +4770,13 @@ mod tests {
 
     #[test]
     fn drain_utf8_invalid_byte_replaced_and_continue() {
-        // 真非法字节（0xFF）按 U+FFFD 替换，剩余部分继续解码
+        // A truly invalid byte (0xFF) becomes U+FFFD; decoding continues after it
         let mut carry = Vec::new();
         let mut out = String::new();
         out.push_str(&drain_utf8(&mut carry, &[b'a', 0xFF, b'b']));
         assert_eq!(out, "a\u{FFFD}b");
         assert!(carry.is_empty());
-        // 非法字节在块尾：替换后不阻塞后续块
+        // Invalid byte at a chunk tail: replacement must not block later chunks
         out.push_str(&drain_utf8(&mut carry, &[0xFF]));
         assert_eq!(out, "a\u{FFFD}b\u{FFFD}");
         out.push_str(&drain_utf8(&mut carry, b"c"));
@@ -4794,28 +4794,28 @@ mod tests {
 
     #[test]
     fn parse_osc7_bash_rc_wrapper_format() {
-        // bash rc wrapper：_zt_cwd() { printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "$PWD"; }
-        // 输出 = ESC]7;file://myserver/home/userESC\
+        // bash rc wrapper: _zt_cwd() { printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "$PWD"; }
+        // output = ESC]7;file://myserver/home/userESC\
         let out = format!("\x1b]7;file://myserver/home/user\x1b\\");
         assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/home/user"));
-        // 根目录
+        // root directory
         let out = format!("\x1b]7;file://myserver/\x1b\\");
         assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/"));
-        // 带空格/特殊字符的路径
+        // path with spaces/special characters
         let out = format!("\x1b]7;file://srv/opt/my app/logs\x1b\\");
         assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/opt/my app/logs"));
     }
 
     #[test]
     fn parse_osc7_with_bel_terminator() {
-        // 部分终端/OSC 实现以 BEL 结尾
+        // Some terminal/OSC implementations terminate with BEL
         let out = format!("\x1b]7;file://host/var/log\x07");
         assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/var/log"));
     }
 
     #[test]
     fn parse_osc7_split_across_chunks() {
-        // 序列被 SSH 数据块切开：单块匹配必然失败，拼接窗口后必须成功
+        // Sequence split across SSH data chunks: single-chunk matching must fail, the joined window must succeed
         let head = "\x1b]7;file://myserver/home/use";
         let tail = "r/project\x1b\\";
         assert_eq!(parse_osc7_cwd(head), None, "半截序列单独匹配必须失败");
@@ -4825,7 +4825,7 @@ mod tests {
             parse_osc7_cwd(&combined).as_deref(),
             Some("/home/user/project")
         );
-        // 前有大量输出（大文本场景）时同样能匹配
+        // Also matches with plenty of preceding output (large-text scenario)
         let noisy = format!("ls output line\nanother\n{combined}");
         assert_eq!(
             parse_osc7_cwd(&noisy).as_deref(),
@@ -4835,7 +4835,7 @@ mod tests {
 
     #[test]
     fn parse_1337_currentdir_fish_native() {
-        // fish ≥3.x 每个提示符原生输出（实测 rig 192.168.41.88 的捕获流）
+        // fish ≥3.x emits this natively at every prompt
         assert_eq!(
             parse_1337_currentdir("\u{1b}]1337;CurrentDir=/root\u{7}"),
             Some("/root".to_string())
@@ -4844,27 +4844,27 @@ mod tests {
             parse_1337_currentdir("\u{1b}]1337;CurrentDir=/tmp\u{1b}\\"),
             Some("/tmp".to_string())
         );
-        // 路径含空格：fish 原样输出，不转义
+        // Path with spaces: fish prints it verbatim, unescaped
         assert_eq!(
             parse_1337_currentdir("\u{1b}]1337;CurrentDir=/opt/my app/logs\u{7}"),
             Some("/opt/my app/logs".to_string())
         );
-        // iTerm2 file:// 变体：剥掉 scheme+host
+        // iTerm2 file:// variant: strip scheme+host
         assert_eq!(
             parse_1337_currentdir("\u{1b}]1337;CurrentDir=file://box.local/var/log\u{7}"),
             Some("/var/log".to_string())
         );
-        // %XX 编码变体：解码
+        // %XX-encoded variant: decode it
         assert_eq!(
             parse_1337_currentdir("\u{1b}]1337;CurrentDir=/home/my%20dir\u{7}"),
             Some("/home/my dir".to_string())
         );
-        // 裸 % 不做解码（真实路径常见）
+        // A bare % is not decoded (common in real paths)
         assert_eq!(
             parse_1337_currentdir("\u{1b}]1337;CurrentDir=/data/100%load\u{7}"),
             Some("/data/100%load".to_string())
         );
-        // 噪声中匹配
+        // Match amid noise
         assert_eq!(
             parse_1337_currentdir(&format!(
                 "prompt ❯ some output\n\u{1b}]1337;CurrentDir=/srv\u{7}\nmore"
@@ -4875,9 +4875,9 @@ mod tests {
 
     #[test]
     fn parse_1337_currentdir_no_match() {
-        // 无终止符（跨块时上游窗口拼接后才会匹配，单块必须返回 None）
+        // No terminator (a cross-chunk sequence only matches after the upstream window join; a lone chunk must return None)
         assert_eq!(parse_1337_currentdir("\u{1b}]1337;CurrentDir=/root"), None);
-        // 相对路径/空路径不接受
+        // Relative/empty paths are not accepted
         assert_eq!(
             parse_1337_currentdir("\u{1b}]1337;CurrentDir=relative\u{7}"),
             None
@@ -4889,8 +4889,8 @@ mod tests {
 
     #[test]
     fn mixed_cwd_sequences_prefer_latest_position() {
-        // 登录时 wrapper 的 OSC 7 (/root) + 之后 fish 每个提示符的 1337 (/tmp)：
-        // 窗口里两者并存时，位置靠后的 1337 必须赢（or_else 短路会永远卡在旧值）
+        // The login wrapper's OSC 7 (/root) plus fish's per-prompt 1337 (/tmp):
+        // with both in the window, the later-positioned 1337 must win (or_else short-circuiting would stick on the old value forever)
         let window = "\u{1b}]7;file://host/root\u{1b}\\\u{1b}]0;title\u{7}prompt\u{1b}]1337;CurrentDir=/tmp\u{7}";
         let osc7 = parse_osc7_cwd(window);
         let c1337 = parse_1337_currentdir(window);
@@ -4910,8 +4910,8 @@ mod tests {
 
     #[test]
     fn bash_rc_wrapper_end_to_end() {
-        // 用真实 bash 执行 RC wrapper（本机无 bash 则跳过）：验证生成的 rc 文件
-        // 能让 shell 输出可解析的 OSC 7 cwd。隔离 HOME 避免污染测试机用户配置。
+        // Run the RC wrapper with a real bash (skipped when no bash on this machine):
+        // verify the generated rc file makes the shell emit a parseable OSC 7 cwd. HOME is isolated to avoid polluting the test machine's user config.
         let bash = [
             "bash",
             "D:/Program Files/Git/bin/bash.exe",
@@ -4980,11 +4980,11 @@ mod tests {
         }];
         assert!(center_on_any_monitor(960, 540, &one));
         assert!(center_on_any_monitor(0, 0, &one));
-        // 边界外：左侧/右侧/下侧
+        // Just outside: left/right/bottom edges
         assert!(!center_on_any_monitor(-1, 540, &one));
         assert!(!center_on_any_monitor(1920, 540, &one));
         assert!(!center_on_any_monitor(960, 1080, &one));
-        // 双显示器（副屏在左侧，负坐标）
+        // Dual monitors (secondary on the left, negative coordinates)
         let two = [
             MonitorRect {
                 x: 0,

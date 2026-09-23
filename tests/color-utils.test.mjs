@@ -1,4 +1,4 @@
-// ZTerm - 颜色转换纯逻辑单测（node --test）
+// ZTerm - color conversion pure-logic unit tests (node --test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -20,11 +20,11 @@ test('hexToRgb 标准格式（带/不带 #，大小写）', () => {
 test('hexToRgb 无效输入返回 null', () => {
     assert.equal(hexToRgb(null), null);
     assert.equal(hexToRgb(''), null);
-    assert.equal(hexToRgb('#abc'), null); // 短格式不支持
+    assert.equal(hexToRgb('#abc'), null); // short form not supported
     assert.equal(hexToRgb('red'), null);
     assert.equal(hexToRgb('#12345'), null);
     assert.equal(hexToRgb('#1234567'), null);
-    assert.equal(hexToRgb('#gggggg'), null); // 非十六进制
+    assert.equal(hexToRgb('#gggggg'), null); // not hexadecimal
 });
 
 // ── rgbToHex ──
@@ -73,7 +73,7 @@ test('rgb → hsv → rgb roundtrip 近似保真', () => {
     for (const [r, g, b] of [[0x61, 0xaf, 0xef], [0x12, 0x34, 0x56], [200, 30, 90], [255, 255, 0]]) {
         const { h, s, v } = rgbToHsv(r, g, b);
         const back = hsvToRgb(h, s, v);
-        // 取整误差允许 ±2
+        // rounding error of ±2 is allowed
         assert.ok(Math.abs(back.r - r) <= 2, `r ${back.r} vs ${r}`);
         assert.ok(Math.abs(back.g - g) <= 2, `g ${back.g} vs ${g}`);
         assert.ok(Math.abs(back.b - b) <= 2, `b ${back.b} vs ${b}`);
@@ -81,7 +81,7 @@ test('rgb → hsv → rgb roundtrip 近似保真', () => {
 });
 
 
-// ── hexToHsl / hslToHex（surface 派生用） ──
+// ── hexToHsl / hslToHex (for surface derivation) ──
 
 test('hexToHsl ↔ hslToHex 往返无损（含终端配色背景）', () => {
     for (const hex of ['#282c34', '#282a36', '#1a1b26', '#1e1e2e', '#ffffff', '#000000']) {
@@ -91,8 +91,8 @@ test('hexToHsl ↔ hslToHex 往返无损（含终端配色背景）', () => {
 });
 
 test('surface 派生值锁定（Snazzy 底座/浮层，防 UI 阶梯漂移）', () => {
-    // These values are shown in design/term-ui-fusion-preview.html; changing
-    // them is a visual decision, not a refactor.
+    // These derived surface colors are locked to the shipped theme palette;
+    // changing them is a visual decision, not a refactor.
     const derive = (bg, l) => { const { h, s } = hexToHsl(bg); return hslToHex(h, Math.max(s, 0.06), l); };
     assert.equal(derive('#282a36', 0.065), '#0e0f13'); // Snazzy --surface-win
     assert.equal(derive('#282a36', 0.185), '#282a36'); // Snazzy --surface-float

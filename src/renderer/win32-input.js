@@ -8,8 +8,8 @@
 // (terminal/input/terminalInput.cpp::_makeWin32Output); xterm.js has no
 // support for it, so our keys go through the legacy byte path, where
 // OpenConsole's lossy translation rewrites a lone LF into a Ctrl+Enter
-// INPUT_RECORD (field-verified with a ConPTY input probe, not checked in:
-// byte 0x0A in -> key event vk=0x0D char=0x0A ctrl=LEFT_CTRL out). Event-level stdin readers
+// INPUT_RECORD (observed on the wire: byte 0x0A in -> key event vk=0x0D
+// char=0x0A ctrl=LEFT_CTRL out). Event-level stdin readers
 // (crossterm, kimi) then see "Ctrl+Enter" — never "Ctrl+J" — and the key
 // does nothing. Over SSH there is no ConPTY rewrite, which is why only the
 // local path was broken.

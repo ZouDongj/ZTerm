@@ -1,4 +1,4 @@
-// ZTerm - 快捷命令（拆自 renderer.html，纯代码搬运，未改逻辑）
+// ZTerm - Quick commands
 // ── Quick Commands ──
 let _qcCommands = [];
 let _qcSelected = 0;
@@ -44,7 +44,7 @@ function qcFilter() {
         list.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-3);font-size:13px">没有匹配的命令<br><span style="font-size:11px;cursor:pointer;color:#8fc1ee;margin-top:8px;display:inline-block" onclick="closeQC();openSettings(\'quickcommands\')">+ 添加第一个命令</span></div>';
         return;
     }
-    // V3 分区标题式：按分组渲染分区标题 + 表项（名称 + 命令 + Enter 徽标）
+    // V3 section-header layout: render a section header per group plus items (name + command + Enter badge)
     const groups = {};
     filtered.forEach((c, i) => {
         const k = c.group || '未分组';
@@ -99,7 +99,7 @@ function executeQuickCommand(cmd) {
     const tab = TabManager.getActive();
     if (!tab) return;
     // Insert command text into terminal (user can edit before pressing Enter)
-    // “末尾回车自动执行”开关：关闭时剥掉末尾一个换行（只注入命令文本，不自动执行）
+    // "Auto-execute trailing Enter" toggle: when off, strip one trailing newline (inject the command text only, no auto-execute)
     let text = cmd.command;
     if (!_settingsConfig.qcAutoEnter) {
         text = stripTrailingNewline(text);
@@ -116,7 +116,7 @@ function executeQuickCommand(cmd) {
     }
 }
 
-// “末尾回车自动执行”全局开关（设置 → 快捷命令页顶部）
+// Global "auto-execute trailing Enter" toggle (top of Settings -> Quick Commands page)
 function toggleQCAutoEnter() {
     _settingsConfig.qcAutoEnter = !_settingsConfig.qcAutoEnter;
     const el = document.getElementById('qc-auto-enter');
@@ -124,7 +124,7 @@ function toggleQCAutoEnter() {
     persistSettings();
 }
 
-// ── 设置页快捷命令列表（对齐 SSH 设置页：分节标题 + 每组一张设置卡片） ──
+// ── Settings-page quick command list (aligned with the SSH settings page: section headers + one settings card per group) ──
 // View state survives redraws: query text and the collapsed-group set.
 const _qcSettingsView = { query: '', collapsed: new Set() };
 
@@ -214,7 +214,7 @@ function _qcUpdateCount(matched, total) {
 function renderQCCommandsList() {
     const container = document.getElementById('qc-commands-list');
     if (!container) return;
-    // 同步“末尾回车自动执行”开关状态
+    // Sync the "auto-execute trailing Enter" toggle state
     const qcToggle = document.getElementById('qc-auto-enter');
     if (qcToggle) qcToggle.classList.toggle('on', !!_settingsConfig.qcAutoEnter);
     const snap = _qcFocusSnapshot(container);
@@ -329,9 +329,9 @@ function startRenameQCGroup(btn) {
     btn.style.color = '';
     input.focus();
     input.select();
-    // 保留原始 onclick（HTML 属性），Esc 时还原——
-    // 否则 finish(false) 后残留的 btn.onclick 闭包会在下次点击时执行 finish(true) 完成路径，
-    // 而非重新进入重命名
+    // Keep the original onclick (HTML attribute) and restore it on Esc —
+    // otherwise the btn.onclick closure left over from finish(false) would run
+    // the finish(true) commit path on the next click instead of re-entering rename
     const originalOnClick = btn.getAttribute('onclick');
 
     const finish = (save) => {
@@ -342,7 +342,7 @@ function startRenameQCGroup(btn) {
         input.replaceWith(span);
         btn.innerHTML = Icons.iconSvg('pencil', 11);
         btn.style.color = '';
-        // 还原原始 onclick（被 startRenameQCGroup 覆盖的 HTML 属性）
+        // Restore the original onclick (the HTML attribute overridden by startRenameQCGroup)
         btn.onclick = null;
         if (originalOnClick) btn.setAttribute('onclick', originalOnClick);
 
@@ -384,7 +384,7 @@ function deleteQC(id) {
     });
 }
 
-// QC 分组下拉（照抄 SSH 配置的分组 combo）
+// QC group dropdown (mirrors the group combo of the SSH profiles editor)
 function initQCGroupCombo() {
     const input = document.getElementById('qc-edit-group');
     const menu = document.getElementById('qc-group-menu');
@@ -423,8 +423,8 @@ function initQCGroupCombo() {
 
     input.addEventListener('focus', () => renderOptions(input.value));
     input.addEventListener('input', () => renderOptions(input.value));
-    // mousedown 触发 renderOptions：用户 Esc 关掉 menu 后再点 input 时
-    // （input 没失焦，focus/input 事件不触发）能重新弹出下拉框
+    // mousedown triggers renderOptions: clicking the input again after Esc closed
+    // the menu reopens it (input never blurred, so no focus/input event fires)
     input.addEventListener('mousedown', () => renderOptions(input.value));
     input.addEventListener('blur', () => setTimeout(() => menu.classList.remove('open'), 150));
     input.addEventListener('keydown', (e) => {
@@ -472,8 +472,8 @@ function closeQCEdit() {
 
 function saveQCEdit() {
     const name = document.getElementById('qc-edit-name').value.trim();
-    // command 保存原文（保留用户输入的末尾回车）：编辑栏显示什么就存什么，
-    // 末尾回车是否注入由“末尾回车自动执行”开关在注入时决定
+    // command is stored verbatim (keeping any trailing Enter the user typed): whatever the
+    // edit field shows is saved; the "auto-execute trailing Enter" toggle decides at injection time
     const commandRaw = document.getElementById('qc-edit-command').value;
     const group = document.getElementById('qc-edit-group').value.trim();
     if (!name || !commandRaw.trim()) {

@@ -1,8 +1,10 @@
-// ZTerm - 分屏拖拽 + 窗口 resize（纯逻辑函数见 split-layout.js，由 renderer.html 先加载）
-// ── Window resize：只跟手布局 DOM，抑制 term fit ──
-// 拖拽窗口期间每帧触发 resize：若同时 fit（全屏重绘 + pty-resize 下发），
-// 字符每帧重排 → 终端区域抖动（远程桌面下更明显）。改为拖拽停止 250ms 后
-// 统一由 _scheduleSettleResize（320ms debounce，含 pty-resize 上报）结算一次。
+// ZTerm - split drag + window resize (pure logic functions live in split-layout.js, loaded earlier by renderer.html)
+// ── Window resize: re-layout only the DOM live, suppress term fit ──
+// Window dragging fires resize every frame; fitting at the same time (full
+// redraw + pty-resize dispatch) reflows characters every frame and the
+// terminal area jitters (more visible over remote desktop). Instead, 250ms
+// after dragging stops, _scheduleSettleResize (320ms debounce, includes the
+// pty-resize report) settles everything in one pass.
 let _windowResizing = false;
 let _windowResizeTimer = null;
 

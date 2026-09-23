@@ -116,12 +116,12 @@ test('real detach stream passes through intact (alt-screen exit never freezes)',
 });
 
 test('dsh-tui-era capture without painted evidence passes through untouched (real bytes)', () => {
-    // 2026-09 capture of typing 5 keys into dsh-tui inside herdr: 12 sync
+    // Capture of typing 5 keys into dsh-tui inside herdr: 12 sync
     // blocks, 24 in-block hides, ZERO painted-caret cells. The pre-gate
     // filter manufactured one SHOW per block anyway (visibleBefore self-
     // sustained) and parked a protocol caret at each frame's final CUP —
     // correct-looking only while the park happened to be the input box.
-    // Current herdr (verified 2026-09-18 sandbox, 0.9.0) hides its console
+    // Current herdr (0.9.0) hides its console
     // cursor and draws pane carets as content, so a manufactured SHOW is a
     // phantom caret (the far-right blinking one in kimi working frames).
     const s = readFileSync(join(here, 'fixtures', 'dshtui-input.txt'), 'latin1');
@@ -148,11 +148,10 @@ test('dsh-tui-era capture without painted evidence passes through untouched (rea
     assert.equal(count(/\x1b\[\?25l/g, outr), count(/\x1b\[\?25l/g, s), 'repair forwards hides');
 });
 
-// Distilled from the real 2026-09-18 kimi-working capture (sandbox ztprobe;
-// field-observed, raw capture not checked in): spinner frame idiom — sync
-// block, OSC8-end, styled braille, park CUP, two in-block hides, no painted
-// caret. Byte-pattern verified equivalent to the live stream (0 shows /
-// 94 hides all in-block / 0 painted in 48KB).
+// Distilled from a real kimi-working capture (raw capture not checked in):
+// spinner frame idiom — sync block, OSC8-end, styled braille, park CUP, two
+// in-block hides, no painted caret. Byte-pattern verified equivalent to the
+// live stream (0 shows / 94 hides all in-block / 0 painted in 48KB).
 const HERDR_KIMI_FRAME =
     '\u001b[?2026h\u001b[?25l\u001b]8;;\u001b\\\u001b[24;28H\u001b[0;38;2;136;136;136;49m⠴\u001b[0m\u001b[27;32H\u001b[?25l\u001b[?2026l';
 
@@ -195,7 +194,7 @@ test('host_cursor=native stream is enhanced, not corrupted', () => {
 // ── ConPTY DA1 handshake ──
 // OpenConsole opens every pseudoconsole with a DA1 probe (ESC[c) and blocks
 // the client shell's output until a VT220-class reply arrives (~3.3s stall
-// measured when unsatisfied, conpty_probe A/B 2026-09-17). xterm.js answers
+// measured when unsatisfied). xterm.js answers
 // DA1 with ESC[?1;2c (VT100 class), which OpenConsole ignores — so the filter
 // swallows the FIRST DA1 and reports it via onDa1Query for ipc.js to answer
 // with CONPTY_DA1_RESPONSE. Later DA1 probes (apps querying the terminal)

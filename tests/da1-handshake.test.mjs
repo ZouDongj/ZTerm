@@ -1,4 +1,4 @@
-// Integration guard for the ConPTY DA1 handshake reply path (2026-09-17).
+// Integration guard for the ConPTY DA1 handshake reply path.
 // OpenConsole blocks the shell's first output until a VT220-class DA1 reply
 // arrives; the caret filter swallows the probe and ipc.js answers it. The
 // filter's own units live in conpty-caret.test.mjs — this file exercises the

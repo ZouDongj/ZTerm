@@ -23,9 +23,9 @@ russh = { version = "0.60", features = ["aws-lc-rs"] }
 anyhow = "1"
 winapi = { version = "0.3", features = ["dpapi", "minwindef", "ntdef", "shellapi", "winbase", "wincrypt", "wingdi", "winnt", "winreg", "winuser"] }
 arboard = "3"
-# Electron safeStorage 兼容（OSCrypt AES-GCM 解密）
+# Electron safeStorage compatibility (OSCrypt AES-GCM decryption)
 aes-gcm = "0.10"
-# 检查更新：单次小 JSON GET，sync 客户端 + spawn_blocking，不引 reqwest/hyper
+# Update check: one small JSON GET via the sync client + spawn_blocking, avoiding reqwest/hyper
 ureq = { version = "3", features = ["json", "win-system-proxy"] }
 # Update installer integrity check (sha256 of the downloaded setup exe).
 # Already in the lockfile as an indirect dep; declared here for direct use.
@@ -36,5 +36,5 @@ sha2 = "0.10"
 webview2-com = "0.38"
 windows-core = "0.61"
 
-# PoC 2: 验证 portable-pty 本地 shell + Tauri Channel 通信
-# russh 0.60 re-exports russh_keys as russh::key, 不需要单独依赖 russh-keys
+# portable-pty drives the local shell; output reaches the frontend over a Tauri Channel
+# russh 0.60 re-exports russh_keys as russh::key, so no separate russh-keys dependency

@@ -1,4 +1,4 @@
-// ZTerm - 快捷键纯逻辑单测（node --test）
+// ZTerm - keyboard shortcut pure-logic unit tests (node --test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -35,10 +35,10 @@ test('comboFromEvent 方向键保留 Arrow 前缀', () => {
 });
 
 test('comboFromEvent Dead/Unidentified 回退到 e.code', () => {
-    // Dead（输入法组合键）与 Unidentified：用 code 的 Key/Digit 提取字母
+    // Dead (IME composition keys) and Unidentified: extract the character from the code's Key/Digit prefix
     assert.equal(comboFromEvent(ev({ key: 'Dead', code: 'KeyQ' })), 'Q');
     assert.equal(comboFromEvent(ev({ key: 'Unidentified', code: 'Digit3' })), '3');
-    // code 无 Key/Digit 前缀时原样使用
+    // when code has no Key/Digit prefix, use it as-is
     assert.equal(comboFromEvent(ev({ key: 'Unidentified', code: 'F2' })), 'F2');
 });
 
@@ -66,12 +66,12 @@ test('mergeShortcutBindings 无覆盖/空覆盖时保持默认', () => {
     const defaults = { a: 'Ctrl+A' };
     assert.deepEqual(mergeShortcutBindings(defaults, undefined), defaults);
     assert.deepEqual(mergeShortcutBindings(defaults, {}), defaults);
-    // 返回新对象，不修改入参
+    // returns a new object; arguments are not mutated
     const merged = mergeShortcutBindings(defaults, {});
     assert.notEqual(merged, defaults);
 });
 
-// ── browserAcceleratorDenied（Edge-OOUI 加速键拦截）──
+// ── browserAcceleratorDenied (Edge-OOUI accelerator interception) ──
 
 test('browserAcceleratorDenied Ctrl+J 命中拦截名单', () => {
     assert.equal(browserAcceleratorDenied(ev({ ctrlKey: true, key: 'j' })), true);

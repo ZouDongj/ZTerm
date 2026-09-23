@@ -1,12 +1,11 @@
-// ADR-0001 B1 regression tests: the heuristic painted-caret takeover must
+// Regression tests for the painted-caret takeover heuristic: it must
 // not delete caret-cell writes (content correctness first) and must not
-// force a second cursor. Fixtures are REAL pre-filter captures from isolated
-// self-created sessions (herdr+dsh-tui / herdr+kimi on 41.88, 2026-09-15):
+// force a second cursor. Fixtures are real pre-filter captures from isolated
+// self-created sessions (herdr+dsh-tui / herdr+kimi):
 // forward typing paints carets over SPACES (5 in dsh), but deletion and pure
 // left/right navigation paint carets over CHARACTERS ('b','c','d','y') —
 // the old space-only removal missed those while engagement kept forcing
-// SHOW, producing the user-visible double caret ("一份跳动、一份平滑追赶").
-// These tests are RED against a1083a2 and must be GREEN after B1.
+// SHOW, producing a user-visible double caret.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -66,14 +65,14 @@ test('B1: transport policy — SSH streams never enter the caret repair', () => 
 });
 
 test('B1: a genuine SHOW does not unlock SHOW manufacturing for evidence-free frames', () => {
-  // 2026-09-18 sandbox captures (kimi/dsh-tui/bash panes, herdr 0.9.0):
-  // current herdr hides its console cursor once and paints pane carets as
+  // Captured herdr 0.9.0 sessions (kimi/dsh-tui/bash panes): herdr hides
+  // its console cursor once and paints pane carets as
   // content, so frames arrive with in-block ?25l and NO painted-caret SGR —
   // even though the shell showed the caret before the TUI launched. The old
   // "shown once => every later hide is ConPTY's rewrite" premise manufactured
   // a block-end SHOW per frame, parking a phantom protocol caret at each
-  // frame's final CUP (the far-right blinking caret reported while an agent
-  // works). Evidence-free frames must pass through raw.
+  // frame's final CUP (a far-right blinking caret while an agent works).
+  // Evidence-free frames must pass through raw.
   const frame = '\u001b[?2026h\u001b[?25l\u001b[30;70H\u001b[0;39;49ma\u001b[0m\u001b[30;71H\u001b[?25l\u001b[?2026l';
   const f = createConPtyCaretFilter({ mode: 'fix' });
   let out = '';
@@ -89,11 +88,11 @@ test('B1: a genuine SHOW does not unlock SHOW manufacturing for evidence-free fr
 
 test('B1: ink painted-caret frames get no manufactured SHOW (B2 owns the caret)', () => {
   // Live dsh-tui/kimi frames paint the caret as a styled CELL (truecolor
-  // fg+bg, one glyph) — the B2 software-caret candidate — inside sync blocks
+  // fg+bg, one glyph) — the software-caret candidate — inside sync blocks
   // with NO conhost painted-caret SGR. The visibility repair must not fire
   // here: every manufactured SHOW draws the protocol caret at the frame's
-  // final CUP on top of the app-painted caret (the double caret the user
-  // reported). The software caret (ink-caret-observer → xterm-smooth-cursor)
+  // final CUP on top of the app-painted caret, a visible double caret.
+  // The software caret (ink-caret-observer → xterm-smooth-cursor)
   // renders this cursor instead.
   const frame = '\u001b[?2026h\u001b[?25l\u001b[30;70Hhi\u001b[0m\u001b[0;38;2;40;44;52;48;2;220;223;228md\u001b[0m\u001b[30;71H\u001b[?25l\u001b[?2026l';
   const f = createConPtyCaretFilter({ mode: 'fix' });

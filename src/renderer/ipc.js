@@ -1,6 +1,6 @@
-// ZTerm - ipcRenderer 监听器 + pty-output 路由（拆自 renderer.html，纯代码搬运，未改逻辑）
+// ZTerm - ipcRenderer listeners and pty-output routing
 
-// 更新 pane 状态点 DOM（TabManager.render() 不重绘 pane header，需手动更新）
+// Update the pane status dot DOM (TabManager.render() does not repaint pane headers, so it must be updated manually)
 function _updatePaneDot(pane, connected) {
     pane.connected = connected;
     const el = document.querySelector(`.split-pane[data-pane="${pane.id}"] .pane-header .dot`);
@@ -22,7 +22,7 @@ function _conPtyCaretFix(owner, data, ownerType) {
         ? createConPtyCaretFilter
         : window.createConPtyCaretFilter;
     if (!factory) return data;
-    // ADR-0001 B1 transport policy: the repair addresses ConPTY byte-stream
+    // Transport policy: the repair addresses ConPTY byte-stream
     // mutations and applies to LOCAL PTY sessions only. SSH streams reach
     // xterm exactly as the application emitted them — the old blanket fix
     // mode ran on them too, deleting painted caret cells (content loss) and
@@ -45,14 +45,14 @@ function _conPtyCaretFix(owner, data, ownerType) {
         owner._win32InputMode = true;
         // Gate keyed by the backend session id: split/drag migration moves
         // this terminal to a different tab/pane wrapper, and the id is the
-        // only handle that survives the move (ADR-0002 review).
+        // only handle that survives the move.
         globalThis.__win32Input?.markGated?.(owner.tabId);
     } });
     const out = owner._caretFilter.push(data);
     return typeof out === 'string' ? out : data;
 }
 
-// ADR-0001 B2: feed the RAW stream (pre-filter, pre-highlight) into the
+// Feed the RAW stream (pre-filter, pre-highlight) into the
 // per-owner ink caret observer and return this chunk's ordinal. The write
 // callback in pty-output reports the ordinal back to the adapter once xterm
 // has fully parsed it (the watermark binding).
@@ -63,7 +63,7 @@ function _inkFeed(owner, tab, pane, data) {
     if (!port) return null;
     // Adapter identity changes on WebGL context loss / renderer rebuild —
     // the observer's port closure would feed a disposed adapter. Recreate
-    // with the live port whenever the adapter changed (reviewer N5).
+    // with the live port whenever the adapter changed.
     if (owner._inkObserver && owner._inkObserverAdapter !== adapter) owner._inkObserver = null;
     owner._inkObserverAdapter = adapter;
     if (!owner._inkObserver) {
@@ -146,13 +146,13 @@ function _resetCaretState(owner) {
 ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
     const diagnostics = globalThis.ZTermDiagnostics?.enabled ? globalThis.ZTermDiagnostics : null;
     const diagnostic = diagnostics?.receive(tabId, data, nativeTrace);
-    // Diagnostic-only RAW capture (ADR-0001 B0): grabs the stream BEFORE any
-    // caret filtering so samples are pristine pre-filter evidence, not the
-    // post-fix cache. Armed by probes/tests via globalThis.__ztRawCapture =
-    // []; one property check per chunk when disarmed. Bounded by the armer.
+    // Diagnostic-only RAW capture: grabs the stream BEFORE any caret
+    // filtering so samples are pristine pre-filter evidence, not the
+    // post-fix cache. Armed by setting globalThis.__ztRawCapture = [];
+    // one property check per chunk when disarmed. Bounded by the armer.
     if (globalThis.__ztRawCapture) globalThis.__ztRawCapture.push(data);
-    // Diagnostic-only stream volume counter: armed by the perf sample /
-    // stability probes (a plain global lookup otherwise — no cost when off).
+    // Diagnostic-only stream volume counter: armed by setting globalThis.__ztStreamBytes
+    // to an object (a plain global lookup otherwise — no cost when off).
     if (globalThis.__ztStreamBytes) globalThis.__ztStreamBytes[tabId] = (globalThis.__ztStreamBytes[tabId] || 0) + (data ? data.length : 0);
     for (const tab of TabManager.tabs) {
         if (tab.splitRoot) {
@@ -160,8 +160,8 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
             if (pane) {
                 diagnostics?.routed(diagnostic, pane, data);
                 if (!tab._contentBuffer) tab._contentBuffer = [];
-                // Observe the RAW bytes first (ADR B2), then the transport
-                // filter, then write with a parse-watermark callback.
+                // Observe the RAW bytes first, then the transport filter,
+                // then write with a parse-watermark callback.
                 const inkSeq = _inkFeed(pane, tab, pane, data);
                 // ConPTY caret fix must run before buffering so the filter sees
                 // the full stream in order; ptyBuffers then holds repaired bytes.
@@ -225,7 +225,7 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
                     _resetCaretState(pane);
                     wireTerminalToPane(tab, pane);
                     if (spawnError && pane.term) pane.term.write('\r\n\x1b[31m[ZTerm] 启动失败: ' + spawnError + '\x1b[0m\r\n');
-                    // 同步 fit + 立即上报尺寸：本地 pty 以 80x24 开启，缩短到真实尺寸的窗口
+                    // Sync fit + report the size immediately: the local pty starts at 80x24, so this shortens the window before it reaches the real size
                     _syncFitAndReportSize(tab, pane);
                     return;
                 }
@@ -242,14 +242,14 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
             }
         }
     }
-    // 无人认领的孤儿 pty——回收，避免进程泄漏
+    // Unclaimed orphan pty — destroy it to avoid leaking the process
     ipcRenderer.send('pty-destroy', { tabId });
 });
 
 // ── IPC: SSH connecting ──
-// SSH 握手开始（onReady 在认证完成后才来，有几秒窗口）：
-// 此时建好 term 并 fit，立刻把真实 cols/rows 发给主进程存入 pendingSizes，
-// 主进程在 onReady 开 PTY 时取用 → PTY 一开就是真实尺寸，无 80x24 闪烁
+// The SSH handshake starts here (onReady only arrives after auth completes, a window of seconds):
+// build the term and fit now, then immediately send the real cols/rows to the main process,
+// which caches them as pendingSizes and uses them when opening the PTY on onReady — the PTY starts at the real size, no 80x24 flicker
 function _syncFitAndReportSize(tab, pane) {
     const term = pane ? pane.term : tab.term;
     const fitAddon = pane ? pane.fitAddon : tab.fitAddon;
@@ -257,7 +257,7 @@ function _syncFitAndReportSize(tab, pane) {
         ? document.getElementById('pane-body_' + pane.id)
         : (term && term.element ? term.element.parentElement : null);
     if (!term || !fitAddon || !parentEl) return;
-    // 等一帧让 DOM 落位，再 fit + 直发尺寸到主进程（此时 PTY 未开，主进程缓存为 pendingSizes）
+    // Wait one frame for the DOM to settle, then fit + send the size straight to the main process (the PTY is not open yet; the main process caches it as pendingSizes)
     requestAnimationFrame(() => {
         _fitWithScroll(term, fitAddon, parentEl);
         const backendTabId = pane ? pane.tabId : tab.tabId;
@@ -274,7 +274,7 @@ ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId }) => {
             if (pane) {
                 if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(pane);
                 pane.tabId = tabId;
-                // 保留模式（clearOnConnect=false）下终端已存在：不重建，否则保留的内容被替换成空终端
+                // In preserve mode (clearOnConnect=false) the terminal already exists: do not rebuild it, or the preserved content would be replaced with an empty terminal
                 if (!pane.term) wireTerminalToPane(tab, pane);
                 if (pane.term) {
                     pane.term.write('\x1b[33mConnecting to ' + (pane._sshHost || tab.host || pane.name || tab.name) + '...\x1b[0m\r\n');
@@ -294,7 +294,7 @@ ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId }) => {
 });
 
 // ── IPC: SSH connected ──
-// SSH 展示名：优先 SSH 配置名，不用动态拼接的 tab 名（分屏命名会拼成 "A | B"）
+// SSH display name: prefer the SSH profile name over the dynamically composed tab name (split panes compose names like "A | B")
 function _sshDisplayName(tab, pane) {
     const pId = (pane && pane._sshProfileId) || tab.sshProfileId;
     const prof = pId ? (TabManager.sshProfiles || []).find(x => x.id === pId) : null;
@@ -315,8 +315,8 @@ ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
                 TabManager.render();
                 TabManager.updateStatus();
                 showToast('SSH 已连接: ' + _sshDisplayName(tab, pane));
-                // 兜底尺寸结算：connecting 阶段已 fit 并通过 pendingSizes 让 PTY 开对尺寸，
-                // 但若 connecting 时容器 0 尺寸（tab 不可见等），这里补一次；connected 后尺寸已注册可用
+                // Fallback size settle: the connecting phase already fit and opened the PTY at the right size via pendingSizes,
+                // but if the container had zero size during connecting (tab hidden, etc.), settle once more here; after connected the size is registered and usable
                 _scheduleSettleResize(tab);
                 return;
             }
@@ -328,7 +328,7 @@ ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
             TabManager.render();
             TabManager.updateStatus();
             showToast('SSH 已连接: ' + _sshDisplayName(tab, null));
-            _scheduleSettleResize(tab); // 兜底尺寸结算，与分屏分支对称
+            _scheduleSettleResize(tab); // fallback size settle, symmetric with the split branch
             return;
         }
     }
@@ -342,14 +342,14 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
             const p = getAllPanes(t).find(pp => pp.tabId === tabId || pp.requestId === rendererId);
             if (p) { tab = t; pane = p; break; }
         } else if (t.id === rendererId || t.tabId === tabId) {
-            // 只精确匹配——不能把错误写到任意"还在连接中"的 SSH tab 上
+            // Match exactly — never write the error onto some arbitrary SSH tab that is still connecting
             tab = t; break;
         }
     }
     if (!tab) { showToast('[SSH] ' + error, true); return; }
-    // M6：按 russh 错误文本类别判断瞬时性错误（超时/连接被断/密钥交换失败）才自动重试一次；
-    // 认证失败、未知主机密钥等确定性错误不重试。原正则 /handshake|lost before/ 是给
-    // Electron ssh2 错误写的，russh 常规错误不命中导致瞬时失败从不重试
+    // Classify transient errors from the russh error text (timeout / connection dropped / key exchange failure)
+    // and auto-retry only those; deterministic errors like auth failure or unknown host key are not retried.
+    // The old regex /handshake|lost before/ was written for Electron ssh2 errors; regular russh errors never matched it, so transient failures were never retried
     // Handshake-class failures include the bare russh "Disconnected" that
     // strict sshd configs (MaxStartups-style random early drop, fail2ban)
     // produce while several connections arrive close together — retry with
@@ -550,20 +550,20 @@ ipcRenderer.on('window-state-changed', (event, { maximized }) => {
     requestAnimationFrame(() => {
         TabManager.tabs.forEach(tab => {
             if (tab.splitRoot) TabManager._layoutSplit(tab);
-            // 窗口尺寸变化后对所有 tab 结算最终终端尺寸（覆盖单 terminal 的 wrap RO 可能漏发的边角）
+            // After a window size change, settle the final terminal size for every tab (covers corners a single terminal's wrap ResizeObserver may miss)
             _scheduleSettleResize(tab);
         });
     });
 });
 
-// 配置文件损坏已被主进程备份并重建，通知用户
+// The main process has backed up and rebuilt the corrupted config file; notify the user
 ipcRenderer.on('config-corrupted', () => {
     showToast('配置文件已损坏，已备份并恢复默认设置', true);
 });
 
-// SSH host key 不匹配告警（可能 MITM），让用户决定是否继续连接
-// 当前活跃 hostkey 弹窗的 cleanup：Escape 关闭（closeAllOverlays）不触发 cleanup，
-// 旧回调会叠加到下次弹窗（可能放行未确认的主机）。打开新弹窗前先解绑旧的。
+// SSH host key mismatch alert (possible MITM): let the user decide whether to keep connecting.
+// Cleanup for the currently active hostkey dialog: closing via Escape (closeAllOverlays) does not run cleanup,
+// so stale callbacks would stack onto the next dialog (possibly trusting an unconfirmed host). Unbind the old one before opening a new dialog.
 let _activeHostkeyCleanup = null;
 
 ipcRenderer.on('ssh-hostkey-mismatch', (event, { tabId, host, oldAlgorithm, oldFingerprint, newAlgorithm, newFingerprint }) => {
@@ -586,7 +586,7 @@ ipcRenderer.on('ssh-hostkey-mismatch', (event, { tabId, host, oldAlgorithm, oldF
         cancelBtn.removeEventListener('click', onReject);
         okBtn.removeEventListener('click', onAccept);
         overlay.querySelector('.overlay-backdrop').removeEventListener('click', onReject);
-        // 恢复默认按钮文案
+        // Restore the default button labels
         cancelBtn.textContent = '取消';
         okBtn.textContent = '删除';
     };

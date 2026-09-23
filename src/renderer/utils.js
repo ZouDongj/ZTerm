@@ -1,4 +1,4 @@
-// ZTerm - 通用工具（拆自 renderer.html，纯代码搬运，未改逻辑）
+// ZTerm - shared utilities (extracted verbatim from renderer.html; logic unchanged)
 const { ipcRenderer, webUtils } = require('electron');
 const { Terminal } = require('@xterm/xterm');
 const { FitAddon } = require('@xterm/addon-fit');
@@ -8,7 +8,7 @@ const { ClipboardAddon } = require('@xterm/addon-clipboard');
 const { WebLinksAddon } = require('@xterm/addon-web-links');
 const fs = require('fs');
 const path = require('path');
-// ── Global error hooks（异常进控制台，不静默）──
+// ── Global error hooks (exceptions go to the console, never swallowed) ──
 window.addEventListener('error', e => { console.error('[ZTerm]', e.message, e.filename + ':' + e.lineno); });
 window.addEventListener('unhandledrejection', e => { console.error('[ZTerm] unhandled rejection:', e.reason); });
 
@@ -50,7 +50,7 @@ function formatSize(bytes) {
 }
 
 function formatDate(ts) {
-    // 兼容秒（SFTP mtime）和毫秒（Date.now()）
+    // Accepts both seconds (SFTP mtime) and milliseconds (Date.now())
     const d = new Date(ts > 1e12 ? ts : ts * 1000);
     if (isNaN(d.getTime())) return '';
     const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -63,18 +63,19 @@ function sftpClose() { SFTP.close(); }
 function sftpUpload() { SFTP.upload(); }
 function sftpMkdir() { SFTP.mkdir(); }
 
-// HTML 文本节点转义（只转义 & < >，文本节点中引号无特殊含义）
+// Escape an HTML text node (only & < >; quotes have no special meaning in text nodes)
 function escHtml(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-// HTML 属性值转义（转义 & < > " '，用于 title="..." 等属性上下文）
+// Escape an HTML attribute value (& < > " ', for attribute contexts like title="...")
 function escAttr(s) { return escHtml(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
-// 单引号 JS 字符串转义（转义 ' \ 和换行，用于 onclick='fn("...")' 内嵌字符串上下文）
-// 防止用户可控数据闭合单引号注入任意 JS（XSS）
+// Escape a single-quoted JS string (' \ and newlines, for embedded-string contexts like onclick='fn("...")')
+// Prevents user-controlled data from closing the quote and injecting arbitrary JS (XSS)
 function escJsString(s) { return (s || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n').replace(/\r/g,'\\r'); }
 
-// 当前活跃确认弹窗的 cleanup：Escape（closeAllOverlays）只移除 .open 类不触发
-// cleanup，旧监听会残留到下次弹窗叠加执行（误删数据）。打开新弹窗前先解绑旧的。
+// Cleanup of the currently active confirm dialog: Escape (closeAllOverlays) only removes the
+// .open class without running cleanup, so stale listeners would stack onto the next dialog
+// (deleting the wrong data). Unbind the old one before opening a new dialog.
 let _activeConfirmCleanup = null;
 
 function showConfirm(msg, onOk, okText) {
@@ -159,9 +160,9 @@ function _getAccentColorAlpha(alpha) {
     return rgb ? 'rgba(' + rgb + ',' + alpha + ')' : 'rgba(97,175,239,' + alpha + ')';
 }
 
-// Terminal link opening (ADR-0003): the vendored addon's built-in regex is
-// already http(s)-only and `requireModifier` is not a real option — the
-// gesture gate lives in the unified LinkOpen entry (bare Ctrl+click).
+// Terminal link opening: the vendored addon's built-in regex is already
+// http(s)-only and `requireModifier` is not a real option — the gesture gate
+// lives in the unified LinkOpen entry (bare Ctrl+click).
 // Known detection gap: the regex matches only all-lower or all-upper case
 // schemes, so mixed-case "Https://…" plain text is not linkified (harmless;
 // the backend validator is case-insensitive and would accept it).
@@ -175,12 +176,13 @@ function _createWebLinksAddon(term) {
     );
 }
 
-// 规范化 fontFamily：字体名加引号（带空格的必须引号），
-// CSS 通用字体族关键字（monospace/serif/sans-serif 等）不加引号。
-// 关键：fallback 字体（通常是 CJK 字体）必须插在通用关键字 *之前*，
-// 否则 monospace 会截胡（Windows 上 monospace 默认映射到宋体），
-// 导致中文回退到宋体而不是用户指定的 fallback 字体。
-// 启动（_buildTerminalOptions）和设置页热更新（saveAppearance）必须走同一逻辑
+// Normalize fontFamily: quote font names (names with spaces must be quoted);
+// CSS generic family keywords (monospace/serif/sans-serif etc.) stay unquoted.
+// Key: the fallback font (usually a CJK font) must be inserted *before* the
+// generic keyword, otherwise monospace wins (on Windows monospace maps to
+// SimSun by default) and Chinese would fall back to SimSun instead of the
+// user-specified fallback font.
+// Startup (_buildTerminalOptions) and settings hot update (saveAppearance) must share this logic
 const _GENERIC_FONT_FAMILIES = new Set([
     'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui',
     'ui-serif', 'ui-sans-serif', 'ui-monospace', 'ui-rounded', 'emoji',
@@ -191,13 +193,13 @@ function _normalizeFontFamily(fontFamily, fallbackFont) {
         const t = (name || '').trim();
         if (!t) return '';
         if (t.startsWith('"') || t.startsWith("'")) return t;
-        if (_GENERIC_FONT_FAMILIES.has(t.toLowerCase())) return t; // 通用关键字不加引号
+        if (_GENERIC_FONT_FAMILIES.has(t.toLowerCase())) return t; // generic keywords stay unquoted
         return '"' + t + '"';
     };
     let parts = (fontFamily || '').split(',').map(quote).filter(Boolean);
     if (fallbackFont) {
         const fb = quote(fallbackFont);
-        // 插在第一个通用关键字之前，避免 monospace 等截胡 CJK 回退
+        // Insert before the first generic keyword so monospace etc. cannot hijack CJK fallback
         const idx = parts.findIndex(p => _GENERIC_FONT_FAMILIES.has(p.toLowerCase()));
         if (idx === -1) parts.push(fb);
         else parts.splice(idx, 0, fb);

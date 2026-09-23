@@ -1,9 +1,9 @@
-; ZTerm NSIS 安装器钩子 (Tauri 2.11 NSIS_HOOK_* 宏)
-; 清理旧版 Electron 运行时残留（保留 data/ 用户数据目录）
+; ZTerm NSIS installer hooks (Tauri 2.11 NSIS_HOOK_* macros)
+; Remove legacy Electron runtime leftovers (keep the data/ user data directory)
 
 !macro NSIS_HOOK_PREINSTALL
-  ; 清理旧版 Electron 运行时残留（Electron 专用文件，避免与 Tauri 版混装）
-  ; 注意: 不删除 data/ 目录（可能是用户数据）
+  ; Remove legacy Electron runtime files (Electron-only, so the Tauri build never shares them)
+  ; Note: do not delete the data/ directory (it may contain user data)
   ${If} ${FileExists} "$INSTDIR\resources"
     RMDir /r "$INSTDIR\resources"
   ${EndIf}

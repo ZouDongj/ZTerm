@@ -1,6 +1,6 @@
-// ZTerm - 高亮规则纯逻辑（无 DOM 依赖，浏览器全局 + CommonJS 双导出，node:test 可测）
+// ZTerm - highlight rule pure logic (no DOM dependency; browser global + CommonJS dual export, node:test-able)
 
-// 编译高亮规则的正则：isRegExp 用原文，否则转义关键字；非法正则返回 null（不抛异常）
+// Compile a rule's regex: isRegExp uses the text verbatim, otherwise the keyword is escaped; invalid regexes return null (never throw)
 function buildHighlightRegex(text, isRegExp, isCaseSensitive) {
     try {
         const src = isRegExp ? text : text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -96,28 +96,28 @@ function buildHighlightEndSeq(rule, state) {
     return seq;
 }
 
-// 找出字符串中所有 ANSI 转义序列的区间：
-// CSI（\x1b[ 到 final byte 0x40–0x7E）、OSC（\x1b] 到 BEL 或 ST）、其他（ESC + 1 字符）
+// Find the ranges of all ANSI escape sequences in a string:
+// CSI (\x1b[ through final byte 0x40–0x7E), OSC (\x1b] through BEL or ST), other (ESC + 1 char)
 function _getEscapeRanges(s) {
     const ranges = [];
     for (let i = 0; i < s.length; i++) {
         if (s[i] !== '\x1b') continue;
         const next = s[i + 1];
         if (next === '[') {
-            // CSI: 直到 final byte
+            // CSI: through the final byte
             let j = i + 2;
             while (j < s.length && !(s.charCodeAt(j) >= 0x40 && s.charCodeAt(j) <= 0x7E)) j++;
             ranges.push({ start: i, end: Math.min(j + 1, s.length) });
             i = j;
         } else if (next === ']') {
-            // OSC: 直到 BEL(\x07) 或 ST(\x1b\\)
+            // OSC: through BEL(\x07) or ST(\x1b\\)
             let j = i + 2;
             while (j < s.length && s[j] !== '\x07' && !(s[j] === '\x1b' && s[j + 1] === '\\')) j++;
             const end = s[j] === '\x07' ? j + 1 : (j < s.length ? j + 2 : s.length);
             ranges.push({ start: i, end });
             i = end - 1;
         } else {
-            // 其他 ESC 序列（字符集切换等），跳过 ESC + 1 个字符
+            // Other ESC sequences (charset switches etc.): skip ESC + 1 char
             ranges.push({ start: i, end: Math.min(i + 2, s.length) });
             i += 1;
         }
@@ -154,14 +154,14 @@ function applyHighlightToLine(line, rules) {
     const matches = [];
     for (const rule of rules) {
         const regex = buildHighlightRegex(rule.text, rule.isRegExp, rule.isCaseSensitive);
-        if (!regex) continue; // 非法正则跳过该规则
+        if (!regex) continue; // invalid regex: skip this rule
         const match = regex.exec(line);
         if (match) {
             matches.push({ start: match.index, end: match.index + match[0].length, rule });
         }
     }
     if (matches.length === 0) return line;
-    // ANSI 序列（CSI/OSC/其他）区间内的匹配全部丢弃——向 OSC 注入颜色码会打断序列，匹配文本会泄漏成可见输出
+    // Drop all matches inside ANSI sequences (CSI/OSC/other) — injecting color codes into an OSC would break the sequence and the matched text would leak into visible output
     const escapeRanges = _getEscapeRanges(line);
     const validMatches = matches.filter(m => !escapeRanges.some(r => m.start < r.end && m.end > r.start));
     if (validMatches.length === 0) return line;
@@ -173,7 +173,7 @@ function applyHighlightToLine(line, rules) {
     let result = '';
     let last = 0;
     validMatches.forEach((m, idx) => {
-        if (m.start < last) return; // 与前一个 match 重叠，先来先得
+        if (m.start < last) return; // overlaps the previous match — first match wins
         result += line.slice(last, m.start);
         result += _getHighlightBeginSeq(m.rule);
         result += line.slice(m.start, m.end);

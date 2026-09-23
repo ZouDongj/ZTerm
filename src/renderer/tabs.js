@@ -1,7 +1,7 @@
-// ZTerm - 标签页管理（TabManager 整个对象）（拆自 renderer.html，纯代码搬运，未改逻辑）
-const GAP_PX = 8; // pane 间距固定像素值
+// ZTerm - tab management (the entire TabManager object) (split out of renderer.html as a pure code move, logic unchanged)
+const GAP_PX = 8; // fixed pixel gap between panes
 
-// 查询 SSH profile 中的 loginScripts
+// Look up loginScripts from the SSH profile
 function _getLoginScripts(tab, pane) {
     const profileId = (pane && pane._sshProfileId) || tab.sshProfileId;
     if (!profileId) return [];
@@ -9,7 +9,7 @@ function _getLoginScripts(tab, pane) {
     return (profile && profile.loginScripts) || [];
 }
 
-// 查询 SSH profile 的 clearOnConnect（默认 true：重连清空终端；false：保留之前内容）
+// Look up clearOnConnect from the SSH profile (default true: clear the terminal on reconnect; false: keep previous content)
 function _clearOnConnect(tab, pane) {
     const profileId = (pane && pane._sshProfileId) || tab.sshProfileId;
     if (!profileId) return true;
@@ -116,11 +116,11 @@ const TabManager = {
     // Tabs whose exit animation is running and whose deferred removal is
     // scheduled (rapid-close bookkeeping — see closeTab).
     _closingTabs: new Set(),
-    _closedTabIds: new Map(), // id → 关闭时间戳；消费后删除；超 60s 兜底清理防内存泄漏
+    _closedTabIds: new Map(), // id → close timestamp; deleted once consumed; entries older than 60s are swept to prevent leaks
     _markClosed(id) {
         if (id == null) return;
         const now = Date.now();
-        // 兜底清理：超过 60s 仍没消费（异常路径：pty-exit 永远没来）的过期 entry
+        // Sweep expired entries older than 60s that were never consumed (error path: pty-exit never arrived)
         for (const [k, t] of this._closedTabIds) { if (now - t > 60000) this._closedTabIds.delete(k); }
         this._closedTabIds.set(id, now);
     },
@@ -128,7 +128,7 @@ const TabManager = {
     _dragTab: null, // { sourceTabId, targetTabId, side: 'left'|'right' }
 
     init() {
-        // 一次性挂 chrome：addBtn / menuBtn（不再每 render 重建）
+        // Mount chrome once: addBtn / menuBtn (no longer rebuilt on every render)
         const bar = document.getElementById('tabbar');
         if (bar) {
             if (!document.getElementById('btn-add-tab')) {
@@ -153,20 +153,20 @@ const TabManager = {
         }
 
         ipcRenderer.once('profiles', async (event, { profiles, sshProfiles, lastTabs }) => {
-            // 自动探测本机 shell（Git Bash/WSL 等），保留 config 里探测不到的自定义条目
+            // Auto-detect local shells (Git Bash/WSL etc.), keeping custom config entries that detection missed
             let detected = [];
             try { detected = await ipcRenderer.invoke('get-local-shells') || []; } catch(e) {}
             const custom = (profiles || []).filter(p => !detected.some(d => d.command === p.command));
             this.profiles = detected.length > 0 ? [...detected, ...custom] : (profiles || []);
             this.sshProfiles = sshProfiles || [];
 
-            // 过滤设置页/坏数据（旧版本可能把 settings tab 存进了 lastTabs）
+            // Filter out settings tabs / bad data (older versions may have saved a settings tab into lastTabs)
             const tabsToRestore = ((lastTabs && lastTabs.length > 0) ? lastTabs : [])
                 .filter(t => t && typeof t === 'object' && t.type !== 'settings');
             if (tabsToRestore.length === 0) tabsToRestore.push(getDefaultLocalProfile());
 
             tabsToRestore.forEach(t => {
-                // 有分屏数据则走完整恢复路径
+                // Tabs with split data go through the full restore path
                 if (t.splitRoot) {
                     this._restoreSplitTab(t);
                     return;
@@ -353,8 +353,8 @@ const TabManager = {
         // class, re-switch tabs and stack extra deferred removals.
         if (this._closingTabs.has(id)) return;
         if (this.aliveCount() <= 1) {
-            // 唯一 tab 不允许关闭；若其分屏已被清空（0 pane，异常路径），
-            // 重置为默认本地终端，避免留下无法关闭的空分屏死 tab（P3 兜底）
+            // The last tab cannot be closed; if its split tree was already emptied (0 panes, error path),
+            // reset it to the default local terminal as a fallback so no unclosable empty-split dead tab remains
             const t = this.tabs[0];
             if (t && t.splitRoot && getAllPanes(t).length === 0) {
                 t.splitRoot = null;
@@ -372,7 +372,7 @@ const TabManager = {
         if (idx < 0) return;
         const tab = this.tabs[idx];
         const wasActive = this.activeId === id;
-        // M5：关闭的 tab 若正开着 SFTP 面板，联动关闭（避免面板指向已销毁会话）
+        // If the tab being closed has the SFTP panel open, close the panel too (so it never points at a destroyed session)
         if (window.SFTP && SFTP._tabId) {
             const ids = tab.splitRoot ? getAllPanes(tab).map(p => p.tabId) : [tab.tabId];
             if (ids.includes(SFTP._tabId)) SFTP.close();
@@ -386,9 +386,9 @@ const TabManager = {
         // pump for seconds (see the rule's comment in app.css).
         const tabEl = document.querySelector(`.tab[data-tab="${id}"]`);
         if (tabEl) tabEl.classList.add('tab-exit');
-        // 算 next tab：必须在 splice 之前算（splice 后 idx 位置会被原 idx+1 占据）。
-        // 必须跳过正在关闭的 tab：burst 时 tabs 数组还没 splice，闭着眼睛取
-        // 邻居会把 active 切回一个 dying tab，后续按键就在两个 dying tab 之间乒乓。
+        // Compute the next tab BEFORE splice (after splice, the old idx+1 occupies idx).
+        // Tabs being closed must be skipped: during a burst the tabs array is not yet spliced,
+        // so blindly taking a neighbor reactivates a dying tab and later keys ping-pong between dying tabs.
         // Neighbors follow VISUAL order (orderedTabs): the raw array can hold
         // the settings tab mid-list, which would steal the activation from
         // the tab that actually sits next to the closed one on the bar.
@@ -405,16 +405,16 @@ const TabManager = {
                 }
             }
         }
-        // 立即切到 next（老 wrap 立即 hide，next wrap 立即 show）
+        // Switch to next immediately (old wrap hides and next wrap shows at once)
         if (next) this.switchTo(next.id);
         const doRemove = () => {
-            // 按 id 重新定位 idx——动画期间用户可能已重排/删了其他 tab，
-            // 闭包里旧 idx 会切错位置
+            // Re-locate idx by id — the user may have reordered or closed other tabs
+            // during the animation, and the closure's stale idx would splice the wrong slot
             const cur = this.tabs.findIndex(t => t.id === id);
-            if (cur < 0) { this._closingTabs.delete(id); return; } // 已被其他路径关闭
+            if (cur < 0) { this._closingTabs.delete(id); return; } // already closed by another path
             this.tabs.splice(cur, 1);
             this._closingTabs.delete(id);
-            // 释放主进程内存中的明文凭据（如果有）。克隆出的 tab 不拥有凭据所有权，不撤
+            // Release the plaintext credential held in main-process memory (if any). Cloned tabs do not own the credential, so it is not revoked
             if (tab._credId && !tab._cloneCred) ipcRenderer.send('revoke-credential', { credId: tab._credId });
             if (tab.splitRoot) {
                 getAllPanes(tab).forEach((p, i) => {
@@ -431,7 +431,7 @@ const TabManager = {
                 });
                 const split = document.getElementById('split_' + id);
                 if (split) split.remove();
-                tab.splitRoot = null; // 防止残留引用被后续代码误判为仍存活
+                tab.splitRoot = null; // prevent a stale reference from being treated as a live split by later code
             } else {
                 const el = document.getElementById('wrap_' + id);
                 if (el) { if (el._resizeObserver) el._resizeObserver.disconnect(); el.remove(); }
@@ -486,10 +486,10 @@ const TabManager = {
             if (tab.term) { try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
             const wrap = document.getElementById('wrap_' + id);
             if (wrap) { if (wrap._resizeObserver) wrap._resizeObserver.disconnect(); wrap.remove(); }
-            // 显式释放 ptyBuffers（旧 tabId 永远不会再被新连接复用，否则累积 1MB+）
+            // Explicitly release ptyBuffers (the old tabId is never reused by a new connection; otherwise buffers pile up 1MB+)
             if (tab.tabId) delete ptyBuffers[tab.tabId];
         } else if (tab.term) {
-            // 保留内容：写入分隔线 + 滚到底部让用户看到提示
+            // Keep content: write a separator line and scroll to bottom so the user sees the notice
             tab.term.write('\r\n\x1b[2m─────── 重新连接中… ───────\x1b[0m\r\n');
             try { tab.term.scrollToBottom(); } catch(e) {}
         }
@@ -515,10 +515,10 @@ const TabManager = {
             if (pane.term) { try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
             const body = document.getElementById('pane-body_' + pane.id);
             if (body) body.innerHTML = '';
-            // 显式释放 ptyBuffers
+            // Explicitly release ptyBuffers
             if (pane.tabId) delete ptyBuffers[pane.tabId];
         } else if (pane.term) {
-            // 保留内容：写入分隔线 + 滚到底部
+            // Keep content: write a separator line and scroll to bottom
             pane.term.write('\r\n\x1b[2m─────── 重新连接中… ───────\x1b[0m\r\n');
             try { pane.term.scrollToBottom(); } catch(e) {}
         }
@@ -565,9 +565,9 @@ const TabManager = {
             div.onclick = () => this.switchTo(t.id);
             div.ondblclick = (e) => { if (t.type !== 'settings') { e.stopPropagation(); this.startRenameTab(t.id); } };
             div.oncontextmenu = (e) => { if (t.type !== 'settings') { e.preventDefault(); this.showTabContextMenu(e, t.id); } };
-            // tab 拖拽（排序 + 拖到内容区分屏）走指针事件：
-            // HTML5 draggable 在 Tauri WebView2 下被窗口级 DnD handler 拦截
-            // （dragover 不触发、指针变禁止图标），与 pane 拖拽一致用 Tabby 同款指针拖拽
+            // Tab drag (reorder + drag onto the content area to split) uses pointer events:
+            // HTML5 draggable is intercepted by Tauri WebView2's window-level DnD handler
+            // (dragover never fires, cursor shows no-drop) — same pointer drag as panes (Tabby).
             div.onmousedown = (e) => this._onTabPointerDown(e, t.id);
             let inner;
             if (t.type === 'settings') {
@@ -576,7 +576,7 @@ const TabManager = {
                 let dotClass = t.connected ? 'connected' : 'disconnected';
                 const showDot = _settingsConfig.showStatusDot !== false;
                 inner = (showDot ? `<span class="tab-icon ${dotClass}"></span>` : '') + `<span class="tab-name">${escHtml(t.name)}</span>`;
-                // 分屏时不在 tab 标签显示重连按钮，改为 pane header 里各 pane 独立重连
+                // In split mode the tab label shows no reconnect button; each pane reconnects via its own pane header
                 if (t.type === 'ssh' && !t.splitRoot) {
                     const rcClass = t.connected ? 'tab-reconnect-normal' : 'tab-reconnect';
                     const rcTitle = t.connected ? '强制重连' : '重新连接';
@@ -630,7 +630,7 @@ const TabManager = {
 
     _newPaneData(tab, srcPane) {
         const id = 'p_' + (this._paneCounter++);
-        // 优先用 srcPane 字段（split 时继承 focused pane），fallback 到 tab
+        // Prefer srcPane fields (a split inherits from the focused pane), fall back to the tab
         const src = srcPane || tab;
         const isLocal = (src.type || tab.type || 'local') !== 'ssh';
         return {
@@ -640,7 +640,7 @@ const TabManager = {
             term: null,
             fitAddon: null,
             focused: false,
-            // pane name 优先用 srcPane.name（拖入/克隆时保留原 pane 名），否则用 tab.name（首次分屏）
+            // Pane name prefers srcPane.name (keeps the original pane name on drag-in/clone), otherwise tab.name (first split)
             name: srcPane ? (srcPane.name || '') : tab.name,
             type: src.type || (isLocal ? 'local' : 'ssh'),
             connected: isLocal || src.connected,
@@ -686,7 +686,7 @@ const TabManager = {
             // The stored OSC title travels with the terminal onto its new pane
             // wrapper — the split branch of resolveTabName only reads pane slots.
             if (tab._oscTitle !== undefined) { existing._oscTitle = tab._oscTitle; delete tab._oscTitle; }
-            // 重新绑定 onData：terminal 已搬到 pane，需用 pane.tabId 而非已清空的 tab.tabId
+            // Rebind onData: the terminal moved onto the pane, so it must use pane.tabId, not the now-cleared tab.tabId
             if (tab._onDataDisp) { tab._onDataDisp.dispose(); tab._onDataDisp = null; }
             existing._onDataDisp = existing.term?.onData(data => {
                 _sendPaneInput(tab, existing, data);
@@ -716,7 +716,7 @@ const TabManager = {
         const focused = all.find(p => p.focused) || all[all.length - 1];
         if (!focused) return;
         const newPane = this._newPaneData(tab, focused);
-        // 保留兜底：tab 缺凭据时再从 focused 继承（防御性，正常情况下 _newPaneData 已处理）
+        // Kept as a fallback: when the tab lacks a credential, inherit from focused (defensive; _newPaneData normally covers this)
         if (!tab._credId && !newPane._sshCredId && focused._sshCredId) {
             newPane._sshHost = focused._sshHost || tab.host;
             newPane._sshPort = focused._sshPort || tab.port;
@@ -736,7 +736,7 @@ const TabManager = {
     },
 
     add(tab, thing, relative, side) {
-        // Tabby add 语义：relative 为空（根边缘 zone）或未找到父容器时，重打包根容器
+        // Tabby add semantics: when relative is null (root-edge zone) or the parent container is missing, repack the root container
         let target = relative ? getParentOf(tab, relative) : null;
         if (!target) {
             target = this._createContainer(['l', 'r'].includes(side) ? 'h' : 'v');
@@ -770,13 +770,13 @@ const TabManager = {
     _renderSplit(tab) {
         const main = document.getElementById('main-area');
         let rootEl = document.getElementById('split_' + tab.id);
-        // splitRoot 已拆散（退出分屏等）：清掉残留 DOM
+        // splitRoot already torn down (split exited etc.): remove leftover DOM
         if (!tab.splitRoot) {
             if (rootEl) rootEl.remove();
             return;
         }
-        // 复用已有 root：树结构变化时保留 pane DOM，只改坐标 →
-        // CSS transition 从旧坐标平滑过渡到新坐标（重排动画）
+        // Reuse the existing root: keep pane DOM on tree changes and only update coordinates, so
+        // CSS transitions animate smoothly from the old coordinates to the new (reorder animation)
         if (!rootEl) {
             document.getElementById('wrap_' + tab.id)?.remove();
             rootEl = document.createElement('div');
@@ -786,8 +786,8 @@ const TabManager = {
         } else {
             rootEl.className = 'split-root' + (tab.syncInput ? ' sync-input' : '');
         }
-        // 可见性始终与激活态同步：跨 tab 拖拽等路径会重建/复用非激活 tab 的
-        // split root，不统一设置会把新建的可见 root 叠在激活 tab 之上（幽灵叠加）
+        // Visibility always tracks the active state: paths like cross-tab drag rebuild or reuse an
+        // inactive tab's split root; otherwise the new visible root stacks over the active tab (ghost overlay)
         rootEl.style.display = (tab.id === this.activeId) ? '' : 'none';
 
         const buildPane = (pane) => {
@@ -795,12 +795,12 @@ const TabManager = {
             el.className = 'split-pane' + (pane.focused ? ' active' : '');
             el.setAttribute('data-pane', pane.id);
             el.onmousedown = () => { if (!tab._maximizedPaneId) this._focusPane(tab, pane.id); };
-            // pane 拖拽重排走 Tabby 式 drop zone 层（_onPaneDragStart 时渲染），pane 自身不挂 drop 监听
+            // Pane drag-reorder uses a Tabby-style drop-zone layer (rendered at _onPaneDragStart); panes carry no drop listeners of their own
             const dc = (pane.connected !== false && (pane.connected || !!pane.tabId)) ? 'connected' : 'disconnected';
             const showDot = _settingsConfig.showStatusDot !== false;
             const hdr = document.createElement('div');
             hdr.className = 'pane-header';
-            // 只在 SSH pane 中显示 SFTP 和重连按钮
+            // Only SSH panes show the SFTP and reconnect buttons
             const sftpBtn = pane.type === 'ssh' ? '<button title="SFTP" onclick="event.stopPropagation();TabManager._openSFTP(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('folder', 13) + '</button>' : '';
             const reconnectPaneBtn = pane.type === 'ssh' ? '<button title="强制重连" onclick="event.stopPropagation();TabManager._reconnectPane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('rotate-cw', 12) + '</button>' : '';
             hdr.innerHTML = (showDot ? '<span class="dot ' + dc + '"></span>' : '') +
@@ -811,7 +811,7 @@ const TabManager = {
                 '<button title="maximize" onclick="event.stopPropagation();TabManager._maximizePane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('maximize', 13) + '</button>' +
                 '<button title="close" onclick="event.stopPropagation();TabManager._closePane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('x', 13) + '</button>';
             el.appendChild(hdr);
-            // 拖拽重排：Tabby 同款指针拖拽（mousedown 跟踪，不用 HTML5 draggable）
+            // Drag-reorder: same pointer-based drag as Tabby (mousedown tracking, no HTML5 draggable)
             hdr.addEventListener('mousedown', (e) => this._onPaneHeaderMouseDown(e, tab, pane));
             const body = document.createElement('div');
             body.className = 'pane-body';
@@ -822,23 +822,23 @@ const TabManager = {
         };
 
         const allPanes = getAllPanes(tab);
-        // 收集现有 pane 节点。不排除 pane-exit：淡出窗口内该 pane 重回树时
-        // 直接复活复用，避免同一 data-pane 双 DOM（L2）
+        // Collect existing pane nodes. pane-exit nodes are not excluded: if the pane re-enters the
+        // tree within its fade-out window it is revived in place, avoiding duplicate DOM for one data-pane
         const existing = new Map();
         rootEl.querySelectorAll('.split-pane').forEach(el => {
             existing.set(el.getAttribute('data-pane'), el);
         });
-        // 动画期间抑制 ResizeObserver 的 fit：pane 尺寸每帧变化会触发
-        // 连续全量重绘 + pty-resize 风暴（TUI 程序被反复 resize、终端闪烁），
-        // 动画结束后由下方 250ms 定时器 + _scheduleSettleResize 统一结算
+        // Suppress ResizeObserver-driven fit during the animation: per-frame pane size changes
+        // would trigger continuous full repaints + a pty-resize storm (TUI apps resized repeatedly,
+        // terminal flicker); after the animation the 250ms timer below + _scheduleSettleResize settle
         this._layoutAnimating = true;
         const enterIds = [];
         allPanes.forEach(p => {
             let el = existing.get(p.id);
             if (el) {
                 existing.delete(p.id);
-                el.classList.remove('pane-exit'); // L2：淡出中的 pane 重回树 → 复活
-                // 复用节点：刷新连接状态 dot（树变化时状态可能已更新）
+                el.classList.remove('pane-exit'); // a pane mid-fade-out re-entering the tree is revived
+                // Reused node: refresh the connection-status dot (state may have changed with the tree)
                 const dc = (p.connected !== false && (p.connected || !!p.tabId)) ? 'connected' : 'disconnected';
                 const dot = el.querySelector('.dot');
                 if (dot) dot.className = 'dot ' + dc;
@@ -855,8 +855,8 @@ const TabManager = {
                     if (TabManager._layoutAnimating) return;
                     raf = true;
                     requestAnimationFrame(() => {
-                        // _windowResizing：窗口拖拽 resize 期间抑制 fit（每帧全屏重绘 + pty-resize 风暴），
-                        // 停止后由 split.js 的 resize 结算统一 fit
+                        // _windowResizing: suppress fit during window-drag resize (per-frame full repaints + pty-resize
+                        // storm); after the drag stops, split.js's resize settle performs one unified fit
                         if (!_spannerDrag && !TabManager._maximizing && !_windowResizing) _fitWithScroll(p.term, p.fitAddon, body);
                         raf = false;
                     });
@@ -866,7 +866,7 @@ const TabManager = {
             }
             enterIds.push(p.id);
         });
-        // 已从树中移除的 pane：淡出后移除（复用节点时才有）
+        // Panes removed from the tree: fade out, then remove (only present when nodes were reused)
         existing.forEach((el) => {
             el.classList.add('pane-exit');
             setTimeout(() => { if (el.isConnected) el.remove(); }, 200);
@@ -883,14 +883,14 @@ const TabManager = {
                 }));
             }
         });
-        // 解除 fit 抑制（transition 200ms + 余量）
+        // Lift the fit suppression (transition 200ms + margin)
         setTimeout(() => { this._layoutAnimating = false; }, 300);
         setTimeout(() => {
             allPanes.forEach(p => {
                 if (p.term && p.fitAddon) _fitWithScroll(p.term, p.fitAddon, document.getElementById('pane-body_' + p.id));
             });
         }, 250);
-        // 树结构变化后，原有 pane 的 xterm 失焦；对有焦点的 pane 强制恢复
+        // After tree changes, existing panes' xterm loses focus; forcibly refocus the focused pane
         const fp = allPanes.find(p => p.focused);
         if (fp && fp.term) setTimeout(() => { try { fp.term.focus(); } catch(e) {} }, 200);
     },
@@ -929,7 +929,7 @@ const TabManager = {
             return;
         }
         this._addSpanners(tab, tab.splitRoot);
-        // 动画结束后的尺寸结算（onResize 抑制窗口会丢掉动画末的最终尺寸，否则 nvim 等 TUI 界面混乱）
+        // Settle sizes after the animation (the onResize suppression window drops the final animated size; without this, nvim and other TUI layouts break)
         _scheduleSettleResize(tab);
     },
 
@@ -954,7 +954,7 @@ const TabManager = {
             if (child.orientation) {
                 this._layoutInternal(tab, child, childX, childY, childW, childH, rootEl);
             } else {
-                // 用外层传入的 rootEl，避免每个 leaf 都 getElementById + querySelector
+                // Use the rootEl passed in from outside, avoiding a getElementById + querySelector per leaf
                 const el = rootEl ? rootEl.querySelector('.split-pane[data-pane="' + child.id + '"]') : null;
                 if (el) {
                     if (tab._maximizedPaneId && tab._maximizedPaneId === child.id) {
@@ -1013,10 +1013,10 @@ const TabManager = {
         });
     },
 
-    // ── Pane drag swap（任意两个 pane 交换位置和尺寸）──
+    // ── Pane drag swap (swap any two panes' position and size) ──
     _paneDragState: null,
 
-    // Tabby 同款指针拖拽：mousedown 按下标题，移动超阈值进入拖拽，移动中命中 drop zone，松开执行插入
+    // Same pointer-based drag as Tabby: mousedown on the header, drag starts past a threshold, drop zones are hit while moving, release performs the insert
     _onPaneHeaderMouseDown(e, tab, pane) {
         if (e.button !== 0 || tab._maximizedPaneId) return;
         if (e.target.closest('button')) return;
@@ -1031,7 +1031,7 @@ const TabManager = {
             document.removeEventListener('pointercancel', cancelDrag);
             this._onPanePointerUp(ev);
         };
-        // P1：指针拖出窗口/窗口失焦时 mouseup 不派发，兜底清理（残留 ghost/半透明/drop zones）
+        // mouseup is not dispatched when the pointer leaves the window or it loses focus, so clean up defensively (leftover ghost/translucency/drop zones)
         const cancelDrag = () => {
             document.removeEventListener('mousemove', move);
             document.removeEventListener('mouseup', up);
@@ -1054,14 +1054,14 @@ const TabManager = {
             if (Math.abs(e.clientX - state.startX) + Math.abs(e.clientY - state.startY) < 5) return;
             state.dragging = true;
             document.body.classList.add('pane-dragging');
-            // 源 pane 半透明（Tabby 行为）
+            // Source pane turns translucent (Tabby behavior)
             const el = document.querySelector(`.split-pane[data-pane="${state.sourcePane.id}"]`);
             if (el) el.style.opacity = '0.4';
             this._showPaneDropZones(state.sourceTab);
             this._showPaneDragGhost(state, e);
         }
         this._movePaneDragGhost(state, e);
-        // 命中检测（Tabby 的 drop zone highlighted）
+        // Hit detection (Tabby's drop-zone highlight)
         const hit = document.elementFromPoint(e.clientX, e.clientY);
         const zoneEl = hit && hit.closest ? hit.closest('.pane-drop-zone') : null;
         document.querySelectorAll('.pane-drop-zone.drag-over').forEach(el => { if (el !== zoneEl) el.classList.remove('drag-over'); });
@@ -1098,19 +1098,19 @@ const TabManager = {
         }
     },
 
-    // ── Tabby 同款 pane 拖拽重排：计算 drop zone 条带，命中即按 side 定向插入 ──
+    // ── Same pane drag-reorder as Tabby: compute drop-zone bars; a hit inserts in the side direction ──
 
-    // 计算 drop zones（对齐 Tabby layoutInternal）：根容器四边 + 每个 child 的侧边条 + spanner 缝隙条
+    // Compute drop zones (aligned with Tabby layoutInternal): root container edges + per-child side bars + spanner gap bars
     _computePaneDropZones(tab) {
         const zones = [];
-        const T = 8; // zone 厚度（占 split 区域百分比，Tabby 为 10）
+        const T = 8; // zone thickness (percent of the split area; Tabby uses 10)
         const walk = (container, x, y, w, h) => {
             const isV = container.orientation === 'v';
             const gap = isV ? (tab._gapYPct || 0) : (tab._gapXPct || 0);
             const size = isV ? h : w;
             const avail = Math.max(size - (container.children.length - 1) * gap, 0);
             const sizes = container.ratios.map(r => r * avail);
-            // 根容器四边（Tabby: root 的 l/t/r/b）
+            // Root container's four edges (Tabby: root l/t/r/b)
             if (container === tab.splitRoot) {
                 zones.push({ x: x - T / 2, y: y + T, w: T, h: h - T * 2, side: 'l', relativeTo: null });
                 zones.push({ x, y: y - T / 2, w, h: T, side: 't', relativeTo: null });
@@ -1125,7 +1125,7 @@ const TabManager = {
                 const childH = isV ? sizes[i] : h;
                 if (child.orientation) walk(child, childX, childY, childW, childH);
                 offset += sizes[i];
-                // spanner 缝隙 zone：沿容器方向插到 child 之后（Tabby: 对每个非末尾 child 都加）
+                // Spanner gap zone: inserts after the child along the container direction (Tabby adds one for every non-last child)
                 if (i !== container.ratios.length - 1) {
                     zones.push({
                         x: isV ? childX + T : childX + offset - T / 2,
@@ -1136,7 +1136,7 @@ const TabManager = {
                         relativeTo: child,
                     });
                 }
-                // child 侧边 zone：垂直于父方向插到 child 对应侧（Tabby 对所有 child 都加）
+                // Child side zone: inserts on the child's side perpendicular to the parent direction (Tabby adds these for all children)
                 if (isV) {
                     zones.push({ x: childX, y: childY + T, w: T, h: childH - T * 2, side: 'l', relativeTo: child });
                     zones.push({ x: childX + childW - T, y: childY + T, w: T, h: childH - T * 2, side: 'r', relativeTo: child });
@@ -1155,9 +1155,9 @@ const TabManager = {
         this._hidePaneDropZones();
         const rootEl = document.getElementById('split_' + tab.id);
         if (!rootEl || !tab.splitRoot) return;
-        if (getAllPanes(tab).length < 2) return; // 单 pane 无重排对象（Tabby canActivateFor）
+        if (getAllPanes(tab).length < 2) return; // a single pane has nothing to reorder with (Tabby canActivateFor)
         const src = this._paneDragState && this._paneDragState.sourcePane;
-        const zones = this._computePaneDropZones(tab).filter(z => !(src && z.relativeTo === src)); // 排除拖回自身（Tabby canActivateFor）
+        const zones = this._computePaneDropZones(tab).filter(z => !(src && z.relativeTo === src)); // exclude dropping back onto itself (Tabby canActivateFor)
         if (this._paneDragState) this._paneDragState.zones = zones;
         const layer = document.createElement('div');
         layer.id = 'pane-drop-layer';
@@ -1181,14 +1181,14 @@ const TabManager = {
         if (!state) return;
         const sourcePane = state.sourcePane;
         if (zone.relativeTo === sourcePane) { this._onPaneDragEnd(); return; }
-        // 1. 从原父容器摘除（Tabby: add 之前先 removeTab）
+        // 1. Detach from the original parent container (Tabby: removeTab before add)
         const parent = getParentOf(tab, sourcePane);
         if (!parent) { this._onPaneDragEnd(); return; }
         const idx = parent.children.indexOf(sourcePane);
         parent.children.splice(idx, 1);
         parent.ratios.splice(idx, 1);
         normalize(tab.splitRoot);
-        // 2. 按 zone 的 side 插入到 relativeTo 对应位置（复用 Tabby 语义的 add）
+        // 2. Insert per the zone's side at the position relative to relativeTo (reuses the Tabby-semantics add)
         this.add(tab, sourcePane, zone.relativeTo, zone.side);
         this._onPaneDragEnd();
         this._renderSplit(tab);
@@ -1216,7 +1216,7 @@ const TabManager = {
         if (pane.tabId) {
             this._markClosed(pane.tabId);
             ipcRenderer.send('pty-destroy', { tabId: pane.tabId, rendererId: tabId });
-            delete ptyBuffers[pane.tabId]; // 防止 buffer 永久泄漏（pane 关闭后不会再 wire）
+            delete ptyBuffers[pane.tabId]; // prevent permanent buffer leaks (a closed pane is never wired again)
         }
         if (pane.term) try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}
         // Exit animation: fade + shrink, then remove from tree and re-render
@@ -1270,7 +1270,7 @@ const TabManager = {
             });
         }
         const pane = findPane(tab, paneId);
-        // pane 拖拽中不抢焦点（50ms 后的 term.focus() 会杀死刚起步的 HTML5 drag）
+        // Do not steal focus mid pane drag (a term.focus() 50ms later would kill a just-started drag)
         if (pane && pane.term) setTimeout(() => { if (!this._paneDragState) pane.term.focus(); }, 50);
     },
 
@@ -1292,8 +1292,8 @@ const TabManager = {
                 this._maximizing = false;
                 const body = document.getElementById('pane-body_' + pane.id);
                 if (body) _fitWithScroll(pane.term, pane.fitAddon, body);
-                // _maximizing 期间 onResize/applyFit 全被屏蔽，fit 后必须显式直发最终尺寸，
-                // 否则后端停留在旧 cols/rows（nvim、htop 等 TUI 界面错乱）
+                // onResize/applyFit are fully suppressed during _maximizing, so after fit the final size must be
+                // sent explicitly; otherwise the backend stays at the old cols/rows (nvim, htop and other TUI layouts break)
                 if (pane.tabId && pane.term.cols && pane.term.rows) {
                     ipcRenderer.send('pty-resize', { tabId: pane.tabId, cols: pane.term.cols, rows: pane.term.rows });
                 }
@@ -1322,8 +1322,8 @@ const TabManager = {
             tabId: pane.tabId,
             splitRoot: null,
         };
-        // 搬到新 tab 后重绑 onData：原闭包引用 pane（源 tab 的旧 pane），
-        // 改用 nt.tabId 确保输入正确路由
+        // Rebind onData after moving to the new tab: the original closure referenced pane (the source tab's
+        // old pane); switching to nt.tabId ensures input is routed correctly
         if (pane._onDataDisp) { pane._onDataDisp.dispose(); pane._onDataDisp = null; }
         nt._onDataDisp = pane.term?.onData(data => {
             _sendPaneInput(nt, { tabId: nt.tabId }, data);
@@ -1356,7 +1356,7 @@ const TabManager = {
             const rp = rem[0];
             st.splitRoot = null;
             if (!rem.some(p => p.focused)) rp.focused = true;
-            // term 从 pane 搬回 tab：dispose pane 的 onData 僵尸 listener，重绑到 tab
+            // The term moves from pane back to tab: dispose the pane's zombie onData listener and rebind to the tab
             if (rp._onDataDisp) { rp._onDataDisp.dispose(); rp._onDataDisp = null; }
             st.term = rp.term;
             st.fitAddon = rp.fitAddon;
@@ -1402,8 +1402,8 @@ const TabManager = {
         const targetTab = this.tabs.find(t => t.id === targetTabId);
         if (!sourceTab || !targetTab || sourceTab === targetTab) return;
         if (sourceTab.type === 'settings' || targetTab.type === 'settings') return;
-        // M2：先校验目标 pane 仍存在（拖拽期间目标树可能被快捷键分屏改变）。
-        // 必须在校验通过后才摘除源 pane——否则失败路径会把已摘除的 pane 丢弃
+        // Validate the target pane still exists first (a shortcut split may have changed the target tree
+        // during the drag). Detach the source pane only after validation — otherwise the failure path drops it
         const focusedPane = targetPaneId ? findPane(targetTab, targetPaneId) : null;
         if (targetPaneId && !focusedPane) return;
         let mt = null, mf = null, mid = null, sc = null;
@@ -1419,8 +1419,8 @@ const TabManager = {
             // tree damaged and the pane's input permanently broken.
             if (!focused || !focused.term || !focused.tabId) return;
             mt = focused.term; mf = focused.fitAddon; mid = focused.tabId;
-            // 立即 dispose 被拖走 pane 的 onData listener：否则下面给 np 重绑后，
-            // term 上会同时存在两个 listener（旧 pane 的 + 新 np 的）→ 每次按键双发
+            // Dispose the dragged pane's onData listener immediately: otherwise after np is rebound below, the term
+            // would hold two listeners (the old pane's + np's) and every keypress would fire twice
             if (focused._onDataDisp) { focused._onDataDisp.dispose(); focused._onDataDisp = null; }
             paneName = focused.name || sourceTab.name;
             paneType = focused.type || sourceTab.type || 'local';
@@ -1440,7 +1440,7 @@ const TabManager = {
                 if (rem.length === 1) {
                     sc = () => {
                         const rp = rem[0];
-                        // term 从 pane 搬回 tab：dispose pane 的 onData 僵尸 listener，重绑到 tab
+                        // The term moves from pane back to tab: dispose the pane's zombie onData listener and rebind to the tab
                         if (rp._onDataDisp) { rp._onDataDisp.dispose(); rp._onDataDisp = null; }
                         sourceTab.term = rp.term;
                         sourceTab.fitAddon = rp.fitAddon;
@@ -1487,8 +1487,8 @@ const TabManager = {
             };
         }
         if (!mt || !mid) return;
-        // 幂等防呆：若被拖的 terminal 元素已在目标分屏 DOM 中（任何双路径重复
-        // drop / 重复 move 导致），拒绝再次插入——防止同一连接以两个 pane 出现
+        // Idempotency guard: if the dragged terminal element is already inside the target split DOM (from any
+        // duplicate drop/move via two paths), refuse to insert again — one connection must never appear as two panes
         const tgtRoot = document.getElementById('split_' + targetTab.id);
         if (tgtRoot && mt.element && tgtRoot.contains(mt.element)) {
             console.warn('[tabdrag] terminal already in target split, drop ignored');
@@ -1503,8 +1503,8 @@ const TabManager = {
             fp._smoothCursor = targetTab._smoothCursor;
             fp.tabId = targetTab.tabId;
             fp.focused = false;
-            // terminal 从 targetTab 搬到 fp pane，onData 需用 fp.tabId
-            // （targetTab.tabId 即将清空，闭包里 { tabId: tab.tabId } → null 导致静默丢弃）
+            // The terminal moves from targetTab onto the fp pane, so onData must use fp.tabId
+            // (targetTab.tabId is about to be cleared; a closure over { tabId: tab.tabId } → null would silently drop input)
             if (targetTab._onDataDisp) { targetTab._onDataDisp.dispose(); targetTab._onDataDisp = null; }
             fp._onDataDisp = fp.term?.onData(data => {
                 _sendPaneInput(targetTab, fp, data);
@@ -1526,14 +1526,14 @@ const TabManager = {
             requestId: 'p_' + (this._paneCounter - 1),
             term: mt, fitAddon: mf, _smoothCursor: sourceTab._smoothCursor, tabId: mid, focused: true,
             name: paneName, type: paneType,
-            connected: !!mid, // 有 backend tabId 说明在线
+            connected: !!mid, // having a backend tabId means it is online
             _sshHost: sshHost, _sshPort: sshPort, _sshUser: sshUser,
             _sshCredId: sshCredId, _sshProfileId: sshProfileId,
             _command: paneType !== 'ssh' ? (sourceTab.command || '') : '',
             _args: paneType !== 'ssh' ? (sourceTab.args || []) : [],
         };
-        // terminal 搬家后重绑 onData：原闭包引用 sourceTab（已被 splice 移除或 tabId 被新 pane 接管），
-        // 改为直接引用 np.tabId 确保输入路由到正确 pane
+        // Rebind onData after the terminal moves: the original closure referenced sourceTab (already spliced away,
+        // or its tabId taken over by the new pane); referencing np.tabId directly routes input to the correct pane
         if (mt && sourceTab._onDataDisp) { sourceTab._onDataDisp.dispose(); sourceTab._onDataDisp = null; }
         np._onDataDisp = mt?.onData(data => {
             _sendPaneInput(targetTab, np, data);
@@ -1566,8 +1566,8 @@ const TabManager = {
             }
             if (i > 0 && p.term) try { p._smoothCursor?.dispose(); p._smoothCursor = null; p.term.dispose(); } catch(e) {}
         });
-        // 同步 tab 全部字段到剩余 pane——否则 tab.type/host/user 等仍带原 tab 类型
-        // （例如原 SSH tab 退 split 留 local pane，但 tab 仍标 SSH，重启后真连 SSH，pane 名却错配）
+        // Sync all tab fields from the surviving pane — otherwise tab.type/host/user etc. keep the old tab's type
+        // (e.g. an SSH tab exits split leaving a local pane but stays marked SSH: after restart it would really connect via SSH with a mismatched pane name)
         if (fp) {
             tab.type = fp.type || 'local';
             if (fp.type === 'ssh') {
@@ -1595,20 +1595,20 @@ const TabManager = {
         // The surviving pane's OSC title comes back onto the tab with its term.
         if (fp && fp._oscTitle !== undefined) tab._oscTitle = fp._oscTitle;
         else delete tab._oscTitle;
-        tab.connected = fp?.connected !== false && (fp?.connected || !!fp?.tabId); // L1：同步连接状态，否则标签点/重连按钮错误
+        tab.connected = fp?.connected !== false && (fp?.connected || !!fp?.tabId); // sync the connection state, otherwise the status dot/reconnect button are wrong
         tab.splitRoot = null;
         tab._maximizedPaneId = null;
-        // term 从 pane 搬回 tab：必须 dispose pane 上的 onData listener 并重绑到 tab，
-        // 否则该 listener 作为僵尸永久留在 term 上，下次再分屏会重复绑定 → 每次按键输入两次
+        // The term moves from pane back to tab: the pane's onData listener must be disposed and rebound to the tab,
+        // otherwise it stays on the term as a permanent zombie and re-splitting double-binds it — every keypress inputs twice
         if (fp && fp._onDataDisp) { fp._onDataDisp.dispose(); fp._onDataDisp = null; }
         if (tab.term) {
             tab._onDataDisp = tab.term.onData(data => {
                 _sendPaneInput(tab, { tabId: tab.tabId }, data);
             });
         }
-        // 同步 contentBuffer 焦点缓冲：split 期间所有 pane 的输出累积到 tab._contentBuffer，
-        // 退 split 后缓冲内容与剩余 pane 类型可能错配（SSH 内容算到 local 缓冲里）。
-        // 简单做法：退 split 时清空 contentBuffer，避免恢复时再乱。
+        // Sync the contentBuffer focus buffer: during split, all panes' output accumulates into tab._contentBuffer,
+        // and after exiting the split the buffered content may mismatch the surviving pane's type (SSH content in a
+        // local buffer). Simple approach: clear contentBuffer when exiting the split to avoid confusion on restore.
         tab._contentBuffer = [];
         // Disconnect pane-body resize observers before dropping the split
         // subtree (Blink retains observed nodes and their DOM subtrees).
@@ -1697,8 +1697,8 @@ const TabManager = {
         if (e.button !== 0) return;
         const tab = this.tabs.find(t => t.id === tabId);
         if (!tab || tab.type === 'settings') return;
-        // Action buttons are semantic <button>s; the rename field is a text
-        // input. Neither may start a tab drag (ADR-0001 interaction guard).
+        // Action buttons are semantic <button>s and the rename field is a text input;
+        // interactive elements must never start a tab drag.
         if (e.target.closest('button, input, textarea, [contenteditable]')) return;
         e.preventDefault();
         const el = e.currentTarget;
@@ -1714,7 +1714,7 @@ const TabManager = {
                 const main = document.getElementById('main-area');
                 if (main) main.classList.add('drop-target');
                 document.body.classList.add('tab-dragging');
-                // 被拖走的 tab 快照（对齐 HTML5 默认 drag image），跟随鼠标
+                // Snapshot of the dragged tab (matching the default HTML5 drag image), following the mouse
                 const srcEl = document.querySelector('.tab[data-tab="' + tabId + '"]');
                 if (srcEl) {
                     const img = srcEl.cloneNode(true);
@@ -1724,7 +1724,7 @@ const TabManager = {
                     document.body.appendChild(img);
                     dragImage = img;
                 }
-                // 全屏拦截层：屏蔽下方所有元素的 hover/交互（拖拽期间）
+                // Full-screen interception layer: blocks hover/interaction on everything below during the drag
                 const overlay = document.createElement('div');
                 overlay.id = 'tab-drag-overlay';
                 document.body.appendChild(overlay);
@@ -1921,8 +1921,8 @@ const TabManager = {
             this._onTabDragEnd();
             document.body.classList.remove('tab-dragging');
         };
-        // P1：指针拖出窗口/窗口失焦时 mouseup 不派发，兜底清理拖拽状态
-        // （否则全屏拦截层残留、UI 冻结到下次窗口内 mouseup）
+        // mouseup is not dispatched when the pointer leaves the window or it loses focus, so clean up drag
+        // state defensively (otherwise the full-screen interception layer lingers and the UI freezes until the next in-window mouseup)
         const cancelDrag = () => {
             document.removeEventListener('mousemove', move);
             document.removeEventListener('mouseup', up);
@@ -2015,9 +2015,9 @@ const TabManager = {
         const finish = (save) => {
             if (save && input.value.trim()) {
                 tab.name = input.value.trim();
-                tab._customName = true; // 锁定自定义名，pane 变动不再覆盖
+                tab._customName = true; // lock the custom name so pane changes no longer overwrite it
             } else if (save && !input.value.trim() && tab.splitRoot) {
-                // 用户清空名称 → 恢复自动生成
+                // user cleared the name → restore auto-generation
                 delete tab._customName;
                 this._updateTabName(tab);
             }
@@ -2040,7 +2040,7 @@ const TabManager = {
         menu.className = 'tab-context-menu';
         const tab = this.tabs.find(t => t.id === tabId);
         if (!tab) return;
-        // 快捷键从 _getShortcutBindings() 查当前绑定：用户改过要跟随
+        // Read shortcuts from _getShortcutBindings() so user-remapped bindings are reflected
         const bindings = _getShortcutBindings();
         const items = [
             { label: '重命名', actionId: 'renameTab', action: () => this.startRenameTab(tabId) },
@@ -2057,7 +2057,7 @@ const TabManager = {
             menu.appendChild(el);
         });
         document.body.appendChild(menu);
-        // 宽度跟随快捷键提示扩展（180 起 + shortcut text 宽度余量）
+        // Width grows with the shortcut hints (base 180 plus margin for the shortcut text)
         const x = Math.min(e.clientX, window.innerWidth - 220);
         const y = Math.min(e.clientY, window.innerHeight - items.length * 34 - 12);
         menu.style.left = x + 'px';
@@ -2079,10 +2079,10 @@ const TabManager = {
         const src = this.tabs.find(t => t.id === tabId);
         if (!src || src.type === 'settings') return;
 
-        // 有分屏：深度克隆 split tree，为每个 pane 启动新后端
+        // Has splits: deep-clone the split tree and start a new backend for each pane
         if (src.splitRoot) return this._cloneSplitTab(src);
 
-        // 单窗格：直接 createTab
+        // Single pane: plain createTab
         const options = { name: src.name, type: src.type };
         if (src.type === 'ssh') {
             options.host = src.host;
@@ -2097,7 +2097,7 @@ const TabManager = {
         }
         const newId = this.createTab(options);
         const newTab = this.tabs.find(t => t.id === newId);
-        if (newTab) newTab._cloneCred = true; // 标记为克隆，closeTab 不撤证
+        if (newTab) newTab._cloneCred = true; // mark as a clone so closeTab does not revoke the credential
         return newId;
     },
 
@@ -2110,19 +2110,19 @@ const TabManager = {
             command: src.command,
             args: [...(src.args || [])],
             connected: false,
-            _cloneCred: true, // closeTab 时不撤证，凭据属于源 tab
+            _cloneCred: true, // closeTab must not revoke; the credential belongs to the source tab
         };
         if (src.type === 'ssh') {
             Object.assign(tab, {
                 host: src.host, port: src.port, user: src.user,
                 privateKey: src.privateKey,
                 sshProfileId: src.sshProfileId,
-                // 注意：不复制 _credId——每个 pane 有自己的 _sshCredId
-                // 若复制到 tab 级别，closeTab 时会 revoke-credential
-                // 导致所有共享此凭据的 pane 断连
+                // Note: _credId is NOT copied — each pane has its own _sshCredId.
+                // Copying it to the tab level would make closeTab send revoke-credential,
+                // disconnecting every pane sharing that credential
             });
         }
-        // 深度克隆 split tree，叶子节点保留源 pane 自己的 type/SSH 参数
+        // Deep-clone the split tree; leaf nodes keep the source pane's own type/SSH parameters
         const clonePane = (srcPane) => ({
             id: 'p_' + (this._paneCounter++),
             requestId: null,
@@ -2156,17 +2156,17 @@ const TabManager = {
         this.tabs.push(tab);
         this._renderSplit(tab);
 
-        // _renderSplit 时新旧 split-root 同时可见导致布局争抢，
-        // 先把新的藏起来，switchTo 再在单 split 环境下正确展示
+        // During _renderSplit the old and new split-root are both visible, causing layout contention,
+        // so hide the new one first; switchTo then displays it correctly in a single-split context
         const newSplit = document.getElementById('split_' + tab.id);
         if (newSplit) newSplit.style.display = 'none';
 
-        // 为所有叶子 pane 启动后端连接
+        // Start backend connections for all leaf panes
         const panes = getAllPanes(tab);
         panes.forEach(p => this._spawnBackendForPane(p, tab));
 
         this.switchTo(id);
-        // switchTo 后 DOM 布局已稳定，重新计算 gap 修正 spanner 宽度
+        // DOM layout is stable after switchTo; recompute gaps to fix spanner widths
         requestAnimationFrame(() => this._layoutSplit(tab));
         this._updateTabName(tab);
         this.render();
@@ -2186,7 +2186,7 @@ const TabManager = {
         if (tab.splitRoot || changed) this._scheduleSaveConfig();
     },
 
-    // 合并写盘：拖动 / 拆建 pane 等连续触发场景下，idle 内只写一次（不再每次同步 IPC 阻塞渲染）
+    // Coalesced persistence: under continuous triggers like drags / pane create-destroy, write once per idle window (no more synchronous IPC blocking the render each time)
     _scheduleSaveConfig() {
         if (typeof requestIdleCallback !== 'undefined') {
             if (this._saveConfigIdleHandle) cancelIdleCallback(this._saveConfigIdleHandle);
@@ -2217,8 +2217,8 @@ const TabManager = {
             defaultName: tab.name,
             nextPaneId: () => 'p_' + (this._paneCounter++),
         });
-        // P3：异常树防御——反序列化后 normalize；空树（0 叶子）不允许进入运行态，
-        // 否则关闭唯一 pane 会变成无法关闭的空分屏死 tab。退化后按普通 tab 恢复。
+        // Guard against abnormal trees — normalize after deserialization; an empty tree (0 leaves) must not
+        // enter the runtime: closing its last pane would leave an unclosable empty-split dead tab. Degraded trees restore as normal tabs.
         if (tab.splitRoot) {
             normalize(tab.splitRoot);
             if (getAllPanes(tab).length === 0) {
@@ -2227,7 +2227,7 @@ const TabManager = {
         }
         this.tabs.push(tab);
         if (!tab.splitRoot) {
-            // 退化（空树）：按普通单终端 tab 恢复并启动后端
+            // Degraded (empty tree): restore as a normal single-terminal tab and start the backend
             const { wrap: w, inner: wInner } = createTermWrap(tab);
             document.getElementById('main-area').appendChild(w);
             if (tabData.type === 'ssh' && tabData.host) {
@@ -2240,16 +2240,16 @@ const TabManager = {
         }
         this._renderSplit(tab);
         this._updateTabName(tab);
-        // 恢复时先隐藏，等 switchTo 激活后再显示，防止多个 split 叠加
+        // Hide on restore and show only after switchTo activates it, preventing multiple splits from stacking
         const splitEl = document.getElementById('split_' + tab.id);
         if (splitEl) splitEl.style.display = 'none';
 
-        // 为每个 pane 注册凭据（SSH）并启动后端
+        // Register credentials (SSH) and start the backend for each pane
         const panes = getAllPanes(tab);
         panes.forEach(p => {
             if (p.type === 'ssh' && p._sshHost) {
                 const prof = (this.sshProfiles || []).find(x => x.id === p._sshProfileId);
-                // 凭据注册是异步的，完成后 spawn 后端
+                // Credential registration is async; spawn the backend when it completes
                 const doSpawn = (credId) => {
                     if (credId) p._sshCredId = credId;
                     this._spawnBackendForPane(p, tab);
@@ -2373,7 +2373,7 @@ const TabManager = {
 // ── Shared low-latency tab tooltip ──
 // Native title attributes carry a ~1s OS delay, which reads as lag when the
 // pointer sweeps across tabs. One delegated listener + one shared element.
-// ADR-0001: hover NEVER changes tab geometry — long names stay truncated and
+// Hover must NEVER change tab geometry — long names stay truncated and
 // are fully revealed by this tooltip alone; the handler only switches the
 // pending target and does one rect-read/style-write per NEW target inside
 // the 120ms timer. No width measurement, no expansion state machine.
@@ -2395,7 +2395,7 @@ const TabManager = {
         current = null;
     };
     bar.addEventListener('mouseover', (e) => {
-        // 覆盖 tab + tab 栏两个 chrome 按钮（dataset.tip 共用低延迟 tooltip）。
+        // Covers tabs plus the tabbar's two chrome buttons (their dataset.tip shares this low-latency tooltip).
         // Moving between a tab's internal spans/svg resolves to the same
         // closest('.tab') target and must NOT restart the timer.
         const el = e.target.closest('.tab, #btn-add-tab, #btn-menu');

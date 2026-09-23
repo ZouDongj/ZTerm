@@ -64,20 +64,20 @@
     let smoothEnabled = options?.smooth !== false;
     let cursorStyle = options?.cursorStyle === 'block' ? 'block' : 'bar';
     let continuationQueued = false;
-    // Continuation render scope. 'full' = v3.2 behavior (re-render the whole
-    // viewport on every animation frame). 'cursor' = re-render only the rows
-    // the caret spans, which is 1-2 rows instead of ~30.
+    // Continuation render scope. 'full' re-renders the whole viewport on
+    // every animation frame; 'cursor' re-renders only the rows the caret
+    // spans, which is 1-2 rows instead of ~30.
     let renderScope = options?.renderScope === 'cursor' ? 'cursor' : 'full';
     let lastDrawnRow = null;
     let snapBeforeNextDraw = true;
     let lastTarget = null;
-    // v3 hidden-freeze state: elapsed time of the in-flight animation at the
+    // Hidden-freeze state: elapsed time of the in-flight animation at the
     // last drawable (painted) frame, latched while the cursor is not drawable
     // so the hidden period never ages the animation anchor.
     let lastDrawElapsedMs = null;
     let frozenElapsedMs = null;
 
-    // ── Software-caret takeover (ADR-0001 B2) ──
+    // ── Software-caret takeover ──
     // A bypass observer on the raw stream produces per-unit caret candidates
     // (write position + covering char + truecolor evidence). They become the
     // SINGLE animated cursor only after: two consecutive candidate units
@@ -182,8 +182,8 @@
       // candidate cell (contradiction → revoke + reset trust). Interleaved
       // outer-TUI frames (herdr chrome, complete with its own SHOWs) are
       // the normal case inside an ink input session — protocol-cursor
-      // gestures and software-caret existence are separate concerns
-      // (ADR 4.4), so only cell-level contradiction breaks the run.
+      // gestures and software-caret existence are separate concerns, so
+      // only cell-level contradiction breaks the run.
       unit(info) {
         if (disposed) return;
         if (!info.hadCandidate) {
@@ -251,11 +251,11 @@
       }
 
       if (!ownsCursor) {
-        // v3 semantics (Ghostty/MaidKit alignment): while the cursor is not
-        // drawable (hidden, unfocused, disabled...) the animation anchor is
-        // frozen at the last visible position. Neither the motion state nor
-        // the tracked target moves, so a later re-show slides from the frozen
-        // position toward the new cursor cell instead of landing there.
+        // While the cursor is not drawable (hidden, unfocused, disabled...)
+        // the animation anchor is frozen at the last visible position.
+        // Neither the motion state nor the tracked target moves, so a later
+        // re-show slides from the frozen position toward the new cursor cell
+        // instead of landing there.
         if (frozenElapsedMs === null) frozenElapsedMs = lastDrawElapsedMs;
         instrumentation.drawPassStatus = 'base-only';
         return;
@@ -373,13 +373,13 @@
     function scheduleContinuation() {
       if (disposed || continuationQueued || diagnostic.held) return;
       continuationQueued = true;
-      // v3.2: drive animation frames directly — one rAF, one synchronous
-      // renderRows. The previous path (rAF → _requestRedrawViewport → the
-      // render debouncer's own rAF) landed a draw only every other display
+      // Drive animation frames directly — one rAF, one synchronous
+      // renderRows. The alternative (rAF → _requestRedrawViewport → the
+      // render debouncer's own rAF) lands a draw only every other display
       // frame (~7 draws per 90ms slide at 144Hz); a direct per-vsync render
-      // restores the full ~13, matching MaidKit's Flutter Ticker pacing.
-      // Fallbacks keep non-browser (test) environments on the old microtask
-      // path, where synthetic clocks cannot pump real timers.
+      // restores the full ~13, one draw per vsync. Fallbacks keep
+      // non-browser (test) environments on a microtask path, where synthetic
+      // clocks cannot pump real timers.
       const raf = typeof root.requestAnimationFrame === 'function'
         ? root.requestAnimationFrame.bind(root)
         : typeof root.queueMicrotask === 'function'
@@ -429,8 +429,8 @@
         const protocolY = active.baseY + active.cursorY - viewportY;
         if (protocolX === sw.published.x && protocolY === sw.published.y) return { drawable: false };
       }
-      // Software-caret source (ADR-0001 B2): when a trusted, watermark-
-      // matched descriptor exists, IT defines the drawn cursor. DECTCEM is
+      // Software-caret source: when a trusted, watermark-matched descriptor
+      // exists, IT defines the drawn cursor. DECTCEM is
       // ignored here on purpose (the app hides the protocol cursor and
       // paints its own); eligibility is re-checked on every draw entry
       // through this function.
@@ -585,10 +585,10 @@
     // DEFAULT colors (SGR 0;39;49) — expressed here as a draw-time overlay
     // (theme-background rectangle + theme-foreground glyph, the same two
     // passes the base render uses for a normal cell). The buffer keeps the
-    // app's bytes untouched. Reviewer B1: with the default 'bar' style no
-    // block glyph redraws this cell afterwards, so the covering character
-    // MUST be part of the restore itself — a background-only rect would
-    // blank the letter under the caret during navigation.
+    // app's bytes untouched. With the default 'bar' style no block glyph
+    // redraws this cell afterwards, so the covering character MUST be part
+    // of the restore itself — a background-only rect would blank the letter
+    // under the caret during navigation.
     function drawRestoreCell(cursor) {
       const rectangle = renderer._rectangleRenderer.value;
       const glyph = renderer._glyphRenderer.value;
@@ -675,7 +675,7 @@
     }
 
     const adapter = {
-      // ADR-0001 B2 port: the raw-stream observer (wired in ipc.js) reports
+      // Software-caret port: the raw-stream observer (wired in ipc.js) reports
       // candidates, unit completions and xterm parse watermarks here.
       softwareCaretPort,
       setEnabled(value) {

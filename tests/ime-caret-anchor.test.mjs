@@ -1,4 +1,4 @@
-// Unit tests for the IME caret anchor patch (ADR-0002 item 1, second layer).
+// Unit tests for the IME caret anchor patch.
 // xterm anchors the IME helper textarea / composition view to the PROTOCOL
 // cursor without checking visibility; agent TUIs hide the protocol cursor
 // for whole sessions and park it at their spinner, so the candidate window
@@ -7,11 +7,10 @@
 //   hidden + perceived caret    -> anchor both elements at the caret cell
 //     (the app-drawn caret the user sees, from the smooth-cursor adapter);
 //   hidden + no perceived caret -> STOCK protocol anchoring. (Freezing here
-//     stranded the anchor — the 2026-09-18 field regression: fresh sessions
-//     put it at the textarea's DOM default, screen top-left; post-commit
-//     revoke gaps left it on a just-overwritten cell, so the next
-//     composition covered committed text. Live probe: the protocol cursor
-//     tracks the insertion point during input phases.)
+//     stranded the anchor: fresh sessions put it at the textarea's DOM
+//     default, screen top-left; post-commit revoke gaps left it on a
+//     just-overwritten cell, so the next composition covered committed text.
+//     The protocol cursor tracks the insertion point during input phases.)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';

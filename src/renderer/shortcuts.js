@@ -1,14 +1,14 @@
-// ZTerm - 快捷键注册表 + 调度 + 自定义 UI + 数据目录/关于页（纯逻辑见 shortcut-utils.js，由 renderer.html 先加载）
+// ZTerm - shortcut registry + dispatch + customization UI + data directory/about page (pure logic lives in shortcut-utils.js, loaded first by renderer.html)
 // ── Keyboard shortcuts ──
 // Capture-phase handler for keys that terminal would otherwise eat
 // ── Keyboard shortcuts ──
-// 必须在 capture 阶段拦截：xterm 会把 F2/Ctrl+W/Ctrl+Tab 等键处理成转义序列
-// 并 stopPropagation，冒泡阶段的监听在终端聚焦时永远收不到。
+// Must intercept in the capture phase: xterm turns F2/Ctrl+W/Ctrl+Tab etc. into escape sequences
+// and calls stopPropagation, so bubble-phase listeners never fire while the terminal is focused.
 function _comboFromEvent(e) {
     return comboFromEvent(e);
 }
 
-// 默认快捷键绑定（用户自定义覆盖见 _settingsConfig.shortcuts）
+// Default shortcut bindings (user-defined overrides live in _settingsConfig.shortcuts)
 const DEFAULT_SHORTCUTS = {
     newTab: 'Ctrl+Shift+N',
     sshPanel: 'Ctrl+Shift+S',
@@ -60,8 +60,8 @@ const SHORTCUT_ACTIONS = {
         const tab = TabManager.getActive();
         if (!tab || tab.type === 'settings') return;
         if (TabManager.aliveCount() <= 1) {
-            // 至少保留一个标签页（ZTerm 不能全空）；用存活数而非 tabs.length，
-            // 快速连按时已有关闭中的 tab 还没 splice，长度守卫会被穿透
+            // Keep at least one tab (ZTerm must never be empty); guard on the alive count,
+            // not tabs.length — on rapid repeat a closing tab is not spliced yet, so a length guard leaks
             showToast('至少保留一个标签页');
             return;
         }
@@ -74,8 +74,8 @@ const SHORTCUT_ACTIONS = {
             const focused = getAllPanes(tab).find(p => p.focused);
             if (focused) TabManager._closePane(tab.id, focused.id);
         } else if (!document.querySelector('.overlay.open') && TabManager.aliveCount() > 1) {
-            // 不在分屏（单 terminal 或刚从分屏退出只剩 1 个 pane 后）：等同 Ctrl+W 关闭当前 tab
-            // 与 tabby 行为一致（存活数守卫防止连按穿透保留最后一个 tab 的约束）
+            // Not in a split (single terminal, or down to one pane after leaving a split): act like
+            // Ctrl+W and close the current tab — matches tabby (alive-count guard keeps the last tab)
             TabManager.closeTab(tab.id);
         }
     },
@@ -90,7 +90,7 @@ const SHORTCUT_ACTIONS = {
     splitH: () => { if (!document.querySelector('.overlay.open')) TabManager.splitHorizontal(); },
     splitV: () => { if (!document.querySelector('.overlay.open')) TabManager.splitVertical(); },
     syncInput: () => {
-        // 分屏同步输入开关（Tabby 同款）：开启后输入广播到当前 tab 的所有 pane
+        // Split sync-input toggle (same as Tabby): when on, input broadcasts to all panes of the current tab
         const tab = TabManager.getActive();
         if (!tab || !tab.splitRoot) return;
         tab.syncInput = !tab.syncInput;
@@ -107,7 +107,7 @@ const SHORTCUT_ACTIONS = {
         }
     },
     extractPane: () => {
-        // 提取当前聚焦 pane 为独立 tab（无分屏时无操作）
+        // Extract the focused pane into its own tab (no-op without a split)
         if (document.querySelector('.overlay.open')) return;
         const tab = TabManager.getActive();
         if (tab && tab.splitRoot) {
@@ -116,7 +116,7 @@ const SHORTCUT_ACTIONS = {
         }
     },
     nextPane: () => {
-        // 分屏内循环聚焦下一个 pane（getAllPanes 深度优先 = 视觉左→右、上→下）
+        // Cycle focus to the next pane in the split (getAllPanes is depth-first = visual left→right, top→bottom)
         if (document.querySelector('.overlay.open')) return;
         const tab = TabManager.getActive();
         if (!tab || !tab.splitRoot) return;
@@ -155,10 +155,10 @@ const SHORTCUT_ACTIONS = {
     commandPalette: () => {
         const palette = document.getElementById('overlay-palette');
         if (palette && palette.classList.contains('open')) {
-            closePalette();  // toggle：面板已开 → 关闭
+            closePalette();  // toggle: palette already open -> close it
             return;
         }
-        if (document.querySelector('.overlay.open')) return;  // 其他 overlay 打开时不响应
+        if (document.querySelector('.overlay.open')) return;  // ignore while another overlay is open
         openPalette();
     },
     cloneTab: () => {
@@ -262,7 +262,7 @@ const SHORTCUT_ACTIONS = {
                 const s = snapshot(adapter);
                 // WHY the cursor is (not) drawable — via the PUBLIC buffer API:
                 // term._core.buffer has no '.active' (that path threw every 100ms
-                // and silently emptied this timeline in the field).
+                // and silently emptied this timeline).
                 const core = tab && tab.term ? tab.term._core : null;
                 const buf = tab && tab.term ? tab.term.buffer : null;
                 const flags = {
@@ -411,7 +411,7 @@ function startShortcutCapture(actionId, btn) {
     const onKey = (e) => {
         e.preventDefault(); e.stopPropagation();
         if (e.key === 'Escape') { finish(null); return; }
-        if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return; // 等待非修饰键
+        if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return; // wait for a non-modifier key
         finish(_comboFromEvent(e));
     };
     const finish = (combo) => {
@@ -432,7 +432,7 @@ function startShortcutCapture(actionId, btn) {
             }
         }
         renderShortcutsList();
-        // 顶栏菜单的快捷键提示要立即跟随用户最新绑定
+        // The top-bar menu's shortcut hints must immediately follow the user's latest bindings
         if (typeof updateMenuShortcuts === 'function') updateMenuShortcuts();
     };
     document.addEventListener('keydown', onKey, true);
@@ -456,7 +456,7 @@ function persistShortcuts() {
     ipcRenderer.send('save-shortcuts', _settingsConfig.shortcuts || {});
 }
 
-// ── Data directory (settings → 关于) ──
+// ── Data directory (settings → About) ──
 async function loadDataDirInfo() {
     const el = document.getElementById('data-dir-path');
     if (!el) return;
@@ -466,7 +466,7 @@ async function loadDataDirInfo() {
     document.getElementById('data-dir-reset').style.display = info.isCustom ? '' : 'none';
 }
 
-// ── About info（主进程动态读取版本号）──
+// ── About info (version numbers read dynamically by the main process) ──
 async function loadAboutInfo() {
     try {
         const info = await ipcRenderer.invoke('get-about-info');
@@ -660,7 +660,7 @@ async function checkForUpdates() {
 }
 
 function goUpdateReleaseNotes() {
-    // Unified open + categorized failure toast (ADR-0003): release
+    // Unified open + categorized failure toast: release
     // notes go through the same backend validation as terminal links.
     if (window.__updateUrl) LinkOpen.invokeOpenUrl(window.__updateUrl);
 }
@@ -751,24 +751,24 @@ async function resetDataDir() {
 // Browser-accelerator guard (WebView2 gap): see browserAcceleratorDenied in
 // shortcut-utils.js. preventDefault marks the key consumed in every focus
 // context, including the textarea-blurred corner case that opened the Edge
-// downloads hub in the field. Combos ZTerm binds itself are already consumed
+// downloads hub. Combos ZTerm binds itself are already consumed
 // by the dispatcher below; the denylist is only for Edge-OOUI keys.
 document.addEventListener('keydown', e => {
     if (browserAcceleratorDenied(e)) e.preventDefault();
 }, true);
 
 document.addEventListener('keydown', e => {
-    if (_shortcutCapture) return; // 正在录制新快捷键，交给录制监听器处理
-    // Escape：弹窗/最大化恢复的优先级最高，其余情况放行给 xterm（vim 等程序要用）
+    if (_shortcutCapture) return; // recording a new shortcut; leave it to the capture listener
+    // Escape: closing popups / restoring a maximized pane has top priority; otherwise pass through to xterm (vim etc. need it)
     if (e.key === 'Escape') {
-        // 内联编辑输入框（SFTP 路径/mkdir、分组重命名等）的 Escape
-        // 应由输入框自己处理（取消编辑），不能在这里关掉整个 overlay。
-        // 本监听器是 capture 阶段，先于 input 的 keydown，必须在这里放行。
+        // Escape inside an inline-edit input (SFTP path/mkdir, group rename, etc.)
+        // must be handled by the input itself (cancel edit), not close the whole overlay.
+        // This listener runs in the capture phase, before the input's keydown, so it must pass through here.
         if (e.target && e.target.classList && e.target.classList.contains('inline-edit')) {
             return;
         }
-        // combo dropdown menu 开着时（SSH/QC 编辑面板的分组字段），Escape 应先关 menu
-        // 而非关整个编辑表单；input keydown 已 stopPropagation（bubble），这里负责放行
+        // While a combo dropdown menu is open (group field in the SSH/QC edit panels), Escape
+        // closes just the menu, not the whole edit form; the input keydown already stopPropagations (bubble), so pass through here
         if (document.querySelector('.dd-menu.open')) {
             return;
         }
@@ -811,7 +811,7 @@ document.addEventListener('keydown', e => {
         return;
     }
 
-    // 在输入框/下拉框里打字时不触发全局快捷键（xterm 的辅助输入框除外）
+    // Do not trigger global shortcuts while typing in an input/select (except xterm's helper textarea)
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')
         && !(t.classList && t.classList.contains('xterm-helper-textarea'))) return;

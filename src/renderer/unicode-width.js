@@ -5,7 +5,7 @@
 // all plane-1 emoji. Modern TUIs (kimi via string-width, ratatui apps, WT,
 // wezterm) lay out emoji-presentation codepoints as 2 cells, so their
 // absolute CUP writes leave the cell right of the glyph un-erased while the
-// 2-cell glyph overflows into it (field capture: kimi's tip line writes
+// 2-cell glyph overflows into it (observed with kimi: its tip line writes
 // U+1F311 at col 28 then jumps to col 31; stale 'p' / '─' showed inside the
 // moon glyph). The base tables were transcribed from the vendored bundle.
 // BMP width-1 characters classified as wide by the installed Tabby's Unicode11

@@ -7,26 +7,26 @@
 // Agent TUIs (kimi thinking/working) hide the protocol cursor for the whole
 // session and park it next to their spinner on every frame, so:
 //   - stock behavior: the candidate window chases the spinner park
-//     (field report: candidate flies to the thinking line while typing);
-//   - naive "freeze while hidden" (first fix, field regression 2026-09-18):
-//     kimi never un-hides the protocol cursor, so the anchor stranded at the
-//     textarea's DOM default (screen top-left) for the entire session.
+//     (the candidate flies to the thinking line while typing);
+//   - naive "freeze while hidden": kimi never un-hides the protocol cursor,
+//     so the anchor strands at the textarea's DOM default (screen top-left)
+//     for the entire session.
 // The caret the user perceives in those TUIs is the app-drawn one, already
 // tracked by the smooth-cursor adapter (xterm-smooth-cursor.js). Policy:
 //   - protocol cursor visible            -> stock xterm anchoring;
 //   - hidden + adapter-owned caret known -> anchor both elements at THAT cell;
 //   - hidden + no known caret            -> STOCK protocol anchoring.
-// The third branch used to freeze instead (field regression 2026-09-18):
-// kimi builds that paint no caret (and every session before the adapter's
-// two-unit trust engages, and every revoke gap after a commit) left the
-// anchor stranded — at the textarea's DOM default (screen top-left) on a
-// fresh session, or on a just-overwritten cell after a commit, so the next
-// composition covered the committed text. Live probe evidence
-// (scripts/_ime-anchor-probe.mjs): during input phases the protocol cursor
-// tracks the insertion point exactly (per-commit advance, constant input
-// row), so stock anchoring is correct there; the known gap is composing
-// during a spinner/thinking animation with NO trusted caret — stock then
-// follows the animation park, i.e. the pre-fix baseline, never worse.
+// The third branch must not freeze either: kimi builds that paint no caret
+// (and every session before the adapter's two-unit trust engages, and every
+// revoke gap after a commit) would leave the anchor stranded — at the
+// textarea's DOM default (screen top-left) on a fresh session, or on a
+// just-overwritten cell after a commit, so the next composition would cover
+// the committed text. Probe evidence: during input phases the protocol
+// cursor tracks the insertion point exactly (per-commit advance, constant
+// input row), so stock anchoring is correct there; the known gap is
+// composing during a spinner/thinking animation with NO trusted caret —
+// stock then follows the animation park, i.e. unpatched behavior, never
+// worse.
 //
 // This patches xterm internals from the outside (_core._syncTextArea,
 // _core._compositionHelper.updateCompositionElements, coreService

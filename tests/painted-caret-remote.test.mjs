@@ -1,10 +1,10 @@
-// Remote-shaped stream guards after ADR-0001 B1 removed the heuristic
-// painted-caret takeover. These byte shapes came from real dsh-tui-in-herdr
-// captures (2026-09-14); under B1 nothing is deleted, no second cursor is
-// forced, and apps that manage their own cursor (nvim-style SHOWs) are
-// untouched. The transport-level guarantee (SSH streams never enter the
-// repair at all) lives in caret-takeover-policy.test.mjs; this file pins
-// the filter's own behavior on the same shapes for LOCAL sessions.
+// Guards for remote-shaped streams: the heuristic painted-caret takeover was
+// removed, so nothing is deleted and no second cursor is forced. These byte
+// shapes mirror a dsh-tui session running inside herdr; apps that manage
+// their own cursor (nvim-style SHOWs) are untouched. The transport-level
+// guarantee (SSH streams never enter the repair at all) lives in
+// caret-takeover-policy.test.mjs; this file pins the filter's own behavior
+// on the same shapes for LOCAL sessions.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';

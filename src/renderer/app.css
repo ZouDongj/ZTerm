@@ -1,37 +1,37 @@
-/* ZTerm - 全部样式（拆自 renderer.html <style>，未改） */
-/* Design C1v2-A (Contrast Float)：窗口/pane/浮层三级色差 + 悬浮卡片 + 零分割线 */
+/* ZTerm - all styles (extracted unchanged from renderer.html <style>) */
+/* Design C1v2-A (Contrast Float): three-level color separation for window/pane/overlay + floating cards + zero divider lines */
 :root{
   --accent-rgb:97,175,239;--accent-contrast:#10161d;--term-bg:#282c34;
-  --surface-win:#12141b;      /* 窗口底座 */
-  --surface-float:#2a303e;    /* 浮层（弹窗/面板/设置页） */
-  --surface-card:#343b4b;     /* 设置卡片（比浮层高一级） */
-  --text-1:#abb2bf;           /* 主文字（保持原基准，避免刺眼） */
-  --text-2:#a2aab7;             /* 次级文字：win/float/card 三背景 >=4.5:1（8.1/5.9/4.8）*/
-  --text-3:#6a7280;             /* 弱化：仅限图标、占位符与装饰，不承载正常信息 */
+  --surface-win:#12141b;      /* window base */
+  --surface-float:#2a303e;    /* overlay layer (dialogs/panels/settings page) */
+  --surface-card:#343b4b;     /* settings card (one level above the overlay) */
+  --text-1:#abb2bf;           /* primary text (kept at the original baseline to avoid glare) */
+  --text-2:#a2aab7;             /* secondary text: >=4.5:1 contrast on win/float/card backgrounds (8.1/5.9/4.8) */
+  --text-3:#6a7280;             /* de-emphasized: icons, placeholders and decoration only, never carries regular information */
   --shadow-pane:0 4px 16px rgba(0,0,0,0.28);
   --shadow-float:0 12px 32px rgba(0,0,0,0.35);
 }
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-/* 表单控件默认不继承字体（textarea 是 UA 默认 monospace），统一跟随界面字体 */
+/* Form controls do not inherit fonts by default (textarea falls back to UA monospace); make them follow the UI font */
 textarea{font-family:inherit}
 html,body{background:var(--surface-win);margin:0;padding:0;overflow:hidden;width:100vw;height:100vh}
 body{display:flex;justify-content:center;align-items:center;min-height:100vh;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
 .window{width:100vw;height:100vh;background:var(--surface-win);display:flex;flex-direction:column;overflow:hidden}
-/* 启动动画：窗口恢复状态并显示后播放一次（借鉴 Tabby：纯淡入 ease-out，无缩放） */
+/* Startup animation: plays once after the window state is restored and shown (borrowing Tabby's approach: pure ease-out fade-in, no scaling) */
 .window.win-in{animation:zterm-window-in 0.4s ease-out}
 @keyframes zterm-window-in{from{opacity:0}to{opacity:1}}
 
-/* 启动界面：A 版 —— 无边框，渐变底 + 纯 Z 形方块；绿点沿 Z 单向循环移动 */
+/* Startup splash, variant A: borderless, gradient background + plain Z-shaped blocks; the green dot loops along the Z in one direction */
 .startup-splash{position:fixed;inset:0;background:linear-gradient(135deg,#131624,#0a0c12);display:flex;align-items:center;justify-content:center;z-index:9999}
-/* 图标弹出：缩放 + 淡入（用户要的"放大感"） */
+/* Logo pop-in: scale + fade-in (the "grow" feel requested for launch) */
 .startup-splash .startup-logo{animation:splash-pop 0.45s cubic-bezier(0.2,0.8,0.3,1.1)}
 @keyframes splash-pop{from{opacity:0;transform:scale(0.82)}to{opacity:1;transform:scale(1)}}
-/* 绿点加载动画：一格一格走，变色过渡柔和 */
+/* Green-dot loading animation: advances cell by cell with a soft color transition */
 .startup-splash .cell{transition:fill 0.2s ease-out}
 .startup-splash .cell.loading{fill:#8affa0}
 .startup-splash.leaving{opacity:0;transition:opacity 0.4s ease-out}
-/* 启动页在 .window 之前，兄弟选择器(.window ~ .startup-splash)不可达：
-   改由 body.no-animations 锚定（main.js 在动画关闭时同步加类） */
+/* The splash precedes .window, so the sibling selector (.window ~ .startup-splash)
+   cannot reach it; anchor on body.no-animations instead (main.js adds that class when animations are off) */
 body.no-animations .startup-splash.leaving{transition:none}
 body.no-animations .startup-splash .startup-logo{animation:none}
 body.no-animations .startup-splash .cell{transition:none}
@@ -44,12 +44,12 @@ body.no-animations .startup-splash .cell{transition:none}
 
 /* Titlebar */
 .titlebar{height:38px;background:var(--surface-win);display:flex;align-items:center;padding:0 0 0 12px;flex-shrink:0}
-/* Tauri 无边框拖拽区域 */
+/* Tauri frameless drag region */
 [data-tauri-drag-region]{-webkit-app-region:drag}
 #tabbar{display:flex;align-items:center;gap:2px;flex:1;overflow:hidden;min-width:0;contain:layout style;will-change:transform}#tabbar *{-webkit-app-region:no-drag}
 .tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;border-radius:12px;transition:background 0.12s,color 0.12s;white-space:nowrap;height:28px;max-width:180px;-webkit-app-region:no-drag;user-select:none}
-/* Semantic action buttons inside tabs: UA reset + ADR-0001 stable hit
-   regions. Every action lives in a permanently-reserved slot; hover/focus
+/* Semantic action buttons inside tabs: UA reset + stable hit regions.
+   Every action lives in a permanently-reserved slot; hover/focus
    toggles ONLY painted visibility (opacity + pointer-events), never the
    layout rect of the tab or its neighbors. pointer-events:none while
    hidden keeps invisible actions from swallowing clicks; :focus-visible
@@ -76,14 +76,15 @@ body.no-animations .startup-splash .cell{transition:none}
 .tab-close:hover{opacity:1!important;color:#f19b92}
 /* ── Tab drag-to-split ── */
 .tab.dragging{opacity:0.35}
-/* 拖拽中：全局抓取光标 + 屏蔽其它元素 hover/选中 */
+/* While dragging: global grabbing cursor + suppress hover/selection on other elements */
 body.tab-dragging{user-select:none}
-/* 拖拽中的 tab 快照（对齐 HTML5 默认 drag image）：
-   必须与指针刚性同步——禁用 .tab 的 transition，否则位置变化被
-   0.2s 过渡平滑，快速拖动时拖影永远滞后于鼠标 */
+/* Drag snapshot of a tab (aligned with the HTML5 default drag image):
+   must track the pointer rigidly — the .tab transition is disabled, otherwise position changes get
+   smoothed by the 0.2s transition and the drag ghost always lags behind the mouse on fast drags */
 .tab-drag-image{position:fixed;z-index:9999;pointer-events:none;opacity:0.85;box-shadow:var(--shadow-float);margin:0;transition:none!important}
-/* 拖拽期间的全屏拦截层：接住所有鼠标事件，屏蔽下方元素的 hover/交互；
-   光标固定为箭头（HTML5 拖拽时光标由浏览器接管为箭头） */
+/* Full-screen interception layer during drag: catches all mouse events and blocks
+   hover/interaction on elements below; the cursor stays an arrow (the browser takes
+   over the cursor as an arrow during HTML5 drag) */
 #tab-drag-overlay{position:fixed;inset:0;z-index:9998;cursor:default}
 .tab.drag-over-left{box-shadow:inset 2px 0 0 0 rgba(var(--accent-rgb),0.6)}
 .tab.drag-over-right{box-shadow:inset -2px 0 0 0 rgba(var(--accent-rgb),0.6)}
@@ -97,8 +98,8 @@ body.tab-dragging{user-select:none}
    (max-width/padding/margin) here — in WebView2 a 200ms layout transition
    on the tab bar stalls the host Win32 message pump for seconds, so real
    mouse hover (WndProc) freezes right after closing a tab; CDP-synthesized
-   events bypass the pump, which hid this from every earlier probe. The
-   slot is held during the fade and collapses when doRemove splices the
+   events bypass the pump, so synthetic input never reproduces the freeze.
+   The slot is held during the fade and collapses when doRemove splices the
    tab (a small one-shot reflow at this tab count). */
 .tab.tab-exit{opacity:0;overflow:hidden;pointer-events:none;transition:opacity 0.2s cubic-bezier(0.05, 0.7, 0.1, 1)}
 @keyframes bellFlash{0%,100%{background:rgba(255,183,77,0)}50%{background:rgba(255,183,77,0.25)}}
@@ -118,19 +119,19 @@ body.tab-dragging{user-select:none}
    .tab-reconnect: the slot is always reserved, hover/focus reveals it by
    opacity only — the earlier zero-width-to-20px max-width hover animation
    reflowed the whole tab bar per frame and fed an event→layout→event loop
-   that could pin the main thread (ADR-0001). Never animate layout here. */
+   that could pin the main thread. Never animate layout here. */
 .tab-reconnect-normal{font-size:12px;margin-left:2px;cursor:pointer;color:var(--text-2);opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
 .tab:hover .tab-reconnect-normal,.tab-reconnect-normal:focus-visible{opacity:0.5;pointer-events:auto}
 .tab-reconnect-normal:hover{opacity:1!important;color:rgb(var(--accent-rgb))}
 #btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;font-size:16px;transition:all 0.12s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
 #btn-add-tab:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 
-/* 窗口控件按钮（Segoe MDL2 Assets 原生图标） */
+/* Window control buttons (Segoe MDL2 Assets native icons) */
 .win-controls{display:flex;align-items:stretch;flex-shrink:0;height:100%;-webkit-app-region:no-drag}
 .win-ctrl{width:46px;height:100%;border:none;background:transparent;color:var(--text-2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.12s;padding:0;font-family:'Segoe MDL2 Assets','Segoe Fluent Icons',sans-serif;font-size:10px}
 .win-ctrl:hover{background:rgba(var(--accent-rgb),0.12);color:var(--text-1)}
 .win-close:hover{background:#c42b1c;color:#fff}
-/* Main：无底座圆角框，pane 直接悬浮在窗口上 */
+/* Main: no base rounded frame; panes float directly on the window */
 .main{flex:1;display:flex;position:relative;background:transparent;margin:2px 12px 8px}
 /* With the statusbar visible the bar itself fills the gap below; 8px reads
    right. Hidden, the terminal meets the window edge directly and needs the
@@ -148,8 +149,9 @@ body.hide-statusbar .main{margin-bottom:12px}
 .term-wrap.drop-target.drop-bottom::before{bottom:0;left:0;right:0;height:30%;background:linear-gradient(0deg,rgba(var(--accent-rgb),0.28),transparent)}
 .xterm{height:100%;width:100%}
 .xterm .xterm-viewport{width:auto !important;left:0 !important;right:-8px !important}
-/* 分屏 pane 无 padding（pane-body 用 left/right:10px 定位），全局 right:-8px 会让滚动条
-   超出 pane-body 被裁掉而消失；分屏内覆盖为 right:0 让滚动条贴 pane-body 右边显示 */
+/* Split panes have no padding (pane-body sits at left/right:10px), so the global right:-8px would
+   push the scrollbar outside pane-body where it gets clipped away; override to right:0 inside
+   splits so the scrollbar hugs the right edge of pane-body */
 .pane-body .xterm .xterm-viewport{right:0 !important}
 .xterm-decoration-overview-ruler{display:none !important}
 .xterm-link{text-decoration:underline;cursor:pointer}
@@ -173,7 +175,7 @@ body.hide-statusbar .main{margin-bottom:12px}
 .split-spanner.h::after{width:36px;height:2px}
 .split-spanner.v:hover::after{background:rgba(var(--accent-rgb),0.3);height:56px}
 .split-spanner.h:hover::after{background:rgba(var(--accent-rgb),0.3);width:56px}
-/* Pane 拖拽排序：spanner 作为 drop zone */
+/* Pane drag reorder: spanner acts as the drop zone */
 .split-spanner.drop-zone::after{background:rgba(var(--accent-rgb),0.2);transition:all 0.2s}
 .split-spanner.drop-zone.v::after{width:4px;height:80px}
 .split-spanner.drop-zone.h::after{width:80px;height:4px}
@@ -191,22 +193,22 @@ body.hide-statusbar .main{margin-bottom:12px}
 .pane-header[draggable="true"]{cursor:grab}
 .pane-header[draggable="true"]:active{cursor:grabbing}
 .pane-body{position:absolute;top:32px;left:10px;right:10px;bottom:10px;overflow:hidden}
-/* Drop target styling — tab 拖拽分屏的方向提示 */
+/* Drop target styling — direction hint for tab drag-to-split */
 .split-pane.drop-target{overflow:visible}
 .split-pane.drop-target::before{content:'';position:absolute;border-radius:6px;pointer-events:none;z-index:20;transition:opacity 0.12s}
 .split-pane.drop-target.drop-left::before{top:0;left:0;bottom:0;width:28%;background:linear-gradient(90deg,rgba(var(--accent-rgb),0.2),transparent)}
 .split-pane.drop-target.drop-right::before{top:0;right:0;bottom:0;width:28%;background:linear-gradient(270deg,rgba(var(--accent-rgb),0.2),transparent)}
 .split-pane.drop-target.drop-top::before{top:0;left:0;right:0;height:28%;background:linear-gradient(180deg,rgba(var(--accent-rgb),0.2),transparent)}
 .split-pane.drop-target.drop-bottom::before{bottom:0;left:0;right:0;height:28%;background:linear-gradient(0deg,rgba(var(--accent-rgb),0.2),transparent)}
-/* Swap target styling — pane 交换拖拽，整个目标 pane 高亮 */
+/* Swap target styling — pane swap drag highlights the entire target pane */
 .split-pane.swap-target::before{content:'';position:absolute;inset:0;border-radius:12px;background:rgba(var(--accent-rgb),0.15);border:2px solid rgba(var(--accent-rgb),0.5);pointer-events:none;z-index:20;transition:opacity 0.12s}
 
-/* Pane 拖拽重排 drop zones（未悬停不可见；悬停显示虚线框，方案 E） */
+/* Pane drag-reorder drop zones (invisible when not hovered; hovering shows a dashed frame, variant E) */
 #pane-drop-layer{position:absolute;inset:0;z-index:20;pointer-events:none}
 .pane-drop-zone{position:absolute;pointer-events:auto;background:transparent;transition:background 0.12s,border-color 0.12s}
 .pane-drop-zone.drag-over{background:rgba(var(--accent-rgb),0.14);border:1px solid rgba(var(--accent-rgb),0.55);border-radius:8px}
 .pane-drag-ghost{position:fixed;z-index:9999;pointer-events:none;background:var(--surface-float);border:1px solid rgba(var(--accent-rgb),0.4);border-radius:10px;padding:5px 12px;font-size:12px;color:var(--text-1);box-shadow:var(--shadow-float);opacity:0.9;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* 拖拽中全局抓取光标（覆盖终端的 I-beam） */
+/* Global grabbing cursor during drag (overrides the terminal's I-beam) */
 body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 
 /* ── Search bar ── */
@@ -249,7 +251,7 @@ body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
 ::-webkit-scrollbar-corner{background:transparent}
 
 /* ── Settings page ── */
-/* 设置页跟随终端配色方案（与 pane bubble 同底色），窗口/浮层三级阶梯保持不变 */
+/* Settings page follows the terminal color scheme (same base color as pane bubbles); the window/overlay three-level ladder stays unchanged */
 .settings-pane{position:absolute;top:0;left:0;right:0;bottom:0;display:none;flex-direction:column;background:var(--term-bg);overflow:hidden;border-radius:12px;transition:background 0.25s}
 .settings-pane.active{display:flex}
 .settings-header{height:46px;display:flex;align-items:center;padding:0 16px;gap:10px;flex-shrink:0}
@@ -411,20 +413,20 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .panel-footer{display:flex;align-items:center;gap:12px;padding:12px 20px 14px;font-size:12px;color:var(--text-2);flex-shrink:0}
 .panel-footer kbd{background:rgba(var(--accent-rgb),0.12);padding:2px 7px;border-radius:5px;font-family:inherit;font-size:10px;color:#9cc8ee}
 
-/* Quick Commands + Palette（与会话选择器同一视觉语言：ss-header/ss-search/
-   ss-results/ss-footer + 选型行） */
+/* Quick Commands + Palette (same visual language as the session selector:
+   ss-header/ss-search/ss-results/ss-footer + option rows) */
 .qc-panel{width:500px;max-width:calc(100vw - 32px);max-height:460px;display:flex;flex-direction:column;overflow:hidden}
 .palette-panel{width:500px;max-width:calc(100vw - 32px);max-height:620px;display:flex;flex-direction:column;overflow:hidden}
 .qc-panel .ss-results{max-height:260px;min-height:90px}
 .palette-panel .ss-results{max-height:480px;min-height:90px}
 .palette-empty{display:none;padding:28px 16px;text-align:center;color:var(--text-2);font-size:12px}
-/* V3 分组标题（快捷命令/命令面板共用），镜像 .ss-section-label */
+/* V3 group title (shared by quick commands and the command palette), mirrors .ss-section-label */
 .v3-section{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--text-3);min-height:29px;padding:1px 13px 5px;user-select:none}
 .v3-section:not(:first-child){margin-top:12px;padding-top:3px}
-/* V3 表项，镜像 .ss-row：透明边框预留选中描边，左侧 accent 条标示选中。
-   选中态的三处视觉变化（背景/描边/指示条）共用一段 70ms ease-out 同步过渡；
-   指示条常驻渲染、用 opacity 渐显——伪元素随选中态创建/销毁是无法过渡的，
-   异步出现正是快速切换时“拖沓感”的来源。 */
+/* V3 list item, mirrors .ss-row: a transparent border reserves space for the selected outline, and a left accent bar marks selection.
+   The selected state's three visual changes (background/border/indicator) share one synchronized 70ms ease-out transition; the indicator
+   is always rendered and fades in via opacity — a pseudo-element created/destroyed with the selected state cannot transition, and
+   appearing asynchronously is exactly the source of the "laggy" feel during fast switching. */
 .v3-item{position:relative;display:flex;align-items:center;gap:11px;padding:9px 11px;border:1px solid transparent;border-radius:7px;cursor:pointer;user-select:none;margin-bottom:1px;transition:background-color .07s ease-out,border-color .07s ease-out}
 .v3-item:hover:not([data-selected]){background:rgba(255,255,255,.045)}
 .v3-item[data-selected]{background:rgba(var(--accent-rgb),.14);border-color:rgba(var(--accent-rgb),.28)}
@@ -436,7 +438,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .v3-cmd{font-size:12px;color:var(--text-2);max-width:55%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .v3-kbd{font-size:10px;color:var(--text-3);background:rgba(255,255,255,.06);padding:2px 7px;border-radius:5px;flex-shrink:0;font-family:inherit}
 
-/* Panel items（会话选择/SSH 管理器等） */
+/* Panel items (session selector / SSH manager etc.) */
 /* ── Session selector (new-session overlay, extends prototype A; container-scoped) ── */
 .session-selector{width:min(548px,calc(100vw - 32px));max-height:calc(100vh - 83px);display:flex;flex-direction:column;overflow:hidden}
 .ss-header{display:flex;align-items:center;justify-content:space-between;padding:20px 21px 14px;flex-shrink:0;user-select:none}
@@ -646,9 +648,9 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ssh-mgr-empty-actions{margin-top:14px}
 
 /* ── Settings host only: section titles + one settings-card per group ──
-   (design/ssh-settings-card-design.md; the overlay manager stays flat).
-   Shared by the SSH and quick-commands settings pages: both mount the
-   ssh-mgr-* structure inside their own .settings-card-list container. */
+   (the overlay manager stays flat). Shared by the SSH and quick-commands
+   settings pages: both mount the ssh-mgr-* structure inside their own
+   .settings-card-list container. */
 .settings-page-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:4px}
 /* Chained to .btn-primary (defined later in this file) so the 9px radius and
    32px height actually win the cascade. */
@@ -709,25 +711,25 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .form-group select:not(.styled-select){appearance:none;cursor:pointer}
 .form-group select:not(.styled-select) option{background:var(--surface-float);color:var(--text-1)}
 
-/* SSH 已配密码状态行：视觉与 input 框完全一致（同高、同宽、同圆角、同字体色） */
+/* SSH saved-password status row: visually identical to an input box (same height, width, border radius, and text color) */
 .ssh-pwd-status{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:10px;padding:8px 12px;font-size:12px;color:var(--text-1);transition:all 0.12s;line-height:1.2;min-height:36px}
 .ssh-pwd-status:hover{background:rgba(255,255,255,0.07)}
 .ssh-pwd-status .ssh-pwd-status-text{flex:1;color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2}
-/* 文字链式按钮：无边框/无背景 + 强调色 + 紧凑 padding，
-   高度 = 12.5×1.2 = 15px（和 input 文字同高），容器高度与 input 完全一致 34px */
+/* Text-link button: no border/background + accent color + tight padding;
+   height = 12.5×1.2 = 15px (same as the input text), container height exactly matches the input's 34px */
 .ssh-pwd-status .btn-outline{background:transparent;color:#8fc1ee;border:none;padding:0 4px;font-size:12px;line-height:1.2;border-radius:0}
 .ssh-pwd-status .btn-outline:hover{background:rgba(var(--accent-rgb),0.12);color:#8fc1ee}
 
-/* 隐藏浏览器默认密码可见按钮（使用自定义 SVG 替代） */
+/* Hide the browser's built-in password reveal button (replaced with a custom SVG) */
 #ssh-edit-password::-ms-reveal{display:none}
 
-/* 密码输入框内联操作按钮（👁 ✓ ×，嵌在右内侧，顺序：眼44 存24 消4） */
+/* Password input inline action buttons (👁 ✓ ×, nested inside the right edge, order: eye 44 / save 24 / cancel 4) */
 .ssh-pwd-inline-act{position:absolute;top:50%;transform:translateY(-50%);width:20px;height:20px;border-radius:5px;border:none;background:transparent;color:var(--text-3);cursor:pointer;display:none;align-items:center;justify-content:center;transition:all 0.12s;padding:0}
 .ssh-pwd-inline-act:hover{background:rgba(var(--accent-rgb),0.14);color:#8fc1ee}
-/* 显示明文密码已开启：持久高亮（略强于 hover） */
+/* Plaintext password visible: persistent highlight (slightly stronger than hover) */
 .ssh-pwd-inline-act.active{background:rgba(var(--accent-rgb),0.2);color:#8fc1ee}
 .ssh-pwd-inline-act.show{display:flex}
-/* × 取消 hover 变红 */
+/* × cancel button turns red on hover */
 #ssh-pwd-inline-cancel:hover{color:#f19b92;background:rgba(241,155,146,0.12)}
 
 /* Custom Dropdown (replaces native select, from prototype) */
@@ -791,7 +793,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .toast.show{opacity:1}
 .toast.error{background:#f2b8b5;color:#5f2120}
 .toast.error::before{mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'/%3E%3Cline x1='6' y1='6' x2='18' y2='18'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'/%3E%3Cline x1='6' y1='6' x2='18' y2='18'/%3E%3C/svg%3E")}
-/* Terminal link hover tip (ADR-0003): real target + gesture hint */
+/* Terminal link hover tip: shows the real target URL plus a gesture hint */
 .link-tip{position:fixed;z-index:90;max-width:480px;background:var(--surface-float);color:var(--text-1);border:1px solid var(--surface-card);border-radius:6px;padding:6px 10px;font-size:12px;line-height:1.5;pointer-events:none;opacity:0;transition:opacity 0.12s;word-break:break-all;box-shadow:var(--shadow-float)}
 .link-tip.show{opacity:1}
 .link-tip-target{display:block;font-family:monospace}

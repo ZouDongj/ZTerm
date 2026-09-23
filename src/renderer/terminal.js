@@ -1,5 +1,5 @@
-// ZTerm - 终端创建/接线/搜索/同步输入（拆自 renderer.html，纯代码搬运，未改逻辑）
-// 渲染引擎：xterm.js + WebGL（libghostty WASM 实验引擎已移除）
+// ZTerm - terminal creation/wiring/search/sync-input (extracted verbatim from renderer.html, logic unchanged)
+// Rendering engine: xterm.js + WebGL (the experimental libghostty WASM engine has been removed)
 
 // ── Shared: fit terminal + preserve scroll-to-bottom ──
 function _fitWithScroll(term, fitAddon, parentEl) {
@@ -19,9 +19,11 @@ function _fitWithScroll(term, fitAddon, parentEl) {
     }
 }
 
-// 布局动画（200ms）结束后的尺寸结算：
-// onResize 在 _layoutTime 后 300ms 内会被抑制（terminal.js 内两处），动画结束的最终尺寸会落在
-// 抑制窗口里被丢弃，导致后端停留旧尺寸（分屏后 nvim 界面混乱）。这里在 320ms 后统一重 fit 并显式上报。
+// Size settlement after the layout animation (200ms) ends:
+// onResize is suppressed for 300ms after _layoutTime (two places in terminal.js), so the
+// animation's final size falls inside the suppression window and is dropped, leaving the
+// backend stuck at the old size (nvim UI garbled after splitting). Re-fit and explicitly
+// report the size once after 320ms.
 function _scheduleSettleResize(tab) {
     clearTimeout(tab._resizeSettleTimer);
     tab._resizeSettleTimer = setTimeout(() => {
@@ -29,7 +31,7 @@ function _scheduleSettleResize(tab) {
             getAllPanes(tab).forEach(p => {
                 if (p.term && p.fitAddon) {
                     const body = document.getElementById('pane-body_' + p.id);
-                    // 0 尺寸（隐藏 tab 的 pane）不 fit 也不发——否则会把初始 80x24 错误地下发给后端
+                    // Zero size (pane of a hidden tab): neither fit nor send — otherwise the initial 80x24 would be wrongly pushed to the backend
                     if (!body || body.clientWidth === 0 || body.clientHeight === 0) return;
                     _fitWithScroll(p.term, p.fitAddon, body);
                     if (p.tabId && p.term.cols && p.term.rows) {
@@ -56,8 +58,9 @@ function setupWrapResizeObserver(wrap, tab) {
         if (rafPending) return;
         rafPending = true;
         requestAnimationFrame(() => {
-            // _windowResizing：窗口拖拽 resize 期间抑制 fit，停止后由
-            // split.js 的 resize 结算统一 fit（避免每帧全屏重绘导致抖动）
+            // _windowResizing: suppress fit while the window is being drag-resized;
+            // after the drag stops, split.js's resize settlement fits everything
+            // at once (avoids the jitter of a full-viewport repaint every frame)
             if (!_spannerDrag && !TabManager._maximizing && !_windowResizing) _fitWithScroll(tab.term, tab.fitAddon, inner);
             rafPending = false;
         });
@@ -173,8 +176,8 @@ function _buildTerminalOptions() {
     // bundles, JetBrainsMonoNL NF 16px, weight 400/600, Tabby's linePadding=1
     // (=> lineHeight 1.125, cell height 23px) and allowTransparency=true,
     // which switches the glyph atlas to an alpha canvas and therefore to
-    // grayscale anti-aliasing (Tabby does not use LCD subpixel AA; verified
-    // by pixel A/B in artifacts/font-parity-20260913).
+    // grayscale anti-aliasing (Tabby does not use LCD subpixel AA; confirmed
+    // by pixel-level A/B comparison).
     return {
         cursorBlink: c.cursorBlink === true,
         cursorStyle: c.cursor || 'bar',
@@ -212,9 +215,10 @@ function _installLinkHandler(term) {
 }
 
 // ── OSC 52 clipboard provider ──
-// Tauri: 走 Rust 命令（系统剪贴板，不受 WebView2 用户手势限制 —— OSC 52 由
-// 终端输出触发，navigator.clipboard 在非手势下会抛 NotAllowedError）
-// Electron: 走 native clipboard（同步，包装成 Promise 以匹配 addon 接口）
+// Tauri: goes through a Rust command (system clipboard, not subject to WebView2's
+// user-gesture restriction — OSC 52 is triggered by terminal output, and
+// navigator.clipboard throws NotAllowedError outside a gesture)
+// Electron: goes through the native clipboard (synchronous, wrapped in a Promise to match the addon interface)
 function _createClipboardAddon() {
     const isTauri = !!(window.__TAURI__ && window.__TAURI__.event);
     const provider = {
@@ -233,8 +237,9 @@ function _createClipboardAddon() {
     return new ClipboardAddon(undefined, provider);
 }
 
-// 快捷键放行处理器（统一入口）：Ctrl+P（命令面板）/ Ctrl+Shift+P（快捷命令）交给 shortcuts.js 调度。
-// xterm 语义：返回 false 停止处理（true 继续）。
+// Shortcut passthrough handler (single entry point): Ctrl+P (command palette) and
+// Ctrl+Shift+P (quick commands) are handed to shortcuts.js for dispatch.
+// xterm semantics: returning false stops processing (true continues).
 function _shortcutPassthrough(term, e) {
     const isShortcut =
         (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') ||
@@ -358,7 +363,7 @@ function wireTerminal(tab, tabId) {
         _fitWithScroll(tab.term, fitAddon, inner);
     }
 
-    // 首次 fit：等 DOM 布局完成；后续尺寸变化由 setupWrapResizeObserver 覆盖
+    // First fit: wait for DOM layout to settle; later size changes are covered by setupWrapResizeObserver
     setTimeout(applyFit, 50);
 
     setupWrapResizeObserver(wrap, tab);
@@ -369,7 +374,7 @@ function wireTerminal(tab, tabId) {
         if (TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300) return;
         clearTimeout(_resizeDebounce);
         _resizeDebounce = setTimeout(() => {
-            // 动态读取 tab.tabId：重连后后端 tabId 会变化，闭包捕获旧值会发到死连接
+            // Read tab.tabId dynamically: the backend tabId changes after a reconnect, and a closure-captured stale value would be sent to a dead connection
             if (tab.tabId) ipcRenderer.send('pty-resize', { tabId: tab.tabId, cols, rows });
         }, 150);
     });
@@ -382,7 +387,7 @@ function wireTerminal(tab, tabId) {
     }, 1000);
 
     tab._onDataDisp = term.onData(data => {
-        // 动态读取 tab.tabId（重连保留内容模式下，终端复用但后端 tabId 已更新）
+        // Read tab.tabId dynamically (in reconnect-with-content-preserved mode the terminal is reused but the backend tabId has been updated)
         _sendPaneInput(tab, { tabId: tab.tabId }, data);
     });
     _wireOscTitleFollow(term);
@@ -423,8 +428,8 @@ function wireTerminal(tab, tabId) {
     });
 
     // ── Right-click paste ──
-    // Electron 的 clipboard.readText() 是同步的; Tauri(WebView2) 只有异步 Clipboard API,
-    // 通过 readTextAsync 分支读取, 两者共用同一段逻辑
+    // Electron's clipboard.readText() is synchronous; Tauri (WebView2) only has the async
+    // Clipboard API, read via the readTextAsync branch — both share the same logic
     term.element.addEventListener('contextmenu', async (e) => {
         e.preventDefault();
         if (_settingsConfig.rightClickPaste === false) return;
@@ -449,7 +454,7 @@ function wireTerminal(tab, tabId) {
     }
 }
 
-// 分屏同步输入：syncInput 开启时输入广播到该 tab 的所有 pane
+// Split-pane sync input: when syncInput is on, input is broadcast to every pane of the tab
 function _sendPaneInput(tab, pane, data) {
     if (tab.syncInput && tab.splitRoot) {
         getAllPanes(tab).forEach(p => {
@@ -489,17 +494,19 @@ function _applyOscTitle(ownerTab, paneLike, title) {
     }
 }
 
-// 同步输入开启时，点击任意 pane（包括当前聚焦的）退出
-// 用动态查找所属 tab：term.element 在搬家（拖拽分屏）后 DOM 位置改变，
-// 从 .split-pane[data-pane] 反查所属 pane → 所属 tab，避免闭包捕获旧 tab 导致退出失效
+// While sync input is on, clicking any pane (including the focused one) exits it.
+// The owning tab is looked up dynamically: term.element's DOM position changes after a
+// move (drag-split), so resolve .split-pane[data-pane] back to its pane and then its tab,
+// avoiding a closure over the stale tab that would break the exit.
 function _bindSyncExitOnClick(tab, element) {
     if (!element || element._syncExitBound) return;
     element._syncExitBound = true;
     element.addEventListener('mousedown', () => {
-        // 动态反查：term.element 的祖先 .split-pane[data-pane] 给出 pane.id，
-        // 再从 TabManager.tabs 找到所属 tab（搬迁后自动指向新 tab）
+        // Dynamic reverse lookup: term.element's ancestor .split-pane[data-pane] gives the
+        // pane.id, then TabManager.tabs yields the owning tab (automatically points at the
+        // new tab after a move)
         const paneEl = element.closest('.split-pane');
-        let ownerTab = tab; // 兜底：非分屏（单 tab）直接用捕获的 tab
+        let ownerTab = tab; // fallback: non-split (single tab) uses the captured tab directly
         if (paneEl) {
             const paneId = paneEl.getAttribute('data-pane');
             for (const t of TabManager.tabs) {
@@ -554,15 +561,17 @@ function wireTerminalToPane(tab, pane) {
             return;
         }
         _fitWithScroll(pane.term, fitAddon, bodyEl);
-        // 初始 fit 后显式直发最终尺寸：首次 fit 的 onResize 可能落在 _layoutTime 抑制窗口被丢弃，
-        // 之后的 fit 尺寸未变 onResize 不再触发，会导致后端永远停留在 80x24（nvim 界面混乱）
+        // After the initial fit, explicitly send the final size directly: the first fit's
+        // onResize may fall inside the _layoutTime suppression window and be dropped, and
+        // a later fit with unchanged size never fires onResize again — the backend would
+        // stay at 80x24 forever (nvim UI garbled)
         const suppressed = TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300;
         if (pane.tabId && pane.term.cols && pane.term.rows && !suppressed) {
             ipcRenderer.send('pty-resize', { tabId: pane.tabId, cols: pane.term.cols, rows: pane.term.rows });
         }
     }
 
-    // 等 CSS 过渡完成（200ms）后再初始 fit，避免拿到中间态尺寸
+    // Wait for the CSS transition (200ms) to finish before the initial fit, to avoid measuring an intermediate size
     setTimeout(() => applyFit(), 300);
 
     // Disconnect any previous ResizeObserver on this body to avoid double-fit
@@ -582,7 +591,7 @@ function wireTerminalToPane(tab, pane) {
     let _resizeDebounce = null;
     term.onResize(({ cols, rows }) => {
         if (TabManager._maximizing) return;
-        // 分屏布局动画期间（200ms）的中间尺寸不发，等动画稳定后再发
+        // Intermediate sizes during the split layout animation (200ms) are not sent; send once the animation has settled
         if (TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300) return;
         clearTimeout(_resizeDebounce);
         _resizeDebounce = setTimeout(() => {
@@ -631,7 +640,7 @@ function wireTerminalToPane(tab, pane) {
     });
 
     // ── Right-click paste ──
-    // 同上: Tauri 走异步 readTextAsync, Electron 走同步 readText
+    // Same as above: Tauri reads via async readTextAsync, Electron via synchronous readText
     term.element.addEventListener('contextmenu', async (e) => {
         e.preventDefault();
         if (_settingsConfig.rightClickPaste === false) return;
@@ -670,7 +679,7 @@ function wireTerminalToPane(tab, pane) {
     if (TabManager.activeId === tab.id && pane.focused) {
         setTimeout(() => term.focus(), 150);
     }
-    // 接线完成后再挂一次尺寸结算兜底（覆盖 onResize 被抑制/未变的场景）
+    // After wiring is complete, schedule one more size-settlement fallback (covers cases where onResize was suppressed or the size never changed)
     if (tab.splitRoot) _scheduleSettleResize(tab);
 }
 

@@ -1,4 +1,4 @@
-// ZTerm - tab 显示名解析纯逻辑单测（node --test）
+// ZTerm - tab display-name resolution pure-logic unit tests (node --test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -56,7 +56,7 @@ test('分屏多 pane：OSC 标题参与拼接与去重', () => {
     const panes = [
         { name: 'ssh-a', _oscTitle: 'root@a:~' },
         { name: 'ssh-b', _oscTitle: 'root@b:~' },
-        { name: 'ssh-c' }, // 无 OSC 标题 → 用 pane 名
+        { name: 'ssh-c' }, // no OSC title → use the pane name
     ];
     assert.equal(resolveTabName(tab, panes), 'root@a:~ | root@b:~ | ssh-c');
 });

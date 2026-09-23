@@ -1,21 +1,21 @@
-// Ink software-caret observer (ADR-0001 B2). A bounded, observe-only
+// Ink software-caret observer. A bounded, observe-only
 // streaming recognizer that runs on the RAW terminal stream (before any
 // rewriting) and produces per-presentation-unit caret CANDIDATES. It never
 // modifies bytes and never touches the xterm buffer; candidates only become
 // a drawn cursor after the adapter's watermark/generation checks pass.
 //
-// Two verified client grammars (real pre-filter captures on 41.88):
+// Two client grammars verified against live application streams:
 //
-// 1. Sync-unit form (2026-09-15 B0 fixtures, older dsh-tui/kimi builds via
-//    herdr): inside a synchronized-output unit (?2026h … ?2026l) the app
+// 1. Sync-unit form (older dsh-tui/kimi builds relayed via herdr): inside a
+//    synchronized-output unit (?2026h … ?2026l) the app
 //    writes the input line as
 //      CUP(row;col) SGR(0;39;49) <plain char(s)> SGR(0;38;2;FG;48;2;BG) <char> SGR(0) CUP(...) ?25l
 //    The caret cell is the truecolor fg+bg styled single character written
 //    at the CURRENT cursor position. The trailing CUP may point at the
 //    caret cell or past it and is deliberately NOT used for coordinates
-//    (ADR C5: never fake the software position from the protocol park).
+//    (never fake the software position from the protocol park).
 //
-// 2. Frame form (2026-09-15 gap captures — the CURRENT dsh-tui/kimi builds,
+// 2. Frame form (current dsh-tui/kimi builds,
 //    SSH-direct, local and herdr-relayed alike): the app emits one minimal
 //    frame per keystroke:
 //      SGR(0) OSC8-end HOME <relative moves> SGR(7) <char> SGR(27) [plain] CUP(24;1) CUP(row;col)
@@ -31,7 +31,7 @@
 // Decidability limits: any other unit containing SHOW, an unmodeled
 // cursor-movement sequence, MULTIPLE styled caret candidates, or plain
 // writes whose attributes contradict the verified convention produces NO
-// candidate — the adapter then shows raw display. Per ADR 4.4 this module
+// candidate — the adapter then shows raw display. This module
 // is the ONLY place pattern knowledge lives; it gates nothing by name.
 (function installInkCaretObserver(root) {
   'use strict';
@@ -145,7 +145,7 @@
       unitMode = mode;
       // NOTE: row/col are NOT reset here — cursor position is continuous
       // stream state. Absolute anchors (CUP/HOME) realign it; the ConPTY
-      // sync form (verified 2026-09-15 local kimi capture) addresses its
+      // sync form (observed with local kimi sessions) addresses its
       // units purely relatively (\r + EL + writes).
       unit = {
         sawShow: false,
@@ -211,18 +211,18 @@
     // the sync-form caret signature, SGR 7/27 reverse for the frame-form
     // signature, and "default colors" for the plain convention. The default
     // state is DERIVED from fg/bg/rev/attrs — partial resets (39/49/22/…)
-    // must be able to return to it. Live finding 2026-09-17: claude's
+    // must be able to return to it: claude code's
     // banner uses 38;5/48;5 palette colors and SGR 1 … 22 (bold on/off),
-    // which stranded the old monotonic isDefault flag and blocked every
-    // checkpoint recovery ('non-default-style') while the real terminal
-    // was verifiably back at defaults (xterm attr.fg/bg/ext all 0).
+    // which a monotonic isDefault flag cannot survive: it would stick
+    // non-default and block every checkpoint recovery ('non-default-style')
+    // while the real terminal is verifiably back at defaults (xterm attr.fg/bg/ext all 0).
     const ATTR_BOLD = 1, ATTR_DIM = 2, ATTR_ITALIC = 4, ATTR_UNDERLINE = 8,
       ATTR_BLINK = 16, ATTR_INVISIBLE = 32, ATTR_STRIKE = 64, ATTR_OTHER = 128;
     let sgr = { fg: null, bg: null, rev: false, attrs: 0 };
     function sgrDefault() { return sgr.fg === null && sgr.bg === null && !sgr.rev && sgr.attrs === 0; }
 
-    // Bare reverse-caret gesture (claude code form, verified 2026-09-15 rig
-    // capture): NO sync blocks and NO frame prefix — the app just emits
+    // Bare reverse-caret gesture (claude code form): NO sync blocks and NO
+    // frame prefix — the app just emits
     //   <relative moves> SGR(7) <char> SGR(27) <CR/LF tail>
     // per keystroke, addressed purely relatively. The self-terminating
     // signature is rev-ON, EXACTLY ONE printable, rev-OFF: multi-char rev
@@ -430,7 +430,7 @@
         // Frame-form completion: the first absolute park AFTER a caret
         // write closes the frame (the app's park pair 24;1 → row;col).
         // Positions were latched at write time; the park is a terminator,
-        // never a coordinate source (ADR C5).
+        // never a coordinate source.
         if (unitMode === 'frame' && unit && unit.caret) finishUnit(seq);
         return;
       }

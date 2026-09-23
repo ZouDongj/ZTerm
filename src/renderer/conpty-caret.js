@@ -1,14 +1,14 @@
-// ConPTY stream filter: caret visibility repair (ADR-0001 B1) + session
-// bring-up handshake.
+// ConPTY stream filter: caret visibility repair + session bring-up
+// handshake.
 //
-// DA1 HANDSHAKE (2026-09-17): OpenConsole opens every pseudoconsole with a
+// DA1 HANDSHAKE: OpenConsole opens every pseudoconsole with a
 // DA1 probe (ESC[c) and blocks the client shell's output until a VT220-class
 // reply arrives (VtIo.cpp WaitUntilDA1, ~3s timeout; replies with param0 < 61
 // like xterm.js's ESC[?1;2c are ignored). The filter swallows the FIRST DA1
 // of each session and reports it via onDa1Query so ipc.js answers with
 // CONPTY_DA1_RESPONSE; later probes pass through to xterm.
 //
-// WHY THE CARET REPAIR EXISTS (captured with src/bin/pty-capture.rs, artifacts/vt-capture/):
+// WHY THE CARET REPAIR EXISTS — one observed ConPTY frame looks like this:
 //   herdr local       ?2026h ?25l OSC8 CUP(30;70) SGR(0;39;49) a SGR(0;7;39;49) ' ' SGR(0) CUP(30;71) ?25l ?2026l
 // ConPTY consolidates the app's cursor-visibility ops inside synchronized-
 // output blocks and rewrites its trailing `?25h` (show) into `?25l` (hide),
@@ -17,21 +17,21 @@
 // `fix` (LOCAL CONPTY TRANSPORTS ONLY — see caretRepairAllowed):
 //   1. drops the transient in-block ?25l churn of frames that carry ConPTY's
 //      painted-caret evidence (SGR 0;7;39;49 = conhost's own "console cursor
-//      visible" ground truth), re-asserting SHOW at the block end (the
-//      2026-09-13 user-verified repair; evidence gate added 2026-09-18 —
-//      frames that hide the caret without painting one belong to apps that
-//      genuinely hide it, and manufacturing a SHOW there parked a phantom
-//      caret at the frame's final CUP);
+//      visible" ground truth), re-asserting SHOW at the block end. The
+//      evidence gate is required: frames that hide the caret without
+//      painting one belong to apps that genuinely hide it, and
+//      manufacturing a SHOW there parks a phantom caret at the frame's
+//      final CUP;
 //   2. strips the reverse flag of the console caret cell ConPTY itself
 //      paints (SGR 0;7;39;49) — a style-only change on a narrow signature.
 //
-// ADR-0001 B1 REMOVED from here (unsafe heuristics, superseded by B2):
-//   - the ink painted-caret takeover (glyph-evidence engagement, swallowing
+// Deliberately NOT done here (an earlier takeover approach proved unsafe):
+//   - an ink painted-caret takeover (glyph-evidence engagement, swallowing
 //     every HIDE, forced SHOW while engaged). It deleted styled caret-cell
-//     writes (real captures: backspace erasure lost as `abcd` staying
-//     alive) and forced a second cursor beside the app's own caret during
-//     deletion/navigation (the user-visible double caret) — and all of that
-//     ran on SSH streams too, where no ConPTY ever consolidated anything.
+//     writes (backspace erasure was lost, `abcd` staying alive) and forced
+//     a second cursor beside the app's own caret during deletion/navigation
+//     (a user-visible double caret) — and all of that also ran on SSH
+//     streams, where no ConPTY ever consolidated anything.
 (function installConPtyCaretFilter(root) {
   'use strict';
 
@@ -46,8 +46,8 @@
   const CUP = /^\u001b\[\d+;\d+[Hf]$/;
   // ConPTY session bring-up: OpenConsole starts every pseudoconsole with a
   // DA1 probe (ESC[c) and BLOCKS the client shell's output until the terminal
-  // answers with a VT220-class reply — our harness measured a ~3.3s stall when
-  // the reply never satisfies it, ~0.4s once it does (conpty_probe, 2026-09-17).
+  // answers with a VT220-class reply — measured as a ~3.3s stall when the
+  // reply never satisfies it, ~0.4s once it does.
   // xterm.js answers DA1 with ESC[?1;2c (VT100 class), which OpenConsole does
   // not accept, so every new local terminal paid the full timeout. We answer
   // the FIRST DA1 ourselves with CONPTY_DA1_RESPONSE and drop the query, so
@@ -66,8 +66,8 @@
   // OSC strings (hyperlinks) are legitimate, so this is a generous safety net.
   const MAX_PENDING_BYTES = 65536;
 
-  // ADR-0001 B1 transport policy: the visibility repair addresses ConPTY
-  // mutations of the byte stream, which only exist on local PTY sessions.
+  // Transport policy: the visibility repair addresses ConPTY mutations of
+  // the byte stream, which only exist on local PTY sessions.
   // SSH streams reach xterm exactly as the application emitted them and must
   // pass through raw. ownerType is the owning tab/pane type.
   function caretRepairAllowed(ownerType) {
@@ -145,14 +145,13 @@
           // The repair fires only on ConPTY's painted-caret evidence (SGR
           // 0;7;39;49): conhost draws the console caret into the frame when
           // the console cursor is visible, so its presence proves the
-          // in-block ?25l is ConPTY's rewrite of an app-intended show (the
-          // 2026-09-13 anti-churn case). Frames that hide the caret WITHOUT
-          // painting one are passed through untouched: current herdr draws
-          // pane carets as content and keeps its console cursor hidden
-          // (0 painted cells in the 2026-09-18 sandbox captures of
-          // kimi/dsh-tui/bash panes), and re-asserting SHOW there parked a
-          // phantom protocol caret at each frame's final CUP — the
-          // far-right blinking caret reported while an agent works.
+          // in-block ?25l is ConPTY's rewrite of an app-intended show.
+          // Frames that hide the caret WITHOUT painting one are passed
+          // through untouched: current herdr draws pane carets as content
+          // and keeps its console cursor hidden (0 painted cells in
+          // kimi/dsh-tui/bash panes), and re-asserting SHOW there would
+          // park a phantom protocol caret at each frame's final CUP — a
+          // far-right blinking caret while an agent works.
           const hasPaintedCaret = out.indexOf(PAINTED_CARET_SGR) >= 0;
           out = removePaintedCaret(out);
           // Transient-hide churn: forwarding the in-frame ?25l toggles the
@@ -161,7 +160,8 @@
           // animation on every key. Strip the rewritten hides and re-assert
           // SHOW at the block end (LOCAL transports only — the transport
           // gate in ipc.js decides).
-          // Known B1 residual, fixed by B2's draw-phase takeover: during
+          // Known residual of this stream-side repair (handled by the
+          // software-caret takeover in xterm-smooth-cursor.js): during
           // ink-TUI navigation/deletion the app paints its caret over a
           // CHARACTER away from the park position, so the restored protocol
           // cursor and the painted cell diverge (double caret) locally.

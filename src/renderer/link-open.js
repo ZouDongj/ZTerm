@@ -1,4 +1,4 @@
-// ZTerm - terminal link opening (ADR-0003): gesture/scheme gate plus the
+// ZTerm - terminal link opening: gesture/scheme gate plus the
 // shared browser glue behind both the plain-link WebLinksAddon and the OSC 8
 // linkHandler. Browser global + CommonJS dual export for node:test.
 //
@@ -9,8 +9,8 @@
 //  - a valid activation consumes the event ONLY when the terminal is in
 //    mouse-reporting (TUI) mode: there the document-level mouseup listener
 //    reports the click to the remote app, and swallowing our own activation
-//    keeps vim/htop from also receiving it (ADR-0003 §1; the mousedown half
-//    is irrevocable — ADR-0003 §59). In normal mode the same document
+//    keeps vim/htop from also receiving it (the mousedown half cannot be
+//    revoked once dispatched). In normal mode the same document
 //    listener runs xterm's selection cleanup, so the event must flow
 //    through or selection state strands (ghost selection, stuck drag);
 //  - only http/https targets ever leave the renderer — the Rust side

@@ -1,4 +1,4 @@
-// Guard-chain tests for win32-input-mode Ctrl+J (ADR-0002 item 4): the only
+// Guard-chain tests for win32-input-mode Ctrl+J: the only
 // things standing between an SSH pane and win32 INPUT_RECORD bytes are
 //   (a) the session gate is marked exclusively through the LOCAL-only caret
 //       filter wiring in ipc.js (keyed by backend session id, so it survives
@@ -160,7 +160,7 @@ test('hook: keyup is swallowed without a resend; other ctrl keys pass through', 
 
 test('hook: handled Ctrl+J suppresses the browser default (WebView2 downloads accelerator)', () => {
     // A trusted unconsumed Ctrl+J bounces back to the browser process, which
-    // opens the downloads flyout (field report). Only preventDefault marks it
+    // opens the downloads flyout. Only preventDefault marks it
     // consumed; synthetic KeyboardEvents never exercise that path.
     const term = {};
     const pane = { tabId: 'local_1', term };
@@ -186,7 +186,7 @@ test('hook: fall-through paths leave the default action alone', () => {
     assert.equal(prevented, 0, 'no preventDefault when we do not own the key');
 });
 
-// Regression (ADR-0002 review blocker): the key handler used to close over
+// Regression: the key handler used to close over
 // the (tab, pane) pair captured at wiring time. addPaneRelativeTo moves the
 // terminal into a fresh pane and nulls tab.tabId — the stale closure then
 // resolved owner=tab, sent nowhere, and still swallowed the key.

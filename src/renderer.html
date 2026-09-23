@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="renderer/smooth-cursor-overlay.css">
 <link rel="stylesheet" href="renderer/app.css">
 <body>
-<!-- 启动界面：只显示 Z 形方块，绿点沿 Z 单向循环移动（一格一格走）；首帧渲染完成后淡出 -->
+<!-- Startup splash: shows only the Z-shaped cells; the green dot walks one cell at a time along the Z in a one-way loop; fades out after the first frame renders -->
 <div class="startup-splash" id="startup-splash">
   <svg class="startup-logo" width="132" height="132" viewBox="0 0 512 512" fill="none">
     <g id="splash-cells" fill="#f4f6ff">
@@ -117,7 +117,7 @@
     </div>
   </div>
 
-  <!-- 命令面板 -->
+  <!-- Command palette -->
   <div class="overlay" id="overlay-palette" onclick="closePalette()">
     <div class="panel palette-panel" onclick="event.stopPropagation()">
       <div class="ss-header">
@@ -703,7 +703,7 @@
       <div class="panel-tab" data-tab="scripts" onclick="switchSSHTab('scripts')">登录脚本<span id="ls-tab-badge" class="panel-tab-badge"></span></div>
     </div>
     <div style="padding:0 20px 20px">
-      <!-- 连接 tab -->
+      <!-- Connection tab -->
       <div id="ssh-tab-conn" class="ssh-tab-panel active" style="flex-direction:column;gap:12px">
         <div class="form-row">
           <div class="form-group">
@@ -791,7 +791,7 @@
           </div>
         </div>
       </div>
-      <!-- 登录脚本 tab -->
+      <!-- Login scripts tab -->
       <div id="ssh-tab-scripts" class="ssh-tab-panel" style="flex-direction:column;gap:8px">
         <div id="login-scripts-container" style="display:flex;flex-direction:column;gap:2px;max-height:320px;overflow-y:auto"></div>
         <span class="form-section-add" onclick="addLoginScriptRow()" style="align-self:flex-start">+ 添加脚本</span>
@@ -952,7 +952,7 @@
   </div>
 </div>
 
-  <!-- Tauri 迁移: 在 14 个 renderer/*.js 之前注入 polyfill + require shim + xterm UMD -->
+  <!-- Script load order: polyfill + require shim + xterm UMD must load before the renderer/*.js scripts -->
   <!-- 1. xterm UMD bundle. The xterm/webgl bundles are mechanically extracted
        from the user's Tabby install (see vendor/PROVENANCE.json) so terminal
        text renders identically to Tabby; they attach TabbyXterm/TabbyWebgl
@@ -968,12 +968,12 @@
     window.WebglAddon = window.TabbyWebgl;
   </script>
 
-  <!-- 2. ipcRenderer polyfill (同步暴露 window.ipcRenderer, 异步加载 Tauri API) -->
+  <!-- 2. ipcRenderer polyfill (exposes window.ipcRenderer synchronously, loads the Tauri API asynchronously) -->
   <script src="ipc-polyfill.js"></script>
 
-  <!-- 3. require shim: 拦截 require('electron'/'fs'/'path'/'@xterm/...') 转发到 window 全局 -->
+  <!-- 3. require shim: intercepts require('electron'/'fs'/'path'/'@xterm/...') and forwards to window globals -->
   <script>
-    // 最小 path shim (state.js 用 path.join, utils.js 用 path.basename/dirname)
+    // Minimal path shim (state.js uses path.join, utils.js uses path.basename/dirname)
     const pathShim = {
       join: function() { return Array.from(arguments).join('/').replace(/\/+/g, '/'); },
       basename: function(p) { return p.split(/[\\/]/).pop(); },
@@ -983,7 +983,7 @@
       isAbsolute: function(p) { return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('/'); },
       sep: '/',
     };
-    // 最小 fs shim (utils.js 用 fs.existsSync / fs.readFileSync / fs.writeFileSync)
+    // Minimal fs shim (utils.js uses fs.existsSync / fs.readFileSync / fs.writeFileSync)
     const fsShim = {
       existsSync: function() { return false; },
       readFileSync: function() { return ''; },
@@ -995,14 +995,14 @@
       copyFileSync: function() {},
     };
     // electron clipboard stub — use browser Clipboard API (Tauri WebView2 supports it)
-    // 注意: WebView2 的 Clipboard API 全部异步; readTextAsync 供右键粘贴(异步)使用,
-    // readText 保留同步占位(返回空, 兼容未改造的同步调用点)
+    // Note: the WebView2 Clipboard API is fully async; readTextAsync serves the (async) right-click paste,
+    // readText stays a synchronous placeholder (returns empty, for legacy synchronous call sites)
     const electronClipboard = {
       readText: function() { return ''; },
       readTextAsync: function() { return navigator.clipboard.readText(); },
-      // P2：Tauri 下走 Rust arboard（系统剪贴板，无 WebView2 权限限制）；
-      // navigator.clipboard.writeText 在非手势（如 selectionchange 自动复制）下会
-      // 抛 NotAllowedError，且 Promise 拒绝需要 catch 否则成为 unhandled rejection
+      // Under Tauri, writes go through Rust arboard (system clipboard, no WebView2 permission restrictions);
+      // navigator.clipboard.writeText outside a user gesture (e.g. selectionchange auto-copy)
+      // throws NotAllowedError, and the rejected promise needs a catch to avoid an unhandled rejection
       writeText: function(text) {
         if (typeof isTauri !== 'undefined' && isTauri) {
           ipcRenderer.invoke('clipboard-write-text', { text: text }).catch(() => {});
@@ -1019,7 +1019,7 @@
             navigator.clipboard.write([new ClipboardItem(items)]).catch(() => {});
           }
         } catch(e) {
-          // ClipboardItem 不可用(旧版 WebView2)时兜底: 只写纯文本
+          // Fallback when ClipboardItem is unavailable (older WebView2): write plain text only
           if (data && data.text != null) { try { navigator.clipboard.writeText(data.text); } catch(e2) {} }
         }
       },
@@ -1030,14 +1030,14 @@
       showItemInFolder: function() {},
     };
 
-    // state.js 直接用 path.join 而不 require('path'), 需要全局 path
-    // utils.js require('fs') 但有些地方直接用 fs, 也挂全局
-    // state.js 用 process.env.APPDATA/HOME, 需要全局 process
+    // state.js uses path.join directly without require('path'), so expose a global path
+    // utils.js does require('fs') but some places use fs directly, so expose it globally too
+    // state.js uses process.env.APPDATA/HOME, so expose a global process
     window.path = pathShim;
     window.fs = fsShim;
     window.process = { env: { APPDATA: '', HOME: '', USERPROFILE: '', LOCALAPPDATA: '', TEMP: '' }, platform: 'win32' };
 
-    // addon UMD 工厂返回 { FitAddon: class }，直接赋给 window.FitAddon，需解包
+    // The addon UMD factory returns { FitAddon: class } and is assigned to window.FitAddon directly, so unwrap it
     window.require = function(name) {
       if (name === 'electron') return { ipcRenderer: window.electron.ipcRenderer, clipboard: electronClipboard, shell: electronShell };
       if (name === 'fs') return fsShim;

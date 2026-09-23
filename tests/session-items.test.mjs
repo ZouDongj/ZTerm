@@ -1,4 +1,4 @@
-// ZTerm - 会话选择器纯逻辑单测（node --test）
+// ZTerm - session-picker pure-logic unit tests (node --test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -25,7 +25,7 @@ test('buildSessionItems 本地 profile 构造', () => {
         id: 'local_powershell', name: 'PowerShell', detail: 'powershell.exe',
         type: 'local', badge: '', icon: 'terminal', profile: LOCAL[0],
     });
-    // 带 args 的 profile：detail 用短路径 + args
+    // profile with args: detail shows the short path plus args
     assert.equal(items[1].detail, 'bash.exe --login -i');
     assert.equal(items[1].icon, 'terminal');
 });

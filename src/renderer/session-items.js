@@ -1,6 +1,6 @@
-// ZTerm - 会话选择器纯逻辑（无 DOM 依赖，浏览器全局 + CommonJS 双导出，node:test 可测）
+// ZTerm - session selector pure logic (no DOM dependency; browser global + CommonJS dual export, node:test-able)
 
-// 从本地 profile 与 SSH profile 构造会话列表项
+// Build session list items from local profiles and SSH profiles
 function buildSessionItems(localProfiles, sshProfiles, hiddenIds) {
     const items = [];
     (localProfiles || []).forEach(p => {
@@ -26,7 +26,7 @@ function buildSessionItems(localProfiles, sshProfiles, hiddenIds) {
     return items;
 }
 
-// 按名称/详情/分组过滤（大小写不敏感）；空查询返回原数组
+// Filter by name/detail/group (case-insensitive); empty query returns the original array
 function filterSessionItems(items, query) {
     if (!query) return items;
     const q = query.toLowerCase();

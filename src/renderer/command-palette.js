@@ -1,7 +1,7 @@
-// 命令面板 — 列出全部快捷键操作，搜索 + 键盘导航 + 回车执行
+// Command palette — lists every shortcut action; search + keyboard navigation + Enter to execute
 let _paletteSelected = 0;
 
-// action 显示顺序（语义序：标签页 → 分屏 → SSH → 搜索 → 设置/快捷命令）
+// Action display order (semantic: tabs → splits → SSH → search → settings/quick commands)
 const _paletteOrder = [
     'newTab', 'closeTab', 'nextTab', 'prevTab', 'renameTab', 'cloneTab',
     'closePane', 'splitH', 'splitV', 'maximizePane',
@@ -51,7 +51,7 @@ function renderPaletteList(filter = '') {
         const combo = bindings[id] || '';
         const comboDisplay = typeof _comboDisplay === 'function' ? _comboDisplay(combo) : combo;
         const sel = i === _paletteSelected ? ' data-selected' : '';
-        // V3 表项（无分组纯列表）：名称 + 快捷键
+        // V3 list item (flat list, no groups): name + shortcut
         html += `<div class="v3-item" role="option" aria-selected="${i === _paletteSelected}"${sel} data-action-id="${id}"
                   onclick="paletteClickItem('${id}')"
                   onmouseenter="paletteSelect(${i})">

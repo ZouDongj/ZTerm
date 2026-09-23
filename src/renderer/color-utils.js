@@ -1,6 +1,6 @@
-// ZTerm - 颜色转换纯逻辑（无 DOM 依赖，浏览器全局 + CommonJS 双导出，node:test 可测）
+// ZTerm - color conversion pure logic (no DOM dependency; browser global + CommonJS dual export, node:test-able)
 
-// '#rrggbb'（可带 #）→ {r,g,b}；无效输入返回 null
+// '#rrggbb' (leading # optional) → {r,g,b}; invalid input returns null
 function hexToRgb(hex) {
     const m = /^#?([0-9a-f]{6})$/i.exec(hex);
     if (!m) return null;

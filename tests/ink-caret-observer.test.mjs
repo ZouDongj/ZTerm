@@ -1,4 +1,5 @@
-// ADR-0001 B2 observer tests: real fixtures + the ADR §6 decidability rows.
+// Ink caret observer tests: real fixtures plus the decidability rules for
+// when a styled cell counts as an app-painted caret.
 // The observer is pure (no DOM): feed raw chunks, collect candidates.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

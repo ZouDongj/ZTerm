@@ -1,4 +1,4 @@
-// ZTerm - 设置页主体 + 自定义下拉 + 取色盘（颜色转换纯函数见 color-utils.js，由 renderer.html 先加载）
+// ZTerm - settings page body + custom dropdown + color picker (color conversion pure functions live in color-utils.js, loaded first by renderer.html)
 
 // ── Custom dropdown (replaces native <select class="styled-select">) ──
 function convertSelects() {
@@ -155,7 +155,7 @@ function loadSettingsIntoForm() {
     if (blinkEl) blinkEl.value = config.cursorBlink !== false ? 'on' : 'off';
     const contrastEl = document.getElementById('set-contrast');
     if (contrastEl && config.minimumContrastRatio) contrastEl.value = config.minimumContrastRatio;
-    // Local shell defaults（选项来自自动探测的 profiles）
+    // Local shell defaults (options come from auto-detected profiles)
     const dsEl = document.getElementById('set-default-shell');
     if (dsEl) {
         dsEl.innerHTML = '';
@@ -351,7 +351,7 @@ function initColorPickerEvents() {
     };
 }
 
-// Color conversion helpers（实现见 color-utils.js）
+// Color conversion helpers (implemented in color-utils.js)
 
 function selectAccent(hex) {
     const input = document.getElementById('set-accent');
@@ -417,8 +417,9 @@ function _buildFontSelects(allFonts) {
     {
 
         // Populate terminal font dropdown with ALL system fonts
-        // 恢复值以 _settingsConfig 为准：首次打开设置页时 select 还是空的，
-        // select.value 已丢失配置值，从配置恢复才能保证后续 saveAppearance 读到正确值
+        // Restore the value from _settingsConfig: on the first settings visit
+        // the select is still empty and select.value has lost the configured
+        // value; restoring from config keeps later saveAppearance reads correct
         const fontEl = document.getElementById('set-font');
         if (fontEl) {
             const current = _settingsConfig.fontFamily || fontEl.value;
@@ -433,7 +434,7 @@ function _buildFontSelects(allFonts) {
             opt.value = 'monospace';
             opt.textContent = 'Monospace';
             fontEl.appendChild(opt);
-            // 配置的字体不在枚举列表里（已卸载？）→ 追加一个选项保留配置，避免被覆盖
+            // Configured font is missing from the enumerated list (uninstalled?) → append an option to preserve the configured value
             if (current && ![...fontEl.options].some(o => o.value === current)) {
                 const extra = document.createElement('option');
                 extra.value = current;
@@ -443,7 +444,7 @@ function _buildFontSelects(allFonts) {
             if (current) fontEl.value = current;
         }
 
-        // Populate UI font dropdown（界面字体，默认系统字体栈）
+        // Populate UI font dropdown (UI font; defaults to the system font stack)
         const uiFontEl = document.getElementById('set-ui-font');
         if (uiFontEl) {
             const current = _settingsConfig.uiFont || '';
@@ -458,7 +459,7 @@ function _buildFontSelects(allFonts) {
             opt.value = '';
             opt.textContent = '系统默认';
             uiFontEl.appendChild(opt);
-            // 配置的字体不在枚举列表里 → 追加一个选项保留配置
+            // Configured font is missing from the enumerated list → append an option to preserve the configured value
             if (current && ![...uiFontEl.options].some(o => o.value === current)) {
                 const extra = document.createElement('option');
                 extra.value = current;
@@ -492,7 +493,7 @@ function _buildFontSelects(allFonts) {
             uiFbEl.value = current || '';
         }
 
-        // 同步界面字体跟随开关状态与行可见性
+        // Sync the follow-terminal toggle state and row visibility
         syncUiFollowUI();
 
         // Populate fallback font dropdown with ALL system fonts
@@ -523,10 +524,10 @@ function _buildFontSelects(allFonts) {
     }
 }
 
-// 界面字体默认值：系统字体栈（不依赖外部字体，内网/离线环境稳定）
+// Default UI font: system font stack (no external font dependency; stable on intranet/offline networks)
 const DEFAULT_UI_FONT = "'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif";
 
-// 界面字体跟随终端字体开关：开启时界面复用终端字体组合，隐藏界面字体设置
+// Follow-terminal-font toggle for the UI font: when on, the UI reuses the terminal font combination and the UI font settings are hidden
 function toggleUiFollowTerminal() {
     _settingsConfig.uiFollowTerminal = !(_settingsConfig.uiFollowTerminal !== false);
     syncUiFollowUI();
@@ -544,8 +545,8 @@ function syncUiFollowUI() {
     if (rowFb) rowFb.style.display = follow ? 'none' : '';
 }
 
-// 应用界面字体到 body：
-// 跟随终端 → 终端字体 + 终端回退组合；独立 → 界面字体 + 界面回退组合
+// Apply the UI font to body:
+// follow terminal → terminal font + terminal fallback; independent → UI font + UI fallback
 function applyUiFont() {
     const follow = _settingsConfig.uiFollowTerminal !== false;
     let family;
@@ -557,8 +558,8 @@ function applyUiFont() {
     document.body.style.fontFamily = family || DEFAULT_UI_FONT;
 }
 
-// 字重校验：1-1000 的数字（xterm 只接受 number 1-1000 或 'normal'/'bold'/'100'..'900' 整百字符串，
-// 数字字符串如 '550' 会被静默打回默认值——所以这里必须返回 number）
+// Font-weight validation: a number 1-1000 (xterm accepts only a number 1-1000 or 'normal'/'bold'/'100'..'900'
+// hundred-step strings; numeric strings like '550' are silently reset to the default — so this must return a number)
 function saveAppearance() {
     const fontFamily = document.getElementById('set-font')?.value || '';
     const uiFont = document.getElementById('set-ui-font')?.value || _settingsConfig.uiFont || '';
@@ -591,7 +592,7 @@ function saveAppearance() {
     applyTerminalScheme();
 
     // Apply font settings to existing terminals
-    // 必须走与启动相同的引号规范化，否则未加引号的 monospace 会变成 CSS 通用关键字，改变 CJK 回退
+    // Must use the same quote normalization as startup, otherwise an unquoted monospace becomes a CSS generic keyword and changes CJK fallback
     const appliedFontFamily = fontFamily ? _normalizeFontFamily(fontFamily, fallbackFont) : '';
     TabManager.tabs.forEach(t => {
         if (t.term) {

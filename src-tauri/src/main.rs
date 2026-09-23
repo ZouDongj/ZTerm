@@ -1,6 +1,6 @@
-// ZTerm — Tauri 主进程
+// ZTerm — Tauri main process
 
-// GUI subsystem: 避免控制台程序启动时触发系统默认终端 (Windows Terminal)
+// GUI subsystem: avoid starting as a console app, which would open in the system default terminal (Windows Terminal)
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod zterm;
@@ -76,14 +76,14 @@ async fn main() {
             zterm::renderer_ready,
         ])
         .setup(|app| {
-            // 注册全局 AppHandle（config-corrupted 等事件 emit 用）
+            // Register the global AppHandle (used to emit events such as config-corrupted)
             zterm::init_app_handle(app.handle());
-            // 数据目录迁移：默认目录(打包版=安装目录/data)无 config 且锚点有 → 复制
+            // Data dir migration: if the default dir (packaged build = install dir/data) has no config but the anchor location does, copy it
             zterm::migrate_legacy_config();
-            // 手动创建主窗口（tauri.conf.json 的 windows 已清空）:
-            // enable_clipboard_access 让 wry 注册 WebView2 PermissionRequested handler，
-            // 自动允许 CLIPBOARD_READ —— 否则每次 navigator.clipboard.readText()
-            // （右键粘贴）都会弹系统原生权限气泡，与 ZTerm 暗色 UI 风格不一致
+            // Create the main window manually (tauri.conf.json's windows list is empty):
+            // enable_clipboard_access makes wry register a WebView2 PermissionRequested
+            // handler that auto-allows CLIPBOARD_READ — otherwise every
+            // navigator.clipboard.readText() (right-click paste) pops a native permission bubble that clashes with ZTerm's dark UI
             let window = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
@@ -93,14 +93,14 @@ async fn main() {
             .inner_size(1100.0, 720.0)
             .min_inner_size(600.0, 400.0)
             .decorations(false)
-            // 先隐藏，恢复窗口状态后再显示——否则窗口先以默认尺寸闪现，
-            // 最大化状态变成"先窗口化再最大化"的跳跃
+            // Stay hidden until the window state is restored — otherwise the window
+            // flashes at the default size, then jumps from windowed to maximized
             .visible(false)
-            // 禁用 WebView2 表单自动补全（输入时弹出的白底建议列表），
-            // 终端软件不需要浏览器式 autofill
+            // Disable WebView2 form autofill (the white suggestion popup shown while typing);
+            // a terminal has no use for browser-style autofill
             .general_autofill_enabled(false)
-            // 窗口/WebView 背景色与主题一致（#21252b）：resize 拖拽期间
-            // WebView 内容未覆盖到的边缘露出默认白色会形成闪烁
+            // Match the window/WebView background to the theme (#21252b): during
+            // resize drags, edges not yet covered by WebView content would flash default white
             .background_color(tauri::window::Color(33, 37, 43, 255))
             .enable_clipboard_access()
             // Disable LCD subpixel text antialiasing so every piece of UI text
@@ -127,14 +127,14 @@ async fn main() {
             #[cfg(windows)]
             disable_browser_accelerator_keys(&window);
 
-            // 窗口状态恢复 + show 移到 renderer_ready command：
-            // renderer 加载完成并注册好 window-shown 监听后才通知主进程显示窗口，
-            // 避免事件在监听器就绪前 emit 导致启动界面无法隐藏
+            // Window-state restore + show live in the renderer_ready command: the
+            // renderer asks the main process to show the window only after it has
+            // loaded and registered its window-shown listener — an earlier emit would strand the splash screen
             #[cfg(debug_assertions)]
             {
                 window.open_devtools();
             }
-            // 关闭前通知 renderer 保存状态；同时保存窗口状态（位置/大小/最大化）
+            // On close, notify the renderer to save state; also save the window state (position/size/maximized)
             let handle = app.handle().clone();
             let win_for_state = window.clone();
             window.on_window_event(move |event| {
@@ -153,9 +153,9 @@ async fn main() {
                     let _ = handle.emit("app-before-quit", json!({}));
                 }
             });
-            // 兜底：renderer 初始化失败/崩溃会导致 renderer-ready 永不调用、窗口永远隐藏。
-            // 5s 后仍不可见则强制显示并补发 window-shown（正常路径 renderer-ready 早已完成，
-            // 这里 is_visible 为 true 直接跳过，不会重复淡入）
+            // Fallback: if renderer init fails or crashes, renderer-ready never fires and the
+            // window stays hidden forever — if still invisible after 5s, force-show and re-emit
+            // window-shown (normally is_visible is already true here, so this skips; no double fade-in)
             let win_fallback = window.clone();
             let app_fallback = app.handle().clone();
             std::thread::spawn(move || {

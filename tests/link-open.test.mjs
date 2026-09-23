@@ -1,4 +1,4 @@
-// tests for src/renderer/link-open.js (ADR-0003): pure gesture/scheme gate
+// Tests for src/renderer/link-open.js: pure gesture/scheme gate
 // plus the browser glue seam (stubbed document/showConfirm/showToast/ipcRenderer).
 import test from 'node:test';
 import assert from 'node:assert/strict';

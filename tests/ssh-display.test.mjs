@@ -1,4 +1,4 @@
-// ZTerm - SSH 展示 helper 单测（node --test）
+// ZTerm - SSH display helper unit tests (node --test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 const { effectivePort, formatEndpoint, sshDisplayModel, sshProfileMatches } =
     require('../src/renderer/ssh-display.js');
 
-// ── 主行/次行规则 ──
+// ── primary/secondary line rules ──
 
 test('空名称：主行 host（技术文本），次行 用户 · 端口', () => {
     const m = sshDisplayModel({ name: '', host: '192.0.2.88', username: 'root', port: 22 });
@@ -76,7 +76,7 @@ test('authType 非 key 时 keyAuth 为 false', () => {
     assert.equal(sshDisplayModel({ host: 'h' }).keyAuth, false);
 });
 
-// ── 搜索匹配 ──
+// ── search matching ──
 
 test('搜索覆盖名称/host/用户名/有效端口/分组，大小写不敏感', () => {
     const p = { name: 'Prod', host: 'server.EXAMPLE', username: 'Ops', port: 6000, group: '生产' };

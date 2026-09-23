@@ -1,10 +1,10 @@
-// ZTerm - 全局状态 + 常量 + 配色（拆自 renderer.html，纯代码搬运，未改逻辑）
+// ZTerm - global state + constants + color schemes (extracted from renderer.html unchanged)
 let CONFIG_FILE = path.join(process.env.APPDATA || process.env.HOME, 'ZTerm', 'config.json');
 
 // ── PTY output → terminal (shared by PTY and SSH) ──
 const ptyBuffers = {};
 // ── Terminal color schemes ──
-// 光标固定纯白、选中色跟随强调色（全应用统一），方案只定义背景/前景/16 色
+// Cursor stays pure white and selection follows the accent color (app-wide); schemes only define background/foreground/16 colors
 const TERMINAL_SCHEMES = {
     onedark: {
         name: 'One Dark Pro',
@@ -238,7 +238,7 @@ function getTerminalTheme() {
     };
 }
 
-// 热应用配色方案：更新所有已打开终端 + 终端容器背景变量
+// Hot-apply the color scheme: update all open terminals + the terminal container background variable
 function applyTerminalScheme() {
     const theme = getTerminalTheme();
     document.documentElement.style.setProperty('--term-bg', theme.background);
@@ -297,7 +297,7 @@ function applyAccentColor(hex) {
     document.documentElement.style.setProperty('--accent-contrast', contrast);
 }
 
-// ── Statusbar visibility（Ctrl+Shift+B 切换；持久化在 appearance 配置里）──
+// ── Statusbar visibility (Ctrl+Shift+B toggles; persisted in the appearance config) ──
 // Default is visible: only an explicit `false` hides the bar, so old configs
 // written before this field existed keep the status bar.
 function applyStatusbarVisibility() {
