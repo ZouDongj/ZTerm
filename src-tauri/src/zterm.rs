@@ -3053,11 +3053,138 @@ fn exe_under_any_root(exe: &str, roots: &[String]) -> bool {
     })
 }
 
+/// Normalize a directory path for comparison: trim whitespace, strip ONE pair
+/// of surrounding double quotes (NSIS records InstallLocation with embedded
+/// quotes), unify slashes, drop trailing backslashes, and lowercase.
+fn normalize_install_dir(dir: &str) -> String {
+    let d = dir.trim();
+    let d = d
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(d);
+    d.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+/// True when a registry-recorded install location and the running exe's
+/// parent directory denote the same directory. Exact directory equality after
+/// normalization — a sibling like `ZTerm2` must not match `ZTerm`.
+/// Accepted residual risk: an exe launched via an 8.3 short-name or junction
+/// spelling won't string-match the NSIS-recorded path, so custom-root
+/// installs then degrade to the pre-fix env-roots fallback — a false negative
+/// only, never a false elevation.
+fn install_dir_matches(recorded: &str, exe_dir: &str) -> bool {
+    let recorded = normalize_install_dir(recorded);
+    !recorded.is_empty() && recorded == normalize_install_dir(exe_dir)
+}
+
+/// HKLM uninstall subkey written by the per-machine NSIS install. The final
+/// component must match productName in tauri.conf.json ("ZTerm").
+#[cfg(windows)]
+const UNINSTALL_SUBKEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ZTerm";
+
+/// Read the install location recorded by a per-machine NSIS install (HKLM
+/// uninstall entry, value `InstallLocation`). This key is the authoritative
+/// record of install scope and covers custom roots such as `D:\Program Files`
+/// that the ProgramFiles env vars cannot see. None when the entry or value is
+/// absent (per-user installs live under the same subkey in HKCU instead) or
+/// unreadable.
+#[cfg(windows)]
+fn hklm_install_location() -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::shared::minwindef::{DWORD, HKEY};
+    use winapi::um::winnt::{KEY_READ, KEY_WOW64_64KEY, REG_SZ};
+    use winapi::um::winreg::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_LOCAL_MACHINE};
+    let wide = |s: &str| -> Vec<u16> {
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(Some(0))
+            .collect()
+    };
+    let subkey = wide(UNINSTALL_SUBKEY);
+    let value = wide("InstallLocation");
+    unsafe {
+        let mut key: HKEY = std::ptr::null_mut();
+        // Prefer the explicit 64-bit view so a 32-bit build still sees the
+        // real uninstall entry; fall back to the default view if rejected.
+        let mut status = RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            subkey.as_ptr(),
+            0,
+            KEY_READ | KEY_WOW64_64KEY,
+            &mut key,
+        );
+        if status != 0 {
+            status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.as_ptr(), 0, KEY_READ, &mut key);
+        }
+        if status != 0 {
+            return None;
+        }
+        // Two-call sizing: the first query reports the byte count, the second
+        // reads into a buffer of exactly that size.
+        let mut data_type: DWORD = 0;
+        let mut byte_len: DWORD = 0;
+        let status = RegQueryValueExW(
+            key,
+            value.as_ptr(),
+            std::ptr::null_mut(),
+            &mut data_type,
+            std::ptr::null_mut(),
+            &mut byte_len,
+        );
+        if status != 0 || data_type != REG_SZ || byte_len == 0 {
+            RegCloseKey(key);
+            return None;
+        }
+        let mut buf = vec![0u16; (byte_len as usize + 1) / 2];
+        let status = RegQueryValueExW(
+            key,
+            value.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            buf.as_mut_ptr() as *mut u8,
+            &mut byte_len,
+        );
+        RegCloseKey(key);
+        if status != 0 {
+            return None;
+        }
+        let s = String::from_utf16_lossy(&buf)
+            .trim_end_matches('\0')
+            .to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn hklm_install_location() -> Option<String> {
+    None
+}
+
+/// True when the running exe is a per-machine install, in which case its
+/// updater must launch elevated. The HKLM uninstall entry (matched against
+/// the exe's parent directory) is the authoritative scope record and covers
+/// custom roots like `D:\Program Files`; the ProgramFiles env-root check
+/// stays as a fallback for hand-copied installs that never wrote an entry.
+/// Per-user installs (HKCU entry, %LOCALAPPDATA%\Programs) and dev builds
+/// report false.
 fn is_per_machine_install() -> bool {
     let exe = match std::env::current_exe() {
         Ok(p) => p.to_string_lossy().into_owned(),
         Err(_) => return false,
     };
+    if let Some(recorded) = hklm_install_location() {
+        let exe_dir = std::path::Path::new(&exe)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if install_dir_matches(&recorded, &exe_dir) {
+            return true;
+        }
+    }
     let roots: Vec<String> = ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
         .iter()
         .filter_map(|k| std::env::var(k).ok())
@@ -5325,6 +5452,63 @@ mod tests {
         assert!(!exe_under_any_root(
             "C:\\Program Files\\ZTerm\\zterm.exe",
             &["".to_string()]
+        ));
+    }
+
+    #[test]
+    fn install_dir_match_normalizes_registry_values() {
+        // Exact match, and the custom per-machine root from the field report.
+        assert!(install_dir_matches(
+            "D:\\Program Files\\ZTerm",
+            "D:\\Program Files\\ZTerm"
+        ));
+        // NSIS records InstallLocation with embedded surrounding quotes.
+        assert!(install_dir_matches(
+            "\"D:\\Program Files\\ZTerm\"",
+            "D:\\Program Files\\ZTerm"
+        ));
+        // Case, slash style, trailing backslash, and surrounding whitespace
+        // are all normalized away.
+        assert!(install_dir_matches(
+            "d:\\PROGRAM FILES\\zterm",
+            "D:\\Program Files\\ZTerm"
+        ));
+        assert!(install_dir_matches(
+            "D:/Program Files/ZTerm",
+            "D:\\Program Files\\ZTerm"
+        ));
+        assert!(install_dir_matches(
+            "D:\\Program Files\\ZTerm\\",
+            "D:\\Program Files\\ZTerm"
+        ));
+        assert!(install_dir_matches(
+            "D:\\Program Files\\ZTerm",
+            "\"D:\\Program Files\\ZTerm\\\""
+        ));
+        assert!(install_dir_matches(
+            "  D:\\Program Files\\ZTerm  ",
+            "D:\\Program Files\\ZTerm"
+        ));
+        // Genuine mismatch and the sibling-prefix trap must NOT match.
+        assert!(!install_dir_matches(
+            "D:\\Program Files\\ZTerm",
+            "D:\\Tools\\ZTerm"
+        ));
+        assert!(!install_dir_matches(
+            "D:\\Program Files\\ZTerm2",
+            "D:\\Program Files\\ZTerm"
+        ));
+        assert!(!install_dir_matches(
+            "D:\\Program Files\\ZTerm",
+            "D:\\Program Files\\ZTerm2"
+        ));
+        // An empty recorded location carries no information.
+        assert!(!install_dir_matches("", "D:\\Program Files\\ZTerm"));
+        // Only ONE surrounding quote pair is stripped — a double pair does not
+        // match (the failure direction is safe: false negative only).
+        assert!(!install_dir_matches(
+            "\"\"D:\\Program Files\\ZTerm\"\"",
+            "D:\\Program Files\\ZTerm"
         ));
     }
 
