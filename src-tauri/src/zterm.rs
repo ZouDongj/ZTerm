@@ -2990,21 +2990,99 @@ pub fn update_download_state(args: Vec<Value>) -> Value {
     UPDATE_DL.lock().snapshot_json()
 }
 
+/// True when `exe` lives under any of the given Program Files roots. Only
+/// per-machine installs need elevation to update; per-user installs (e.g.
+/// %LOCALAPPDATA%\Programs) and dev builds must stay on the plain spawn path.
+fn exe_under_any_root(exe: &str, roots: &[String]) -> bool {
+    let exe = exe.replace('/', "\\").to_lowercase();
+    roots.iter().any(|root| {
+        let root = root.replace('/', "\\").to_lowercase();
+        let root = root.trim_end_matches('\\');
+        !root.is_empty()
+            && exe.starts_with(root)
+            && exe.as_bytes().get(root.len()) == Some(&b'\\')
+    })
+}
+
+fn is_per_machine_install() -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) => return false,
+    };
+    let roots: Vec<String> = ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .collect();
+    exe_under_any_root(&exe, &roots)
+}
+
+/// Launch the NSIS installer for a verified update. Per-machine installs go
+/// through ShellExecuteExW with the "runas" verb so the UAC prompt belongs to
+/// the installer itself — the app never needs to run elevated, and a declined
+/// prompt comes back as an error instead of a silent not-running-as-admin
+/// failure halfway through the install.
+fn launch_update_installer(path: &std::path::Path) -> Result<(), String> {
+    if is_per_machine_install() {
+        launch_elevated(path, "/P /UPDATE /R")
+    } else {
+        std::process::Command::new(path)
+            .args(["/P", "/UPDATE", "/R"])
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("failed to launch installer: {e}"))
+    }
+}
+
+#[cfg(windows)]
+fn launch_elevated(path: &std::path::Path, args: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::shellapi::{ShellExecuteExW, SHELLEXECUTEINFOW};
+    use winapi::um::winuser::SW_SHOWNORMAL;
+    let wide = |s: &std::ffi::OsStr| -> Vec<u16> { s.encode_wide().chain(Some(0)).collect() };
+    let verb = wide(std::ffi::OsStr::new("runas"));
+    let file = wide(path.as_os_str());
+    let params = wide(std::ffi::OsStr::new(args));
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.lpParameters = params.as_ptr();
+    info.nShow = SW_SHOWNORMAL;
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if code == 1223 {
+            // ERROR_CANCELLED: the user declined the UAC prompt. The app keeps
+            // running so the update can be retried later.
+            return Err("elevation prompt declined".to_string());
+        }
+        return Err(format!("elevated installer launch failed (win32 error {code})"));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn launch_elevated(_path: &std::path::Path, _args: &str) -> Result<(), String> {
+    Err("elevated launch is only supported on Windows".to_string())
+}
+
 #[tauri::command]
-pub fn apply_update(args: Vec<Value>) -> Result<Value, String> {
+pub async fn apply_update(args: Vec<Value>) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
     let dry_run = params
         .get("dry_run")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let st = UPDATE_DL.lock();
-    if st.phase != UpdateDlPhase::Ready {
-        return Err("apply-update: no verified update ready".to_string());
-    }
-    let path = update_download_dir().join(&st.file_name);
-    let sha = st.sha256.clone();
-    let tag = st.tag.clone();
-    drop(st);
+    let (path, sha, tag) = {
+        let st = UPDATE_DL.lock();
+        if st.phase != UpdateDlPhase::Ready {
+            return Err("apply-update: no verified update ready".to_string());
+        }
+        (
+            update_download_dir().join(&st.file_name),
+            st.sha256.clone(),
+            st.tag.clone(),
+        )
+    };
     if !path.is_file() {
         return Err("apply-update: installer file missing, download again".to_string());
     }
@@ -3021,15 +3099,19 @@ pub fn apply_update(args: Vec<Value>) -> Result<Value, String> {
             "dry_run": true,
             "tag": tag,
             "cmdline": cmdline,
+            "elevated": is_per_machine_install(),
         }));
     }
-    std::process::Command::new(&path)
-        .args(["/P", "/UPDATE", "/R"])
-        .spawn()
-        .map_err(|e| format!("apply-update: failed to launch installer: {e}"))?;
+    // ShellExecuteExW with the "runas" verb blocks until the user answers the
+    // UAC prompt — user-controlled and unbounded — so it must not run on the
+    // webview's message thread.
+    let launched = tokio::task::spawn_blocking(move || launch_update_installer(&path))
+        .await
+        .map_err(|e| format!("apply-update: launch task: {e}"))?;
+    launched.map_err(|e| format!("apply-update: {e}"))?;
     // Let the installer come up before we vanish; NSIS CheckIfAppIsRunning
     // would kill us anyway, exiting here is just the clean path.
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     std::process::exit(0);
 }
 
@@ -5103,6 +5185,28 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exe_root_match_decides_elevation() {
+        let roots = vec![
+            "C:\\Program Files".to_string(),
+            "C:\\Program Files (x86)".to_string(),
+        ];
+        // Per-machine install locations (case- and slash-style-insensitive).
+        assert!(exe_under_any_root("C:\\Program Files\\ZTerm\\zterm.exe", &roots));
+        assert!(exe_under_any_root("c:/program files (x86)/zterm/zterm.exe", &roots));
+        // Sibling prefix must NOT match ("Program Filesish" is a different dir).
+        assert!(!exe_under_any_root("C:\\Program Filesish\\zterm.exe", &roots));
+        // Per-user install and dev-build locations stay on the plain path.
+        assert!(!exe_under_any_root(
+            "C:\\Users\\me\\AppData\\Local\\Programs\\ZTerm\\zterm.exe",
+            &roots
+        ));
+        assert!(!exe_under_any_root("D:\\Code\\MyTerm\\ZTerm\\target\\release\\zterm.exe", &roots));
+        // No roots known (env missing) -> never elevate.
+        assert!(!exe_under_any_root("C:\\Program Files\\ZTerm\\zterm.exe", &[]));
+        assert!(!exe_under_any_root("C:\\Program Files\\ZTerm\\zterm.exe", &["".to_string()]));
     }
 
     #[test]

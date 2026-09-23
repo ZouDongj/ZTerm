@@ -723,7 +723,11 @@ async function _doApplyUpdate() {
         // control only returns here when the launch failed.
     } catch (e) {
         if (apply) { apply.disabled = false; apply.textContent = '重启并安装'; }
-        _setUpdateDesc('启动安装失败：' + (e && e.message ? e.message : String(e)), 'rgba(220,120,120,0.9)');
+        const raw = e && e.message ? e.message : String(e);
+        const msg = raw.includes('elevation prompt declined')
+            ? '已取消管理员授权，更新未安装'
+            : '启动安装失败：' + raw;
+        _setUpdateDesc(msg, 'rgba(220,120,120,0.9)');
     }
 }
 
