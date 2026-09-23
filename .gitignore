@@ -4,6 +4,9 @@ dist/
 .env*
 .codegraph/
 
+# E2E 沙盒与探针的临时目录（运行结束即自动清理，残留由下次运行扫除）
+artifacts/e2e-tmp/
+
 # Tauri 迁移（tauri-migration 分支）
 # target/ 包含所有 Rust 编译产物 + 依赖缓存（几百 MB）
 # src-tauri/gen/ 是 Tauri 自动生成（capabilities schema、acl-manifests 等）

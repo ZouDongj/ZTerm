@@ -1,15 +1,60 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
-export function createE2eSandbox(sourceExe, tempRoot = tmpdir()) {
+// Sandbox root lives INSIDE the repo (artifacts/e2e-tmp), never in %TEMP% —
+// hundreds of zterm-e2e-* / zterm-probe-* dirs accumulated in the user's temp
+// dir before this rule existed. Every path registered here is removed on
+// process exit; dirs older than an hour (left by killed runs) are swept when
+// the next sandbox is created.
+export const E2E_TMP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'artifacts', 'e2e-tmp');
+
+const exitCleanups = new Set();
+let exitHookArmed = false;
+function armExitHook() {
+  if (exitHookArmed) return;
+  exitHookArmed = true;
+  process.on('exit', () => {
+    for (const target of exitCleanups) {
+      try { rmSync(target, { recursive: true, force: true }); } catch { /* locked by an orphan: left for the stale sweep */ }
+    }
+  });
+}
+
+// Register any scratch path (sandbox dir, WebView2 user-data folder, helper
+// file) for best-effort removal when this process exits.
+export function registerExitCleanup(target) {
+  exitCleanups.add(target);
+  armExitHook();
+  return target;
+}
+
+function sweepStaleSandboxes(tempRoot) {
+  const cutoff = Date.now() - 3_600_000;
+  let entries;
+  try { entries = readdirSync(tempRoot, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    const full = join(tempRoot, entry.name);
+    if (exitCleanups.has(full)) continue;
+    let mtimeMs = 0;
+    try { mtimeMs = statSync(full).mtimeMs; } catch { continue; }
+    if (mtimeMs < cutoff) {
+      try { rmSync(full, { recursive: true, force: true }); } catch { /* locked: try again next run */ }
+    }
+  }
+}
+
+export function createE2eSandbox(sourceExe, tempRoot = E2E_TMP_ROOT) {
+  mkdirSync(tempRoot, { recursive: true });
+  sweepStaleSandboxes(tempRoot);
   const directory = mkdtempSync(join(tempRoot, 'zterm-e2e-'));
   const exe = join(directory, 'zterm.exe');
   const appData = join(directory, 'appdata');
   mkdirSync(appData);
   mkdirSync(join(directory, 'data'));
   copyFileSync(resolve(sourceExe), exe);
+  registerExitCleanup(directory);
   return { directory, exe, appData };
 }
 
