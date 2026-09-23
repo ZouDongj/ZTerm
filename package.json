@@ -1,6 +1,6 @@
 {
   "name": "zterm",
-  "version": "1.0.10",
+  "version": "1.1.0",
   "description": "ZTerm — A modern terminal emulator for Windows with SSH management, split panes, and SFTP",
   "private": true,
   "scripts": {
