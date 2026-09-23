@@ -3049,9 +3049,7 @@ fn exe_under_any_root(exe: &str, roots: &[String]) -> bool {
     roots.iter().any(|root| {
         let root = root.replace('/', "\\").to_lowercase();
         let root = root.trim_end_matches('\\');
-        !root.is_empty()
-            && exe.starts_with(root)
-            && exe.as_bytes().get(root.len()) == Some(&b'\\')
+        !root.is_empty() && exe.starts_with(root) && exe.as_bytes().get(root.len()) == Some(&b'\\')
     })
 }
 
@@ -3106,7 +3104,9 @@ fn launch_elevated(path: &std::path::Path, args: &str) -> Result<(), String> {
             // running so the update can be retried later.
             return Err("elevation prompt declined".to_string());
         }
-        return Err(format!("elevated installer launch failed (win32 error {code})"));
+        return Err(format!(
+            "elevated installer launch failed (win32 error {code})"
+        ));
     }
     Ok(())
 }
@@ -5242,11 +5242,22 @@ mod tests {
     fn update_proxy_setting_parsing() {
         assert_eq!(configured_update_proxy(&json!({})), None);
         assert_eq!(configured_update_proxy(&json!({ "terminal": {} })), None);
-        assert_eq!(configured_update_proxy(&json!({ "terminal": { "updateProxy": "" } })), None);
-        assert_eq!(configured_update_proxy(&json!({ "terminal": { "updateProxy": "   " } })), None);
-        assert_eq!(configured_update_proxy(&json!({ "terminal": { "updateProxy": 42 } })), None);
         assert_eq!(
-            configured_update_proxy(&json!({ "terminal": { "updateProxy": " http://127.0.0.1:7890 " } })),
+            configured_update_proxy(&json!({ "terminal": { "updateProxy": "" } })),
+            None
+        );
+        assert_eq!(
+            configured_update_proxy(&json!({ "terminal": { "updateProxy": "   " } })),
+            None
+        );
+        assert_eq!(
+            configured_update_proxy(&json!({ "terminal": { "updateProxy": 42 } })),
+            None
+        );
+        assert_eq!(
+            configured_update_proxy(
+                &json!({ "terminal": { "updateProxy": " http://127.0.0.1:7890 " } })
+            ),
             Some("http://127.0.0.1:7890".to_string())
         );
     }
@@ -5256,8 +5267,8 @@ mod tests {
         assert!(validate_update_proxy("http://127.0.0.1:7890").is_ok());
         assert!(validate_update_proxy("https://proxy.corp:8443").is_ok());
         assert!(validate_update_proxy("localhost:7890").is_ok()); // schemeless defaults to http
-        // socks URLs parse in ureq but panic at connect time without the
-        // socks-proxy feature — they must be rejected here instead.
+                                                                  // socks URLs parse in ureq but panic at connect time without the
+                                                                  // socks-proxy feature — they must be rejected here instead.
         let err = validate_update_proxy("socks5://127.0.0.1:1080").unwrap_err();
         assert!(err.contains("only http(s)"), "{err}");
         let err = validate_update_proxy("not a url").unwrap_err();
@@ -5269,7 +5280,10 @@ mod tests {
         let err = validate_update_proxy("socks5://alice:s3cret@127.0.0.1:1080").unwrap_err();
         assert!(!err.contains("s3cret"), "{err}");
         assert!(err.contains("***@"), "{err}");
-        assert_eq!(redact_proxy_userinfo("http://127.0.0.1:7890"), "http://127.0.0.1:7890");
+        assert_eq!(
+            redact_proxy_userinfo("http://127.0.0.1:7890"),
+            "http://127.0.0.1:7890"
+        );
         assert_eq!(redact_proxy_userinfo("http://u:p@h:1"), "http://***@h:1");
         assert_eq!(redact_proxy_userinfo("u:p@h:1"), "***@h:1");
     }
@@ -5281,19 +5295,37 @@ mod tests {
             "C:\\Program Files (x86)".to_string(),
         ];
         // Per-machine install locations (case- and slash-style-insensitive).
-        assert!(exe_under_any_root("C:\\Program Files\\ZTerm\\zterm.exe", &roots));
-        assert!(exe_under_any_root("c:/program files (x86)/zterm/zterm.exe", &roots));
+        assert!(exe_under_any_root(
+            "C:\\Program Files\\ZTerm\\zterm.exe",
+            &roots
+        ));
+        assert!(exe_under_any_root(
+            "c:/program files (x86)/zterm/zterm.exe",
+            &roots
+        ));
         // Sibling prefix must NOT match ("Program Filesish" is a different dir).
-        assert!(!exe_under_any_root("C:\\Program Filesish\\zterm.exe", &roots));
+        assert!(!exe_under_any_root(
+            "C:\\Program Filesish\\zterm.exe",
+            &roots
+        ));
         // Per-user install and dev-build locations stay on the plain path.
         assert!(!exe_under_any_root(
             "C:\\Users\\me\\AppData\\Local\\Programs\\ZTerm\\zterm.exe",
             &roots
         ));
-        assert!(!exe_under_any_root("D:\\Code\\MyTerm\\ZTerm\\target\\release\\zterm.exe", &roots));
+        assert!(!exe_under_any_root(
+            "D:\\Code\\MyTerm\\ZTerm\\target\\release\\zterm.exe",
+            &roots
+        ));
         // No roots known (env missing) -> never elevate.
-        assert!(!exe_under_any_root("C:\\Program Files\\ZTerm\\zterm.exe", &[]));
-        assert!(!exe_under_any_root("C:\\Program Files\\ZTerm\\zterm.exe", &["".to_string()]));
+        assert!(!exe_under_any_root(
+            "C:\\Program Files\\ZTerm\\zterm.exe",
+            &[]
+        ));
+        assert!(!exe_under_any_root(
+            "C:\\Program Files\\ZTerm\\zterm.exe",
+            &["".to_string()]
+        ));
     }
 
     #[test]
