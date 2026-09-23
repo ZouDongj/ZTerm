@@ -171,106 +171,12 @@ function applyHighlight(data, tabId) {
     }
     const enabledRules = _highlightRules.filter(r => r.enabled);
     if (enabledRules.length === 0) return data;
-    // Split by \n and process each line
+    // Split by \n and process each line. applyHighlightToLine and its SGR
+    // helpers live in highlight-utils.js (pure, node:test-able); the end of a
+    // match restores the rendition active at the match position (issue #9).
     const lines = data.split('\n');
     const result = lines.map(line => applyHighlightToLine(line, enabledRules));
     return result.join('\n');
-}
-
-function applyHighlightToLine(line, rules) {
-    if (!line) return line;
-    // Collect first match from each rule
-    const matches = [];
-    for (const rule of rules) {
-        const regex = buildHighlightRegex(rule.text, rule.isRegExp, rule.isCaseSensitive);
-        if (!regex) continue; // 非法正则跳过该规则
-        const match = regex.exec(line);
-        if (match) {
-            matches.push({ start: match.index, end: match.index + match[0].length, rule });
-        }
-    }
-    if (matches.length === 0) return line;
-    // ANSI 序列（CSI/OSC/其他）区间内的匹配全部丢弃——向 OSC 注入颜色码会打断序列，匹配文本会泄漏成可见输出
-    const escapeRanges = _getEscapeRanges(line);
-    const validMatches = matches.filter(m => !escapeRanges.some(r => m.start < r.end && m.end > r.start));
-    if (validMatches.length === 0) return line;
-    // Sort by start position, first match wins on overlap
-    validMatches.sort((a, b) => a.start - b.start);
-    // Build result with ANSI color injection
-    let result = '';
-    let last = 0;
-    for (const m of validMatches) {
-        if (m.start < last) continue; // 与前一个 match 重叠，先来先得
-        result += line.slice(last, m.start);
-        result += _getHighlightBeginSeq(m.rule);
-        result += line.slice(m.start, m.end);
-        result += _getHighlightEndSeq(m.rule);
-        last = m.end;
-    }
-    result += line.slice(last);
-    return result;
-}
-
-// 找出字符串中所有 ANSI 转义序列的区间：
-// CSI（\x1b[ 到 final byte 0x40–0x7E）、OSC（\x1b] 到 BEL 或 ST）、其他（ESC + 1 字符）
-function _getEscapeRanges(s) {
-    const ranges = [];
-    for (let i = 0; i < s.length; i++) {
-        if (s[i] !== '\x1b') continue;
-        const next = s[i + 1];
-        if (next === '[') {
-            // CSI: 直到 final byte
-            let j = i + 2;
-            while (j < s.length && !(s.charCodeAt(j) >= 0x40 && s.charCodeAt(j) <= 0x7E)) j++;
-            ranges.push({ start: i, end: Math.min(j + 1, s.length) });
-            i = j;
-        } else if (next === ']') {
-            // OSC: 直到 BEL(\x07) 或 ST(\x1b\\)
-            let j = i + 2;
-            while (j < s.length && s[j] !== '\x07' && !(s[j] === '\x1b' && s[j + 1] === '\\')) j++;
-            const end = s[j] === '\x07' ? j + 1 : (j < s.length ? j + 2 : s.length);
-            ranges.push({ start: i, end });
-            i = end - 1;
-        } else {
-            // 其他 ESC 序列（字符集切换等），跳过 ESC + 1 个字符
-            ranges.push({ start: i, end: Math.min(i + 2, s.length) });
-            i += 1;
-        }
-    }
-    return ranges;
-}
-
-function _getHighlightBeginSeq(rule) {
-    let seq = '';
-    if (rule.foreground && rule.foregroundColor) {
-        const rgb = _hexToRgb(rule.foregroundColor);
-        if (rgb) seq += `\x1b[38;2;${rgb.r};${rgb.g};${rgb.b}m`;
-    }
-    if (rule.background && rule.backgroundColor) {
-        const rgb = _hexToRgb(rule.backgroundColor);
-        if (rgb) seq += `\x1b[48;2;${rgb.r};${rgb.g};${rgb.b}m`;
-    }
-    if (rule.bold) seq += '\x1b[1m';
-    if (rule.italic) seq += '\x1b[3m';
-    if (rule.underline) seq += '\x1b[4m';
-    return seq;
-}
-
-function _getHighlightEndSeq(rule) {
-    let seq = '';
-    if (rule.underline) seq += '\x1b[24m';
-    if (rule.italic) seq += '\x1b[23m';
-    if (rule.bold) seq += '\x1b[22m';
-    if (rule.background && rule.backgroundColor) seq += '\x1b[49m';
-    if (rule.foreground && rule.foregroundColor) seq += '\x1b[39m';
-    return seq;
-}
-
-function _hexToRgb(hex) {
-    const m = /^#?([0-9a-f]{6})$/i.exec(hex);
-    if (!m) return null;
-    const int = parseInt(m[1], 16);
-    return { r: (int >> 16) & 255, g: (int >> 8) & 255, b: int & 255 };
 }
 
 // ── Menu popup ──

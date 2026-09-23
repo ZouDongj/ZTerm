@@ -2586,6 +2586,36 @@ async function main() {
       cycleOrder.nextLanded === cycleOrder.expectNext && cycleOrder.settled === true,
       JSON.stringify(cycleOrder));
 
+    // 13.13 Issue #9 regression: after a highlighted keyword, the text that
+    // follows on the same line must get its ORIGINAL SGR rendition back —
+    // the old end sequence reset to the terminal default and washed colored
+    // text white.
+    const hlRestore = await cdp.eval(`(() => {
+      const backupRules = _highlightRules;
+      const backupSettings = _highlightSettings;
+      try {
+        _highlightRules = [{ id: 'hl_e2e', text: 'ERROR', enabled: true, isRegExp: false, isCaseSensitive: false,
+                             foreground: true, foregroundColor: '#e06c75', background: false, backgroundColor: '',
+                             bold: false, italic: false, underline: false }];
+        _highlightSettings = { highlightEnabled: true, highlightAlternateDisable: true };
+        const line = '\\x1b[38;2;97;175;239minfo: build ERROR done\\x1b[39m';
+        const out = applyHighlight(line, 'e2e-tab');
+        const kw = out.indexOf('ERROR');
+        const after = kw >= 0 ? out.slice(kw + 5) : '';
+        return { ok: kw >= 0,
+                 restores: after.startsWith('\\x1b[38;2;97;175;239m'),
+                 wipes: after.startsWith('\\x1b[39m'),
+                 kwColored: out.includes('\\x1b[38;2;224;108;117mERROR') };
+      } finally {
+        _highlightRules = backupRules;
+        _highlightSettings = backupSettings;
+      }
+    })()`).catch((e) => ({ evalError: String((e && e.message) || e) }));
+    check('高亮关键字后同行文本恢复原色（issue #9 回归）',
+      !!hlRestore && hlRestore.ok === true && hlRestore.restores === true &&
+      hlRestore.wipes === false && hlRestore.kwColored === true,
+      JSON.stringify(hlRestore));
+
     // 14. 窗口状态恢复：写入 config 的 window 字段 → 重启 → 验证最大化/尺寸恢复
     async function writeWindowState(state) {
       // 读现有 config（若存在）并注入 window 字段
