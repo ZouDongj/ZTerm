@@ -2529,6 +2529,63 @@ async function main() {
     })()`).catch(() => null);
     await sleep(250);
 
+    // 13.12 Issue #7 regression: keyboard cycling must follow the bar's
+    // VISUAL order. Opening settings and THEN creating another tab leaves
+    // the settings tab mid-array; the render pins it rightmost, so raw array
+    // order and visual order diverge — cycling used the array and jumped in
+    // a non-visual order.
+    // The 13.11 cleanup closed the settings tab through the staggered
+    // removal path; wait it out or openSettings() below would focus a dying
+    // tab that _cycleTab then filters from the alive set.
+    await cdp.eval(`(async () => {
+      for (let i = 0; i < 40; i++) {
+        if (TabManager._closingTabs.size === 0 && !TabManager.tabs.some(t => t.type === 'settings')) return true;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return false;
+    })()`).catch(() => null);
+    const cycleOrder = await cdp.eval(`(async () => {
+      const T = TabManager;
+      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+      const baseIds = T.tabs.map(t => t.id);
+      const baseActive = T.activeId;
+      openSettings();
+      const settingsId = T.tabs.find(t => t.type === 'settings').id;
+      const p = getDefaultLocalProfile();
+      T.createTab({ name: p.name, type: 'local', command: p.command, args: p.args });
+      const extraId = T.tabs[T.tabs.length - 1].id;
+      const settingsMidArray = T.tabs.findIndex(t => t.id === settingsId) < T.tabs.length - 1;
+      const ordered = T.orderedTabs();
+      const orderedLastIsSettings = ordered[ordered.length - 1].id === settingsId;
+      const domOrder = [...document.querySelectorAll('#tabbar .tab')].map(el => el.dataset.tab);
+      const domMatchesOrdered = JSON.stringify(domOrder) === JSON.stringify(ordered.map(t => t.id));
+      const key = (init) => document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }));
+      T.switchTo(settingsId);
+      key({ key: 'Tab', ctrlKey: true, shiftKey: true }); // prevTab → visually last non-settings
+      const prevLanded = T.activeId;
+      key({ key: 'Tab', ctrlKey: true }); // nextTab → back to settings
+      const nextLanded = T.activeId;
+      // Cleanup: close the extra tab and the settings tab, wait for the
+      // staggered removal to settle, restore the original active tab.
+      T.closeTab(extraId);
+      T.closeTab(settingsId);
+      for (let i = 0; i < 40; i++) {
+        await sleep(100);
+        if (T.tabs.length === baseIds.length && T._closingTabs.size === 0 &&
+            document.querySelectorAll('#tabbar .tab').length === baseIds.length) break;
+      }
+      if (T.activeId !== baseActive) T.switchTo(baseActive);
+      const settled = T.tabs.length === baseIds.length && T._closingTabs.size === 0 &&
+        document.querySelectorAll('#tabbar .tab').length === baseIds.length && T.activeId === baseActive;
+      return { settingsMidArray, orderedLastIsSettings, domMatchesOrdered,
+               prevLanded, expectPrev: extraId, nextLanded, expectNext: settingsId, settled };
+    })()`).catch((e) => ({ evalError: String((e && e.message) || e) }));
+    check('标签页循环切换遵循视觉顺序（issue #7 回归）',
+      !!cycleOrder && cycleOrder.settingsMidArray === true && cycleOrder.orderedLastIsSettings === true &&
+      cycleOrder.domMatchesOrdered === true && cycleOrder.prevLanded === cycleOrder.expectPrev &&
+      cycleOrder.nextLanded === cycleOrder.expectNext && cycleOrder.settled === true,
+      JSON.stringify(cycleOrder));
+
     // 14. 窗口状态恢复：写入 config 的 window 字段 → 重启 → 验证最大化/尺寸恢复
     async function writeWindowState(state) {
       // 读现有 config（若存在）并注入 window 字段

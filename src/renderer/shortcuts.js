@@ -41,8 +41,10 @@ function _getShortcutBindings() {
 function _cycleTab(delta) {
     // Cycle among ALIVE tabs only — a rapid-close burst can leave dying tabs
     // in the array for their staggered removal window; landing on one would
-    // strand activeId on a removed tab.
-    const alive = TabManager.tabs.filter(t => !TabManager._closingTabs.has(t.id));
+    // strand activeId on a removed tab. Follow the bar's VISUAL order
+    // (orderedTabs): the raw array can hold the settings tab mid-list, which
+    // made cycling jump in a different order than the bar shows (issue #7).
+    const alive = TabManager.orderedTabs().filter(t => !TabManager._closingTabs.has(t.id));
     const idx = alive.findIndex(t => t.id === TabManager.activeId);
     if (idx === -1 || alive.length < 2) return;
     const next = alive[(idx + delta + alive.length) % alive.length];

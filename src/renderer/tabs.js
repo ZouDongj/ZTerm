@@ -389,14 +389,19 @@ const TabManager = {
         // 算 next tab：必须在 splice 之前算（splice 后 idx 位置会被原 idx+1 占据）。
         // 必须跳过正在关闭的 tab：burst 时 tabs 数组还没 splice，闭着眼睛取
         // 邻居会把 active 切回一个 dying tab，后续按键就在两个 dying tab 之间乒乓。
+        // Neighbors follow VISUAL order (orderedTabs): the raw array can hold
+        // the settings tab mid-list, which would steal the activation from
+        // the tab that actually sits next to the closed one on the bar.
         let next = null;
         if (wasActive) {
-            for (let j = idx + 1; j < this.tabs.length; j += 1) {
-                if (!this._closingTabs.has(this.tabs[j].id)) { next = this.tabs[j]; break; }
+            const ordered = this.orderedTabs();
+            const oidx = ordered.findIndex(t => t.id === id);
+            for (let j = oidx + 1; j < ordered.length; j += 1) {
+                if (!this._closingTabs.has(ordered[j].id)) { next = ordered[j]; break; }
             }
             if (!next) {
-                for (let j = idx - 1; j >= 0; j -= 1) {
-                    if (!this._closingTabs.has(this.tabs[j].id)) { next = this.tabs[j]; break; }
+                for (let j = oidx - 1; j >= 0; j -= 1) {
+                    if (!this._closingTabs.has(ordered[j].id)) { next = ordered[j]; break; }
                 }
             }
         }
@@ -529,18 +534,26 @@ const TabManager = {
 
     getActive() { return this.tabs.find(t => t.id === this.activeId); },
 
+    // Visual tab order: creation/array order with the settings tab pinned to
+    // the end. Render, keyboard cycling and close-next selection must all use
+    // this single ordering — the array itself can hold settings mid-list (a
+    // tab created after settings was opened), which made Ctrl+Alt+H/L cycle
+    // in a different order than the bar shows (issue #7).
+    orderedTabs() {
+        return [...this.tabs].sort((a, b) => {
+            if (a.type === 'settings' && b.type !== 'settings') return 1;
+            if (a.type !== 'settings' && b.type === 'settings') return -1;
+            return 0;
+        });
+    },
+
     render() {
         const bar = document.getElementById('tabbar');
         bar.querySelectorAll('.tab').forEach(el => el.remove());
 
         const addBtn = document.getElementById('btn-add-tab');
 
-        // Render non-settings tabs first, settings tab always at the end (rightmost)
-        const sortedTabs = [...this.tabs].sort((a, b) => {
-            if (a.type === 'settings' && b.type !== 'settings') return 1;
-            if (a.type !== 'settings' && b.type === 'settings') return -1;
-            return 0;
-        });
+        const sortedTabs = this.orderedTabs();
         sortedTabs.forEach(t => {
             const div = document.createElement('div');
             div.className = 'tab';
