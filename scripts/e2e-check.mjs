@@ -2656,14 +2656,14 @@ async function main() {
       hlRestore.wipes === false && hlRestore.kwColored === true,
       JSON.stringify(hlRestore));
 
-    // 13.14 Issue #10 regression: an OSC 0/2 window title written by the
-    // session (remote shell, an AI agent, ...) must become the tab name and
-    // reach the tab bar label; a manual rename (_customName) must keep
-    // winning over later title sequences; and the title must keep following
-    // the terminal across the tab→split migration (the term moves onto a
-    // pane wrapper, so both the stored title and the event-time owner
-    // resolution must move with it).
-    const oscTitle = await cdp.eval(`(async () => {
+    // 13.14 Tab naming contract: OSC 0/2 window titles written by the session
+    // must NOT rename the tab (regression guard for the rejected title
+    // auto-follow); the explicit opt-in OSC 1337 `ZTermTabName=` channel sets
+    // an ephemeral display-only name that never touches `tab.name`, loses to
+    // a manual rename, rides the terminal across the tab→split→tab migration
+    // (the term moves between tab and pane wrappers), and clears on an empty
+    // payload.
+    const tabRename = await cdp.eval(`(async () => {
       const T = TabManager;
       const sleep = (ms) => new Promise(r => setTimeout(r, ms));
       const poll = async (fn, n = 40) => { for (let i = 0; i < n; i++) { if (fn()) return true; await sleep(100); } return false; };
@@ -2672,51 +2672,67 @@ async function main() {
       const p = getDefaultLocalProfile();
       T.createTab({ name: p.name, type: 'local', command: p.command, args: p.args });
       const tab = T.tabs[T.tabs.length - 1];
-      const out = { wired: false, followed: false, lockedHeld: false, unlockedFollows: false,
-                    titleMovedToPane: false, splitFollows: false, collapsedBack: false,
-                    collapseFollows: false, settled: false };
+      const baseName = tab.name;
+      const out = { wired: false, osc0Ignored: false, osc2Ignored: false, toolShown: false,
+                    nameUntouched: false, stShown: false, lockedHeld: false, unlockedShows: false,
+                    toolMovedToPane: false, splitShowsTool: false, collapsedBack: false,
+                    collapseShowsTool: false, cleared: false, settled: false };
       try {
         out.wired = await poll(() => tab.term && tab.tabId);
         if (!out.wired) return out;
-        // Wait out the shell's own startup title (Git Bash emits one with the
-        // first prompt; PowerShell never does — then this is just a 2.5s
-        // settle). After the first prompt the shell only re-titles on input,
-        // which this probe never sends.
-        await poll(() => !!tab._oscTitle, 25);
-        await sleep(200);
         const label = () => document.querySelector('.tab[data-tab="' + tab.id + '"] .tab-name')?.textContent || '';
         const origTerm = tab.term;
-        origTerm.write('\\x1b]0;E2E_OSC_TITLE\\x07');
-        out.followed = await poll(() => tab.name === 'E2E_OSC_TITLE' && label() === 'E2E_OSC_TITLE');
-        tab._customName = true;
-        origTerm.write('\\x1b]2;E2E_LOCKED\\x07');
+        // (a) OSC 0 / OSC 2 must change neither the visible label nor tab.name.
+        origTerm.write('\\x1b]0;E2E_OSC0\\x07');
         await sleep(400);
-        out.lockedHeld = tab.name === 'E2E_OSC_TITLE';
+        out.osc0Ignored = tab.name === baseName && label() === baseName;
+        origTerm.write('\\x1b]2;E2E_OSC2\\x07');
+        await sleep(400);
+        out.osc2Ignored = tab.name === baseName && label() === baseName;
+        // (b) The opt-in channel overlays the visible label only.
+        origTerm.write('\\x1b]1337;ZTermTabName=E2E_TOOL\\x07');
+        out.toolShown = await poll(() => label() === 'E2E_TOOL');
+        out.nameUntouched = tab.name === baseName && tab._toolName === 'E2E_TOOL';
+        // The ST terminator is accepted the same way as BEL.
+        origTerm.write('\\x1b]1337;ZTermTabName=E2E_TOOL_ST\\x1b\\\\');
+        out.stShown = await poll(() => label() === 'E2E_TOOL_ST' && tab._toolName === 'E2E_TOOL_ST');
+        // (c) A manual rename outranks the tool name: even a fresh tool write
+        // updates the stored name but not the visible label.
+        tab._customName = true;
+        tab.name = 'E2E_MANUAL';
+        T.render();
+        origTerm.write('\\x1b]1337;ZTermTabName=E2E_TOOL\\x07');
+        await sleep(400);
+        out.lockedHeld = label() === 'E2E_MANUAL' && tab._toolName === 'E2E_TOOL';
         delete tab._customName;
-        T._updateTabName(tab);
-        out.unlockedFollows = tab.name === 'E2E_LOCKED';
-        // Split: the original terminal moves onto a pane wrapper. Its stored
-        // title and its future titles must keep driving the tab name.
+        tab.name = baseName;
+        T.render();
+        out.unlockedShows = await poll(() => label() === 'E2E_TOOL');
+        // (d) Split: the original terminal moves onto a pane wrapper and the
+        // tool name rides it onto the pane slot. The split label joins pane
+        // names, so the tool name shows as part of the join here.
         T.addPaneRelativeTo(tab, 'r');
         const splitReady = await poll(() => tab.splitRoot && getAllPanes(tab).length === 2, 50);
         if (splitReady) {
           const origPane = getAllPanes(tab).find(pp => pp.term === origTerm);
-          // Invariant: the title moved onto the pane slot (tab slot cleared).
-          // Don't assert the exact string — a late shell re-title may replace it.
-          out.titleMovedToPane = !!origPane && typeof origPane._oscTitle === 'string' &&
-            origPane._oscTitle.length > 0 && tab._oscTitle === undefined;
-          origTerm.write('\\x1b]0;E2E_AFTER_SPLIT\\x07');
-          out.splitFollows = await poll(() => tab.name.includes('E2E_AFTER_SPLIT'));
-          // Collapse back to a single terminal: the stored title must move
-          // back onto the tab slot and keep following new titles.
+          // Invariant: the name moved onto the pane slot (tab slot cleared).
+          out.toolMovedToPane = !!origPane && origPane._toolName === 'E2E_TOOL' && tab._toolName === undefined;
+          out.splitShowsTool = await poll(() => label().includes('E2E_TOOL'));
+          // Collapse back to a single terminal: the name must move back onto
+          // the tab slot and keep driving the label.
           const other = getAllPanes(tab).find(pp => pp.term !== origTerm);
           if (other) T._closePane(tab.id, other.id);
           out.collapsedBack = await poll(() => !tab.splitRoot && tab.term === origTerm, 40);
           if (out.collapsedBack) {
-            origTerm.write('\\x1b]0;E2E_AFTER_COLLAPSE\\x07');
-            out.collapseFollows = await poll(() => tab.name === 'E2E_AFTER_COLLAPSE');
+            out.collapseShowsTool = await poll(() => label() === 'E2E_TOOL' && tab._toolName === 'E2E_TOOL');
           }
         }
+        // (e) Empty payload clears the tool name and restores the base label.
+        // Also valid if the collapse above failed: the write resolves the
+        // owner pane by terminal identity, and two equal pane names dedup-
+        // join back to the base label.
+        origTerm.write('\\x1b]1337;ZTermTabName=\\x07');
+        out.cleared = await poll(() => label() === baseName && tab.name === baseName && tab._toolName === undefined);
       } finally {
         if (T.tabs.includes(tab)) T.closeTab(tab.id);
         for (let i = 0; i < 40; i++) {
@@ -2728,12 +2744,14 @@ async function main() {
       }
       return out;
     })()`).catch((e) => ({ evalError: String((e && e.message) || e) }));
-    check('OSC 标题序列跟随为标签名且尊重手动重命名（issue #10 回归）',
-      !!oscTitle && oscTitle.wired === true && oscTitle.followed === true &&
-      oscTitle.lockedHeld === true && oscTitle.unlockedFollows === true &&
-      oscTitle.titleMovedToPane === true && oscTitle.splitFollows === true &&
-      oscTitle.collapsedBack === true && oscTitle.collapseFollows === true && oscTitle.settled === true,
-      JSON.stringify(oscTitle));
+    check('OSC 0/2 不改名；1337 ZTermTabName 通道提供临时显示名且随分屏迁移（issue #10 行为反转）',
+      !!tabRename && tabRename.wired === true && tabRename.osc0Ignored === true &&
+      tabRename.osc2Ignored === true && tabRename.toolShown === true &&
+      tabRename.nameUntouched === true && tabRename.stShown === true && tabRename.lockedHeld === true &&
+      tabRename.unlockedShows === true && tabRename.toolMovedToPane === true &&
+      tabRename.splitShowsTool === true && tabRename.collapsedBack === true &&
+      tabRename.collapseShowsTool === true && tabRename.cleared === true && tabRename.settled === true,
+      JSON.stringify(tabRename));
 
     // 13.15 Update proxy setting: the input must persist into config.json
     // (terminal.updateProxy) and actually steer the update HTTP agent — a

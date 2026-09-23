@@ -561,7 +561,7 @@ const TabManager = {
             // no native title attribute: the OS tooltip delay is ~1s, which
             // reads as lag when sweeping across tabs. The shared low-latency
             // tooltip below (delegated on #tabbar) replaces it.
-            div.dataset.tip = t.name;
+            div.dataset.tip = this._tabDisplayName(t);
             div.onclick = () => this.switchTo(t.id);
             div.ondblclick = (e) => { if (t.type !== 'settings') { e.stopPropagation(); this.startRenameTab(t.id); } };
             div.oncontextmenu = (e) => { if (t.type !== 'settings') { e.preventDefault(); this.showTabContextMenu(e, t.id); } };
@@ -571,11 +571,11 @@ const TabManager = {
             div.onmousedown = (e) => this._onTabPointerDown(e, t.id);
             let inner;
             if (t.type === 'settings') {
-                inner = `<span class="tab-lead-icon">${Icons.iconSvg('settings', 14)}</span><span class="tab-name">${escHtml(t.name)}</span>`;
+                inner = `<span class="tab-lead-icon">${Icons.iconSvg('settings', 14)}</span><span class="tab-name">${escHtml(this._tabDisplayName(t))}</span>`;
             } else {
                 let dotClass = t.connected ? 'connected' : 'disconnected';
                 const showDot = _settingsConfig.showStatusDot !== false;
-                inner = (showDot ? `<span class="tab-icon ${dotClass}"></span>` : '') + `<span class="tab-name">${escHtml(t.name)}</span>`;
+                inner = (showDot ? `<span class="tab-icon ${dotClass}"></span>` : '') + `<span class="tab-name">${escHtml(this._tabDisplayName(t))}</span>`;
                 // In split mode the tab label shows no reconnect button; each pane reconnects via its own pane header
                 if (t.type === 'ssh' && !t.splitRoot) {
                     const rcClass = t.connected ? 'tab-reconnect-normal' : 'tab-reconnect';
@@ -616,7 +616,7 @@ const TabManager = {
             return;
         }
         let iconName = 'terminal';
-        let info = t.name;
+        let info = this._tabDisplayName(t);
         if (t.type === 'ssh') {
             iconName = 'zap';
             info = t.user ? `${t.user}@${t.host}` : t.name;
@@ -683,9 +683,9 @@ const TabManager = {
             existing._smoothCursor = tab._smoothCursor;
             existing.tabId = tab.tabId;
             existing.focused = false;
-            // The stored OSC title travels with the terminal onto its new pane
-            // wrapper — the split branch of resolveTabName only reads pane slots.
-            if (tab._oscTitle !== undefined) { existing._oscTitle = tab._oscTitle; delete tab._oscTitle; }
+            // The stored tool-provided name travels with the terminal onto its
+            // new pane wrapper — the split branch of resolveTabDisplayName only reads pane slots.
+            if (tab._toolName !== undefined) { existing._toolName = tab._toolName; delete tab._toolName; }
             // Rebind onData: the terminal moved onto the pane, so it must use pane.tabId, not the now-cleared tab.tabId
             if (tab._onDataDisp) { tab._onDataDisp.dispose(); tab._onDataDisp = null; }
             existing._onDataDisp = existing.term?.onData(data => {
@@ -1085,7 +1085,7 @@ const TabManager = {
     _showPaneDragGhost(state, e) {
         const ghost = document.createElement('div');
         ghost.className = 'pane-drag-ghost';
-        ghost.textContent = state.sourcePane.name || state.sourceTab.name;
+        ghost.textContent = (state.sourcePane._toolName || '').trim() || state.sourcePane.name || this._tabDisplayName(state.sourceTab);
         document.body.appendChild(ghost);
         state.ghost = ghost;
         this._movePaneDragGhost(state, e);
@@ -1328,8 +1328,8 @@ const TabManager = {
         nt._onDataDisp = pane.term?.onData(data => {
             _sendPaneInput(nt, { tabId: nt.tabId }, data);
         });
-        // The pane's OSC title follows its terminal onto the new single tab.
-        if (pane._oscTitle !== undefined) nt._oscTitle = pane._oscTitle;
+        // The pane's tool-provided name follows its terminal onto the new single tab.
+        if (pane._toolName !== undefined) nt._toolName = pane._toolName;
         if (isSSH) {
             nt.host = pane._sshHost || st.host;
             nt.port = pane._sshPort || st.port;
@@ -1363,7 +1363,7 @@ const TabManager = {
             st.tabId = rp.tabId;
             st.name = rp.name || st.name;
             st.type = rp.type || st.type;
-            if (rp._oscTitle !== undefined) st._oscTitle = rp._oscTitle; else delete st._oscTitle;
+            if (rp._toolName !== undefined) st._toolName = rp._toolName; else delete st._toolName;
             if (st.term) {
                 st._onDataDisp = st.term.onData(data => {
                     _sendPaneInput(st, { tabId: st.tabId }, data);
@@ -1408,7 +1408,7 @@ const TabManager = {
         if (targetPaneId && !focusedPane) return;
         let mt = null, mf = null, mid = null, sc = null;
         let paneName = sourceTab.name, paneType = sourceTab.type || 'local';
-        let oscTitle = sourceTab._oscTitle;
+        let toolName = sourceTab._toolName;
         let sshHost = sourceTab.host, sshPort = sourceTab.port, sshUser = sourceTab.user;
         let sshCredId = sourceTab._credId, sshProfileId = sourceTab.sshProfileId;
         if (sourceTab.splitRoot) {
@@ -1424,7 +1424,7 @@ const TabManager = {
             if (focused._onDataDisp) { focused._onDataDisp.dispose(); focused._onDataDisp = null; }
             paneName = focused.name || sourceTab.name;
             paneType = focused.type || sourceTab.type || 'local';
-            oscTitle = focused._oscTitle;
+            toolName = focused._toolName;
             sshHost = focused._sshHost || sourceTab.host;
             sshPort = focused._sshPort || sourceTab.port;
             sshUser = focused._sshUser || sourceTab.user;
@@ -1449,7 +1449,7 @@ const TabManager = {
                         sourceTab.splitRoot = null;
                         sourceTab.name = rp.name || sourceTab.name;
                         sourceTab.type = rp.type || sourceTab.type;
-                        if (rp._oscTitle !== undefined) sourceTab._oscTitle = rp._oscTitle; else delete sourceTab._oscTitle;
+                        if (rp._toolName !== undefined) sourceTab._toolName = rp._toolName; else delete sourceTab._toolName;
                         if (sourceTab.term) {
                             sourceTab._onDataDisp = sourceTab.term.onData(data => {
                                 _sendPaneInput(sourceTab, { tabId: sourceTab.tabId }, data);
@@ -1509,8 +1509,8 @@ const TabManager = {
             fp._onDataDisp = fp.term?.onData(data => {
                 _sendPaneInput(targetTab, fp, data);
             });
-            // Same transfer rule as the terminal: the OSC title moves onto fp.
-            if (targetTab._oscTitle !== undefined) { fp._oscTitle = targetTab._oscTitle; delete targetTab._oscTitle; }
+            // Same transfer rule as the terminal: the tool-provided name moves onto fp.
+            if (targetTab._toolName !== undefined) { fp._toolName = targetTab._toolName; delete targetTab._toolName; }
             targetTab.splitRoot = this._createContainer('h');
             targetTab.splitRoot.children = [fp];
             targetTab.splitRoot.ratios = [1];
@@ -1538,7 +1538,7 @@ const TabManager = {
         np._onDataDisp = mt?.onData(data => {
             _sendPaneInput(targetTab, np, data);
         });
-        if (oscTitle !== undefined) np._oscTitle = oscTitle;
+        if (toolName !== undefined) np._toolName = toolName;
         this.add(targetTab, np, focusedPane, side);
         getAllPanes(targetTab).forEach(p => p.focused = false);
         np.focused = true;
@@ -1592,9 +1592,9 @@ const TabManager = {
         // terminal — otherwise the tab keeps the disposed original wrapper
         // and the software caret silently dies for this tab's whole life.
         tab._smoothCursor = fp?._smoothCursor ?? null;
-        // The surviving pane's OSC title comes back onto the tab with its term.
-        if (fp && fp._oscTitle !== undefined) tab._oscTitle = fp._oscTitle;
-        else delete tab._oscTitle;
+        // The surviving pane's tool-provided name comes back onto the tab with its term.
+        if (fp && fp._toolName !== undefined) tab._toolName = fp._toolName;
+        else delete tab._toolName;
         tab.connected = fp?.connected !== false && (fp?.connected || !!fp?.tabId); // sync the connection state, otherwise the status dot/reconnect button are wrong
         tab.splitRoot = null;
         tab._maximizedPaneId = null;
@@ -2181,9 +2181,25 @@ const TabManager = {
         if (changed) tab.name = next;
         // Split-tree callers rely on this hook to persist layout mutations even
         // when the computed name is unchanged, so the save stays unconditional
-        // for split tabs; a single-terminal tab only saves when its name moved
-        // (e.g. an OSC title arrived).
+        // for split tabs; a single-terminal tab only saves when its name moved.
         if (tab.splitRoot || changed) this._scheduleSaveConfig();
+    },
+
+    // Visible-name overlay: a manual rename wins, then a tool-provided
+    // `_toolName` (OSC 1337 rename channel), then the persisted base name.
+    // Display-only — the result is never written back to `tab.name`.
+    _tabDisplayName(tab) {
+        if (!tab) return '';
+        if (tab._customName) return tab.name || '';
+        return resolveTabDisplayName(tab, tab.splitRoot ? getAllPanes(tab) : []);
+    },
+
+    // A tool-provided name changed: refresh the tab strip and (for the active
+    // tab) the status bar. No saveConfig — `_toolName` is ephemeral and must
+    // never reach the persisted config.
+    refreshTabDisplay(tab) {
+        this.render();
+        if (tab && this.activeId === tab.id) this.updateStatus();
     },
 
     // Coalesced persistence: under continuous triggers like drags / pane create-destroy, write once per idle window (no more synchronous IPC blocking the render each time)

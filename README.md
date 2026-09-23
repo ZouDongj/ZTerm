@@ -11,6 +11,23 @@ A Windows terminal with SSH management, split panes, SFTP file transfer, and a M
 - Terminal color schemes, grouped quick commands, keyword/regex highlights, and editable keyboard shortcuts.
 - Smooth cursors and conservative TUI software-caret recognition.
 
+## Tab rename integration
+
+Tabs never follow OSC 0/1/2 window titles — a program cannot rename a tab implicitly. Tools that deliberately want to label the tab they run in (for example an AI agent on a remote host) can use the explicit opt-in channel:
+
+```text
+ESC ] 1337 ; ZTermTabName=<name> ST
+```
+
+Both terminators are accepted (`\a` BEL or `\e\\` ST). An empty value clears the tool-provided name and restores default naming:
+
+```bash
+printf '\e]1337;ZTermTabName=my-ai-task\a'   # set the tab label
+printf '\e]1337;ZTermTabName=\a'             # clear it
+```
+
+The tool name is display-only: it is never written into the persisted tab name and does not survive a restart. A manual rename (double-click the tab) always wins while set; clearing the manual name falls back to the tool name. The name follows its terminal across split, unsplit, and drag-to-tab moves.
+
 ## Install and build
 
 Published packages, when available, are listed on [GitHub Releases](https://github.com/ZouDongj/zterm/releases). Local verification does not establish that a matching package has been published. Windows requires WebView2; see the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for runtime and MSVC setup.

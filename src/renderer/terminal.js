@@ -390,7 +390,7 @@ function wireTerminal(tab, tabId) {
         // Read tab.tabId dynamically (in reconnect-with-content-preserved mode the terminal is reused but the backend tabId has been updated)
         _sendPaneInput(tab, { tabId: tab.tabId }, data);
     });
-    _wireOscTitleFollow(term);
+    _wireTabRenameChannel(term);
     _bindSyncExitOnClick(tab, term.element);
 
     // ── Bell notification ──
@@ -465,33 +465,43 @@ function _sendPaneInput(tab, pane, data) {
     }
 }
 
-// OSC 0/2 window title → tab name (issue #10). The owner is resolved at
-// EVENT TIME by terminal identity: split/unsplit/extract/drag migrations move
-// a term between tab and pane wrappers without re-wiring this hook, so a
-// closure over the original tab/pane pair would keep writing the stale
-// wrapper (and `_updateTabName` reads `_oscTitle` from whichever slot the
-// term is owned by NOW — tab for single-terminal tabs, pane for splits).
-function _wireOscTitleFollow(term) {
-    term.onTitleChange(title => {
+// Explicit opt-in tab rename channel: OSC 1337 with a `ZTermTabName=` payload
+// (ESC ] 1337 ; ZTermTabName=<name> ST, BEL or ST terminator; empty value
+// clears). Plain OSC 0/2 window titles deliberately do NOT rename tabs. The
+// owner is resolved at EVENT TIME by terminal identity: split/unsplit/
+// extract/drag migrations move a term between tab and pane wrappers without
+// re-wiring this hook, so a closure over the original tab/pane pair would
+// keep writing the stale wrapper (and the display overlay reads `_toolName`
+// from whichever slot the term is owned by NOW — tab for single-terminal
+// tabs, pane for splits).
+function _wireTabRenameChannel(term) {
+    if (!term || !term.parser || typeof term.parser.registerOscHandler !== 'function') return;
+    // One registration per terminal: the OSC registry is a per-id handler
+    // list, so a re-wire of the same term would double-apply every rename.
+    if (term._ztermRenameChannelWired) return;
+    term._ztermRenameChannelWired = true;
+    term.parser.registerOscHandler('1337', (data) => {
+        const name = parseTabRenamePayload(data);
+        // Not our payload (iTerm2/WezTerm 1337 sequences, ...): decline so a
+        // later-registered handler can still consume it.
+        if (name === null) return false;
         const resolved = _resolveTermOwner(term);
-        if (resolved) _applyOscTitle(resolved.tab, resolved.owner, title);
+        if (resolved) _applyToolName(resolved.tab, resolved.owner, name);
+        return true;
     });
 }
 
-// The title is stored on the pane (or on the tab itself for single-terminal
-// tabs) so _updateTabName can rank it above the profile/default name; a
-// manual rename (_customName) still wins and leaves the tab untouched. An
-// empty title is treated as "no information", not as a reset request.
-function _applyOscTitle(ownerTab, paneLike, title) {
-    const t = (title || '').trim();
-    if (!t || !ownerTab || paneLike._oscTitle === t) return;
-    paneLike._oscTitle = t;
-    const oldName = ownerTab.name;
-    TabManager._updateTabName(ownerTab);
-    if (ownerTab.name !== oldName) {
-        TabManager.render();
-        if (TabManager.activeId === ownerTab.id) TabManager.updateStatus();
-    }
+// The tool name is stored on the pane (or on the tab itself for single-
+// terminal tabs) and is a pure display overlay: it must never be written into
+// tab.name and never persisted. An empty name clears the tool name. Only
+// refresh when the visible label actually moved — a manual rename
+// (_customName) keeps winning, and a no-op write skips the re-render.
+function _applyToolName(ownerTab, paneLike, name) {
+    if (!ownerTab || !paneLike) return;
+    const oldDisplay = TabManager._tabDisplayName(ownerTab);
+    if (name === '') delete paneLike._toolName;
+    else paneLike._toolName = name;
+    if (TabManager._tabDisplayName(ownerTab) !== oldDisplay) TabManager.refreshTabDisplay(ownerTab);
 }
 
 // While sync input is on, clicking any pane (including the focused one) exits it.
@@ -602,7 +612,7 @@ function wireTerminalToPane(tab, pane) {
     pane._onDataDisp = term.onData(data => {
         _sendPaneInput(tab, pane, data);
     });
-    _wireOscTitleFollow(term);
+    _wireTabRenameChannel(term);
     _bindSyncExitOnClick(tab, term.element);
 
     // ── Bell notification ──
