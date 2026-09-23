@@ -381,7 +381,9 @@ const TabManager = {
             document.getElementById('settings-pane')?.classList.remove('active');
         }
         this._closingTabs.add(id);
-        // 关闭动画：tab 元素缩小淡出（200ms cubic-bezier 0.05,0.7,0.1,1，与 panel/pane 同曲线）
+        // Close animation: fade only. The .tab-exit rule must stay free of
+        // layout-property transitions — they stall the WebView2 host message
+        // pump for seconds (see the rule's comment in app.css).
         const tabEl = document.querySelector(`.tab[data-tab="${id}"]`);
         if (tabEl) tabEl.classList.add('tab-exit');
         // 算 next tab：必须在 splice 之前算（splice 后 idx 位置会被原 idx+1 占据）。
@@ -571,9 +573,9 @@ const TabManager = {
             inner += `<button type="button" class="tab-close" onclick="event.stopPropagation();TabManager.closeTab('${t.id}');this.blur()" ondblclick="event.stopPropagation()">${Icons.iconSvg('x', 13)}</button>`;
             div.innerHTML = inner;
             // A full re-render wipes the exit class of tabs still inside the
-            // staggered removal window — they would pop back to full width,
-            // look alive and intercept clicks. Re-apply so they stay born-
-            // collapsed (no transition, per the .tab-exit rule).
+            // staggered removal window — they would pop back to full opacity,
+            // look alive and intercept clicks. Re-apply so they stay born
+            // invisible and inert (no transition, per the .tab-exit rule).
             if (this._closingTabs.has(t.id)) div.classList.add('tab-exit');
             bar.insertBefore(div, addBtn);
         });
