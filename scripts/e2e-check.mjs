@@ -2696,6 +2696,73 @@ async function main() {
       oscTitle.collapsedBack === true && oscTitle.collapseFollows === true && oscTitle.settled === true,
       JSON.stringify(oscTitle));
 
+    // 13.15 Update proxy setting: the input must persist into config.json
+    // (terminal.updateProxy) and actually steer the update HTTP agent — a
+    // dead proxy must fail check-update fast with [connect], an invalid
+    // proxy URL with the validation error. Both checks are offline-safe:
+    // 127.0.0.1:1 refuses instantly and validation needs no network at all.
+    const updProxySetup = await cdp.eval(`(async () => {
+      openSettings('about');
+      await new Promise(r => setTimeout(r, 300));
+      const input = document.getElementById('set-update-proxy');
+      if (!input) return { hasInput: false };
+      input.value = 'http://127.0.0.1:1';
+      saveTerminal();
+      return { hasInput: true };
+    })()`).catch((e) => ({ evalError: String((e && e.message) || e) }));
+    let proxyPersisted = null, updProxyDead = 'skipped', updProxyInvalid = 'skipped', updProxyRoundTrip = 'skipped';
+    if (updProxySetup && updProxySetup.hasInput === true) {
+      // Never touch the real network unless the dead-proxy setup landed.
+      await sleep(500);
+      try { proxyPersisted = JSON.parse(readFileSync(DATA_CONFIG, 'utf8')).terminal?.updateProxy === 'http://127.0.0.1:1'; } catch {}
+      updProxyDead = await cdp.eval(`(async () => {
+        try { await ipcRenderer.invoke('check-update'); return ''; }
+        catch (e) { return String((e && e.message) || e); }
+      })()`).catch((e) => 'eval-fail: ' + String((e && e.message) || e));
+      updProxyInvalid = await cdp.eval(`(async () => {
+        document.getElementById('set-update-proxy').value = 'not a url';
+        saveTerminal();
+        await new Promise(r => setTimeout(r, 400));
+        try { await ipcRenderer.invoke('check-update'); return ''; }
+        catch (e) { return String((e && e.message) || e); }
+      })()`).catch((e) => 'eval-fail: ' + String((e && e.message) || e));
+      // Load round-trip: persist a value, close + reopen settings, the input
+      // must show it again.
+      updProxyRoundTrip = await cdp.eval(`(async () => {
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        document.getElementById('set-update-proxy').value = 'http://127.0.0.1:9';
+        saveTerminal();
+        await sleep(400);
+        closeSettingsTab();
+        for (let i = 0; i < 40; i++) {
+          await sleep(100);
+          if (TabManager._closingTabs.size === 0 && !TabManager.tabs.some(t => t.type === 'settings')) break;
+        }
+        openSettings('about');
+        await sleep(400);
+        return document.getElementById('set-update-proxy')?.value ?? null;
+      })()`).catch((e) => 'eval-fail: ' + String((e && e.message) || e));
+    }
+    await cdp.eval(`(() => {
+      const input = document.getElementById('set-update-proxy');
+      if (input) input.value = '';
+      saveTerminal();
+      closeSettingsTab();
+      return 'cleared';
+    })()`).catch(() => null);
+    let proxyCleared = false;
+    for (let i = 0; i < 20; i++) {
+      try { if (JSON.parse(readFileSync(DATA_CONFIG, 'utf8')).terminal?.updateProxy === '') { proxyCleared = true; break; } } catch {}
+      await sleep(200);
+    }
+    await sleep(250);
+    check('更新代理设置生效（死代理快速失败 / 非法代理报校验错 / 回填）',
+      updProxySetup?.hasInput === true && proxyPersisted === true &&
+      typeof updProxyDead === 'string' && updProxyDead.includes('[connect]') &&
+      typeof updProxyInvalid === 'string' && updProxyInvalid.includes('invalid update proxy') &&
+      updProxyRoundTrip === 'http://127.0.0.1:9' && proxyCleared === true,
+      JSON.stringify({ setup: updProxySetup, persisted: proxyPersisted, dead: updProxyDead, invalid: updProxyInvalid, roundTrip: updProxyRoundTrip, cleared: proxyCleared }));
+
     // 14. 窗口状态恢复：写入 config 的 window 字段 → 重启 → 验证最大化/尺寸恢复
     async function writeWindowState(state) {
       // 读现有 config（若存在）并注入 window 字段

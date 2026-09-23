@@ -2502,7 +2502,7 @@ pub fn version_newer(current: &str, latest: &str) -> bool {
 pub async fn check_update(args: Vec<Value>) -> Result<Value, String> {
     let _ = args;
     tokio::task::spawn_blocking(|| {
-        let agent = update_http_agent(10);
+        let agent = update_http_agent(10).map_err(|e| format!("update: {e}"))?;
         let resp = agent
             .get(RELEASES_LATEST_URL)
             .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
@@ -2768,21 +2768,72 @@ fn seed_ready_from_check(tag: &str, info: &NewerAssetInfo) {
     st.sha256 = info.sha256.clone().unwrap_or_default();
 }
 
-/// ureq agent for GitHub update traffic. Honors the proxy env vars
-/// (ALL_PROXY/HTTPS_PROXY/HTTP_PROXY, either case, NO_PROXY respected) and,
-/// via ureq's win-system-proxy feature, the Windows registry proxy
-/// (ProxyEnable/ProxyServer; PAC and per-protocol entries are not read and
-/// degrade to direct). No proxy configured → direct connection, unchanged.
-fn update_http_agent(timeout_secs: u64) -> ureq::Agent {
-    ureq::Agent::config_builder()
+/// Proxy override for update traffic, from the terminal settings. Trimmed;
+/// empty or absent means "no override" (fall through to env/registry).
+fn configured_update_proxy(config: &Value) -> Option<String> {
+    let raw = config.get("terminal")?.get("updateProxy")?.as_str()?.trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw.to_string())
+    }
+}
+
+/// Redact any userinfo (user:pass@) before echoing a proxy URL in an error
+/// message — the config stores it plaintext, but error text travels further
+/// (UI, logs, bug reports).
+fn redact_proxy_userinfo(url: &str) -> String {
+    match url.find('@') {
+        Some(at) => {
+            let scheme_end = url.find("://").map(|i| i + 3).unwrap_or(0);
+            format!("{}***@{}", &url[..scheme_end], &url[at + 1..])
+        }
+        None => url.to_string(),
+    }
+}
+
+/// Validate a configured proxy URL: http(s) only (ureq parses socks4/5 URLs
+/// even without its socks-proxy feature and then PANICS at connect time) and
+/// parsable by ureq.
+fn validate_update_proxy(url: &str) -> Result<(), String> {
+    let lower = url.to_ascii_lowercase();
+    if let Some(scheme) = lower.split_once("://").map(|(s, _)| s) {
+        if scheme != "http" && scheme != "https" {
+            return Err(format!(
+                "invalid update proxy '{}': only http(s) proxies are supported",
+                redact_proxy_userinfo(url)
+            ));
+        }
+    }
+    ureq::Proxy::new(url)
+        .map(|_| ())
+        .map_err(|e| format!("invalid update proxy '{}': {e}", redact_proxy_userinfo(url)))
+}
+
+/// ureq agent for GitHub update traffic. Proxy resolution order: the
+/// explicit `updateProxy` setting (an invalid value is a hard error — a
+/// silent fallback would masquerade as the very network failure the user is
+/// trying to fix), then the proxy env vars (ALL_PROXY/HTTPS_PROXY/HTTP_PROXY,
+/// either case, NO_PROXY respected) and, via ureq's win-system-proxy feature,
+/// the Windows registry proxy (ProxyEnable/ProxyServer; PAC and per-protocol
+/// entries are not read and degrade to direct). Nothing configured → direct.
+fn update_http_agent(timeout_secs: u64) -> Result<ureq::Agent, String> {
+    let proxy = match configured_update_proxy(&load_config()) {
+        Some(url) => {
+            validate_update_proxy(&url)?;
+            Some(ureq::Proxy::new(url.as_str()).expect("validated above"))
+        }
+        None => ureq::Proxy::try_from_env(),
+    };
+    Ok(ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
         // Bound any single stalled body read: timeout_global does not cover
         // manual into_reader() streaming, and a hang there would wedge the
         // download state machine until an app restart.
         .timeout_recv_body(Some(std::time::Duration::from_secs(30)))
-        .proxy(ureq::Proxy::try_from_env())
+        .proxy(proxy)
         .build()
-        .into()
+        .into())
 }
 
 /// Classify update-channel network errors into a stable tag the frontend maps
@@ -2802,7 +2853,7 @@ fn update_net_error_tag(e: &ureq::Error) -> &'static str {
 
 /// Fetch the latest-release JSON from GitHub (shared by check/download).
 fn fetch_latest_release() -> Result<Value, String> {
-    let agent = update_http_agent(10);
+    let agent = update_http_agent(10).map_err(|e| format!("update: {e}"))?;
     let resp = agent
         .get(RELEASES_LATEST_URL)
         .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
@@ -2840,7 +2891,7 @@ fn download_setup_exe(url: &str, name: &str, size_hint: u64, sha256: &str) -> Re
     let _ = std::fs::remove_file(&part);
     let final_path = dir.join(name);
 
-    let agent = update_http_agent(300);
+    let agent = update_http_agent(300).map_err(|e| format!("update: {e}"))?;
     let resp = agent
         .get(url)
         .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
@@ -5185,6 +5236,42 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_proxy_setting_parsing() {
+        assert_eq!(configured_update_proxy(&json!({})), None);
+        assert_eq!(configured_update_proxy(&json!({ "terminal": {} })), None);
+        assert_eq!(configured_update_proxy(&json!({ "terminal": { "updateProxy": "" } })), None);
+        assert_eq!(configured_update_proxy(&json!({ "terminal": { "updateProxy": "   " } })), None);
+        assert_eq!(configured_update_proxy(&json!({ "terminal": { "updateProxy": 42 } })), None);
+        assert_eq!(
+            configured_update_proxy(&json!({ "terminal": { "updateProxy": " http://127.0.0.1:7890 " } })),
+            Some("http://127.0.0.1:7890".to_string())
+        );
+    }
+
+    #[test]
+    fn update_proxy_validation() {
+        assert!(validate_update_proxy("http://127.0.0.1:7890").is_ok());
+        assert!(validate_update_proxy("https://proxy.corp:8443").is_ok());
+        assert!(validate_update_proxy("localhost:7890").is_ok()); // schemeless defaults to http
+        // socks URLs parse in ureq but panic at connect time without the
+        // socks-proxy feature — they must be rejected here instead.
+        let err = validate_update_proxy("socks5://127.0.0.1:1080").unwrap_err();
+        assert!(err.contains("only http(s)"), "{err}");
+        let err = validate_update_proxy("not a url").unwrap_err();
+        assert!(err.contains("invalid update proxy"), "{err}");
+    }
+
+    #[test]
+    fn update_proxy_error_redacts_userinfo() {
+        let err = validate_update_proxy("socks5://alice:s3cret@127.0.0.1:1080").unwrap_err();
+        assert!(!err.contains("s3cret"), "{err}");
+        assert!(err.contains("***@"), "{err}");
+        assert_eq!(redact_proxy_userinfo("http://127.0.0.1:7890"), "http://127.0.0.1:7890");
+        assert_eq!(redact_proxy_userinfo("http://u:p@h:1"), "http://***@h:1");
+        assert_eq!(redact_proxy_userinfo("u:p@h:1"), "***@h:1");
     }
 
     #[test]

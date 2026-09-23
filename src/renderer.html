@@ -580,6 +580,15 @@
                   <button class="btn-outline" style="font-size:12px;padding:6px 14px" id="btn-check-update" onclick="checkForUpdates()">检查更新</button>
                 </div>
               </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">更新代理</div>
+                  <div class="settings-card-desc">检查/下载更新时使用的代理，留空则跟随系统代理或环境变量。示例：http://127.0.0.1:7890</div>
+                </div>
+                <div class="settings-card-control">
+                  <input type="text" id="set-update-proxy" placeholder="留空使用系统设置" onchange="saveTerminal()">
+                </div>
+              </div>
             </div>
             <div class="settings-section">数据</div>
             <div class="settings-card">

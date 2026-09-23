@@ -119,7 +119,14 @@ function switchSettingsTab(el, page) {
         // Render shortcut list when switching to keys page
         if (page === 'keys') renderShortcutsList();
         // Refresh data dir info when switching to about page
-        if (page === 'about') { loadDataDirInfo(); loadAboutInfo(); }
+        if (page === 'about') {
+            loadDataDirInfo();
+            loadAboutInfo();
+            // The update-proxy input lives on this page — repopulate it here
+            // too instead of relying solely on the tab-activation hook.
+            const upEl = document.getElementById('set-update-proxy');
+            if (upEl) upEl.value = _settingsConfig.updateProxy || '';
+        }
         // Convert selects
         setTimeout(convertSelects, 50);
     }
@@ -162,6 +169,8 @@ function loadSettingsIntoForm() {
     }
     const sdEl = document.getElementById('set-startup-dir');
     if (sdEl) sdEl.value = config.startupDir || '';
+    const upEl = document.getElementById('set-update-proxy');
+    if (upEl) upEl.value = config.updateProxy || '';
     // Shell visibility in session selector: one toggle row per local shell.
     // The group-level hint is static markup under the section title in
     // renderer.html (.settings-section-desc), not injected here.
@@ -623,11 +632,12 @@ function saveTerminal() {
     const restoreLocalContent = getToggle('toggle-restore-local');
     const defaultShell = document.getElementById('set-default-shell')?.value || '';
     const startupDir = document.getElementById('set-startup-dir')?.value || '';
+    const updateProxy = (document.getElementById('set-update-proxy')?.value || '').trim();
     const hiddenProfiles = (TabManager.profiles || [])
         .filter(p => { const el = document.getElementById('toggle-shell-' + p.id); return el && !el.classList.contains('on'); })
         .map(p => p.id);
 
-    const config = { cursor, scrollback, bell, cursorBlink, autoCopy, rightClickPaste, richTextCopy, smartCopy, osc52, restoreLocalContent, defaultShell, startupDir, hiddenProfiles };
+    const config = { cursor, scrollback, bell, cursorBlink, autoCopy, rightClickPaste, richTextCopy, smartCopy, osc52, restoreLocalContent, defaultShell, startupDir, updateProxy, hiddenProfiles };
     _settingsConfig = { ..._settingsConfig, ...config };
     persistSettings();
 
@@ -684,6 +694,7 @@ function persistSettings() {
         restoreLocalContent: config.restoreLocalContent,
         defaultShell: config.defaultShell,
         startupDir: config.startupDir,
+        updateProxy: config.updateProxy,
         hiddenProfiles: config.hiddenProfiles,
         qcAutoEnter: config.qcAutoEnter,
     });

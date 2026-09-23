@@ -550,6 +550,7 @@ function _renderUpdateReady(tag) {
 // Rust, so it does not depend on ureq's display wording.
 function _friendlyUpdateError(raw) {
     const s = (raw && raw !== '未知错误') ? String(raw) : '';
+    if (s.includes('invalid update proxy')) return '更新代理地址无效（仅支持 http/https 代理），请在 设置 → 关于 中修正。详细信息：' + s;
     const m = /\[(\w+)\]/.exec(s);
     const tag = m && m[1];
     let msg = '';
