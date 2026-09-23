@@ -4,12 +4,16 @@ dist/
 .env*
 .codegraph/
 
-# E2E 沙盒与探针的临时目录（运行结束即自动清理，残留由下次运行扫除）
-artifacts/e2e-tmp/
+# Local-only development notes repository (docs, design prototypes,
+# diagnostic probes, field evidence). Tracked by dev/.git, never pushed.
+dev/
 
-# Tauri 迁移（tauri-migration 分支）
-# target/ 包含所有 Rust 编译产物 + 依赖缓存（几百 MB）
-# src-tauri/gen/ 是 Tauri 自动生成（capabilities schema、acl-manifests 等）
-# Cargo.lock **保留**：Tauri 官方文档建议 commit 以保证可重现构建
+# Runtime scratch for the e2e sandbox and probes (auto-cleaned after runs)
+artifacts/
+
+# Tauri migration (tauri-migration branch)
+# target/ holds all Rust build output + dependency caches (hundreds of MB)
+# src-tauri/gen/ is Tauri-generated (capabilities schema, acl-manifests, ...)
+# Cargo.lock IS committed on purpose: reproducible builds per Tauri docs.
 src-tauri/target/
 src-tauri/gen/

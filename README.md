@@ -2,8 +2,6 @@
 
 A Windows terminal with SSH management, split panes, SFTP file transfer, and a Material-You-inspired interface. Built with Tauri 2, WebView2, xterm.js, and vanilla HTML/CSS/JavaScript.
 
-[Current status](docs/STATUS.md) is the authoritative source for verified fixes, unresolved issues, and validation limits. Before changing tab hover or TUI caret ownership, read [ADR-0001](docs/adr/0001-stable-tab-hit-regions-and-safe-tui-caret-ownership.md). Project terminology lives in [CONTEXT.md](CONTEXT.md).
-
 ## Features
 
 - Multi-tab local terminals with PowerShell, CMD, Git Bash, and WSL detection.
@@ -11,7 +9,7 @@ A Windows terminal with SSH management, split panes, SFTP file transfer, and a M
 - Horizontal and vertical split panes, resizing, maximizing, and drag reordering.
 - SFTP browsing, upload/download, drag-and-drop, progress, and cancellation. Follow CWD uses shell directory reports; availability depends on the remote shell integration.
 - Terminal color schemes, grouped quick commands, keyword/regex highlights, and editable keyboard shortcuts.
-- Smooth cursors and conservative TUI software-caret recognition; supported and unresolved scenarios are listed in current status.
+- Smooth cursors and conservative TUI software-caret recognition.
 
 ## Install and build
 
@@ -26,13 +24,13 @@ npm ci
 npm run dev
 ```
 
-In the MyTerm workspace, run npm commands from its `ZTerm` directory. `npm run build` creates the configured NSIS installer under `src-tauri/target/release/bundle/nsis/`; `npm run build:release` builds the release executable without packaging. Commands are defined in [package.json](package.json), and bundle settings in [tauri.conf.json](src-tauri/tauri.conf.json).
+Run npm commands from the repository root. `npm run build` creates the configured NSIS installer under `src-tauri/target/release/bundle/nsis/`; `npm run build:release` builds the release executable without packaging. Commands are defined in [package.json](package.json), and bundle settings in [tauri.conf.json](src-tauri/tauri.conf.json).
 
 ## Verification
 
 Run `npm test` for Rust and frontend unit tests. The default pre-commit gate is `npm run verify`: unit tests, release executable build, then native UI E2E. `npm run e2e` alone uses an existing release executable.
 
-The [E2E runner](scripts/e2e-check.mjs) requires a Windows desktop session and working WebView2. It copies the tested executable into a fresh sandbox, isolates application data and the browser profile, and drives runtime interaction through the debugging protocol. A unit-test pass does not establish native UI behavior. Actual coverage and any explicit exception are recorded in [current status](docs/STATUS.md).
+The [E2E runner](scripts/e2e-check.mjs) requires a Windows desktop session and working WebView2. It copies the tested executable into a fresh sandbox, isolates application data and the browser profile, and drives runtime interaction through the debugging protocol. A unit-test pass does not establish native UI behavior.
 
 ## Data and security
 
