@@ -1515,9 +1515,18 @@ pub async fn ssh_connect(
         let mut inject_buffer = String::new();
         let inject_timeout = tokio::time::sleep(std::time::Duration::from_secs(5));
         tokio::pin!(inject_timeout);
+        // One-shot latch for the injection-timeout arm. A pinned `Sleep` stays
+        // Ready(()) forever once its deadline passes (the timer entry settles
+        // in the fired/DEREGISTERED state and only reset() re-arms it), and
+        // tokio's coop budget re-wakes the task instead of parking it —
+        // without this guard the reader becomes a permanent hot loop five
+        // seconds into every SSH session, burning a core per idle session
+        // (issue #15). See examples/select_sleep_spin.rs.
+        let mut inject_fired = false;
         loop {
             tokio::select! {
-                _ = &mut inject_timeout => {
+                _ = &mut inject_timeout, if !inject_fired => {
+                    inject_fired = true;
                     // Timeout: force Normal state to avoid stuck filtering
                     if filtering_reader.swap(false, std::sync::atomic::Ordering::Relaxed) {
                         let remainder = std::mem::take(&mut inject_buffer);
