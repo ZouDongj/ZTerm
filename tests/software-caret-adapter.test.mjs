@@ -17,6 +17,7 @@ require('../src/vendor/xterm.js');
 const { Terminal } = globalThis.TabbyXterm;
 const BundledTerminal = globalThis.TabbyXterm.Terminal;
 
+const restoreContentSource = readFileSync(new URL('../src/renderer/restore-content.js', import.meta.url), 'utf8');
 const ipcSource = readFileSync(new URL('../src/renderer/ipc.js', import.meta.url), 'utf8');
 
 function ipcParserFixture(t, geometry = { cols: 80, rows: 24 }) {
@@ -26,7 +27,9 @@ function ipcParserFixture(t, geometry = { cols: 80, rows: 24 }) {
   t.after(() => scroll.dispose());
   const owner = { id: 'lifecycle', tabId: 'offline', type: 'ssh', term: f.source, _smoothCursor: { _adapter: f.adapter } };
   const context = { ipcRenderer: { on() {} }, TabManager: { tabs: [owner] }, window: {}, createInkCaretObserver };
-  vm.createContext(context); vm.runInContext(ipcSource, context);
+  vm.createContext(context);
+  vm.runInContext(restoreContentSource, context); // appendContentTail for the restore capture
+  vm.runInContext(ipcSource, context);
   async function write(raw) {
     const ink = context._inkFeed(owner, owner, null, raw);
     await new Promise(resolve => f.source.write(raw, () => { context._outputParsed(owner, ink)(); resolve(); }));

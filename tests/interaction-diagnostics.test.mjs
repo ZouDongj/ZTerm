@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 const require = createRequire(import.meta.url);
 const { createInteractionDiagnostics } = require('../src/renderer/interaction-diagnostics.js');
+const restoreContentSource = fs.readFileSync(new URL('../src/renderer/restore-content.js', import.meta.url), 'utf8');
 
 function fixture() {
     let time = 0, counter = 0;
@@ -107,7 +108,7 @@ test('real IPC callbacks bind captured caret adapter and session epoch', () => {
     const owner = { id: 't', tabId: 'backend', type: 'ssh', _smoothCursor: { _adapter: { softwareCaretPort: port } }, term: { write(data, done) { writes.push({ data, done }); } } };
     const ctx = { ipcRenderer: { on: (n, f) => callbacks.set(n, f) }, TabManager: { tabs: [owner] }, window: {}, ptyBuffers: {}, applyHighlight: s => s,
         createInkCaretObserver: () => ({ push: () => ({ chunkSeq: 1 }) }) };
-    vm.createContext(ctx); vm.runInContext(source, ctx);
+    vm.createContext(ctx); vm.runInContext(restoreContentSource, ctx); vm.runInContext(source, ctx); // appendContentTail for the restore capture
     callbacks.get('pty-output')({}, { tabId: 'backend', data: 'hello' });
     assert.deepEqual(parsed, [['enqueued', 1]]);
     owner._smoothCursor._adapter = { softwareCaretPort: { parsed: () => assert.fail('replacement adapter received old callback') } };
@@ -126,7 +127,7 @@ test('real IPC preserves queued completion for empty filtered output', () => {
     const ctx = { ipcRenderer: { on: (n, f) => callbacks.set(n, f) }, TabManager: { tabs: [owner] }, window: {}, ptyBuffers: {}, applyHighlight: s => s,
         createConPtyCaretFilter: () => ({ push: () => '' }),
         createInkCaretObserver: () => ({ push: () => ({ chunkSeq: 3 }) }) };
-    vm.createContext(ctx); vm.runInContext(source, ctx);
+    vm.createContext(ctx); vm.runInContext(restoreContentSource, ctx); vm.runInContext(source, ctx); // appendContentTail for the restore capture
     callbacks.get('pty-output')({}, { tabId: 'backend', data: 'buffered-by-filter' });
     assert.equal(writes[0].data, ''); assert.deepEqual(actions, [['enqueued', 3]]);
     writes[0].done(); assert.deepEqual(actions, [['enqueued', 3], ['parsed', 3]]);

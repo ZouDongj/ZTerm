@@ -14,6 +14,7 @@ const require = createRequire(import.meta.url);
 const { CONPTY_DA1_RESPONSE } = require('../src/renderer/conpty-caret.js');
 
 const conptySource = readFileSync(new URL('../src/renderer/conpty-caret.js', import.meta.url), 'utf8');
+const restoreContentSource = readFileSync(new URL('../src/renderer/restore-content.js', import.meta.url), 'utf8');
 const ipcSource = readFileSync(new URL('../src/renderer/ipc.js', import.meta.url), 'utf8');
 const INIT_BURST = '\u001b[1t\u001b[c\u001b[?1004h\u001b[?9001h';
 const termSink = (out) => ({ write: (data) => out.push(data) });
@@ -35,6 +36,7 @@ function fixture(tabs, extraGlobals = {}) {
     };
     vm.createContext(ctx);
     vm.runInContext(conptySource, ctx); // real filter: sets createConPtyCaretFilter + __conPtyCaretInternals
+    vm.runInContext(restoreContentSource, ctx); // appendContentTail for the restore capture
     vm.runInContext(ipcSource, ctx);
     return { callbacks, sent };
 }

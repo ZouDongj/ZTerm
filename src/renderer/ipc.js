@@ -159,7 +159,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
             const pane = getAllPanes(tab).find(p => p.tabId === tabId);
             if (pane) {
                 diagnostics?.routed(diagnostic, pane, data);
-                if (!tab._contentBuffer) tab._contentBuffer = [];
+                if (!tab._contentBuffer) tab._contentBuffer = '';
                 // Observe the RAW bytes first, then the transport filter,
                 // then write with a parse-watermark callback.
                 const inkSeq = _inkFeed(pane, tab, pane, data);
@@ -178,22 +178,19 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
         }
         if (tab.tabId === tabId) {
             diagnostics?.routed(diagnostic, tab, data);
-            if (!tab._contentBuffer) tab._contentBuffer = [];
+            if (!tab._contentBuffer) tab._contentBuffer = '';
             const inkSeq = _inkFeed(tab, tab, null, data);
             if (typeof data === 'string' && data) data = _conPtyCaretFix(tab, data, tab.type);
             diagnostics?.filtered(diagnostic, data);
-            // Track alternate screen (nvim, less, etc.) — don't save TUI content
+            // Track alternate screen (nvim, less, etc.) — don't save TUI content.
+            // Gate is chunk-granular and order matters: a chunk containing the
+            // alt-screen ENTER is not captured (flag set before the gate), while
+            // a chunk containing the EXIT is captured including the exit itself
+            // — replay's alt-balance scan strips that stray token (its enter
+            // was never captured), so it cannot teleport the replay cursor.
             if (data.includes('\x1b[?1049h')) tab._altScreen = true;
             if (data.includes('\x1b[?1049l')) tab._altScreen = false;
-            if (!tab._altScreen) {
-                const lines = data.split('\n');
-                for (const line of lines) {
-                    if (line) tab._contentBuffer.push(line);
-                }
-                if (tab._contentBuffer.length > 500) {
-                    tab._contentBuffer = tab._contentBuffer.slice(-500);
-                }
-            }
+            if (!tab._altScreen) tab._contentBuffer = appendContentTail(tab._contentBuffer, data);
             if (tab.term) {
                 if (ptyBuffers[tabId]) {
                     tab.term.write(ptyBuffers[tabId]);

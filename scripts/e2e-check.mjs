@@ -2005,16 +2005,32 @@ async function main() {
     })()`);
     check('更新说明链接走统一 open-url 入口', notesProbe === 3, `calls=${notesProbe}`);
     const notesFail = await cdp.eval(`(async () => {
-      const prev = ipcRenderer.invoke;
-      ipcRenderer.invoke = (cmd) => cmd === 'open-url' ? Promise.reject('blockedProtocol') : prev(cmd);
-      goUpdateReleaseNotes();
-      await new Promise(r => setTimeout(r, 120));
-      ipcRenderer.invoke = prev;
-      const t = document.getElementById('toast');
-      return { shown: t.classList.contains('show'), text: t.textContent };
+      const read = () => {
+        const t = document.getElementById('toast');
+        return { shown: t.classList.contains('show'), text: t.textContent };
+      };
+      // The toast element is a global singleton shared by every notification,
+      // so an ambient toast (e.g. a dead-SSH auto-retry failure from an earlier
+      // section) can overwrite ours inside the 120ms window. Retry until the
+      // expected error text is observed; report the attempt count.
+      for (let attempt = 1; attempt <= 6; attempt++) {
+        const prev = ipcRenderer.invoke;
+        ipcRenderer.invoke = (cmd) => cmd === 'open-url' ? Promise.reject('blockedProtocol') : prev(cmd);
+        try {
+          goUpdateReleaseNotes();
+          await new Promise(r => setTimeout(r, 120));
+        } finally {
+          ipcRenderer.invoke = prev;
+        }
+        const state = read();
+        if (state.shown === true && state.text.includes('无法打开链接') && state.text.includes('blockedProtocol')) {
+          return { ok: true, attempt, ...state };
+        }
+        await new Promise(r => setTimeout(r, 350));
+      }
+      return { ok: false, ...read() };
     })()`);
-    const notesFailOk = notesFail.shown === true && notesFail.text.includes('无法打开链接') && notesFail.text.includes('blockedProtocol');
-    check('更新说明链接失败弹出错误反馈', notesFailOk === true, JSON.stringify(notesFail));
+    check('更新说明链接失败弹出错误反馈', notesFail.ok === true, JSON.stringify(notesFail));
     await cdp.eval(`(() => { ipcRenderer.invoke = window.__linkOrigInvoke; window.__updateUrl = ''; return 'restored'; })()`).catch(() => null);
 
     // 13.9 Overlay style unification + search focus-ring + action-icon optical
@@ -2967,6 +2983,91 @@ async function main() {
     check('重启后恢复窗口化尺寸', r3.max === false && r3.w !== 0,
       `isMaximized=${r3.max}, innerWidth=${r3.w} (期望 ~900/${r3.dpr} CSS px)`);
     cdp3.close();
+
+    // 14.1 Issue #14 regression: restart-restore content replay. Capture used
+    // to split every pty chunk on '\n' and push the pieces as lines, so chunk
+    // boundaries became permanent line breaks (SSH per-keystroke echo restored
+    // one letter per line, TUI history garbled). The tail is now a raw string;
+    // these checks pin the seeded-config → restart → replay path end to end.
+    // Config writes happen after killExisting() and before the relaunch: the
+    // running app rewrites config.json every 15s, so seeding while it is alive
+    // races the periodic save.
+    function seedRestoreTabs(content) {
+      let cfg = {};
+      try { cfg = JSON.parse(readFileSync(DATA_CONFIG, 'utf8')); } catch {}
+      cfg.terminal = { ...(cfg.terminal || {}), restoreLocalContent: true };
+      cfg.lastTabs = [{ name: 'RestoreA', type: 'local', command: 'powershell.exe', args: [], content }];
+      writeFileSync(DATA_CONFIG, JSON.stringify(cfg), 'utf8');
+    }
+    async function restoredTopLines(cdp) {
+      // TabManager restores tabs during init; the replay lands when the local
+      // pty is wired, so poll the active terminal's buffer top rows.
+      for (let i = 0; i < 20; i++) {
+        const state = await cdp.eval(`(() => {
+          const tab = TabManager.getActive();
+          const b = tab && tab.term && tab.term.buffer ? tab.term.buffer.active : null;
+          if (!b) return null;
+          const l0 = b.getLine(0)?.translateToString(true) || '';
+          if (!l0) return null;
+          return { l0, l1: b.getLine(1)?.translateToString(true) || '' };
+        })()`).catch(() => null);
+        if (state) return state;
+        await sleep(400);
+      }
+      return null;
+    }
+
+    // (a) raw string tail: a line split across capture chunks must restore as
+    // ONE line — the vertical-letters regression pin.
+    killExisting();
+    await sleep(500);
+    await seedRestoreTabs('[root@x ~]# echo test\r\ntest output\r\n');
+    const cdpR1 = await restartAndConnect();
+    const r1lines = await restoredTopLines(cdpR1);
+    check('重启恢复：整行内容不再断成竖排单字符（#14）',
+      !!r1lines && r1lines.l0.includes('[root@x ~]# echo test') && r1lines.l1.includes('test output'),
+      JSON.stringify(r1lines));
+    cdpR1.close();
+
+    // (b) legacy array-of-lines save migrates through the same replay intact.
+    killExisting();
+    await sleep(500);
+    await seedRestoreTabs(['[root@y ~]# ls', 'file1']);
+    const cdpR2 = await restartAndConnect();
+    const r2lines = await restoredTopLines(cdpR2);
+    check('重启恢复：旧版行数组内容完整迁移回放',
+      !!r2lines && r2lines.l0.includes('[root@y ~]# ls') && r2lines.l1.includes('file1'),
+      JSON.stringify(r2lines));
+    cdpR2.close();
+
+    // (c) state-reset epilogue: a tail ending inside a killed TUI (cursor
+    // hidden) must end the replay with the cursor visible again.
+    killExisting();
+    await sleep(500);
+    await seedRestoreTabs('restore-epilogue-check\x1b[?25l');
+    const cdpR3 = await restartAndConnect();
+    let r3state = null;
+    let r3ok = false;
+    for (let i = 0; i < 20 && !r3ok; i++) {
+      const s = await cdpR3.eval(`(() => {
+        const tab = TabManager.getActive();
+        if (!tab || !tab.term) return null;
+        const b = tab.term.buffer.active;
+        let hit = false;
+        for (let y = 0; y < b.length; y++) {
+          if ((b.getLine(y)?.translateToString(true) || '').includes('restore-epilogue-check')) { hit = true; break; }
+        }
+        if (!hit) return null;
+        return { hidden: tab.term._core.coreService.isCursorHidden };
+      })()`).catch(() => null);
+      if (s) { r3state = s; if (s.hidden === false) r3ok = true; }
+      if (!r3ok) await sleep(400);
+    }
+    check('重启恢复：回放后隐藏光标被重置为可见',
+      r3ok === true && r3state?.hidden === false,
+      JSON.stringify(r3state));
+    cdpR3.close();
+
     killExisting();
     await sleep(500);
   } finally {

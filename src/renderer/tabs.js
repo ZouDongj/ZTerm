@@ -189,7 +189,7 @@ const TabManager = {
                 }
                 const tid = this.createTabSilent(t.name, t.command || 'powershell.exe', t.type || 'local', sshOpts, t.args);
                 const tab = this.tabs.find(x => x.id === tid);
-                if (tab && t.content) tab._contentBuffer = t.content;
+                if (tab && t.content) tab._contentBuffer = normalizeRestoredContent(t.content);
 
                 if (sshOpts && sshOpts._encryptedPwd) {
                     const capturedId = tid;
@@ -1606,10 +1606,11 @@ const TabManager = {
                 _sendPaneInput(tab, { tabId: tab.tabId }, data);
             });
         }
-        // Sync the contentBuffer focus buffer: during split, all panes' output accumulates into tab._contentBuffer,
-        // and after exiting the split the buffered content may mismatch the surviving pane's type (SSH content in a
-        // local buffer). Simple approach: clear contentBuffer when exiting the split to avoid confusion on restore.
-        tab._contentBuffer = [];
+        // Split panes are not captured (the pane branch of the pty-output
+        // router never appends), so on unsplit the buffer can only hold
+        // stale single-tab content from before the split — reset it so that
+        // content cannot resurrect on a later restore.
+        tab._contentBuffer = '';
         // Disconnect pane-body resize observers before dropping the split
         // subtree (Blink retains observed nodes and their DOM subtrees).
         all.forEach(p => { const body = document.getElementById('pane-body_' + p.id); if (body && body._resizeObserver) body._resizeObserver.disconnect(); });

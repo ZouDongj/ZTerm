@@ -445,8 +445,9 @@ function wireTerminal(tab, tabId) {
         delete ptyBuffers[tabId];
     }
 
-    if (_settingsConfig.restoreLocalContent && tab._contentBuffer && tab._contentBuffer.length > 0) {
-        term.write(tab._contentBuffer.join('\r\n') + '\r\n');
+    if (_settingsConfig.restoreLocalContent && tab._contentBuffer) {
+        const replay = replayPayload(tab._contentBuffer);
+        if (replay) term.write(replay);
     }
 
     if (TabManager.activeId === tab.id) {

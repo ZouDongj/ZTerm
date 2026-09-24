@@ -60,7 +60,7 @@ function saveConfig() {
         .filter(t => t.type !== 'settings')
         .map((t, i) => {
             let saveName = t.name;
-            const entry = { name: saveName, type: t.type, command: t.command || 'powershell.exe', args: t.args || [], content: t.splitRoot ? [] : (t._contentBuffer || []) };
+            const entry = { name: saveName, type: t.type, command: t.command || 'powershell.exe', args: t.args || [], content: t.splitRoot ? '' : (t._contentBuffer || '') };
             if (t.splitRoot) {
                 entry.splitRoot = serializeSplitNode(t.splitRoot);
             }

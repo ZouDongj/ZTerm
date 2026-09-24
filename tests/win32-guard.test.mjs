@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
 const conptySource = readFileSync(new URL('../src/renderer/conpty-caret.js', import.meta.url), 'utf8');
+const restoreContentSource = readFileSync(new URL('../src/renderer/restore-content.js', import.meta.url), 'utf8');
 const ipcSource = readFileSync(new URL('../src/renderer/ipc.js', import.meta.url), 'utf8');
 const terminalSource = readFileSync(new URL('../src/renderer/terminal.js', import.meta.url), 'utf8');
 const win32Source = readFileSync(new URL('../src/renderer/win32-input.js', import.meta.url), 'utf8');
@@ -38,6 +39,7 @@ function ipcFixture(tabs, extraGlobals = {}) {
     vm.createContext(ctx);
     vm.runInContext(win32Source, ctx); // globalThis.__win32Input for the ipc wiring
     vm.runInContext(conptySource, ctx);
+    vm.runInContext(restoreContentSource, ctx); // appendContentTail for the restore capture
     vm.runInContext(ipcSource, ctx);
     return { callbacks, sent, ctx };
 }
