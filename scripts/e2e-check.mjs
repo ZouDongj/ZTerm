@@ -20,6 +20,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { createServer } from 'node:net';
+import { fileURLToPath } from 'node:url';
 import { createE2eSandbox, ownsProcess, restartOwnedApp, killSandboxBrowsers, killPortHolder, sweepDebugPortRange } from './e2e-isolation.mjs';
 
 const SOURCE_EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
@@ -37,6 +38,22 @@ let launchPort = PORT;
 let sandbox = null;
 let ownedChild = null;
 let launchCount = 0;
+
+// ── Virtual-desktop isolation ──
+// E2E launches would otherwise pop the app window onto the user's ACTIVE
+// virtual desktop and disturb their work. ZTERM_E2E_DESKTOP selects a 1-based
+// desktop number as shown in Task View (default "2"); "off"/"0" disables
+// isolation. The helper scripts/e2e-vdesktop-move.cs is compiled lazily into
+// the run sandbox and moves each launched window without switching desktops;
+// any compile/lookup problem warns once and falls back to launching on the
+// current desktop.
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const DESKTOP_CFG = (process.env.ZTERM_E2E_DESKTOP ?? '2').trim().toLowerCase();
+const DESKTOP_ISOLATION = DESKTOP_CFG !== 'off' && DESKTOP_CFG !== '0';
+const DESKTOP_INDEX = DESKTOP_ISOLATION ? Number(DESKTOP_CFG) - 1 : -1;
+let vdHelperTried = false;
+let vdHelperExe = null;
+let vdWarned = false;
 
 // ── Launch the exe (with WebView2 remote debugging) ──
 let DATA_CONFIG = null;
@@ -144,6 +161,67 @@ function killExisting() {
     }
   }
 }
+// Compile the virtual-desktop move helper into the run sandbox, once per run
+// (sandbox cleanup then removes it automatically). csc wants native Windows
+// paths; resolve/join already yield them. Returns the helper path, or null
+// after a one-time warning when isolation is unusable.
+function resolveVdHelper() {
+  if (vdHelperTried) return vdHelperExe;
+  vdHelperTried = true;
+  const fail = (reason) => { console.warn(`[e2e] desktop isolation unavailable: ${reason}`); return null; };
+  if (!Number.isInteger(DESKTOP_INDEX) || DESKTOP_INDEX < 0) {
+    return fail(`ZTERM_E2E_DESKTOP must be a 1-based desktop number, got '${process.env.ZTERM_E2E_DESKTOP}'`);
+  }
+  const src = join(SCRIPT_DIR, 'e2e-vdesktop-move.cs');
+  if (!existsSync(src)) return fail(`helper source missing: ${src}`);
+  const windir = process.env.WINDIR || 'C:\\Windows';
+  const csc = [join(windir, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe'),
+               join(windir, 'Microsoft.NET', 'Framework', 'v4.0.30319', 'csc.exe')].find(existsSync);
+  if (!csc) return fail('csc.exe not found under Microsoft.NET Framework(64) v4.0.30319');
+  const out = join(sandbox.directory, 'e2e-vdesktop-move.exe');
+  try {
+    execFileSync(csc, ['/nologo', '/target:exe', `/out:${out}`, src], { stdio: 'pipe', timeout: 60000 });
+  } catch (e) {
+    return fail(`csc failed: ${String(e.message).split('\n')[0]}`);
+  }
+  vdHelperExe = existsSync(out) ? out : null;
+  if (!vdHelperExe) fail('csc produced no output exe');
+  return vdHelperExe;
+}
+
+// Fire-and-forget: move the freshly launched window to the configured
+// virtual desktop. Never awaited and never allowed to reject the launch; the
+// helper is detached + unref'd so it cannot keep this process alive, and it
+// needs no explicit kill — its process watchdog exits it within ~250 ms of
+// the app dying, and its own 30 s retry budget bounds it absolutely.
+function moveWindowOffDesktop(child) {
+  const helper = resolveVdHelper();
+  if (!helper || !child.pid) return;
+  const desktopNo = DESKTOP_INDEX + 1;
+  // Runtime failures warn once per run: a broken helper must not spam one
+  // warning per launch.
+  const warnOnce = (msg) => { if (!vdWarned) { vdWarned = true; console.warn(msg); } };
+  let proc;
+  try {
+    // The exe path lets the helper verify the pid really is the app it was
+    // asked to move (pid-reuse guard); same value startApp spawns.
+    proc = spawn(helper, [String(child.pid), String(DESKTOP_INDEX), String(EXE)], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch (e) {
+    warnOnce(`[e2e] window move to desktop ${desktopNo} failed to start: ${e.message}`);
+    return;
+  }
+  let out = '';
+  proc.stdout.on('data', (d) => { out += d; });
+  proc.on('exit', (code) => {
+    const line = out.trim().split('\n').pop() || '';
+    if (code === 0) console.log(`[e2e] window moved to desktop ${desktopNo}${line ? ` (${line})` : ''}`);
+    else warnOnce(`[e2e] window move to desktop ${desktopNo} failed (exit ${code})${line ? `: ${line}` : ''}`);
+  });
+  proc.on('error', () => {});
+  proc.unref();
+  proc.stdout.unref?.();
+}
+
 // Safety net for exit paths that skip the explicit killExisting() calls
 // (unexpected early throw, unhandled rejection): never leave a PTY tree behind.
 process.on('exit', () => killExisting());
@@ -164,13 +242,17 @@ function startApp() {
       ...process.env,
       APPDATA: sandbox.appData,
       LOCALAPPDATA: sandbox.appData,
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${launchPort}`,
+      // The anti-throttling flags keep rAF/rendering/timers running while the
+      // window sits on a non-visible virtual desktop (occlusion would
+      // otherwise throttle Chromium and break frame-sampling probes).
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${launchPort} --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`,
       WEBVIEW2_USER_DATA_FOLDER: udf,
     },
   });
   ownedChild = child;
   child.on('error', error => console.error('[e2e] isolated launch failed:', error.message));
   child.unref();
+  if (DESKTOP_ISOLATION) moveWindowOffDesktop(child);
 }
 
 async function assertUnusedPort(port) {
