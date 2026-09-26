@@ -801,12 +801,13 @@ document.addEventListener('keydown', e => {
             e.preventDefault(); e.stopPropagation();
             return;
         }
-        if (TabManager._maximizedPaneId) {
-            const tab = TabManager.getActive();
-            if (tab && tab.splitRoot) {
-                e.preventDefault(); e.stopPropagation();
-                TabManager._maximizePane(tab.id, TabManager._maximizedPaneId);
-            }
+        // Maximize state lives on the tab (per-tab source of truth): only the
+        // ACTIVE tab's field may drive Esc — a manager-level copy could be set
+        // by a background tab and wedge Esc for every other tab
+        const tab = TabManager.getActive();
+        if (tab && tab.splitRoot && tab._maximizedPaneId) {
+            e.preventDefault(); e.stopPropagation();
+            TabManager._maximizePane(tab.id, tab._maximizedPaneId);
         }
         return;
     }

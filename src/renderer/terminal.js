@@ -273,6 +273,29 @@ function _resolveTermOwner(term) {
     return null;
 }
 
+// Input routing for a terminal whose owning wrapper may have changed since the
+// listener was registered (split/extract/drag migration): resolve the owner at
+// SEND time. An unresolvable term (mid-teardown) sends nowhere instead of into
+// a stale wrapper's session; sync-input broadcast follows the CURRENT tab, so
+// no input leaks to pre-migration siblings.
+function _sendInputForTerm(term, data) {
+    const resolved = _resolveTermOwner(term);
+    if (!resolved) return;
+    _sendPaneInput(resolved.tab, resolved.owner, data);
+}
+
+// Resize routing with the same event-time owner resolution: a debounce that
+// fires after a migration must address the terminal's CURRENT backend, and a
+// wrapper whose backend id is still pending sends nothing.
+function _sendResizeForTerm(term, cols, rows) {
+    const resolved = _resolveTermOwner(term);
+    if (!resolved) return;
+    const owner = resolved.owner;
+    if (owner && owner.tabId && cols && rows) {
+        ipcRenderer.send('pty-resize', { tabId: owner.tabId, cols, rows });
+    }
+}
+
 function _tryWin32CtrlJ(term, e) {
     const w32 = typeof window !== 'undefined' ? window.__win32Input : null;
     if (!w32 || !term || !w32.isCtrlJ(e)) return false;
@@ -374,21 +397,23 @@ function wireTerminal(tab, tabId) {
         if (TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300) return;
         clearTimeout(_resizeDebounce);
         _resizeDebounce = setTimeout(() => {
-            // Read tab.tabId dynamically: the backend tabId changes after a reconnect, and a closure-captured stale value would be sent to a dead connection
-            if (tab.tabId) ipcRenderer.send('pty-resize', { tabId: tab.tabId, cols, rows });
+            // Owner resolved at FIRE time: the terminal may have migrated to
+            // another wrapper during the debounce window, and a closure-captured
+            // tabId would send the size to a dead or foreign session
+            _sendResizeForTerm(term, cols, rows);
         }, 150);
     });
 
     // Fallback resize after 1s — covers slow-starting shells that missed the initial resize
     setTimeout(() => {
-        if (tab.term && tab.term.cols && tab.term.rows && tab.tabId) {
-            ipcRenderer.send('pty-resize', { tabId: tab.tabId, cols: tab.term.cols, rows: tab.term.rows });
-        }
+        if (term && term.cols && term.rows) _sendResizeForTerm(term, term.cols, term.rows);
     }, 1000);
 
     tab._onDataDisp = term.onData(data => {
-        // Read tab.tabId dynamically (in reconnect-with-content-preserved mode the terminal is reused but the backend tabId has been updated)
-        _sendPaneInput(tab, { tabId: tab.tabId }, data);
+        // Owner resolved at send time (reconnect with preserved content swaps
+        // the backend id; split/drag migration moves the terminal onto pane
+        // wrappers without rebinding this listener)
+        _sendInputForTerm(term, data);
     });
     _wireTabRenameChannel(term);
     _bindSyncExitOnClick(tab, term.element);
@@ -436,7 +461,13 @@ function wireTerminal(tab, tabId) {
         try {
             const clipboard = require('electron').clipboard;
             const text = clipboard.readTextAsync ? await clipboard.readTextAsync() : clipboard.readText();
-            if (text) _sendPaneInput(tab, { tabId: tab.tabId }, text);
+            if (!text) return;
+            // Resolve the owner AFTER the await: the terminal may have migrated
+            // to another wrapper while the clipboard read was in flight, and
+            // the pre-await tab/tabId would paste into a dead or wrong session
+            const resolved = _resolveTermOwner(term);
+            if (!resolved) return;
+            _sendPaneInput(resolved.tab, resolved.owner, text);
         } catch(e) {}
     });
 
@@ -575,10 +606,11 @@ function wireTerminalToPane(tab, pane) {
         // After the initial fit, explicitly send the final size directly: the first fit's
         // onResize may fall inside the _layoutTime suppression window and be dropped, and
         // a later fit with unchanged size never fires onResize again — the backend would
-        // stay at 80x24 forever (nvim UI garbled)
+        // stay at 80x24 forever (nvim UI garbled). The owner is resolved at send time —
+        // this terminal may already have migrated off the pane it was wired for.
         const suppressed = TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300;
-        if (pane.tabId && pane.term.cols && pane.term.rows && !suppressed) {
-            ipcRenderer.send('pty-resize', { tabId: pane.tabId, cols: pane.term.cols, rows: pane.term.rows });
+        if (!suppressed && pane.term?.cols && pane.term.rows) {
+            _sendResizeForTerm(term, pane.term.cols, pane.term.rows);
         }
     }
 
@@ -606,12 +638,14 @@ function wireTerminalToPane(tab, pane) {
         if (TabManager._layoutTime && (Date.now() - TabManager._layoutTime) < 300) return;
         clearTimeout(_resizeDebounce);
         _resizeDebounce = setTimeout(() => {
-            ipcRenderer.send('pty-resize', { tabId: pane.tabId, cols, rows });
+            // Owner resolved at FIRE time: extract/drag migration may have moved
+            // this terminal onto another wrapper during the debounce window
+            _sendResizeForTerm(term, cols, rows);
         }, 150);
     });
 
     pane._onDataDisp = term.onData(data => {
-        _sendPaneInput(tab, pane, data);
+        _sendInputForTerm(term, data);
     });
     _wireTabRenameChannel(term);
     _bindSyncExitOnClick(tab, term.element);
@@ -658,15 +692,22 @@ function wireTerminalToPane(tab, pane) {
         try {
             const clipboard = require('electron').clipboard;
             const text = clipboard.readTextAsync ? await clipboard.readTextAsync() : clipboard.readText();
-            if (text) _sendPaneInput(tab, pane, text);
+            if (!text) return;
+            // Resolve the owner AFTER the await — see wireTerminal's contextmenu
+            // handler; the pre-await (tab, pane) pair may be stale after migration
+            const resolved = _resolveTermOwner(term);
+            if (!resolved) return;
+            _sendPaneInput(resolved.tab, resolved.owner, text);
         } catch(e) {}
     });
 
     // Sync pane focus visual when terminal receives focus
     const syncFocus = () => {
-        if (TabManager._maximizedPaneId) return;
         const ownerTab = TabManager.tabs.find(t => t.splitRoot && getAllPanes(t).some(pp => pp.id === pane.id));
         if (!ownerTab) return;
+        // Maximize state is per-tab (the owning tab is the single source of
+        // truth): while it shows a maximized pane, focus changes are suppressed
+        if (ownerTab._maximizedPaneId) return;
         getAllPanes(ownerTab).forEach(p => p.focused = (p.id === pane.id));
         const container = document.getElementById('split_' + ownerTab.id);
         if (container) {

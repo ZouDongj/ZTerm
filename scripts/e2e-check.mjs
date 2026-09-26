@@ -2918,6 +2918,171 @@ async function main() {
       updProxyRoundTrip === 'http://127.0.0.1:9' && proxyCleared === true,
       JSON.stringify({ setup: updProxySetup, persisted: proxyPersisted, dead: updProxyDead, invalid: updProxyInvalid, roundTrip: updProxyRoundTrip, cleared: proxyCleared }));
 
+    // 15. ADR-0004 split session ownership & layout migration: per-tab
+    //     maximize state with a REAL Esc key, split-while-maximized pane
+    //     visibility, extract-to-tab wrap geometry + smooth-cursor transfer,
+    //     post-migration resize routing, and right-click paste routing. All
+    //     overrides (ipcRenderer.send recorder, clipboard shim) are restored
+    //     in finally blocks so later sections see a clean page.
+    await cdp.eval(`(() => { try { closeAllOverlays(); } catch (e) {} return true; })()`);
+    // 15.1 Esc exits the ACTIVE tab's maximize (per-tab state, real key event)
+    const adr4TabA = await cdp.eval(`TabManager.createTab({ name: 'E2E-ADR4-A', type: 'local' })`);
+    const A = JSON.stringify(adr4TabA);
+    await waitForValue(cdp, `(() => { const t = TabManager.tabs.find(x => x.id === ${A}); return !!(t && t.term && t.tabId); })()`, true, 15000);
+    await cdp.eval(`TabManager.splitHorizontal()`);
+    await waitForValue(cdp, `getAllPanes(TabManager.tabs.find(x => x.id === ${A})).filter(p => p.term && p.tabId).length`, 2, 15000);
+    await cdp.eval(`(() => { const tab = TabManager.tabs.find(x => x.id === ${A}); TabManager._maximizePane(tab.id, getAllPanes(tab)[0].id); return true; })()`);
+    await waitForValue(cdp, `TabManager._maximizing === false && !!TabManager.tabs.find(x => x.id === ${A})._maximizedPaneId`, true, 8000);
+    await sleep(400); // let _maximizePane's own focus() land
+    await cdp.eval(`(() => { const tab = TabManager.tabs.find(x => x.id === ${A}); const p = getAllPanes(tab).find(q => q.id === tab._maximizedPaneId); if (p?.term) p.term.focus(); return true; })()`);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+    const adr4EscState = await waitForValue(cdp, `(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${A});
+      if (!tab || tab._maximizedPaneId) return false;
+      const el = document.getElementById('split_' + tab.id);
+      if (!el) return false;
+      const panes = [...el.querySelectorAll('.split-pane')];
+      return panes.length === 2 && panes.every(p => p.style.display !== 'none' && p.getBoundingClientRect().height > 0);
+    })()`, true, 8000);
+    check('ADR4：真实 Esc 退出当前标签面板最大化（双面板恢复可见）', adr4EscState === true, JSON.stringify(adr4EscState));
+    // 15.2 split while maximized un-maximizes and keeps the NEW pane visible
+    await cdp.eval(`(() => { const tab = TabManager.tabs.find(x => x.id === ${A}); TabManager._maximizePane(tab.id, getAllPanes(tab)[0].id); return true; })()`);
+    await waitForValue(cdp, `!!TabManager.tabs.find(x => x.id === ${A})._maximizedPaneId`, true, 8000);
+    await cdp.eval(`TabManager.splitHorizontal()`);
+    const adr4SplitMaxState = await waitForValue(cdp, `(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${A});
+      if (!tab || tab._maximizedPaneId) return false;
+      const panes = getAllPanes(tab);
+      if (panes.length !== 3) return false;
+      const el = document.getElementById('split_' + tab.id);
+      if (!el) return false;
+      return [...el.querySelectorAll('.split-pane')].filter(p => p.style.display !== 'none' && p.getBoundingClientRect().height > 0).length === 3;
+    })()`, true, 8000);
+    check('ADR4：最大化期间分屏解除最大化且新面板可见', adr4SplitMaxState === true, JSON.stringify(adr4SplitMaxState));
+    // 15.3 extract one pane: both resulting tabs keep the smooth-cursor
+    //     adapter and the restored single-tab wrap uses the standard inner
+    //     geometry (one .term-inner holding the terminal element)
+    const adr4TabB = await cdp.eval(`TabManager.createTab({ name: 'E2E-ADR4-B', type: 'local' })`);
+    const B = JSON.stringify(adr4TabB);
+    await waitForValue(cdp, `(() => { const t = TabManager.tabs.find(x => x.id === ${B}); return !!(t && t.term && t.tabId); })()`, true, 15000);
+    await cdp.eval(`TabManager.splitHorizontal()`);
+    await waitForValue(cdp, `getAllPanes(TabManager.tabs.find(x => x.id === ${B})).filter(p => p.term && p.tabId).length`, 2, 15000);
+    const adr4ExtractedId = await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${B});
+      const pane = getAllPanes(tab)[0];
+      TabManager._extractPaneToTab(tab.id, pane.id);
+      return TabManager.tabs[TabManager.tabs.length - 1].id;
+    })()`);
+    const N = JSON.stringify(adr4ExtractedId);
+    const adr4ExtReady = await waitForValue(cdp, `(() => {
+      const st = TabManager.tabs.find(x => x.id === ${B});
+      const nt = TabManager.tabs.find(x => x.id === ${N});
+      if (!st || !nt || st.splitRoot || !st.term || !nt.term) return false;
+      return !!document.getElementById('wrap_' + st.id) && !!document.getElementById('wrap_' + nt.id);
+    })()`, true, 10000);
+    const adr4ExtDetail = await cdp.eval(`(() => {
+      const st = TabManager.tabs.find(x => x.id === ${B});
+      const nt = TabManager.tabs.find(x => x.id === ${N});
+      const stWrap = document.getElementById('wrap_' + st.id);
+      const ntWrap = document.getElementById('wrap_' + nt.id);
+      return {
+        a: !!st._smoothCursor?._adapter, b: !!nt._smoothCursor?._adapter,
+        stInner: stWrap ? stWrap.querySelectorAll('.term-inner').length : -1,
+        ntInner: ntWrap ? ntWrap.querySelectorAll('.term-inner').length : -1,
+        stInInner: !!st.term?.element?.closest('.term-inner'),
+        ntInInner: !!nt.term?.element?.closest('.term-inner'),
+      };
+    })()`);
+    check('ADR4：拆出后两端平滑光标存活且恢复 wrap 使用标准内层几何',
+      adr4ExtReady === true && adr4ExtDetail.a === true && adr4ExtDetail.b === true &&
+      adr4ExtDetail.stInner === 1 && adr4ExtDetail.ntInner === 1 &&
+      adr4ExtDetail.stInInner === true && adr4ExtDetail.ntInInner === true,
+      JSON.stringify(adr4ExtDetail));
+    // 15.4 resize ownership after migration: force each terminal's onResize
+    //     with DISTINCT rows (equal values could mask a misroute); every
+    //     pty-resize must be addressed to that terminal's OWN backend id.
+    //     The old closure kept the pre-migration wrapper and sent the
+    //     extracted terminal's size to the REMAINING tab's backend.
+    await cdp.eval(`(() => {
+      window.__e2eSendLog = [];
+      window.__e2eOrigSend = window.electron.ipcRenderer.send;
+      window.electron.ipcRenderer.send = function (ch, payload) { window.__e2eSendLog.push({ ch, payload }); };
+      return true;
+    })()`);
+    try {
+      await cdp.eval(`(() => {
+        const st = TabManager.tabs.find(x => x.id === ${B});
+        const nt = TabManager.tabs.find(x => x.id === ${N});
+        _fitWithScroll(st.term, st.fitAddon, st.term.element ? st.term.element.parentElement : null);
+        _fitWithScroll(nt.term, nt.fitAddon, nt.term.element ? nt.term.element.parentElement : null);
+        st.term.resize(st.term.cols, st.term.rows + 4);
+        nt.term.resize(nt.term.cols, nt.term.rows + 9);
+        return true;
+      })()`);
+      await sleep(600); // 150ms resize debounce + margin
+      const adr4Resize = await cdp.eval(`(() => {
+        const st = TabManager.tabs.find(x => x.id === ${B});
+        const nt = TabManager.tabs.find(x => x.id === ${N});
+        const rs = window.__e2eSendLog.filter(x => x.ch === 'pty-resize').map(x => ({ tabId: x.payload.tabId, rows: x.payload.rows }));
+        const last = {};
+        rs.forEach(r => { last[r.tabId] = r; });
+        return { stTabId: st.tabId, ntTabId: nt.tabId, stRows: st.term.rows, ntRows: nt.term.rows,
+          lastSt: last[st.tabId] || null, lastNt: last[nt.tabId] || null,
+          stCount: rs.filter(r => r.tabId === st.tabId).length, ntCount: rs.filter(r => r.tabId === nt.tabId).length };
+      })()`);
+      check('ADR4：迁移后 resize 各自送达所属 backend',
+        !!adr4Resize.lastSt && !!adr4Resize.lastNt &&
+        adr4Resize.lastSt.rows === adr4Resize.stRows && adr4Resize.lastNt.rows === adr4Resize.ntRows &&
+        adr4Resize.stCount >= 1 && adr4Resize.ntCount >= 1,
+        JSON.stringify(adr4Resize));
+    } finally {
+      await cdp.eval(`(() => { if (window.__e2eOrigSend) { window.electron.ipcRenderer.send = window.__e2eOrigSend; window.__e2eOrigSend = null; } window.__e2eSendLog = null; return true; })()`);
+    }
+    // 15.5 right-click paste routing: the extracted terminal's contextmenu
+    //     handler was wired while it was a pane; after the migration it must
+    //     paste into the CURRENT owner exactly once. The renderer.html
+    //     require('electron') shim's clipboard object is stubbed for the
+    //     probe and restored right after.
+    await cdp.eval(`(() => {
+      window.__e2eSendLog = [];
+      window.__e2eOrigSend = window.electron.ipcRenderer.send;
+      window.electron.ipcRenderer.send = function (ch, payload) { window.__e2eSendLog.push({ ch, payload }); };
+      const clip = require('electron').clipboard;
+      window.__e2eClipBackup = { readText: clip.readText, readTextAsync: clip.readTextAsync };
+      clip.readText = () => 'PASTE-PROBE';
+      clip.readTextAsync = () => Promise.resolve('PASTE-PROBE');
+      return true;
+    })()`);
+    try {
+      await cdp.eval(`(() => { const nt = TabManager.tabs.find(x => x.id === ${N}); nt.term.element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); return true; })()`);
+      await sleep(400);
+      const adr4Paste = await cdp.eval(`(() => {
+        const nt = TabManager.tabs.find(x => x.id === ${N});
+        const inputs = window.__e2eSendLog.filter(x => x.ch === 'pty-input' && x.payload.data === 'PASTE-PROBE');
+        return { ntTabId: nt.tabId, inputs: inputs.map(x => x.payload) };
+      })()`);
+      check('ADR4：右键粘贴按当前归属投递（单次、正确 backend）',
+        adr4Paste.inputs.length === 1 && adr4Paste.inputs[0].tabId === adr4Paste.ntTabId,
+        JSON.stringify(adr4Paste));
+    } finally {
+      await cdp.eval(`(() => {
+        if (window.__e2eOrigSend) { window.electron.ipcRenderer.send = window.__e2eOrigSend; window.__e2eOrigSend = null; }
+        if (window.__e2eClipBackup) {
+          const clip = require('electron').clipboard;
+          clip.readText = window.__e2eClipBackup.readText;
+          clip.readTextAsync = window.__e2eClipBackup.readTextAsync;
+          window.__e2eClipBackup = null;
+        }
+        window.__e2eSendLog = null;
+        return true;
+      })()`);
+    }
+    // Cleanup: close this section's tabs (after the send path is restored, so
+    // the pty-destroy traffic reaches the backends)
+    await cdp.eval(`(() => { [${A}, ${B}, ${N}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} }); return true; })()`).catch(() => null);
+    await sleep(600); // let the staggered tab removals settle before section 14
+
     // 14. Window state restore: write the window field into config → restart →
     // verify maximized/size restore
     async function writeWindowState(state) {

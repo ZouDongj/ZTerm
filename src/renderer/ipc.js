@@ -279,8 +279,11 @@ ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId }) => {
                 }
                 return;
             }
-        } else if (tab.id === rendererId) {
+        } else if (tab.id === rendererId || (tab._ptyRequestId && tab._ptyRequestId === rendererId)) {
             if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(tab);
+            // A collapsed pending pane claimed its creation event through the
+            // marker; consume it now that the backend id landed on the tab
+            delete tab._ptyRequestId;
             tab.tabId = tabId;
             if (!tab.term) wireTerminal(tab, tabId);
             if (tab.term) tab.term.write('\x1b[33mConnecting to ' + (tab.host || tab.name) + '...\x1b[0m\r\n');
@@ -317,7 +320,7 @@ ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
                 _scheduleSettleResize(tab);
                 return;
             }
-        } else if (tab.tabId === tabId || tab.id === rendererId) {
+        } else if (tab.tabId === tabId || tab.id === rendererId || (tab._ptyRequestId && tab._ptyRequestId === rendererId)) {
             tab._sshRetried = 0; // connected: re-arm THIS tab's handshake retry budget
             tab.connected = true;
             if (!tab.term) wireTerminal(tab, tabId);
@@ -338,7 +341,7 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
         if (t.splitRoot) {
             const p = getAllPanes(t).find(pp => pp.tabId === tabId || pp.requestId === rendererId);
             if (p) { tab = t; pane = p; break; }
-        } else if (t.id === rendererId || t.tabId === tabId) {
+        } else if (t.id === rendererId || t.tabId === tabId || (t._ptyRequestId && t._ptyRequestId === rendererId)) {
             // Match exactly — never write the error onto some arbitrary SSH tab that is still connecting
             tab = t; break;
         }

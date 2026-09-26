@@ -31,6 +31,9 @@ let _sshConnectChain = Promise.resolve();
 function _rendererIdAlive(rendererId) {
     for (const tab of TabManager.tabs) {
         if (tab.id === rendererId) return true;
+        // A collapsed pending pane carries its requestId on the tab until the
+        // creation event claims it — the consumer migrated, it did not die
+        if (tab._ptyRequestId === rendererId) return true;
         if (tab.splitRoot) {
             if (getAllPanes(tab).some(p => p.requestId === rendererId || p.tabId === rendererId)) return true;
         }
@@ -112,7 +115,6 @@ const TabManager = {
     _activeTabEl: null,
     profiles: [],
     sshProfiles: [],
-    _maximizedPaneId: null,
     // Tabs whose exit animation is running and whose deferred removal is
     // scheduled (rapid-close bookkeeping — see closeTab).
     _closingTabs: new Set(),
@@ -689,7 +691,7 @@ const TabManager = {
             // Rebind onData: the terminal moved onto the pane, so it must use pane.tabId, not the now-cleared tab.tabId
             if (tab._onDataDisp) { tab._onDataDisp.dispose(); tab._onDataDisp = null; }
             existing._onDataDisp = existing.term?.onData(data => {
-                _sendPaneInput(tab, existing, data);
+                _sendInputForTerm(existing.term, data);
             });
             tab.term = null;
             tab.fitAddon = null;
@@ -705,7 +707,10 @@ const TabManager = {
             else tab.splitRoot.children = [existing, newPane];
             tab.splitRoot.ratios = [0.5, 0.5];
             newPane.focused = true;
-            this._maximizedPaneId = null;
+            // Creating a split exits THIS tab's maximize state (per-tab source
+            // of truth); the new pane must enter a visible layout, not stay
+            // hidden behind a stale maximized-pane reference
+            tab._maximizedPaneId = null;
             this._renderSplit(tab);
             this._spawnBackendForPane(newPane, tab);
             this._updateTabName(tab);
@@ -727,7 +732,8 @@ const TabManager = {
         this.add(tab, newPane, focused, side);
         all.forEach(p => p.focused = false);
         newPane.focused = true;
-        this._maximizedPaneId = null;
+        // Same per-tab rule as the first-split branch above
+        tab._maximizedPaneId = null;
         this._layoutTime = Date.now();
         this._renderSplit(tab);
         this._spawnBackendForPane(newPane, tab);
@@ -1309,34 +1315,31 @@ const TabManager = {
         if (!st || !st.splitRoot) return;
         const pane = findPane(st, paneId);
         if (!pane || !pane.term || !pane.tabId) return;
-        const isSSH = pane.type === 'ssh' || pane._sshHost;
         const nt = {
             id: 't_' + (this._counter++),
             name: pane.name || st.name,
-            type: isSSH ? 'ssh' : (pane.type || st.type || 'local'),
-            command: pane._command || st.command || 'powershell.exe',
-            args: pane._args || st.args || [],
             connected: pane.connected !== false && (pane.connected || !!pane.tabId),
             term: pane.term,
             fitAddon: pane.fitAddon,
             tabId: pane.tabId,
             splitRoot: null,
         };
+        // Session identity (type/ssh fields/command/args/credential) is adopted
+        // from the extracted pane's own session — the source tab's fields may
+        // belong to a different session and must not leak into the new tab
+        adoptPaneFieldsIntoTab(nt, pane);
+        // The pane's smooth-cursor wrapper follows its terminal onto the new
+        // tab; the dropped pane must not keep a reference to the living wrapper
+        nt._smoothCursor = pane._smoothCursor;
+        pane._smoothCursor = null;
         // Rebind onData after moving to the new tab: the original closure referenced pane (the source tab's
-        // old pane); switching to nt.tabId ensures input is routed correctly
+        // old pane); the rebind resolves the owner at send time
         if (pane._onDataDisp) { pane._onDataDisp.dispose(); pane._onDataDisp = null; }
         nt._onDataDisp = pane.term?.onData(data => {
-            _sendPaneInput(nt, { tabId: nt.tabId }, data);
+            _sendInputForTerm(pane.term, data);
         });
         // The pane's tool-provided name follows its terminal onto the new single tab.
         if (pane._toolName !== undefined) nt._toolName = pane._toolName;
-        if (isSSH) {
-            nt.host = pane._sshHost || st.host;
-            nt.port = pane._sshPort || st.port;
-            nt.user = pane._sshUser || st.user;
-            nt._credId = pane._sshCredId || st._credId;
-            nt.sshProfileId = pane._sshProfileId || st.sshProfileId;
-        }
         this.tabs.push(nt);
         const parent = getParentOf(st, pane);
         if (parent) {
@@ -1345,6 +1348,10 @@ const TabManager = {
             parent.ratios.splice(idx, 1);
         }
         if (st._maximizedPaneId === paneId) st._maximizedPaneId = null;
+        // Disconnect the extracted pane's body observer before the DOM drop —
+        // Blink keeps observed nodes (and their DOM subtrees) alive
+        const exBody = document.getElementById('pane-body_' + pane.id);
+        if (exBody && exBody._resizeObserver) exBody._resizeObserver.disconnect();
         normalize(st.splitRoot);
         const rem = getAllPanes(st);
         if (rem.length === 0) {
@@ -1356,28 +1363,46 @@ const TabManager = {
             const rp = rem[0];
             st.splitRoot = null;
             if (!rem.some(p => p.focused)) rp.focused = true;
+            // Pending backend hand-off: the surviving pane's creation request
+            // must survive the collapse, or its pty-created finds no consumer
+            // and the fresh backend is orphan-destroyed
+            if (rp.tabId) delete st._ptyRequestId;
+            else st._ptyRequestId = rp.requestId;
             // The term moves from pane back to tab: dispose the pane's zombie onData listener and rebind to the tab
             if (rp._onDataDisp) { rp._onDataDisp.dispose(); rp._onDataDisp = null; }
             st.term = rp.term;
             st.fitAddon = rp.fitAddon;
             st.tabId = rp.tabId;
             st.name = rp.name || st.name;
-            st.type = rp.type || st.type;
+            // Session identity follows the surviving pane — the tab's old
+            // host/user/credential may belong to the extracted session
+            adoptPaneFieldsIntoTab(st, rp);
+            st._smoothCursor = rp._smoothCursor ?? null;
             if (rp._toolName !== undefined) st._toolName = rp._toolName; else delete st._toolName;
             if (st.term) {
                 st._onDataDisp = st.term.onData(data => {
-                    _sendPaneInput(st, { tabId: st.tabId }, data);
+                    _sendInputForTerm(st.term, data);
                 });
             }
+            const rpBody = document.getElementById('pane-body_' + rp.id);
+            if (rpBody && rpBody._resizeObserver) rpBody._resizeObserver.disconnect();
             const os = document.getElementById('split_' + st.id);
             if (os) os.remove();
-            const w = document.createElement('div');
-            w.className = 'term-wrap' + (this.activeId === st.id ? ' active' : '');
-            w.id = 'wrap_' + st.id;
+            // Standard wrap/inner structure: FitAddon must measure the padded
+            // content area (same geometry as every single-terminal tab), not
+            // the padded container
+            const { wrap: w, inner: wInner } = createTermWrap(st);
             document.getElementById('main-area').appendChild(w);
             if (st.term) {
-                w.appendChild(st.term.element);
-                if (st.fitAddon) setTimeout(() => st.fitAddon.fit(), 50);
+                wInner.appendChild(st.term.element);
+                setupWrapResizeObserver(w, st);
+                if (st.fitAddon) setTimeout(() => {
+                    _fitWithScroll(st.term, st.fitAddon, wInner);
+                    // Report the final size explicitly: an unchanged fit fires
+                    // no onResize, and the backend would keep the pre-collapse
+                    // geometry
+                    if (st.term?.cols) _sendResizeForTerm(st.term, st.term.cols, st.term.rows);
+                }, 50);
             }
         } else {
             if (!rem.some(p => p.focused)) rem[0].focused = true;
@@ -1388,7 +1413,10 @@ const TabManager = {
         if (nt.term) {
             nInner.appendChild(nt.term.element);
             setupWrapResizeObserver(nw, nt);
-            if (nt.fitAddon) setTimeout(() => _fitWithScroll(nt.term, nt.fitAddon, nInner), 50);
+            if (nt.fitAddon) setTimeout(() => {
+                _fitWithScroll(nt.term, nt.fitAddon, nInner);
+                if (nt.term?.cols) _sendResizeForTerm(nt.term, nt.term.cols, nt.term.rows);
+            }, 50);
         }
         this._updateTabName(st);
         this._updateTabName(nt);
@@ -1406,9 +1434,13 @@ const TabManager = {
         // during the drag). Detach the source pane only after validation — otherwise the failure path drops it
         const focusedPane = targetPaneId ? findPane(targetTab, targetPaneId) : null;
         if (targetPaneId && !focusedPane) return;
-        let mt = null, mf = null, mid = null, sc = null;
+        let mt = null, mf = null, mid = null, sc = null, msc = null;
         let paneName = sourceTab.name, paneType = sourceTab.type || 'local';
         let toolName = sourceTab._toolName;
+        // Shell config comes from the MOVED session: a local pane dragged out
+        // of an SSH-rooted tab must keep bash.exe and its args — the source
+        // tab's command/args belong to a different session
+        let paneCommand = sourceTab.command || '', paneArgs = sourceTab.args || [];
         let sshHost = sourceTab.host, sshPort = sourceTab.port, sshUser = sourceTab.user;
         let sshCredId = sourceTab._credId, sshProfileId = sourceTab.sshProfileId;
         if (sourceTab.splitRoot) {
@@ -1419,12 +1451,15 @@ const TabManager = {
             // tree damaged and the pane's input permanently broken.
             if (!focused || !focused.term || !focused.tabId) return;
             mt = focused.term; mf = focused.fitAddon; mid = focused.tabId;
+            msc = focused?._smoothCursor ?? null;
             // Dispose the dragged pane's onData listener immediately: otherwise after np is rebound below, the term
             // would hold two listeners (the old pane's + np's) and every keypress would fire twice
             if (focused._onDataDisp) { focused._onDataDisp.dispose(); focused._onDataDisp = null; }
             paneName = focused.name || sourceTab.name;
             paneType = focused.type || sourceTab.type || 'local';
             toolName = focused._toolName;
+            paneCommand = focused._command || '';
+            paneArgs = focused._args || [];
             sshHost = focused._sshHost || sourceTab.host;
             sshPort = focused._sshPort || sourceTab.port;
             sshUser = focused._sshUser || sourceTab.user;
@@ -1435,11 +1470,18 @@ const TabManager = {
                 const idx = parent.children.indexOf(focused);
                 parent.children.splice(idx, 1);
                 parent.ratios.splice(idx, 1);
+                // The moved pane cannot stay this tab's maximized pane: a stale
+                // id would keep the remaining layout minimized forever
+                if (sourceTab._maximizedPaneId === focused.id) sourceTab._maximizedPaneId = null;
                 normalize(sourceTab.splitRoot);
                 const rem = getAllPanes(sourceTab);
                 if (rem.length === 1) {
                     sc = () => {
                         const rp = rem[0];
+                        // Pending backend hand-off: keep the surviving pane's
+                        // creation request claimable after the collapse
+                        if (rp.tabId) delete sourceTab._ptyRequestId;
+                        else sourceTab._ptyRequestId = rp.requestId;
                         // The term moves from pane back to tab: dispose the pane's zombie onData listener and rebind to the tab
                         if (rp._onDataDisp) { rp._onDataDisp.dispose(); rp._onDataDisp = null; }
                         sourceTab.term = rp.term;
@@ -1448,13 +1490,18 @@ const TabManager = {
                         sourceTab.tabId = rp.tabId;
                         sourceTab.splitRoot = null;
                         sourceTab.name = rp.name || sourceTab.name;
-                        sourceTab.type = rp.type || sourceTab.type;
+                        // Session identity follows the surviving pane — the
+                        // tab's old host/credential/command may belong to the
+                        // moved session
+                        adoptPaneFieldsIntoTab(sourceTab, rp);
                         if (rp._toolName !== undefined) sourceTab._toolName = rp._toolName; else delete sourceTab._toolName;
                         if (sourceTab.term) {
                             sourceTab._onDataDisp = sourceTab.term.onData(data => {
-                                _sendPaneInput(sourceTab, { tabId: sourceTab.tabId }, data);
+                                _sendInputForTerm(sourceTab.term, data);
                             });
                         }
+                        const rpBody = document.getElementById('pane-body_' + rp.id);
+                        if (rpBody && rpBody._resizeObserver) rpBody._resizeObserver.disconnect();
                         const sp = document.getElementById('split_' + sourceTab.id);
                         if (sp) sp.remove();
                         const { wrap: w, inner: wInner } = createTermWrap(sourceTab);
@@ -1462,7 +1509,13 @@ const TabManager = {
                         if (sourceTab.term) {
                             wInner.appendChild(sourceTab.term.element);
                             setupWrapResizeObserver(w, sourceTab);
-                            if (sourceTab.fitAddon) setTimeout(() => _fitWithScroll(sourceTab.term, sourceTab.fitAddon, wInner), 50);
+                            if (sourceTab.fitAddon) setTimeout(() => {
+                                _fitWithScroll(sourceTab.term, sourceTab.fitAddon, wInner);
+                                // Explicit final-size report: an unchanged fit
+                                // fires no onResize and the backend would keep
+                                // the pre-collapse geometry
+                                if (sourceTab.term?.cols) _sendResizeForTerm(sourceTab.term, sourceTab.term.cols, sourceTab.term.rows);
+                            }, 50);
                         }
                         this._updateTabName(sourceTab);
                     };
@@ -1479,6 +1532,7 @@ const TabManager = {
             }
         } else {
             mt = sourceTab.term; mf = sourceTab.fitAddon; mid = sourceTab.tabId;
+            msc = sourceTab._smoothCursor;
             const idx = this.tabs.indexOf(sourceTab);
             sc = () => {
                 this.tabs.splice(idx, 1);
@@ -1504,11 +1558,17 @@ const TabManager = {
             fp.tabId = targetTab.tabId;
             fp.focused = false;
             // The terminal moves from targetTab onto the fp pane, so onData must use fp.tabId
-            // (targetTab.tabId is about to be cleared; a closure over { tabId: tab.tabId } → null would silently drop input)
+            // (targetTab.tabId is about to be cleared; the rebind resolves the owner at send time)
             if (targetTab._onDataDisp) { targetTab._onDataDisp.dispose(); targetTab._onDataDisp = null; }
             fp._onDataDisp = fp.term?.onData(data => {
-                _sendPaneInput(targetTab, fp, data);
+                _sendInputForTerm(fp.term, data);
             });
+            // Same transfer rule as the tool name: a pending-creation marker
+            // must move onto fp. Left on the tab it becomes unreachable (the
+            // claim branches only match single tabs), while _rendererIdAlive
+            // would keep the request "alive" — the connect would fire with no
+            // consumer and leak the session.
+            if (targetTab._ptyRequestId) { fp.requestId = targetTab._ptyRequestId; delete targetTab._ptyRequestId; }
             // Same transfer rule as the terminal: the tool-provided name moves onto fp.
             if (targetTab._toolName !== undefined) { fp._toolName = targetTab._toolName; delete targetTab._toolName; }
             targetTab.splitRoot = this._createContainer('h');
@@ -1524,19 +1584,22 @@ const TabManager = {
         const np = {
             id: 'p_' + (this._paneCounter++),
             requestId: 'p_' + (this._paneCounter - 1),
-            term: mt, fitAddon: mf, _smoothCursor: sourceTab._smoothCursor, tabId: mid, focused: true,
+            term: mt, fitAddon: mf, _smoothCursor: msc, tabId: mid, focused: true,
             name: paneName, type: paneType,
             connected: !!mid, // having a backend tabId means it is online
             _sshHost: sshHost, _sshPort: sshPort, _sshUser: sshUser,
             _sshCredId: sshCredId, _sshProfileId: sshProfileId,
-            _command: paneType !== 'ssh' ? (sourceTab.command || '') : '',
-            _args: paneType !== 'ssh' ? (sourceTab.args || []) : [],
+            // From the MOVED session (paneCommand/paneArgs), not the source
+            // tab's command/args; an empty args array is meaningful and must
+            // not be replaced by another owner's args
+            _command: paneType !== 'ssh' ? paneCommand : '',
+            _args: paneType !== 'ssh' ? paneArgs : [],
         };
         // Rebind onData after the terminal moves: the original closure referenced sourceTab (already spliced away,
-        // or its tabId taken over by the new pane); referencing np.tabId directly routes input to the correct pane
+        // or its tabId taken over by the new pane); the rebind resolves the owner at send time
         if (mt && sourceTab._onDataDisp) { sourceTab._onDataDisp.dispose(); sourceTab._onDataDisp = null; }
         np._onDataDisp = mt?.onData(data => {
-            _sendPaneInput(targetTab, np, data);
+            _sendInputForTerm(mt, data);
         });
         if (toolName !== undefined) np._toolName = toolName;
         this.add(targetTab, np, focusedPane, side);
@@ -1569,21 +1632,11 @@ const TabManager = {
         // Sync all tab fields from the surviving pane — otherwise tab.type/host/user etc. keep the old tab's type
         // (e.g. an SSH tab exits split leaving a local pane but stays marked SSH: after restart it would really connect via SSH with a mismatched pane name)
         if (fp) {
-            tab.type = fp.type || 'local';
-            if (fp.type === 'ssh') {
-                tab.host = fp._sshHost;
-                tab.port = fp._sshPort;
-                tab.user = fp._sshUser;
-                tab.sshProfileId = fp._sshProfileId;
-                tab.command = '';
-                tab.args = [];
-            } else {
-                tab.host = undefined; tab.port = undefined; tab.user = undefined;
-                tab.sshProfileId = undefined;
-                tab.command = fp._command || '';
-                tab.args = fp._args || [];
-            }
-            tab._credId = fp._sshCredId || tab._credId;
+            // Pending backend hand-off: the surviving pane's creation request
+            // must stay claimable on the tab after the split tree is gone
+            if (fp.tabId) delete tab._ptyRequestId;
+            else tab._ptyRequestId = fp.requestId;
+            adoptPaneFieldsIntoTab(tab, fp);
         }
         tab.term = fp?.term || null;
         tab.fitAddon = fp?.fitAddon || null;
@@ -1603,7 +1656,7 @@ const TabManager = {
         if (fp && fp._onDataDisp) { fp._onDataDisp.dispose(); fp._onDataDisp = null; }
         if (tab.term) {
             tab._onDataDisp = tab.term.onData(data => {
-                _sendPaneInput(tab, { tabId: tab.tabId }, data);
+                _sendInputForTerm(tab.term, data);
             });
         }
         // Split panes are not captured (the pane branch of the pty-output
@@ -1623,7 +1676,13 @@ const TabManager = {
         if (tab.term) {
             wInner.appendChild(tab.term.element);
             setupWrapResizeObserver(w, tab);
-            if (tab.fitAddon) setTimeout(() => _fitWithScroll(tab.term, tab.fitAddon, wInner), 50);
+            if (tab.fitAddon) setTimeout(() => {
+                _fitWithScroll(tab.term, tab.fitAddon, wInner);
+                // Explicit final-size report to the CURRENT owner: an
+                // unchanged fit fires no onResize, and the backend would keep
+                // the split-era geometry
+                if (tab.term?.cols) _sendResizeForTerm(tab.term, tab.term.cols, tab.term.rows);
+            }, 50);
         }
         if (this.activeId === tab.id && tab.term) setTimeout(() => tab.term.focus(), 100);
     },
