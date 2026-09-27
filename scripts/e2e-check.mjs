@@ -3370,6 +3370,184 @@ async function main() {
       adr4FState.connected === false && /disconnected/.test(adr4FState.dotClass || ''),
       JSON.stringify(adr4FState));
 
+    // 15.10 delayed terminal focus lifecycle (batch 04): delayed focus timers
+    //     must re-validate their target at fire time. The oracle records the
+    //     actual focusin EVENT HISTORY during each window (a final-state
+    //     snapshot alone can pass after a transient wrong focus followed by a
+    //     correction), plus the final normal-focus state. Late-readiness vs
+    //     search is unit-covered through the REAL pty-created claim path
+    //     (tests/terminal-focus-lifecycle.test.mjs §14b) — natively the
+    //     backend-arrival instant is not controllable against openSearch's
+    //     50ms input timer, so it is not staged here.
+    {
+      // Uncaught timer errors (the old null-deref class) surface as window
+      // error events — count them across the whole section. The focusin
+      // recorder maps each focus landing to its surface (pane:<id> /
+      // wrap:<id> / input:<id>) so a transient stale focus is visible even
+      // when a later correct focus fixes the final state.
+      await cdp.eval(`(() => {
+        window.__flErr = 0;
+        window.__flHist = [];
+        window.addEventListener('error', () => { window.__flErr++; });
+        document.addEventListener('focusin', (e) => {
+          const t = e.target;
+          let surface = t.tagName || '?';
+          const pane = t.closest ? t.closest('.split-pane') : null;
+          if (pane) surface = 'pane:' + pane.getAttribute('data-pane');
+          else {
+            const wrap = t.closest ? t.closest('.term-wrap') : null;
+            if (wrap) surface = 'wrap:' + wrap.id;
+            else if (t.id) surface = 'input:' + t.id;
+          }
+          window.__flHist.push(surface);
+        }, true);
+        return true;
+      })()`);
+      const flA = await cdp.eval(`TabManager.createTab({ name: 'E2E-FL-A', type: 'local' })`);
+      const A2 = JSON.stringify(flA);
+      await waitForValue(cdp, `!!(TabManager.tabs.find(x => x.id === ${A2}) || {}).term`, true, 15000);
+      await cdp.eval(`TabManager.splitHorizontal()`);
+      await waitForValue(cdp, `getAllPanes(TabManager.tabs.find(x => x.id === ${A2})).filter(p => p.term && p.tabId).length`, 2, 15000);
+      const flPanes = await cdp.eval(`getAllPanes(TabManager.tabs.find(x => x.id === ${A2})).filter(p => p.term && p.tabId).map(p => p.id)`);
+      const twoPanes = Array.isArray(flPanes) && flPanes.length === 2;
+      if (twoPanes) {
+        const P0 = JSON.stringify(flPanes[0]);
+        const P1 = JSON.stringify(flPanes[1]);
+
+        // (b) PANE RACE on two VISIBLE panes (a hidden tab's textarea cannot
+        // take focus, so it is a weak control): click pane[0] then pane[1] in
+        // one tick. Both 50ms timers fire; the superseded pane[0] timer must
+        // not land — its focusin would be recorded even though the final
+        // state is pane[1].
+        await cdp.eval(`(() => {
+          const tab = TabManager.tabs.find(x => x.id === ${A2});
+          window.__flHist = [];
+          TabManager._focusPane(tab, ${P0});
+          TabManager._focusPane(tab, ${P1});
+          return true;
+        })()`);
+        await sleep(400);
+        const flRace = await cdp.eval(`(() => {
+          const tab = TabManager.tabs.find(x => x.id === ${A2});
+          const panes = getAllPanes(tab);
+          const p1Body = document.getElementById('pane-body_' + ${P1});
+          return {
+            errors: window.__flErr,
+            hist: window.__flHist.slice(),
+            stalePane0Focus: window.__flHist.some(s => s === 'pane:' + ${P0}),
+            p1FocusedNow: !!p1Body && p1Body.contains(document.activeElement),
+            p1MarkedFocused: panes.find(p => p.id === ${P1})?.focused === true,
+          };
+        })()`);
+        check('焦点生命周期：面板连点后过期面板定时器不得落地（含事件历史）',
+          flRace.errors === 0 && flRace.stalePane0Focus === false &&
+          flRace.p1FocusedNow === true && flRace.p1MarkedFocused === true,
+          JSON.stringify(flRace.hist.concat(flRace)));
+
+        // (a) focus pane[1], close it in the same tick (inside the 50ms
+        // window): no error, and the collapse focuses the survivor.
+        await cdp.eval(`(() => { window.__flHist = []; return true; })()`);
+        await cdp.eval(`(() => {
+          const tab = TabManager.tabs.find(x => x.id === ${A2});
+          TabManager._focusPane(tab, ${P1});
+          TabManager._closePane(${A2}, ${P1});
+          return true;
+        })()`);
+        await sleep(500); // 50ms focus timer + 200ms exit animation + collapse refocus
+        const flClose = await cdp.eval(`(() => {
+          const tab = TabManager.tabs.find(x => x.id === ${A2});
+          const wrap = document.getElementById('wrap_' + ${A2});
+          return {
+            errors: window.__flErr,
+            hist: window.__flHist.slice(),
+            collapsed: !!tab && !tab.splitRoot && !!tab.term,
+            survivorFocused: !!wrap && wrap.contains(document.activeElement),
+          };
+        })()`);
+        check('焦点生命周期：窗口内关闭聚焦面板不抛错，幸存者正常获焦',
+          flClose.errors === 0 && flClose.collapsed === true && flClose.survivorFocused === true,
+          JSON.stringify(flClose.hist.concat(flClose)));
+
+        // (a2) close-then-search: the deferred removal (200ms) completes
+        // AFTER the user opened the search bar — the collapse completion is
+        // passive and must not steal the input's focus (unit: round-2 repro
+        // 1; here with real removal timers). Re-split first: (a) collapsed A.
+        await cdp.eval(`TabManager.splitHorizontal()`);
+        await waitForValue(cdp, `getAllPanes(TabManager.tabs.find(x => x.id === ${A2})).filter(p => p.term && p.tabId).length`, 2, 15000);
+        const flP2 = await cdp.eval(`getAllPanes(TabManager.tabs.find(x => x.id === ${A2})).filter(p => p.term && p.tabId).map(p => p.id)`);
+        if (Array.isArray(flP2) && flP2.length === 2) {
+          const F1 = JSON.stringify(flP2[1]); // the new focused pane
+          await cdp.eval(`(() => { window.__flHist = []; return true; })()`);
+          await cdp.eval(`(() => {
+            TabManager._closePane(${A2}, ${F1}); // deferred removal at +200ms
+            openSearch();                        // the user's newer intent (+50ms input)
+            return true;
+          })()`);
+          await sleep(900); // removal 200ms + collapse refocus 100ms + margin
+          const flCloseSearch = await cdp.eval(`(() => {
+            const hist = window.__flHist.slice();
+            const inputIdx = hist.indexOf('input:search-input');
+            return {
+              errors: window.__flErr,
+              hist,
+              inputFocusRecorded: inputIdx >= 0,
+              inputFocused: document.activeElement === document.getElementById('search-input'),
+              collapsed: !TabManager.tabs.find(x => x.id === ${A2})?.splitRoot,
+              terminalLandingAfterInput: inputIdx >= 0 && hist.slice(inputIdx + 1).some(s => s.startsWith('wrap:') || s.startsWith('pane:')),
+            };
+          })()`);
+          check('焦点生命周期：延迟折叠完成不抢占已打开的搜索输入框（含事件历史）',
+            flCloseSearch.errors === 0 && flCloseSearch.inputFocusRecorded === true && flCloseSearch.inputFocused === true &&
+            flCloseSearch.collapsed === true && flCloseSearch.terminalLandingAfterInput === false,
+            JSON.stringify(flCloseSearch.hist.concat(flCloseSearch)));
+          await cdp.eval(`closeSearch()`);
+          await sleep(250);
+        } else {
+          check('焦点生命周期：二次分屏就绪（a2 前置条件）', false, `panes=${JSON.stringify(flP2)}`);
+        }
+
+        // (c) Ctrl+F inside the switch window: the search input keeps focus
+        // (the stale switch timer must not land AFTER the input — checked in
+        // the history, not just the final state), and closing the search
+        // returns focus to the terminal.
+        const flB = await cdp.eval(`TabManager.createTab({ name: 'E2E-FL-B', type: 'local' })`);
+        const B2 = JSON.stringify(flB);
+        await waitForValue(cdp, `!!(TabManager.tabs.find(x => x.id === ${B2}) || {}).term`, true, 15000);
+        await cdp.eval(`(() => { window.__flHist = []; return true; })()`);
+        await cdp.eval(`(() => {
+          TabManager.switchTo(${A2});   // schedules A's 100ms refocus (stale-in-waiting)
+          openSearch();                 // newer intent: the search input (focused at +50ms)
+          return true;
+        })()`);
+        await sleep(400);
+        const flSearch = await cdp.eval(`(() => {
+          const hist = window.__flHist.slice();
+          const inputIdx = hist.indexOf('input:search-input');
+          return {
+            errors: window.__flErr,
+            hist,
+            inputFocusRecorded: inputIdx >= 0,
+            inputFocused: document.activeElement === document.getElementById('search-input'),
+            terminalLandingAfterInput: inputIdx >= 0 && hist.slice(inputIdx + 1).some(s => s.startsWith('wrap:') || s.startsWith('pane:')),
+          };
+        })()`);
+        check('焦点生命周期：搜索输入框焦点不被过期终端定时器抢占（含事件历史）',
+          flSearch.errors === 0 && flSearch.inputFocusRecorded === true && flSearch.inputFocused === true && flSearch.terminalLandingAfterInput === false,
+          JSON.stringify(flSearch.hist));
+        await cdp.eval(`closeSearch()`);
+        await sleep(250);
+        const flAfterClose = await cdp.eval(`(() => ({
+          focusedInA: !!document.getElementById('wrap_' + ${A2}) && document.getElementById('wrap_' + ${A2}).contains(document.activeElement),
+        }))()`);
+        check('焦点生命周期：关闭搜索后终端恢复正常聚焦',
+          flAfterClose.focusedInA === true, JSON.stringify(flAfterClose));
+        await cdp.eval(`(() => { [${A2}, ${B2}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} }); return true; })()`).catch(() => null);
+        await sleep(400);
+      } else {
+        check('焦点生命周期：分屏面板就绪（前置条件）', false, `panes=${JSON.stringify(flPanes)}`);
+      }
+    }
+
     // Cleanup: close this section's tabs (after the send path is restored, so
     // the pty-destroy traffic reaches the backends)
     await cdp.eval(`(() => { [${A}, ${B}, ${N}, ${C}, ${CC}, ${E}, ${F}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} }); return true; })()`).catch(() => null);

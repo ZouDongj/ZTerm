@@ -341,6 +341,100 @@ function _sendResizeForTerm(term, cols, rows) {
     }
 }
 
+// ── Delayed terminal focus (fire-time validation) ──
+// Terminals are focused through timers all over the tab/pane lifecycle
+// (switchTo, _focusPane, the pane-close survivor, _maximizePane, migrations,
+// terminal wiring). The callback runs tens to hundreds of milliseconds after
+// scheduling, and inside that window the world moves: panes close (their term
+// slot is nulled and the xterm disposed at close initiation), tabs close or
+// switch away, panes are extracted/dragged to other owners, and the user can
+// focus the search input or an overlay. A scheduling-time guard sees none of
+// that, so every delayed focus re-validates at FIRE time:
+// 1. resolve the term's CURRENT owner — a closed pane/tab, a terminal on a
+//    closing tab or a detached term resolves to none: no focus, no deref;
+// 2. the owner's tab must still be the ACTIVE tab;
+// 3. in a split, the owner pane must still be the FOCUSED pane — the latest
+//    explicit focus target stays authoritative;
+// 4. the overlay/form-intent rule below, which depends on WHY the focus was
+//    scheduled. Two modes (user focus intent is relative to the ORIGINAL
+//    user operation, not to the moment a delayed completion schedules its
+//    own timer):
+//    - EXPLICIT activation (pane click, tab switch, close/maximize/move):
+//      an open overlay (the existing .overlay.open keyboard policy) or a
+//      form field (search input, rename field, palette input) that took
+//      focus AFTER the activation is newer intent and blocks. A form field
+//      that ALREADY held focus at activation does not — the real DOM moves
+//      focus into .xterm at mousedown, so a pane click with the search bar
+//      open still focuses the clicked terminal.
+//    - PASSIVE completion (backend-ready wiring of a fresh terminal, refit,
+//      deferred close/collapse machinery): no user activation stands behind
+//      the timer — a LIVE form field holding focus at fire time is the
+//      user's current state and must survive, even if it was focused before
+//      the completion scheduled its timer (the user's original close/split
+//      action predates their search/form entry).
+//    An element inside .xterm is the terminal's own helper textarea and
+//    never blocks.
+// Validation gates FOCUS only: callbacks that also fit/resize keep doing
+// that work — a skipped stale focus must not suppress required layout.
+// A focused form field is LIVE user intent only while its surface is
+// actually visible. The one hidden-focus quirk in this app: closeSearch
+// leaves the now-invisible search input holding focus; while the bar is
+// closed that focus is not live intent (its user dismissed it, and
+// closeSearch's own fire-time callback owns the terminal refocus).
+function _formFocusIsLive(el) {
+    if (el && el.id === 'search-input') {
+        const bar = typeof document !== 'undefined' ? document.getElementById('search-bar') : null;
+        return !!(bar && bar.classList && bar.classList.contains('open'));
+    }
+    return true;
+}
+
+function _terminalFocusBlockedByIntent(priorFocus, passive) {
+    if (typeof document === 'undefined') return false;
+    if (document.querySelector('.overlay.open')) return true;
+    const el = document.activeElement;
+    if (!el) return false;
+    if (el.closest && el.closest('.xterm')) return false;
+    const tag = el.tagName;
+    const isForm = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true;
+    if (!isForm) return false;
+    // Passive completion is not a user activation: the user's LIVE form
+    // focus always survives it (a dismissed search bar's hidden input does
+    // not — see _formFocusIsLive).
+    if (passive) return _formFocusIsLive(el);
+    // Explicit activation: only a form focus NEWER than the activation
+    // blocks (one already focused at activation time reflects the pre-click
+    // state, which the real DOM's mousedown replaced).
+    return el !== priorFocus;
+}
+
+// Focus `term` only if it is still the terminal the user should land on.
+// `priorFocus` is the activeElement captured when the delayed work was
+// SCHEDULED (null when unknown); `passive` selects the completion-mode
+// intent rule. Returns whether the focus landed.
+function _focusTerminalIfCurrent(term, priorFocus, passive) {
+    if (!term) return false;
+    const resolved = _resolveTermOwner(term);
+    if (!resolved) return false;
+    const { tab, owner } = resolved;
+    if (TabManager.activeId !== tab.id) return false;
+    if (tab.splitRoot) {
+        const focusedPane = typeof getAllPanes === 'function' ? getAllPanes(tab).find(p => p.focused) : null;
+        if (!focusedPane || focusedPane !== owner) return false;
+    }
+    if (_terminalFocusBlockedByIntent(priorFocus, passive)) return false;
+    try { term.focus(); return true; } catch (e) { return false; }
+}
+
+// Focus-only delayed focus: reads the wrapper's term slot at fire time (a
+// close inside the window nulls it), validated by _focusTerminalIfCurrent.
+function _scheduleTerminalFocus(getTerm, delay, passive) {
+    const priorFocus = (typeof document !== 'undefined' && document.activeElement) || null;
+    setTimeout(() => {
+        _focusTerminalIfCurrent(typeof getTerm === 'function' ? getTerm() : getTerm, priorFocus, passive);
+    }, delay);
+}
+
 function _tryWin32CtrlJ(term, e) {
     const w32 = typeof window !== 'undefined' ? window.__win32Input : null;
     if (!w32 || !term || !w32.isCtrlJ(e)) return false;
@@ -516,7 +610,11 @@ function wireTerminal(tab, tabId) {
     }
 
     if (TabManager.activeId === tab.id) {
-        setTimeout(() => term.focus(), 150);
+        // Fire-time validated, PASSIVE mode: backend-ready wiring is a
+        // completion, not a user activation — a close/reconnect inside the
+        // 150ms window disposes this terminal or nulls the tab slot, and any
+        // form field the user is holding focus in survives the arrival.
+        _scheduleTerminalFocus(() => tab.term, 150, true);
         // The ACTIVE terminal just became usable (late backend arrival /
         // reconnect of the active tab): an open search bar with a query must
         // rebind to it now instead of waiting for the next user action.
@@ -757,7 +855,12 @@ function wireTerminalToPane(tab, pane) {
     }
 
     if (TabManager.activeId === tab.id && pane.focused) {
-        setTimeout(() => term.focus(), 150);
+        // Fire-time validated, PASSIVE mode: backend-ready wiring is a
+        // completion, not a user activation — a close/migration inside the
+        // 150ms window changes or clears the pane slot, and any form field
+        // the user is holding focus in survives the arrival (their split
+        // action predates their search/form entry).
+        _scheduleTerminalFocus(() => pane.term, 150, true);
         // The ACTIVE pending pane just received its terminal (pty-created →
         // wireTerminalToPane): an open search bar with a query must rebind to
         // the now-usable active terminal. No-ops unless the bar is open with a

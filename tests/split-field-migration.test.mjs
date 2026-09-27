@@ -52,7 +52,10 @@ function loadTabsVm() {
         escHtml: s => String(s),
         showToast() {},
         // terminal.js helpers: stubbed at the boundary the migration code calls them
+        // (batch 04 added the delayed-focus boundary: _scheduleTerminalFocus /
+        // _focusTerminalIfCurrent join the same stub list as _fitWithScroll)
         _sendInputForTerm() {}, _sendResizeForTerm() {}, _fitWithScroll() {},
+        _scheduleTerminalFocus() {}, _focusTerminalIfCurrent() {},
         createTermWrap: () => ({ wrap: fakeEl(), inner: fakeEl() }),
         setupWrapResizeObserver() {}, _scheduleSettleResize() {},
         _sshConnectWithCredentials() {}, saveConfig() {},

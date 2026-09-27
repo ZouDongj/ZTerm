@@ -319,12 +319,17 @@ const TabManager = {
         return id;
     },
 
-    switchTo(id) {
+    // opts.passiveFocus: the switch is a deferred COMPLETION (e.g. the
+    // closeTab fallback re-activation inside the removal timer), not a user
+    // activation — its delayed terminal focus follows the passive intent
+    // rule instead of the explicit one (see terminal.js).
+    switchTo(id, opts) {
         if (this.activeId === id) {
             const tab = this.tabs.find(t => t.id === id);
             if (tab && tab.type === 'ssh' && !tab.connected) this.reconnectTab(id);
             return;
         }
+        const passiveFocus = !!(opts && opts.passiveFocus);
         if (this.activeId) {
             const oldTab = this.tabs.find(t => t.id === this.activeId);
             if (oldTab && oldTab.type === 'settings') {
@@ -357,7 +362,10 @@ const TabManager = {
                     if (!focused.term) return;
                     _fitWithScroll(focused.term, focused.fitAddon, document.getElementById('pane-body_' + focused.id));
                 }, 250);
-                setTimeout(() => focused.term?.focus(), 250);
+                // Fire-time validated: the pane may be closed/disposed, the
+                // tab switched away, or a newer focus intent (overlay/search
+                // input) active when the timer runs.
+                _scheduleTerminalFocus(() => focused.term, 250, passiveFocus);
             }
         } else {
             const el = document.getElementById('wrap_' + id);
@@ -368,7 +376,7 @@ const TabManager = {
                 }, 10);
                 // Re-check at fire time: a reconnect/close inside the 100ms
                 // window nulls the terminal (scheduling-time guard only).
-                if (tab && tab.term) setTimeout(() => tab.term?.focus(), 100);
+                if (tab && tab.term) _scheduleTerminalFocus(() => tab.term, 100, passiveFocus);
             }
         }
         this.updateStatus();
@@ -524,7 +532,7 @@ const TabManager = {
                     if (!newActive || this._closingTabs.has(newActive.id)) {
                         newActive = this.tabs.find(t => !this._closingTabs.has(t.id)) || newActive;
                     }
-                    if (newActive && !this._closingTabs.has(newActive.id)) this.switchTo(newActive.id);
+                    if (newActive && !this._closingTabs.has(newActive.id)) this.switchTo(newActive.id, { passiveFocus: true });
                 }
             } else if (this.tabs.length === 0) {
                 this.activeId = null;
@@ -868,7 +876,10 @@ const TabManager = {
         normalize(tab.splitRoot);
     },
 
-    _renderSplit(tab) {
+    // passiveFocus: this render is a deferred COMPLETION (closeTab/closePane
+    // removal machinery, session restore), not a user tree action — the
+    // post-render focused-pane refocus then follows the passive intent rule.
+    _renderSplit(tab, passiveFocus) {
         const main = document.getElementById('main-area');
         let rootEl = document.getElementById('split_' + tab.id);
         // splitRoot already torn down (split exited etc.): remove leftover DOM
@@ -992,8 +1003,9 @@ const TabManager = {
             });
         }, 250);
         // After tree changes, existing panes' xterm loses focus; forcibly refocus the focused pane
+        // (fire-time validated: a tree change inside the window can close the pane or switch the tab)
         const fp = allPanes.find(p => p.focused);
-        if (fp && fp.term) setTimeout(() => { try { fp.term.focus(); } catch(e) {} }, 200);
+        if (fp && fp.term) _scheduleTerminalFocus(() => fp.term, 200, passiveFocus);
     },
 
     _layoutSplit(tab) {
@@ -1371,14 +1383,21 @@ const TabManager = {
                 if (!rem.some(p => p.focused)) rem[0].focused = true;
                 // The active terminal changed (terminal search follows)
                 if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
-                this._renderSplit(tab);
+                // Deferred completion of the user's close (200ms ago): the
+                // refocuses below are PASSIVE, not new activations.
+                this._renderSplit(tab, true);
                 this._updateTabName(tab);
                 this.render();
                 const focused = rem.find(p => p.focused);
                 if (focused && focused.term) {
                     setTimeout(() => {
                         _fitWithScroll(focused.term, focused.fitAddon, document.getElementById('pane-body_' + focused.id));
-                        try { focused.term.focus(); } catch(e) {}
+                        // Fire-time validated PASSIVE focus only: the survivor
+                        // may itself be closed or the tab switched away inside
+                        // the window, and a live form focus the user is holding
+                        // survives the completion — the fit above still runs
+                        // regardless.
+                        _focusTerminalIfCurrent(focused.term, null, true);
                     }, 150);
                 }
             }
@@ -1402,8 +1421,14 @@ const TabManager = {
             });
         }
         const pane = findPane(tab, paneId);
-        // Do not steal focus mid pane drag (a term.focus() 50ms later would kill a just-started drag)
-        if (pane && pane.term) setTimeout(() => { if (!this._paneDragState) pane.term.focus(); }, 50);
+        // Do not steal focus mid pane drag (a term.focus() 50ms later would kill a just-started drag).
+        // The focus itself is validated at fire time: closing the pane inside
+        // the window nulls its term slot (the old captured-slot deref threw),
+        // and a newer pane/tab/form focus wins over this timer.
+        if (pane && pane.term) {
+            const priorFocus = document.activeElement || null;
+            setTimeout(() => { if (!this._paneDragState) _focusTerminalIfCurrent(pane.term, priorFocus); }, 50);
+        }
         // The active terminal changed (terminal search follows)
         if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
     },
@@ -1424,16 +1449,20 @@ const TabManager = {
         this._layoutSplit(tab);
         const pane = findPane(tab, tab._maximizedPaneId || paneId);
         if (pane && pane.term && pane.fitAddon) {
+            const priorFocus = document.activeElement || null;
             setTimeout(() => {
                 this._maximizing = false;
                 const body = document.getElementById('pane-body_' + pane.id);
                 if (body) _fitWithScroll(pane.term, pane.fitAddon, body);
                 // onResize/applyFit are fully suppressed during _maximizing, so after fit the final size must be
                 // sent explicitly; otherwise the backend stays at the old cols/rows (nvim, htop and other TUI layouts break)
-                if (pane.tabId && pane.term.cols && pane.term.rows) {
+                if (pane.tabId && pane.term?.cols && pane.term?.rows) {
                     ipcRenderer.send('pty-resize', { tabId: pane.tabId, cols: pane.term.cols, rows: pane.term.rows });
                 }
-                try { pane.term.focus(); } catch(e) {}
+                // Fire-time validated focus only: a close/switch inside the
+                // 220ms window makes this pane's focus stale — the fit and
+                // the explicit resize above still complete.
+                _focusTerminalIfCurrent(pane.term, priorFocus);
             }, 220);
         } else {
             setTimeout(() => { this._maximizing = false; }, 220);
@@ -1781,7 +1810,11 @@ const TabManager = {
         this._updateTabName(targetTab);
         this.render();
         this.updateStatus();
-        setTimeout(() => { if (mt) try { mt.focus(); } catch(e) {} }, 150);
+        // Fire-time validated: the moved terminal's auto-activation must not
+        // steal focus if the user switched away inside the 150ms window (the
+        // term may also be closed — its owner resolves to none then).
+        const priorFocus = document.activeElement || null;
+        setTimeout(() => _focusTerminalIfCurrent(mt, priorFocus), 150);
     },
 
     _exitSplit(tab) {
@@ -1854,7 +1887,13 @@ const TabManager = {
                 if (tab.term?.cols) _sendResizeForTerm(tab.term, tab.term.cols, tab.term.rows);
             }, 50);
         }
-        if (this.activeId === tab.id && tab.term) setTimeout(() => tab.term.focus(), 100);
+        // Fire-time validated, PASSIVE: _exitSplit is only reached from the
+        // deferred close collapse — the refocus is a completion, not an
+        // activation, so a live form focus the user is holding survives it.
+        // The slot is still re-read at fire time (a reconnect inside the
+        // window disposes the term and nulls tab.term; the old
+        // captured-slot deref threw).
+        if (this.activeId === tab.id && tab.term) _scheduleTerminalFocus(() => tab.term, 100, true);
     },
 
     // ── Tab → split drop zones (unified with pane reorder visuals) ──
@@ -2484,7 +2523,10 @@ const TabManager = {
             this._updateTabName(tab);
             return tab;
         }
-        this._renderSplit(tab);
+        // Session restore is a passive completion (no user tree action):
+        // its refocus, if any pane already holds a term, follows the passive
+        // intent rule.
+        this._renderSplit(tab, true);
         this._updateTabName(tab);
         // Hide on restore and show only after switchTo activates it, preventing multiple splits from stacking
         const splitEl = document.getElementById('split_' + tab.id);
