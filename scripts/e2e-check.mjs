@@ -3078,9 +3078,194 @@ async function main() {
         return true;
       })()`);
     }
+    // 15.6 search addon follows the terminal (repair-plan gap B): two
+    //     terminals seeded with distinct marker text; after an extract the
+    //     search bar (real doSearch → real SearchAddon → real buffer) finds
+    //     ONLY the active terminal's content on both sides.
+    const adr4TabC = await cdp.eval(`TabManager.createTab({ name: 'E2E-ADR4-C', type: 'local' })`);
+    const C = JSON.stringify(adr4TabC);
+    await waitForValue(cdp, `(() => { const t = TabManager.tabs.find(x => x.id === ${C}); return !!(t && t.term && t.tabId); })()`, true, 15000);
+    await cdp.eval(`TabManager.splitHorizontal()`);
+    await waitForValue(cdp, `getAllPanes(TabManager.tabs.find(x => x.id === ${C})).filter(p => p.term && p.tabId).length`, 2, 15000);
+    const adr4CExt = await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${C});
+      const panes = getAllPanes(tab);
+      panes[0].term.write('ZTERM-SEARCH-ALPHA\\r\\n');
+      panes[1].term.write('ZTERM-SEARCH-BRAVO\\r\\n');
+      TabManager._extractPaneToTab(tab.id, panes[1].id);
+      return TabManager.tabs[TabManager.tabs.length - 1].id;
+    })()`);
+    const CC = JSON.stringify(adr4CExt);
+    // Hard precondition: both markers parsed into the buffers (scan every
+    // line; waitForValue alone returns silently on timeout and would let a
+    // missing fixture masquerade as a search failure).
+    const bufPre = await waitForValue(cdp, `(() => {
+      const has = (tabId, needle) => {
+        const t = TabManager.tabs.find(x => x.id === tabId);
+        if (!t || !t.term) return false;
+        const b = t.term.buffer.active;
+        for (let i = 0; i < b.length; i++) {
+          const l = b.getLine(i);
+          if (l && l.translateToString(true).includes(needle)) return true;
+        }
+        return false;
+      };
+      return has(${C}, 'ZTERM-SEARCH-ALPHA') && has(${CC}, 'ZTERM-SEARCH-BRAVO');
+    })()`, true, 8000);
+    if (bufPre !== true) throw new Error('ADR4 search fixture: marker text never reached the terminal buffers');
+    // The count badge is NOT a valid observable: the vendored addon only
+    // fires onDidChangeResults for findNext(query, {decorations:true}), which
+    // the product never passes. Assert the real user-visible semantics
+    // instead: doSearch() → findNextWithSelection SELECTS the match in the
+    // ACTIVE terminal's buffer (and clears the selection on a miss).
+    async function searchSelects(query) {
+      await cdp.eval(`(() => { document.getElementById('search-input').value = ${JSON.stringify(query)}; doSearch(); return true; })()`);
+      for (let i = 0; i < 10; i++) {
+        const sel = await cdp.eval(`(() => {
+          const tab = TabManager.getActive();
+          if (!tab || !tab.term) return null;
+          return tab.term.hasSelection() ? tab.term.getSelection() : '';
+        })()`);
+        if (sel) return sel;
+        await sleep(150);
+      }
+      return '';
+    }
+    // Active tab after the extract is the NEW tab (BRAVO content only)
+    const hitNew = await searchSelects('ZTERM-SEARCH-BRAVO');
+    const missNew = await searchSelects('ZTERM-SEARCH-ALPHA');
+    await cdp.eval(`(() => { TabManager.switchTo(${C}); return true; })()`);
+    const hitSrc = await searchSelects('ZTERM-SEARCH-ALPHA');
+    check('ADR4：搜索适配器随终端迁移（仅命中活动终端内容）',
+      hitNew === 'ZTERM-SEARCH-BRAVO' && missNew === '' && hitSrc === 'ZTERM-SEARCH-ALPHA',
+      JSON.stringify({ hitNew, missNew, hitSrc }));
+    await cdp.eval(`(() => { try { closeSearch(); } catch (e) {} return true; })()`);
+
+    // 15.7 IME perceivedCaret provider reads the CURRENT owner (gap A): the
+    //     provider installed on the extracted terminal is the real one from
+    //     ime-caret-anchor (stored on the core); only the adapter leaf is
+    //     wrapped to count calls. Old code: 0 calls (old wrapper cleared).
+    const imeProv = await cdp.eval(`(() => {
+      const nt = TabManager.tabs.find(x => x.id === ${CC});
+      if (!nt || !nt.term || !nt.term._core) return { ok: false, why: 'nt' };
+      const prov = nt.term._core.__imeAnchorPerceivedCaret;
+      if (typeof prov !== 'function') return { ok: false, why: 'provider' };
+      const adapter = nt._smoothCursor && nt._smoothCursor._adapter;
+      if (!adapter || typeof adapter.perceivedCaretCell !== 'function') return { ok: false, why: 'adapter' };
+      let calls = 0;
+      const orig = adapter.perceivedCaretCell;
+      adapter.perceivedCaretCell = function () { calls += 1; return orig.call(this); };
+      let val = null;
+      try { val = prov(); } finally { adapter.perceivedCaretCell = orig; }
+      return { ok: true, calls, val: val ? 'cell' : 'null' };
+    })()`);
+    check('ADR4：IME perceivedCaret 提供者按当前归属读取适配器（提取后仍指向新 owner）',
+      imeProv.ok === true && imeProv.calls >= 1, JSON.stringify(imeProv));
+
+    // 15.8 paste generation validation (gap D), close path with the REAL
+    //     closeTab: the clipboard read resolves IMMEDIATELY after the close
+    //     starts — inside the ~200ms exit-animation window where the tab
+    //     still holds its backend — and must deliver ZERO input.
+    const adr4TabD = await cdp.eval(`TabManager.createTab({ name: 'E2E-ADR4-D', type: 'local' })`);
+    const D = JSON.stringify(adr4TabD);
+    await waitForValue(cdp, `(() => { const t = TabManager.tabs.find(x => x.id === ${D}); return !!(t && t.term && t.tabId); })()`, true, 15000);
+    await cdp.eval(`(() => {
+      window.__e2eSendLog = [];
+      window.__e2eOrigSend = window.electron.ipcRenderer.send;
+      window.electron.ipcRenderer.send = function (ch, payload) { window.__e2eSendLog.push({ ch, payload }); };
+      const clip = require('electron').clipboard;
+      window.__e2eClipBackup = { readText: clip.readText, readTextAsync: clip.readTextAsync };
+      window.__e2ePasteGate = { resolve: null };
+      clip.readTextAsync = () => new Promise(r => { window.__e2ePasteGate.resolve = r; });
+      clip.readText = () => '';
+      return true;
+    })()`);
+    try {
+      await cdp.eval(`(() => { TabManager.tabs.find(x => x.id === ${D}).term.element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); return true; })()`);
+      await cdp.eval(`(() => { TabManager.closeTab(${D}); return TabManager._closingTabs.has(${D}); })()`).then((inWindow) => {
+        if (inWindow !== true) throw new Error('ADR4 close-paste: tab was removed synchronously; window not exercised');
+      });
+      // Resolve INSIDE the removal window (before the 200ms deferred removal).
+      await cdp.eval(`window.__e2ePasteGate.resolve('PASTE-CLOSED')`);
+      await sleep(400); // let the removal finish before counting
+      const closedPaste = await cdp.eval(`window.__e2eSendLog.filter(x => x.ch === 'pty-input' && x.payload.data === 'PASTE-CLOSED').length`);
+      check('ADR4：粘贴读取期间会话关闭（动画窗口内）→ 零投递', closedPaste === 0, `count=${closedPaste}`);
+    } finally {
+      await cdp.eval(`(() => {
+        if (window.__e2eOrigSend) { window.electron.ipcRenderer.send = window.__e2eOrigSend; window.__e2eOrigSend = null; }
+        if (window.__e2eClipBackup) {
+          const clip = require('electron').clipboard;
+          clip.readText = window.__e2eClipBackup.readText;
+          clip.readTextAsync = window.__e2eClipBackup.readTextAsync;
+          window.__e2eClipBackup = null;
+        }
+        window.__e2eSendLog = null; window.__e2ePasteGate = null;
+        return true;
+      })()`);
+    }
+    // 15.8b paste generation validation, reconnect-swap path: the backend id
+    //     swap a preserve-content reconnect performs is applied to the state
+    //     (ssh-connecting semantics — a REAL reconnect needs an authorized
+    //     SSH connection, not available here); the handler under test is real.
+    const adr4TabE = await cdp.eval(`TabManager.createTab({ name: 'E2E-ADR4-E', type: 'local' })`);
+    const E = JSON.stringify(adr4TabE);
+    await waitForValue(cdp, `(() => { const t = TabManager.tabs.find(x => x.id === ${E}); return !!(t && t.term && t.tabId); })()`, true, 15000);
+    await cdp.eval(`(() => {
+      window.__e2eSendLog = [];
+      window.__e2eOrigSend = window.electron.ipcRenderer.send;
+      window.electron.ipcRenderer.send = function (ch, payload) { window.__e2eSendLog.push({ ch, payload }); };
+      const clip = require('electron').clipboard;
+      window.__e2eClipBackup = { readText: clip.readText, readTextAsync: clip.readTextAsync };
+      window.__e2ePasteGate = { resolve: null };
+      clip.readTextAsync = () => new Promise(r => { window.__e2ePasteGate.resolve = r; });
+      clip.readText = () => '';
+      return true;
+    })()`);
+    try {
+      await cdp.eval(`(() => { TabManager.tabs.find(x => x.id === ${E}).term.element.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })); return true; })()`);
+      // Simulate the reconnect swap: same terminal, NEW backend generation.
+      await cdp.eval(`(() => { const t = TabManager.tabs.find(x => x.id === ${E}); t.connected = false; t.tabId = t.tabId + '_swap'; return true; })()`);
+      await cdp.eval(`window.__e2ePasteGate.resolve('PASTE-SWAP')`);
+      await sleep(300);
+      const swapPaste = await cdp.eval(`window.__e2eSendLog.filter(x => x.ch === 'pty-input' && x.payload.data === 'PASTE-SWAP').length`);
+      check('ADR4：粘贴读取期间后端换代 → 零投递', swapPaste === 0, `count=${swapPaste}`);
+    } finally {
+      await cdp.eval(`(() => {
+        if (window.__e2eOrigSend) { window.electron.ipcRenderer.send = window.__e2eOrigSend; window.__e2eOrigSend = null; }
+        if (window.__e2eClipBackup) {
+          const clip = require('electron').clipboard;
+          clip.readText = window.__e2eClipBackup.readText;
+          clip.readTextAsync = window.__e2eClipBackup.readTextAsync;
+          window.__e2eClipBackup = null;
+        }
+        window.__e2eSendLog = null; window.__e2ePasteGate = null;
+        return true;
+      })()`);
+    }
+    // 15.9 surviving tab connection state follows the adopted session (gap C):
+    //     the disconnected pane state is synthetic (no authorized SSH drop
+    //     here), the extract and the tab-strip render are real.
+    const adr4TabF = await cdp.eval(`TabManager.createTab({ name: 'E2E-ADR4-F', type: 'local' })`);
+    const F = JSON.stringify(adr4TabF);
+    await waitForValue(cdp, `(() => { const t = TabManager.tabs.find(x => x.id === ${F}); return !!(t && t.term && t.tabId); })()`, true, 15000);
+    await cdp.eval(`TabManager.splitHorizontal()`);
+    await waitForValue(cdp, `getAllPanes(TabManager.tabs.find(x => x.id === ${F})).filter(p => p.term && p.tabId).length`, 2, 15000);
+    const adr4FState = await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${F});
+      const panes = getAllPanes(tab);
+      panes[0].connected = true;
+      panes[1].connected = false; // e.g. a dropped SSH pane
+      TabManager._extractPaneToTab(tab.id, panes[0].id);
+      const dot = document.querySelector('.tab[data-tab="' + ${F} + '"] .tab-icon');
+      return { connected: tab.connected, dotClass: dot ? dot.className : null };
+    })()`);
+    check('ADR4：拆出后剩余标签连接状态来自存活会话（渲染为 disconnected 圆点）',
+      adr4FState.connected === false && /disconnected/.test(adr4FState.dotClass || ''),
+      JSON.stringify(adr4FState));
+
     // Cleanup: close this section's tabs (after the send path is restored, so
     // the pty-destroy traffic reaches the backends)
-    await cdp.eval(`(() => { [${A}, ${B}, ${N}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} }); return true; })()`).catch(() => null);
+    await cdp.eval(`(() => { [${A}, ${B}, ${N}, ${C}, ${CC}, ${E}, ${F}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} }); return true; })()`).catch(() => null);
     await sleep(600); // let the staggered tab removals settle before section 14
 
     // 14. Window state restore: write the window field into config → restart →

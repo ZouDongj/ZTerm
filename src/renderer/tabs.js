@@ -685,6 +685,10 @@ const TabManager = {
             existing._smoothCursor = tab._smoothCursor;
             existing.tabId = tab.tabId;
             existing.focused = false;
+            // The known-failed liveness marker (ipc.js) belongs to THIS
+            // session and must survive the tab→pane promotion — a pending
+            // paste would otherwise deliver into healthy siblings.
+            existing._sessionFailed = tab._sessionFailed === true;
             // The stored tool-provided name travels with the terminal onto its
             // new pane wrapper — the split branch of resolveTabDisplayName only reads pane slots.
             if (tab._toolName !== undefined) { existing._toolName = tab._toolName; delete tab._toolName; }
@@ -1225,6 +1229,15 @@ const TabManager = {
             delete ptyBuffers[pane.tabId]; // prevent permanent buffer leaks (a closed pane is never wired again)
         }
         if (pane.term) try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}
+        // Closing is committed at initiation, not at the deferred removal:
+        // drop the session slots immediately so the dying pane resolves to NO
+        // owner during the exit animation (a pending right-click paste must
+        // not reach the destroyed backend) and the sync-input broadcast skips
+        // it (only panes with a live tabId receive input). The pane element
+        // itself stays mounted purely for the fade animation.
+        pane.term = null;
+        pane.fitAddon = null;
+        pane.tabId = null;
         // Exit animation: fade + shrink, then remove from tree and re-render
         const rootEl = document.getElementById('split_' + tab.id);
         const paneEl = rootEl ? rootEl.querySelector('.split-pane[data-pane="' + paneId + '"]') : null;
@@ -1318,7 +1331,6 @@ const TabManager = {
         const nt = {
             id: 't_' + (this._counter++),
             name: pane.name || st.name,
-            connected: pane.connected !== false && (pane.connected || !!pane.tabId),
             term: pane.term,
             fitAddon: pane.fitAddon,
             tabId: pane.tabId,
@@ -1434,7 +1446,7 @@ const TabManager = {
         // during the drag). Detach the source pane only after validation — otherwise the failure path drops it
         const focusedPane = targetPaneId ? findPane(targetTab, targetPaneId) : null;
         if (targetPaneId && !focusedPane) return;
-        let mt = null, mf = null, mid = null, sc = null, msc = null;
+        let mt = null, mf = null, mid = null, sc = null, msc = null, mconn = false, mfailed = false;
         let paneName = sourceTab.name, paneType = sourceTab.type || 'local';
         let toolName = sourceTab._toolName;
         // Shell config comes from the MOVED session: a local pane dragged out
@@ -1452,6 +1464,10 @@ const TabManager = {
             if (!focused || !focused.term || !focused.tabId) return;
             mt = focused.term; mf = focused.fitAddon; mid = focused.tabId;
             msc = focused?._smoothCursor ?? null;
+            // Connection state travels with the MOVED session: a disconnected
+            // (or still-connecting) pane must not read as online on arrival
+            mconn = paneConnectedState(focused);
+            mfailed = focused._sessionFailed === true;
             // Dispose the dragged pane's onData listener immediately: otherwise after np is rebound below, the term
             // would hold two listeners (the old pane's + np's) and every keypress would fire twice
             if (focused._onDataDisp) { focused._onDataDisp.dispose(); focused._onDataDisp = null; }
@@ -1533,6 +1549,11 @@ const TabManager = {
         } else {
             mt = sourceTab.term; mf = sourceTab.fitAddon; mid = sourceTab.tabId;
             msc = sourceTab._smoothCursor;
+            // Same rule as the split branch: the tab's own session state moves
+            // with its terminal (paneConnectedState reads .connected/.tabId,
+            // which a single tab carries directly)
+            mconn = paneConnectedState(sourceTab);
+            mfailed = sourceTab._sessionFailed === true;
             const idx = this.tabs.indexOf(sourceTab);
             sc = () => {
                 this.tabs.splice(idx, 1);
@@ -1557,6 +1578,9 @@ const TabManager = {
             fp._smoothCursor = targetTab._smoothCursor;
             fp.tabId = targetTab.tabId;
             fp.focused = false;
+            // Same transfer rule as the first-split promotion: the target's
+            // existing session keeps its liveness marker on the fp pane.
+            fp._sessionFailed = targetTab._sessionFailed === true;
             // The terminal moves from targetTab onto the fp pane, so onData must use fp.tabId
             // (targetTab.tabId is about to be cleared; the rebind resolves the owner at send time)
             if (targetTab._onDataDisp) { targetTab._onDataDisp.dispose(); targetTab._onDataDisp = null; }
@@ -1586,7 +1610,10 @@ const TabManager = {
             requestId: 'p_' + (this._paneCounter - 1),
             term: mt, fitAddon: mf, _smoothCursor: msc, tabId: mid, focused: true,
             name: paneName, type: paneType,
-            connected: !!mid, // having a backend tabId means it is online
+            connected: mconn,
+            // Known-failed liveness marker travels with the moved session
+            // (ipc.js owns its lifecycle; see the ssh-error/pty-exit handlers)
+            _sessionFailed: mfailed,
             _sshHost: sshHost, _sshPort: sshPort, _sshUser: sshUser,
             _sshCredId: sshCredId, _sshProfileId: sshProfileId,
             // From the MOVED session (paneCommand/paneArgs), not the source
@@ -1648,7 +1675,9 @@ const TabManager = {
         // The surviving pane's tool-provided name comes back onto the tab with its term.
         if (fp && fp._toolName !== undefined) tab._toolName = fp._toolName;
         else delete tab._toolName;
-        tab.connected = fp?.connected !== false && (fp?.connected || !!fp?.tabId); // sync the connection state, otherwise the status dot/reconnect button are wrong
+        // Connection state was synced by adoptPaneFieldsIntoTab above; with no
+        // surviving pane at all the tab is simply offline.
+        if (!fp) tab.connected = false;
         tab.splitRoot = null;
         tab._maximizedPaneId = null;
         // The term moves from pane back to tab: the pane's onData listener must be disposed and rebound to the tab,

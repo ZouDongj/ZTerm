@@ -220,6 +220,10 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
                     // tabId never matched (respawn would inherit the old
                     // filter with da1Seen=1 and never answer the handshake).
                     _resetCaretState(pane);
+                    // Fresh local generation: a successful claim is live for
+                    // input again; a failed spawn is correctly represented as
+                    // a failed session (paste stays cancelled).
+                    pane._sessionFailed = !!spawnError;
                     wireTerminalToPane(tab, pane);
                     if (spawnError && pane.term) pane.term.write('\r\n\x1b[31m[ZTerm] 启动失败: ' + spawnError + '\x1b[0m\r\n');
                     // Sync fit + report the size immediately: the local pty starts at 80x24, so this shortens the window before it reaches the real size
@@ -230,6 +234,9 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
                 if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(tab);
                 delete tab._ptyRequestId;
                 _resetCaretState(tab); // see the split branch above
+                // Same generation rule as the pane claim: success is live,
+                // a failed spawn stays failed.
+                tab._sessionFailed = !!spawnError;
                 if (!tab.term) {
                     wireTerminal(tab, tabId);
                     if (spawnError && tab.term) tab.term.write('\r\n\x1b[31m[ZTerm] 启动失败: ' + spawnError + '\x1b[0m\r\n');
@@ -264,33 +271,65 @@ function _syncFitAndReportSize(tab, pane) {
     });
 }
 
-ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId }) => {
+// ── Session-owner resolution for backend lifecycle events ──
+// The backend id is a session's CURRENT identity; a rendererId/requestId only
+// identifies a creation that has not produced a backend yet. Pass 1 resolves
+// the backend id across ALL owners, so a delayed event reaches the session's
+// CURRENT owner even after its terminal migrated to another tab/pane. Pass 2
+// (pending fallback) only matches owners that hold NO assigned backend — a
+// tab/pane already carrying a different assigned backend must never absorb
+// another session's event (the old `t.id === rendererId` fallback wrote A's
+// tab failed when B's delayed error arrived after a drag/extract migration).
+// reconnectTab/_reconnectPane and the ssh-error retry branch null the old
+// backend id before re-enqueueing, so legitimate new generations still claim.
+function _findSessionOwner(tabId, rendererId) {
     for (const tab of TabManager.tabs) {
         if (tab.splitRoot) {
-            const pane = findPane(tab, rendererId) || getAllPanes(tab).find(p => p.requestId === rendererId);
-            if (pane) {
-                if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(pane);
-                pane.tabId = tabId;
-                // In preserve mode (clearOnConnect=false) the terminal already exists: do not rebuild it, or the preserved content would be replaced with an empty terminal
-                if (!pane.term) wireTerminalToPane(tab, pane);
-                if (pane.term) {
-                    pane.term.write('\x1b[33mConnecting to ' + (pane._sshHost || tab.host || pane.name || tab.name) + '...\x1b[0m\r\n');
-                    _syncFitAndReportSize(tab, pane);
-                }
-                return;
-            }
-        } else if (tab.id === rendererId || (tab._ptyRequestId && tab._ptyRequestId === rendererId)) {
-            if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(tab);
-            // A collapsed pending pane claimed its creation event through the
-            // marker; consume it now that the backend id landed on the tab
-            delete tab._ptyRequestId;
-            tab.tabId = tabId;
-            if (!tab.term) wireTerminal(tab, tabId);
-            if (tab.term) tab.term.write('\x1b[33mConnecting to ' + (tab.host || tab.name) + '...\x1b[0m\r\n');
-            _syncFitAndReportSize(tab, null);
-            return;
+            const pane = getAllPanes(tab).find(p => tabId && p.tabId === tabId);
+            if (pane) return { tab, pane };
+        } else if (tabId && tab.tabId === tabId) {
+            return { tab, pane: null };
         }
     }
+    for (const tab of TabManager.tabs) {
+        if (tab.splitRoot) {
+            const pane = getAllPanes(tab).find(p => rendererId && !p.tabId && p.requestId === rendererId);
+            if (pane) return { tab, pane };
+        } else if (rendererId && !tab.tabId
+            && ((tab._ptyRequestId && tab._ptyRequestId === rendererId) || tab.id === rendererId)) {
+            return { tab, pane: null };
+        }
+    }
+    return null;
+}
+
+ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId }) => {
+    const hit = _findSessionOwner(tabId, rendererId);
+    if (!hit) return;
+    const { tab, pane } = hit;
+    if (pane) {
+        if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(pane);
+        pane.tabId = tabId;
+        // A fresh connect attempt is a NEW session generation: any
+        // failure marker from a previous generation no longer applies.
+        pane._sessionFailed = false;
+        // In preserve mode (clearOnConnect=false) the terminal already exists: do not rebuild it, or the preserved content would be replaced with an empty terminal
+        if (!pane.term) wireTerminalToPane(tab, pane);
+        if (pane.term) {
+            pane.term.write('\x1b[33mConnecting to ' + (pane._sshHost || tab.host || pane.name || tab.name) + '...\x1b[0m\r\n');
+            _syncFitAndReportSize(tab, pane);
+        }
+        return;
+    }
+    if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(tab);
+    // A collapsed pending pane claimed its creation event through the
+    // marker; consume it now that the backend id landed on the tab
+    delete tab._ptyRequestId;
+    tab.tabId = tabId;
+    tab._sessionFailed = false; // new generation — see the pane branch
+    if (!tab.term) wireTerminal(tab, tabId);
+    if (tab.term) tab.term.write('\x1b[33mConnecting to ' + (tab.host || tab.name) + '...\x1b[0m\r\n');
+    _syncFitAndReportSize(tab, null);
 });
 
 // ── IPC: SSH connected ──
@@ -303,49 +342,43 @@ function _sshDisplayName(tab, pane) {
 
 ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
     _resetCaretFilterById(tabId);
-    for (const tab of TabManager.tabs) {
-        if (tab.splitRoot) {
-            const pane = getAllPanes(tab).find(p => p.tabId === tabId || p.requestId === rendererId);
-            if (pane) {
-                tab._sshRetried = 0; // connected: re-arm THIS tab's handshake retry budget
-                if (!pane.term) wireTerminalToPane(tab, pane);
-                if (pane.term) pane.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
-                tab.connected = true;
-                _updatePaneDot(pane, true);
-                TabManager.render();
-                TabManager.updateStatus();
-                showToast('SSH 已连接: ' + _sshDisplayName(tab, pane));
-                // Fallback size settle: the connecting phase already fit and opened the PTY at the right size via pendingSizes,
-                // but if the container had zero size during connecting (tab hidden, etc.), settle once more here; after connected the size is registered and usable
-                _scheduleSettleResize(tab);
-                return;
-            }
-        } else if (tab.tabId === tabId || tab.id === rendererId || (tab._ptyRequestId && tab._ptyRequestId === rendererId)) {
-            tab._sshRetried = 0; // connected: re-arm THIS tab's handshake retry budget
-            tab.connected = true;
-            if (!tab.term) wireTerminal(tab, tabId);
-            if (tab.term) tab.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
-            TabManager.render();
-            TabManager.updateStatus();
-            showToast('SSH 已连接: ' + _sshDisplayName(tab, null));
-            _scheduleSettleResize(tab); // fallback size settle, symmetric with the split branch
-            return;
-        }
+    const hit = _findSessionOwner(tabId, rendererId);
+    if (!hit) return;
+    const { tab, pane } = hit;
+    if (pane) {
+        tab._sshRetried = 0; // connected: re-arm THIS tab's handshake retry budget
+        if (!pane.term) wireTerminalToPane(tab, pane);
+        if (pane.term) pane.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
+        tab.connected = true;
+        pane._sessionFailed = false; // live again — pending input is valid
+        _updatePaneDot(pane, true);
+        TabManager.render();
+        TabManager.updateStatus();
+        showToast('SSH 已连接: ' + _sshDisplayName(tab, pane));
+        // Fallback size settle: the connecting phase already fit and opened the PTY at the right size via pendingSizes,
+        // but if the container had zero size during connecting (tab hidden, etc.), settle once more here; after connected the size is registered and usable
+        _scheduleSettleResize(tab);
+        return;
     }
+    tab._sshRetried = 0; // connected: re-arm THIS tab's handshake retry budget
+    tab.connected = true;
+    tab._sessionFailed = false; // live again — see the split branch
+    if (!tab.term) wireTerminal(tab, tabId);
+    if (tab.term) tab.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
+    TabManager.render();
+    TabManager.updateStatus();
+    showToast('SSH 已连接: ' + _sshDisplayName(tab, null));
+    _scheduleSettleResize(tab); // fallback size settle, symmetric with the split branch
 });
 
 // ── IPC: SSH error ──
 ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
-    let tab = null, pane = null;
-    for (const t of TabManager.tabs) {
-        if (t.splitRoot) {
-            const p = getAllPanes(t).find(pp => pp.tabId === tabId || pp.requestId === rendererId);
-            if (p) { tab = t; pane = p; break; }
-        } else if (t.id === rendererId || t.tabId === tabId || (t._ptyRequestId && t._ptyRequestId === rendererId)) {
-            // Match exactly — never write the error onto some arbitrary SSH tab that is still connecting
-            tab = t; break;
-        }
-    }
+    // Backend identity first (see _findSessionOwner): a delayed error must
+    // reach the session's current owner, never a tab that merely shares the
+    // original rendererId but now hosts a different live session.
+    const hit = _findSessionOwner(tabId, rendererId);
+    const tab = hit ? hit.tab : null;
+    const pane = hit ? hit.pane : null;
     if (!tab) { showToast('[SSH] ' + error, true); return; }
     // Classify transient errors from the russh error text (timeout / connection dropped / key exchange failure)
     // and auto-retry only those; deterministic errors like auth failure or unknown host key are not retried.
@@ -382,6 +415,9 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
                 delete pane._caretFilter;
             }
             pane.tabId = null;
+            // The source session is known dead: pending input (e.g. an
+            // in-flight right-click paste) must be cancelled, not delivered.
+            pane._sessionFailed = true;
         } else {
             if (tab.tabId) {
                 ipcRenderer.send('ssh-disconnect', { tabId: tab.tabId, rendererId: tab.id });
@@ -390,6 +426,7 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
                 tab._altScreen = false;
             }
             tab.tabId = null;
+            tab._sessionFailed = true; // same liveness marker as the pane branch
         }
         // A manual reconnect (reconnectTab / clicking a down tab) supersedes
         // this scheduled retry: both would enqueue a connect for the same
@@ -414,6 +451,10 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
             if (pane.term) pane.term.write('\r\n\x1b[31m[SSH Error] ' + error + '\x1b[0m\r\n');
         }
         tab.connected = false;
+        // The terminal (and the backend id) is preserved, but the session is
+        // known failed — pending input for THIS pane must be cancelled even
+        // though the old id remains (sync input would relay it to siblings).
+        pane._sessionFailed = true;
         _updatePaneDot(pane, false);
         TabManager.render();
         TabManager.updateStatus();
@@ -421,6 +462,7 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
         return;
     }
     tab.connected = false;
+    tab._sessionFailed = true; // same liveness marker as the pane branch
     if (!tab.tabId) tab.tabId = tabId;
     if (tab.term) {
         tab.term.write('\r\n\x1b[31m[SSH Error] ' + error + '\x1b[0m\r\n');
@@ -443,25 +485,24 @@ ipcRenderer.on('ssh-disconnected', (event, { tabId, rendererId, reason, path }) 
         return;
     }
     const line = '\r\n\x1b[33m[SSH Disconnected]\x1b[0m' + (reason ? ` \x1b[2m${reason}\x1b[0m` : '') + '\r\n';
-    for (const tab of TabManager.tabs) {
-        if (tab.splitRoot) {
-            const pane = getAllPanes(tab).find(p => p.tabId === tabId || p.requestId === rendererId);
-            if (pane) {
-                tab.connected = false;
-                _updatePaneDot(pane, false);
-                if (pane.term) pane.term.write(line);
-                TabManager.render();
-                TabManager.updateStatus();
-                return;
-            }
-        } else if (tab.tabId === tabId || tab.id === rendererId) {
-            tab.connected = false;
-            if (tab.term) tab.term.write(line);
-            TabManager.render();
-            TabManager.updateStatus();
-            return;
-        }
+    const hit = _findSessionOwner(tabId, rendererId);
+    if (!hit) return;
+    const { tab, pane } = hit;
+    if (pane) {
+        tab.connected = false;
+        // Known-disconnected source session: cancel pending input.
+        pane._sessionFailed = true;
+        _updatePaneDot(pane, false);
+        if (pane.term) pane.term.write(line);
+        TabManager.render();
+        TabManager.updateStatus();
+        return;
     }
+    tab.connected = false;
+    tab._sessionFailed = true; // same liveness marker as the pane branch
+    if (tab.term) tab.term.write(line);
+    TabManager.render();
+    TabManager.updateStatus();
 });
 
 // ── IPC: SSH disconnect reason (session-level, from russh's disconnected() callback) ──
@@ -503,12 +544,16 @@ ipcRenderer.on('pty-exit', (event, { tabId }) => {
             if (pane && pane.term) {
                 pane.term.write('\r\n\x1b[33m[Process exited]\x1b[0m\r\n');
                 tab.connected = false;
+                // Local twin of an SSH failure: process gone, id retained —
+                // pending input for THIS pane is cancelled.
+                pane._sessionFailed = true;
                 _updatePaneDot(pane, false);
                 TabManager.render();
                 return;
             }
         } else if (tab.tabId === tabId) {
             tab.connected = false;
+            tab._sessionFailed = true; // same liveness marker as the pane branch
             if (tab.term) tab.term.write('\r\n\x1b[33m[Process exited]\x1b[0m\r\n');
             TabManager.render();
             return;

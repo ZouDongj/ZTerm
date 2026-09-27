@@ -264,6 +264,13 @@ function _shortcutPassthrough(term, e) {
 function _resolveTermOwner(term) {
     if (typeof TabManager === 'undefined' || !TabManager?.tabs) return null;
     for (const tab of TabManager.tabs) {
+        // Closing is committed at initiation: from the moment closeTab marks
+        // the tab, its session is dead for routing even though the tab object
+        // (with term/backend) stays alive for the exit animation's deferred
+        // removal. Skipping it here invalidates every owner-resolved consumer
+        // (keyboard input, resize debounces, right-click paste) immediately,
+        // without touching the animation or its timers.
+        if (TabManager._closingTabs && TabManager._closingTabs.has(tab.id)) continue;
         if (tab.term === term) return { tab, owner: tab };
         if (tab.splitRoot && typeof getAllPanes === 'function') {
             const pane = getAllPanes(tab).find(p => p.term === term);
@@ -271,6 +278,44 @@ function _resolveTermOwner(term) {
         }
     }
     return null;
+}
+
+// IME caret anchor provider: the smooth-cursor wrapper follows the terminal
+// across migrations (split/extract/drag move it between the tab and pane
+// slots), so the provider must read the CURRENT owner's wrapper at call
+// time. A closure over the wrapper it was wired for keeps reading the old
+// owner's cleared slot after the move — IME anchoring would silently fall
+// back to the protocol cursor for the rest of the session. An unresolvable
+// owner (mid-teardown) yields null, which anchors to the protocol cursor.
+function _perceivedCaretProvider(term) {
+    return () => {
+        const resolved = _resolveTermOwner(term);
+        return resolved?.owner?._smoothCursor?._adapter?.perceivedCaretCell?.() ?? null;
+    };
+}
+
+// Right-click paste, shared by tab- and pane-wired terminals. The target is
+// re-resolved after the async clipboard read (the terminal may have migrated
+// to another wrapper mid-read), and validated against the backend id captured
+// BEFORE the read: a same-session migration is allowed, while a close or a
+// reconnect that swapped the backend generation drops the stale paste instead
+// of delivering it to whatever session now owns the terminal. A source session
+// KNOWN to have failed/disconnected (ssh error/drop or local process exit —
+// see the _sessionFailed markers in ipc.js) cancels the paste even when its
+// old backend id remains: with sync input on, delivering it would broadcast
+// into the still-healthy siblings of the current tab.
+async function _pasteFromClipboardInto(term) {
+    const startBackend = _resolveTermOwner(term)?.owner?.tabId ?? null;
+    try {
+        const clipboard = require('electron').clipboard;
+        const text = clipboard.readTextAsync ? await clipboard.readTextAsync() : clipboard.readText();
+        if (!text) return;
+        const resolved = _resolveTermOwner(term);
+        if (!resolved) return;
+        if ((resolved.owner.tabId ?? null) !== startBackend) return;
+        if (resolved.owner._sessionFailed === true) return;
+        _sendPaneInput(resolved.tab, resolved.owner, text);
+    } catch(e) {}
 }
 
 // Input routing for a terminal whose owning wrapper may have changed since the
@@ -353,7 +398,7 @@ function wireTerminal(tab, tabId) {
 
     const term = new Terminal(_buildTerminalOptions());
     _installLinkHandler(term);
-    _installTerminalBehavior(term, () => tab._smoothCursor?._adapter?.perceivedCaretCell?.() ?? null);
+    _installTerminalBehavior(term, _perceivedCaretProvider(term));
     let fitAddon, searchAddon;
     try { fitAddon = new FitAddon(); term.loadAddon(fitAddon); } catch(e) { console.warn('FitAddon init failed:', e); }
     try { searchAddon = new SearchAddon(); term.loadAddon(searchAddon); } catch(e) { console.warn('SearchAddon init failed:', e); }
@@ -362,7 +407,7 @@ function wireTerminal(tab, tabId) {
         try { term.loadAddon(_createClipboardAddon()); } catch(e) { console.warn('ClipboardAddon init failed:', e); }
     }
     try { term.loadAddon(_createWebLinksAddon(term)); } catch(e) { console.warn('WebLinksAddon init failed:', e); }
-    tab._searchAddon = searchAddon;
+    _searchAddonByTerm.set(term, searchAddon);
     searchAddon.onDidChangeResults(r => {
         document.getElementById('search-count').textContent = r?.resultCount ? `${r.resultIndex+1}/${r.resultCount}` : '';
     });
@@ -454,21 +499,13 @@ function wireTerminal(tab, tabId) {
 
     // ── Right-click paste ──
     // Electron's clipboard.readText() is synchronous; Tauri (WebView2) only has the async
-    // Clipboard API, read via the readTextAsync branch — both share the same logic
-    term.element.addEventListener('contextmenu', async (e) => {
+    // Clipboard API, read via the readTextAsync branch — both share the same
+    // logic and the shared _pasteFromClipboardInto implementation (owner
+    // re-resolution + session-generation validation).
+    term.element.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         if (_settingsConfig.rightClickPaste === false) return;
-        try {
-            const clipboard = require('electron').clipboard;
-            const text = clipboard.readTextAsync ? await clipboard.readTextAsync() : clipboard.readText();
-            if (!text) return;
-            // Resolve the owner AFTER the await: the terminal may have migrated
-            // to another wrapper while the clipboard read was in flight, and
-            // the pre-await tab/tabId would paste into a dead or wrong session
-            const resolved = _resolveTermOwner(term);
-            if (!resolved) return;
-            _sendPaneInput(resolved.tab, resolved.owner, text);
-        } catch(e) {}
+        _pasteFromClipboardInto(term);
     });
 
     if (ptyBuffers[tabId]) {
@@ -569,7 +606,7 @@ function wireTerminalToPane(tab, pane) {
 
     const term = new Terminal(_buildTerminalOptions());
     _installLinkHandler(term);
-    _installTerminalBehavior(term, () => pane._smoothCursor?._adapter?.perceivedCaretCell?.() ?? null);
+    _installTerminalBehavior(term, _perceivedCaretProvider(term));
     let fitAddon, searchAddon;
     try { fitAddon = new FitAddon(); term.loadAddon(fitAddon); } catch(e) { console.warn('FitAddon init failed:', e); }
     try { searchAddon = new SearchAddon(); term.loadAddon(searchAddon); } catch(e) { console.warn('SearchAddon init failed:', e); }
@@ -578,7 +615,7 @@ function wireTerminalToPane(tab, pane) {
         try { term.loadAddon(_createClipboardAddon()); } catch(e) { console.warn('ClipboardAddon init failed:', e); }
     }
     try { term.loadAddon(_createWebLinksAddon(term)); } catch(e) { console.warn('WebLinksAddon init failed:', e); }
-    pane._searchAddon = searchAddon;
+    _searchAddonByTerm.set(term, searchAddon);
     searchAddon.onDidChangeResults(r => {
         document.getElementById('search-count').textContent = r?.resultCount ? `${r.resultIndex+1}/${r.resultCount}` : '';
     });
@@ -685,20 +722,12 @@ function wireTerminalToPane(tab, pane) {
     });
 
     // ── Right-click paste ──
-    // Same as above: Tauri reads via async readTextAsync, Electron via synchronous readText
-    term.element.addEventListener('contextmenu', async (e) => {
+    // Owner re-resolution + session-generation validation live in
+    // _pasteFromClipboardInto (shared with wireTerminal's handler).
+    term.element.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         if (_settingsConfig.rightClickPaste === false) return;
-        try {
-            const clipboard = require('electron').clipboard;
-            const text = clipboard.readTextAsync ? await clipboard.readTextAsync() : clipboard.readText();
-            if (!text) return;
-            // Resolve the owner AFTER the await — see wireTerminal's contextmenu
-            // handler; the pre-await (tab, pane) pair may be stale after migration
-            const resolved = _resolveTermOwner(term);
-            if (!resolved) return;
-            _sendPaneInput(resolved.tab, resolved.owner, text);
-        } catch(e) {}
+        _pasteFromClipboardInto(term);
     });
 
     // Sync pane focus visual when terminal receives focus
@@ -736,14 +765,20 @@ function wireTerminalToPane(tab, pane) {
 }
 
 // ── Terminal search ──
+// Search capability is keyed by the terminal instance rather than the wrapper
+// it was wired for: split/extract/drag migrations move terminals between the
+// tab and pane wrapper slots, and a wrapper-slot lookup would miss the addon
+// after the move — or keep serving another session's addon from a stale slot.
+// The addon itself is loaded ON the terminal; this map is only the ownership
+// handle that survives every migration.
+const _searchAddonByTerm = new WeakMap();
 function _getActiveSearchAddon() {
     const tab = TabManager.getActive();
     if (!tab || tab.type === 'settings') return null;
-    if (tab.splitRoot) {
-        const focused = getAllPanes(tab).find(p => p.focused);
-        return focused?._searchAddon || null;
-    }
-    return tab._searchAddon || null;
+    const term = tab.splitRoot
+        ? getAllPanes(tab).find(p => p.focused)?.term
+        : tab.term;
+    return (term && _searchAddonByTerm.get(term)) || null;
 }
 function openSearch() {
     const bar = document.getElementById('search-bar');
