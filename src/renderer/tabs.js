@@ -372,6 +372,8 @@ const TabManager = {
             }
         }
         this.updateStatus();
+        // The active terminal changed (terminal search follows)
+        if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
     },
 
     // Tabs that are not currently closing (rapid-close safe count: the
@@ -801,6 +803,9 @@ const TabManager = {
             tab._maximizedPaneId = null;
             this._renderSplit(tab);
             this._spawnBackendForPane(newPane, tab);
+            // The active terminal moved to the newly focused pending pane
+            // (terminal search follows; rebinds when its terminal arrives)
+            if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
             this._updateTabName(tab);
             this.render();
             return;
@@ -820,6 +825,8 @@ const TabManager = {
         this.add(tab, newPane, focused, side);
         all.forEach(p => p.focused = false);
         newPane.focused = true;
+        // The active terminal moved to the new pane (terminal search follows)
+        if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
         // Same per-tab rule as the first-split branch above
         tab._maximizedPaneId = null;
         this._layoutTime = Date.now();
@@ -1355,10 +1362,15 @@ const TabManager = {
             } else if (rem.length === 1) {
                 tab.name = rem[0]?.name || tab.name;
                 this._exitSplit(tab);
+                // The active terminal collapsed back onto the tab (terminal
+                // search follows the surviving terminal)
+                if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
                 this._updateTabName(tab);
                 this.render();
             } else {
                 if (!rem.some(p => p.focused)) rem[0].focused = true;
+                // The active terminal changed (terminal search follows)
+                if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
                 this._renderSplit(tab);
                 this._updateTabName(tab);
                 this.render();
@@ -1392,6 +1404,8 @@ const TabManager = {
         const pane = findPane(tab, paneId);
         // Do not steal focus mid pane drag (a term.focus() 50ms later would kill a just-started drag)
         if (pane && pane.term) setTimeout(() => { if (!this._paneDragState) pane.term.focus(); }, 50);
+        // The active terminal changed (terminal search follows)
+        if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
     },
 
     _maximizePane(tabId, paneId) {
@@ -1403,6 +1417,8 @@ const TabManager = {
             tab._maximizedPaneId = paneId;
             const pane = findPane(tab, paneId);
             if (pane) getAllPanes(tab).forEach(p => p.focused = (p.id === paneId));
+            // The active terminal changed (terminal search follows)
+            if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
         }
         this._maximizing = true;
         this._layoutSplit(tab);

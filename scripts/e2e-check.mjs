@@ -709,6 +709,113 @@ async function main() {
         && imeProbe.p4 !== null && nearPx(imeProbe.p4.left, imeProbe.e4.left) && nearPx(imeProbe.p4.top, imeProbe.e4.top),
       JSON.stringify(imeProbe));
 
+    // 9.8 Terminal search (batch 03): synthetic local content + the REAL
+    //     bundled xterm/addon-search through the REAL renderer handlers.
+    //     The addon only fires result events when find options carry a
+    //     `decorations` object, so the #search-count text is the end-to-end
+    //     signal for both the option plumbing and the active-terminal
+    //     ownership gating (background refresh must not overwrite it).
+    const searchProbeSetup = await cdp.eval(`(async () => {
+      const tab = TabManager.getActive();
+      const panes = getAllPanes(tab);
+      const targets = (panes.length ? panes : [tab]).filter(p => p?.term);
+      if (!targets.length) return { ok: false, why: 'no-terms' };
+      const write = (t, s) => new Promise(r => t.write(s, r));
+      await write(targets[0].term, '\\r\\nZTERM-SRC-A alpha needle one\\r\\nplain filler\\r\\nZTERM-SRC-A alpha needle two\\r\\nplain filler\\r\\nZTERM-SRC-A alpha needle three\\r\\n');
+      // Pane[1] keeps its own distinct marker lines AND carries exactly ONE
+      // match for the shared A-query, so the pane-switch step below expects
+      // a real 1/1 count from the SAME query (seed/query consistency).
+      if (targets[1]) await write(targets[1].term, '\\r\\nZTERM-SRC-B bravo filler\\r\\nZTERM-SRC-A alpha needle shared\\r\\n');
+      return { ok: true, terms: targets.length };
+    })()`);
+    check('搜索用例：合成内容写入活动 tab 的终端', searchProbeSetup.ok === true, JSON.stringify(searchProbeSetup));
+    if (searchProbeSetup.ok) {
+      const activePanes = await cdp.eval(`getAllPanes(TabManager.getActive()).filter(p => p?.term).map(p => p.id)`);
+      // Start focused on pane[0] so the search owner is deterministic.
+      if (activePanes.length > 1) await cdp.eval(`TabManager._focusPane(TabManager.getActive(), ${JSON.stringify(activePanes[0])})`);
+      await cdp.eval(`openSearch()`);
+      await sleep(200);
+      await cdp.eval(`document.getElementById('search-input').value = 'ZTERM-SRC-A alpha needle'; doSearch();`);
+      const countFirst = await waitForValue(cdp, `document.getElementById('search-count').textContent`, '1/3');
+      check('搜索计数：首个匹配显示 1/3', countFirst === '1/3', `count=${countFirst}`);
+      await cdp.eval(`searchNext()`);
+      const countNext = await waitForValue(cdp, `document.getElementById('search-count').textContent`, '2/3');
+      await cdp.eval(`searchNext()`);
+      const countLast = await waitForValue(cdp, `document.getElementById('search-count').textContent`, '3/3');
+      await cdp.eval(`searchNext()`);
+      const countWrap = await waitForValue(cdp, `document.getElementById('search-count').textContent`, '1/3');
+      await cdp.eval(`searchPrev()`);
+      const countWrapPrev = await waitForValue(cdp, `document.getElementById('search-count').textContent`, '3/3');
+      check('搜索导航：next 推进、越界回绕、prev 反向回绕',
+        countNext === '2/3' && countLast === '3/3' && countWrap === '1/3' && countWrapPrev === '3/3',
+        `next=${countNext}, last=${countLast}, wrap=${countWrap}, wrapPrev=${countWrapPrev}`);
+      const decorWithQuery = await waitForValue(cdp, `document.querySelectorAll('.xterm-find-result-decoration').length`, 1, 5000, 'gt0');
+      check('搜索高亮：decorations 真实渲染', decorWithQuery > 0, `decorations=${decorWithQuery}`);
+      // Query replacement: no-match blanks the counter and clears the selection.
+      await cdp.eval(`document.getElementById('search-input').value = 'ZTERM-SRC-NOMATCH'; doSearch();`);
+      const countNoMatch = await waitForValue(cdp, `document.getElementById('search-count').textContent`, '');
+      const selCleared = await waitForValue(cdp, `(() => {
+        const active = TabManager.getActive();
+        const term = (getAllPanes(active).find(p => p.focused) || active).term;
+        return term && term.hasSelection() === false ? 1 : 0;
+      })()`, 1);
+      check('查询替换：无匹配清空计数与选区', countNoMatch === '' && selCleared === 1, `count='${countNoMatch}', selCleared=${selCleared === 1}`);
+      // Empty query: stale counter must not survive.
+      await cdp.eval(`document.getElementById('search-input').value = 'ZTERM-SRC-A alpha needle'; doSearch();`);
+      await waitForValue(cdp, `document.getElementById('search-count').textContent`, '1/3');
+      await cdp.eval(`document.getElementById('search-input').value = ''; doSearch();`);
+      const countEmpty = await waitForValue(cdp, `document.getElementById('search-count').textContent`, '');
+      check('空查询：计数与残留状态清除', countEmpty === '', `count='${countEmpty}'`);
+      // Switch the focused pane (if the split gave us a second terminal): the
+      // count must follow the newly active terminal for the same query.
+      if (activePanes.length > 1) {
+        await cdp.eval(`document.getElementById('search-input').value = 'ZTERM-SRC-A alpha needle'; doSearch();`);
+        await waitForValue(cdp, `document.getElementById('search-count').textContent`, '1/3');
+        await cdp.eval(`TabManager._focusPane(TabManager.getActive(), ${JSON.stringify(activePanes[1])})`);
+        const countSwitched = await waitForValue(cdp, `document.getElementById('search-count').textContent`, '1/1');
+        check('切换聚焦 pane：计数跟随新活动终端', countSwitched === '1/1', `count=${countSwitched}`);
+        // Background output on pane[0] must not overwrite pane[1]'s count.
+        await cdp.eval(`(() => {
+          const tab = TabManager.getActive();
+          const p0 = getAllPanes(tab).find(p => p.id === ${JSON.stringify(activePanes[0])});
+          if (p0?.term) p0.term.write('ZTERM-SRC-A alpha needle background\\r\\n');
+          return true;
+        })()`);
+        await sleep(1200); // addon background refresh is 200ms + render
+        const countAfterBg = await cdp.eval(`document.getElementById('search-count').textContent`);
+        check('后台终端输出不得改写活动终端计数', countAfterBg === '1/1', `count=${countAfterBg}`);
+      }
+      // Close + reopen: blank state, and a background refresh cannot resurrect
+      // the closed bar's counter.
+      await cdp.eval(`closeSearch()`);
+      await sleep(200);
+      const closedState = await cdp.eval(`(() => ({
+        open: document.getElementById('search-bar').classList.contains('open'),
+        count: document.getElementById('search-count').textContent,
+      }))()`);
+      await cdp.eval(`(() => {
+        const tab = TabManager.getActive();
+        const term = (getAllPanes(tab).find(p => p.focused) || tab).term;
+        if (term) term.write('ZTERM-SRC-A alpha needle after-close\\r\\n');
+        return true;
+      })()`);
+      await sleep(1200);
+      const resurrect = await cdp.eval(`document.getElementById('search-count').textContent`);
+      check('关闭搜索：计数清空且不被后台刷新复活',
+        closedState.open === false && closedState.count === '' && resurrect === '',
+        `open=${closedState.open}, count='${closedState.count}', afterBg='${resurrect}'`);
+      await cdp.eval(`openSearch()`);
+      await sleep(200);
+      const reopened = await cdp.eval(`(() => ({
+        open: document.getElementById('search-bar').classList.contains('open'),
+        input: document.getElementById('search-input').value,
+        count: document.getElementById('search-count').textContent,
+      }))()`);
+      check('重开搜索：输入与计数重置', reopened.open === true && reopened.input === '' && reopened.count === '', JSON.stringify(reopened));
+      await cdp.eval(`closeSearch()`);
+      await sleep(150);
+    }
+
     // 10. Settings page: open → a settings tab appears; switch pages
     await cdp.eval(`openSettings()`);
     await sleep(1000);

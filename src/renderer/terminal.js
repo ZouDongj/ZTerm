@@ -407,10 +407,7 @@ function wireTerminal(tab, tabId) {
         try { term.loadAddon(_createClipboardAddon()); } catch(e) { console.warn('ClipboardAddon init failed:', e); }
     }
     try { term.loadAddon(_createWebLinksAddon(term)); } catch(e) { console.warn('WebLinksAddon init failed:', e); }
-    _searchAddonByTerm.set(term, searchAddon);
-    searchAddon.onDidChangeResults(r => {
-        document.getElementById('search-count').textContent = r?.resultCount ? `${r.resultIndex+1}/${r.resultCount}` : '';
-    });
+    _wireSearchAddon(term, searchAddon);
 
     term.open(inner);
     term.attachCustomKeyEventHandler(e => {
@@ -520,6 +517,11 @@ function wireTerminal(tab, tabId) {
 
     if (TabManager.activeId === tab.id) {
         setTimeout(() => term.focus(), 150);
+        // The ACTIVE terminal just became usable (late backend arrival /
+        // reconnect of the active tab): an open search bar with a query must
+        // rebind to it now instead of waiting for the next user action.
+        // No-ops unless the bar is open with a query and the owner moved.
+        _refreshSearchAfterActiveChange();
     }
 }
 
@@ -615,10 +617,7 @@ function wireTerminalToPane(tab, pane) {
         try { term.loadAddon(_createClipboardAddon()); } catch(e) { console.warn('ClipboardAddon init failed:', e); }
     }
     try { term.loadAddon(_createWebLinksAddon(term)); } catch(e) { console.warn('WebLinksAddon init failed:', e); }
-    _searchAddonByTerm.set(term, searchAddon);
-    searchAddon.onDidChangeResults(r => {
-        document.getElementById('search-count').textContent = r?.resultCount ? `${r.resultIndex+1}/${r.resultCount}` : '';
-    });
+    _wireSearchAddon(term, searchAddon);
 
     term.open(bodyEl);
     term.attachCustomKeyEventHandler(e => {
@@ -759,6 +758,11 @@ function wireTerminalToPane(tab, pane) {
 
     if (TabManager.activeId === tab.id && pane.focused) {
         setTimeout(() => term.focus(), 150);
+        // The ACTIVE pending pane just received its terminal (pty-created →
+        // wireTerminalToPane): an open search bar with a query must rebind to
+        // the now-usable active terminal. No-ops unless the bar is open with a
+        // query and the owner moved.
+        _refreshSearchAfterActiveChange();
     }
     // After wiring is complete, schedule one more size-settlement fallback (covers cases where onResize was suppressed or the size never changed)
     if (tab.splitRoot) _scheduleSettleResize(tab);
@@ -772,50 +776,202 @@ function wireTerminalToPane(tab, pane) {
 // The addon itself is loaded ON the terminal; this map is only the ownership
 // handle that survives every migration.
 const _searchAddonByTerm = new WeakMap();
-function _getActiveSearchAddon() {
+// The terminal whose addon currently owns the global search bar (its query,
+// counter and match decorations). Every result event is gated on it: the
+// addon also refreshes results from background writes/resizes, and an
+// unguarded handler would let a background terminal overwrite the active
+// one's counter or repopulate a closed search bar.
+let _searchOwnerTerm = null;
+// The query that produced the current selection. The addon anchors a find
+// call on the terminal's existing selection; when the QUERY changes that
+// selection belongs to the old query and would start the new search
+// mid-buffer, so doSearch drops it and every edited query restarts from the
+// top. Navigation (Enter/Shift+Enter) keeps the selection to advance.
+let _searchLastQuery = '';
+function _getActiveSearchTerm() {
     const tab = TabManager.getActive();
     if (!tab || tab.type === 'settings') return null;
-    const term = tab.splitRoot
-        ? getAllPanes(tab).find(p => p.focused)?.term
-        : tab.term;
-    return (term && _searchAddonByTerm.get(term)) || null;
+    return tab.splitRoot
+        ? (getAllPanes(tab).find(p => p.focused)?.term ?? null)
+        : (tab.term ?? null);
+}
+function _getActiveSearchTarget() {
+    const term = _getActiveSearchTerm();
+    if (!term) return null;
+    const addon = _searchAddonByTerm.get(term) || null;
+    return addon ? { term, addon } : null;
+}
+// Shared registration for both wiring paths (tab + pane): the WeakMap
+// ownership handle plus the owner-gated counter update.
+function _wireSearchAddon(term, searchAddon) {
+    if (!term || !searchAddon) return;
+    _searchAddonByTerm.set(term, searchAddon);
+    searchAddon.onDidChangeResults(r => {
+        if (_searchOwnerTerm !== term) return;
+        document.getElementById('search-count').textContent = _formatSearchCount(r);
+        // Keep the search-owned-selection snapshot current: the event fires
+        // after every find (including the addon's own background refresh,
+        // which re-selects a match and moves the selection).
+        _captureSearchSelection(term);
+    });
+}
+// The selection the last find left on the owner terminal, in buffer
+// coordinates. The addon clears and sets the terminal selection itself while
+// SEARCHING; the cleanup paths (close/reopen/empty query/owner switch) may
+// only drop a selection that is still exactly the one the search placed —
+// the user may have made a manual selection afterwards, and erasing that on
+// close would destroy their selection.
+let _searchSelection = null; // { term, start: {x,y}, end: {x,y} } | null
+function _captureSearchSelection(term) {
+    let pos = null;
+    try { pos = term.getSelectionPosition(); } catch(e) { pos = null; }
+    _searchSelection = pos ? { term, start: pos.start, end: pos.end } : null;
+}
+// Clears the terminal's selection ONLY while it is still bit-for-bit the
+// selection the search placed (same start/end). Anything else — a later
+// manual selection, or no selection — is left untouched.
+function _clearSearchOwnedSelection(term) {
+    const snapshot = _searchSelection && _searchSelection.term === term ? _searchSelection : null;
+    _searchSelection = null;
+    if (!snapshot) return;
+    let pos = null;
+    try { pos = term.getSelectionPosition(); } catch(e) { pos = null; }
+    if (!pos) return;
+    if (pos.start.x === snapshot.start.x && pos.start.y === snapshot.start.y
+        && pos.end.x === snapshot.end.x && pos.end.y === snapshot.end.y) {
+        try { term.clearSelection(); } catch(e) {}
+    }
+}
+// The vendored addon only fires onDidChangeResults when the find options
+// carry a `decorations` object (its internal gate is
+// fireResultsChanged(!!options?.decorations)), and the same options drive the
+// match highlights and overview-ruler marks. One stable option set for every
+// find call also keeps the addon's own didOptionsChange check from
+// re-highlighting on each navigation step.
+function _searchOptions() {
+    return {
+        caseSensitive: false,
+        regex: false,
+        wholeWord: false,
+        decorations: {
+            matchBackground: _getAccentColorAlpha(0.25),
+            activeMatchBackground: _getAccentColorAlpha(0.55),
+            matchOverviewRuler: _getAccentColorAlpha(0.45),
+            activeMatchColorOverviewRuler: _getAccentColorAlpha(0.8),
+        },
+    };
+}
+// resultIndex is -1 when the current selection is not among the tracked
+// results (e.g. a refresh race inside the addon) — show nothing rather than
+// a bogus "0/N".
+function _formatSearchCount(r) {
+    return (r && r.resultCount > 0 && r.resultIndex >= 0) ? `${r.resultIndex + 1}/${r.resultCount}` : '';
+}
+// Clears every trace of the current query: the counter, the decorations and
+// the SEARCH-OWNED selection on the OWNING terminal (which may no longer be
+// the active one — switching tabs mid-search leaves the old owner
+// highlighted), and the owner handle itself. A selection the user made after
+// the last match is not search-owned and survives. With the owner cleared,
+// the per-terminal result handlers write nothing and the addon's background
+// refresh goes inert (no cached search term left on the old owner).
+function _resetActiveSearch() {
+    document.getElementById('search-count').textContent = '';
+    _searchLastQuery = '';
+    const owner = _searchOwnerTerm;
+    _searchOwnerTerm = null;
+    if (!owner) { _searchSelection = null; return; }
+    try { _searchAddonByTerm.get(owner)?.clearDecorations(); } catch(e) {}
+    _clearSearchOwnedSelection(owner);
+}
+// Makes `term` the search owner, dropping the previous owner's decorations
+// and SEARCH-OWNED selection when the owner actually changes (a tab/pane
+// switch moved the search to another terminal; the old owner's highlights
+// must not linger on a background surface, and a retained search selection
+// would make returning continue from a stale match instead of restarting
+// from the top — a manual selection there is not ours to erase). Returns
+// true when the owner changed.
+function _adoptSearchOwner(term) {
+    if (_searchOwnerTerm === term) return false;
+    const prev = _searchOwnerTerm;
+    _searchOwnerTerm = term;
+    if (prev && prev !== term) {
+        try { _searchAddonByTerm.get(prev)?.clearDecorations(); } catch(e) {}
+        _clearSearchOwnedSelection(prev);
+    }
+    return true;
+}
+// TabManager notifies this whenever the ACTIVE TERMINAL may have changed
+// (tab switch, pane focus move, split promotion, pane-close fallback). The
+// search bar is global: with a query typed, its counter and highlights must
+// follow the newly active terminal instead of showing the previous one's
+// results. Idempotent by design — a notification that did not move the
+// active terminal does nothing, so a repeated notification can never
+// double-advance the navigation position.
+function _refreshSearchAfterActiveChange() {
+    const bar = document.getElementById('search-bar');
+    if (!bar || !bar.classList.contains('open')) return;
+    if (!document.getElementById('search-input').value) return;
+    if (_getActiveSearchTerm() === _searchOwnerTerm) return;
+    doSearch();
 }
 function openSearch() {
     const bar = document.getElementById('search-bar');
     bar.classList.add('open');
     document.getElementById('search-input').value = '';
-    document.getElementById('search-count').textContent = '';
-    setTimeout(() => document.getElementById('search-input').focus(), 50);
+    // A fresh open drops the previous query's owner state entirely: input and
+    // counter start blank, the old owner keeps no decorations, and no
+    // background addon refresh can repopulate the counter for the dead query.
+    _resetActiveSearch();
+    setTimeout(() => {
+        if (bar.classList.contains('open')) document.getElementById('search-input').focus();
+    }, 50);
 }
 function closeSearch() {
     document.getElementById('search-bar').classList.remove('open');
-    const addon = _getActiveSearchAddon();
-    if (addon) { try { addon.clearDecorations(); } catch(e) {} }
-    const tab = TabManager.getActive();
-    if (tab && tab.term) setTimeout(() => tab.term.focus(), 50);
-    else if (tab && tab.splitRoot) {
-        const f = getAllPanes(tab).find(p => p.focused);
-        if (f && f.term) setTimeout(() => f.term.focus(), 50);
-    }
+    _resetActiveSearch();
+    // Focus is re-resolved AT FIRE time: the terminal captured at close can
+    // be gone within the 50ms window (tab close disposes it, a switch moved
+    // the active slot), and focusing a disposed terminal throws.
+    setTimeout(() => {
+        const bar = document.getElementById('search-bar');
+        if (bar.classList.contains('open')) return;
+        const term = _getActiveSearchTerm();
+        if (term) { try { term.focus(); } catch(e) {} }
+    }, 50);
 }
 function doSearch() {
-    const input = document.getElementById('search-input');
-    const query = input.value;
-    const addon = _getActiveSearchAddon();
-    if (!addon || !query) { try { addon?.clearDecorations(); } catch(e) {} return; }
-    addon.findNext(query);
-}
-function searchNext() {
-    const addon = _getActiveSearchAddon();
     const query = document.getElementById('search-input').value;
-    if (!addon || !query) return;
-    addon.findNext(query);
+    const target = _getActiveSearchTarget();
+    if (!target || !query) { _resetActiveSearch(); return; }
+    const queryChanged = _searchLastQuery !== query;
+    _adoptSearchOwner(target.term);
+    // An edited query restarts from the top: the previous query's selection
+    // would anchor the new search mid-buffer (addon semantics). Only the
+    // search's OWN selection is dropped — a manual selection is not ours.
+    if (queryChanged) _clearSearchOwnedSelection(target.term);
+    _searchLastQuery = query;
+    target.addon.findNext(query, _searchOptions());
+    // The event handler captured the fresh selection; capture here too so the
+    // snapshot exists even on the no-event paths (e.g. a fresh owner with no
+    // decorations wiring ever firing).
+    _captureSearchSelection(target.term);
 }
-function searchPrev() {
-    const addon = _getActiveSearchAddon();
+function searchNext() { _navigateSearch(1); }
+function searchPrev() { _navigateSearch(-1); }
+function _navigateSearch(direction) {
     const query = document.getElementById('search-input').value;
-    if (!addon || !query) return;
-    addon.findPrevious(query, { caseSensitive: false, regex: false });
+    const target = _getActiveSearchTarget();
+    if (!target || !query) { _resetActiveSearch(); return; }
+    const ownerChanged = _adoptSearchOwner(target.term);
+    // A fresh owner always STARTS a search rather than navigating: its addon
+    // has no cached term, and findPrevious from the viewport bottom would
+    // land on the LAST match — findNext from the top matches every other
+    // fresh start (openSearch → type → Enter).
+    if (ownerChanged || direction > 0) target.addon.findNext(query, _searchOptions());
+    else target.addon.findPrevious(query, _searchOptions());
+    // Keep the search-owned-selection snapshot fresh on this path too (the
+    // event handler already captures, this covers any no-event edge).
+    _captureSearchSelection(target.term);
 }
 function onSearchKey(e) {
     if (e.key === 'Enter') { e.preventDefault(); e.shiftKey ? searchPrev() : searchNext(); }
