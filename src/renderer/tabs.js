@@ -20,58 +20,80 @@ function _clearOnConnect(tab, pane) {
 // SSH connect with credential fallback: after a main-process restart all
 // credentialId handles are dead, so re-register from the SSH profile when no
 // valid credential is at hand (plaintext never passes through the renderer).
-// ALL outbound ssh-connect traffic must go through _enqueueSshConnect's
+// ALL outbound ssh-connect traffic goes through _enqueueSshConnect's
 // app-wide serial queue (session restore, splits, interactive creation,
 // reconnects) so concurrent handshakes can never race strict sshd configs.
+// Every connect is one ATTEMPT (ssh-attempts.js): its OWN invocation promise
+// settles only its queue slot — lifecycle events never release the queue,
+// and nothing is keyed by a display address.
 let _sshConnectChain = Promise.resolve();
 
-// Is anything still listening for this rendererId (tab id or pane requestId)?
-// Queue slots can run long after their consumer was closed; sending then
-// would open a backend session nobody will ever claim or destroy.
-function _rendererIdAlive(rendererId) {
-    for (const tab of TabManager.tabs) {
-        if (tab.id === rendererId) return true;
-        // A collapsed pending pane carries its requestId on the tab until the
-        // creation event claims it — the consumer migrated, it did not die
-        if (tab._ptyRequestId === rendererId) return true;
-        if (tab.splitRoot) {
-            if (getAllPanes(tab).some(p => p.requestId === rendererId || p.tabId === rendererId)) return true;
-        }
-    }
-    return false;
-}
-
-function _enqueueSshConnect(profile, rendererId) {
-    // Rust's early validation (missing host/username) rejects the invoke
-    // WITHOUT emitting ssh-error, which would stall a queue slot for 20s and
-    // freeze every connect behind it. Drop invalid payloads up front.
+function _enqueueSshConnect(profile, token) {
+    // Rust's early validation (missing host/username/attemptId) rejects the
+    // invocation WITHOUT emitting ssh-error — no event will ever settle this
+    // attempt. Terminate it here through the same shared transition so the
+    // owner sees the failure once and the record retires (no-event path).
     if (!profile || !profile.host || !profile.username) {
-        console.warn('[ssh] dropping connect with missing host/username, rendererId=' + rendererId);
+        console.warn('[ssh] dropping connect with missing host/username, attemptId=' + token);
+        sshAttempts.onRpcTerminal(token, 'failed', null, 'ssh-connect: missing host or username');
         return;
     }
     _sshConnectChain = _sshConnectChain.then(() => new Promise((release) => {
-        if (!_rendererIdAlive(rendererId)) { release(); return; }
-        let released = false;
-        const done = () => {
-            if (released) return;
-            released = true;
+        // Unsent requests of closed/replaced owners never start: the owner
+        // binding tracks migrations, and closing cancels the attempt.
+        if (!sshAttempts.ownerWants(token)) { release(); return; }
+        let settled = false;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
             clearTimeout(timer);
-            // release() FIRST: the queue must never wedge on listener cleanup.
+            // Release the slot through the registry (exactly-once, no
+            // re-entry: releaseSlot clears its waiters before calling).
+            sshAttempts.releaseSlot(token);
             release();
-            ipcRenderer.removeListener('ssh-connected', onOk);
-            ipcRenderer.removeListener('ssh-error', onErr);
         };
-        const matches = (d) => d && (d.rendererId === rendererId || d.tabId === rendererId);
-        const onOk = (e, d) => { if (matches(d)) done(); };
-        const onErr = (e, d) => { if (matches(d)) done(); };
-        const timer = setTimeout(done, 20000);
-        ipcRenderer.on('ssh-connected', onOk);
-        ipcRenderer.on('ssh-error', onErr);
-        ipcRenderer.send('ssh-connect', { profile, rendererId });
+        // Fallback for pathological non-settlement ONLY: it releases the
+        // queue slot but never retires the attempt — a legitimate late
+        // result still routes (the record stays addressable/cancellable).
+        const timer = setTimeout(finish, 20000);
+        sshAttempts.armSlot(token, finish);
+        // The invocation is now actually in flight: from here a cancellation
+        // keeps the record addressable for its own late settlement. Before
+        // this point, cancelling an attempt retires it immediately (it has
+        // no native counterpart that could ever answer).
+        sshAttempts.markInvoked(token);
+        ipcRenderer.invoke('ssh-connect', { profile, attemptId: token }).then(
+            (r) => { sshAttempts.onRpcTerminal(token, r && r.cancelled ? 'cancelled' : 'ok', r && r.tabId); finish(); },
+            (e) => { sshAttempts.onRpcTerminal(token, 'failed', null, String(e)); finish(); },
+        );
     }));
 }
-function _sshConnectWithCredentials(tab, pane, rendererId) {
+
+// Cancel the SSH attempt an owner currently awaits, by immutable identity:
+// the backend id when the owner holds one (authoritative; Rust locates that
+// pending generation anywhere), else the attempt token. Destroys a
+// registered session by backend id exactly as before. Never selects by a
+// display address. channel stays 'pty-destroy' for close/teardown and
+// 'ssh-disconnect' for reconnect/retry, matching the existing producers.
+function _cancelSshAttemptOf(owner, backendId, channel) {
+    if (!owner) return;
+    const token = sshAttempts.ownerAttempt(owner);
+    if (!token && !backendId) return;
+    const payload = {};
+    if (backendId) payload.tabId = backendId;
+    if (token) {
+        payload.attemptId = token;
+        sshAttempts.cancelAttempt(token);
+    }
+    ipcRenderer.send(channel || 'pty-destroy', payload);
+}
+
+function _sshConnectWithCredentials(tab, pane) {
     const isPane = !!pane;
+    // One NEW attempt per initiated connect: reconnect/retry callers cancel
+    // the previous attempt by identity before reaching here. The token is
+    // bound to the wrapper that awaits it and follows it through migrations.
+    const token = sshAttempts.createAttempt(pane || tab);
     const host = isPane ? (pane._sshHost || tab.host) : tab.host;
     const port = isPane ? (pane._sshPort || tab.port) : tab.port;
     const user = isPane ? (pane._sshUser || tab.user) : tab.user;
@@ -86,7 +108,7 @@ function _sshConnectWithCredentials(tab, pane, rendererId) {
         _enqueueSshConnect({
             host, port: port || 22, username: user, credentialId: cid || null,
             followCwd, loginScripts: _getLoginScripts(tab, pane),
-        }, rendererId);
+        }, token);
     };
     if (credId) { send(credId); return; }
     const prof = pId ? (TabManager.sshProfiles || []).find(x => x.id === pId) : null;
@@ -95,12 +117,21 @@ function _sshConnectWithCredentials(tab, pane, rendererId) {
             encryptedPassword: prof.encryptedPassword || '',
             privateKeyPath: prof.privateKeyPath || '',
         }).then(({ credId: newCredId }) => {
+            // The credential round trip can outlive migrations/closures: the
+            // ATTEMPT record (not the captured wrapper) owns the decision —
+            // never enqueue into a dead or replaced attempt. The handle
+            // itself is profile-derived and potentially shared; it is not
+            // revoked on this dead path.
+            if (!sshAttempts.ownerWants(token)) return;
             if (newCredId) {
-                if (isPane) pane._sshCredId = newCredId;
-                else tab._credId = newCredId;
+                const o = sshAttempts.ownerOf(token);
+                if (o) {
+                    if (o._sshHost !== undefined || o._sshCredId !== undefined) o._sshCredId = newCredId;
+                    else o._credId = newCredId;
+                }
             }
             send(newCredId);
-        }).catch(() => send(null));
+        }).catch(() => { if (sshAttempts.ownerWants(token)) send(null); });
     } else {
         send(null);
     }
@@ -214,7 +245,7 @@ const TabManager = {
                             return;
                         }
                         reTab._credId = credId;
-                        _sshConnectWithCredentials(reTab, null, capturedId);
+                        _sshConnectWithCredentials(reTab, null);
                     });
                 }
             });
@@ -255,7 +286,7 @@ const TabManager = {
             // BOTH a password and a key would otherwise connect twice (the
             // first session succeeds and is orphaned by the second).
             if (sshOpts && sshOpts.host && (sshOpts.credId || sshOpts.privateKey) && !sshOpts._encryptedPwd) {
-                _sshConnectWithCredentials(tab, null, id);
+                _sshConnectWithCredentials(tab, null);
             }
         } else {
             ipcRenderer.send('pty-create', { shell: tab.command, args: tab.args, cwd: _settingsConfig.startupDir || undefined, requestId: id });
@@ -279,13 +310,9 @@ const TabManager = {
         this.switchTo(id);
         this.render();
         if (isSSH) {
-            // Look up followCwd from SSH profile
-            let followCwd = false;
-            if (sshProfileId) {
-                const p = (TabManager.sshProfiles || []).find(x => x.id === sshProfileId);
-                if (p) followCwd = !!p.followCwd;
-            }
-            _enqueueSshConnect({ host, port: port || 22, username: user, credentialId: credId || null, followCwd, loginScripts: _getLoginScripts(tab) }, id);
+            // tab already carries host/user/credId — the attempt (and its
+            // credential fallback) is created inside the connect helper.
+            _sshConnectWithCredentials(tab, null);
         } else {
             ipcRenderer.send('pty-create', { shell: tab.command, args: tab.args, cwd: _settingsConfig.startupDir || undefined, requestId: id });
         }
@@ -323,10 +350,14 @@ const TabManager = {
             if (split) { split.style.display = 'flex'; this._layoutTime = Date.now(); this._layoutSplit(tab); }
             const focused = getAllPanes(tab).find(p => p.focused);
             if (focused && focused.term) {
+                // Re-check at fire time: a reconnect/close inside the 250ms
+                // window nulls the pane's terminal, and reading it through
+                // the scheduling-time guard would throw.
                 if (focused.fitAddon) setTimeout(() => {
+                    if (!focused.term) return;
                     _fitWithScroll(focused.term, focused.fitAddon, document.getElementById('pane-body_' + focused.id));
                 }, 250);
-                setTimeout(() => focused.term.focus(), 250);
+                setTimeout(() => focused.term?.focus(), 250);
             }
         } else {
             const el = document.getElementById('wrap_' + id);
@@ -335,7 +366,9 @@ const TabManager = {
                 if (tab && tab.fitAddon) setTimeout(() => {
                     _fitWithScroll(tab.term, tab.fitAddon, tab.term?.element?.parentElement);
                 }, 10);
-                if (tab && tab.term) setTimeout(() => tab.term.focus(), 100);
+                // Re-check at fire time: a reconnect/close inside the 100ms
+                // window nulls the terminal (scheduling-time guard only).
+                if (tab && tab.term) setTimeout(() => tab.term?.focus(), 100);
             }
         }
         this.updateStatus();
@@ -383,6 +416,29 @@ const TabManager = {
             document.getElementById('settings-pane')?.classList.remove('active');
         }
         this._closingTabs.add(id);
+        // Cancellation is committed at initiation, not at the deferred
+        // removal: an attempt still in flight is cancelled by its immutable
+        // identity (the main process locates that exact pending generation),
+        // its queue slot is released at once, and once the tab is spliced out
+        // no owner is left to destroy late results — those fall through to
+        // the orphan disposal paths in ipc.js. The closing skip in the claim
+        // paths keeps the dying tab/panes unclaimable during the fade.
+        // Local pending creates keep their requestId markers: local creation
+        // has no attempt identity; its late result is orphan-destroyed by the
+        // pty-created handler as before.
+        if (tab.type !== 'settings') {
+            if (tab.splitRoot) {
+                // A split tab's tabId is structurally null (the session lives
+                // on its panes). Cancel only PRE-CLAIM attempts here: a
+                // claimed pane's session tears down at the deferred removal
+                // (the fade contract), carrying its attempt identity then.
+                for (const p of getAllPanes(tab)) {
+                    if (!p.tabId && sshAttempts.ownerAttempt(p)) _cancelSshAttemptOf(p, null);
+                }
+            } else if (!tab.tabId && sshAttempts.ownerAttempt(tab)) {
+                _cancelSshAttemptOf(tab, null);
+            }
+        }
         // Close animation: fade only. The .tab-exit rule must stay free of
         // layout-property transitions — they stall the WebView2 host message
         // pump for seconds (see the rule's comment in app.css).
@@ -420,7 +476,15 @@ const TabManager = {
             if (tab._credId && !tab._cloneCred) ipcRenderer.send('revoke-credential', { credId: tab._credId });
             if (tab.splitRoot) {
                 getAllPanes(tab).forEach((p, i) => {
-                    if (p.tabId) { this._markClosed(p.tabId); ipcRenderer.send('pty-destroy', { tabId: p.tabId, rendererId: id }); delete ptyBuffers[p.tabId]; }
+                    // Claimed-session teardown at the deferred removal (the
+                    // fade contract): the destroy carries the pane's backend
+                    // id and its attempt token (identity-exact pending
+                    // cancel + slot release), never a display address.
+                    if (p.tabId) {
+                        this._markClosed(p.tabId);
+                        _cancelSshAttemptOf(p, p.tabId);
+                        delete ptyBuffers[p.tabId];
+                    }
                     // Disconnect pane-body resize observers before dropping
                     // the split subtree — Blink keeps observed nodes (and
                     // their whole DOM subtrees, canvases included) alive.
@@ -437,7 +501,14 @@ const TabManager = {
             } else {
                 const el = document.getElementById('wrap_' + id);
                 if (el) { if (el._resizeObserver) el._resizeObserver.disconnect(); el.remove(); }
-                if (tab.tabId) { this._markClosed(tab.tabId); ipcRenderer.send('pty-destroy', { tabId: tab.tabId, rendererId: id }); delete ptyBuffers[tab.tabId]; }
+                // Claimed-session teardown stays at the deferred removal (the
+                // fade contract); the attempt identity and queue slot go with
+                // the destroy — see the split branch above.
+                if (tab.tabId) {
+                    this._markClosed(tab.tabId);
+                    _cancelSshAttemptOf(tab, tab.tabId);
+                    delete ptyBuffers[tab.tabId];
+                }
                 if (tab.term) try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}
             }
             this.render();
@@ -483,7 +554,11 @@ const TabManager = {
             return;
         }
 
-        if (tab.tabId) ipcRenderer.send('ssh-disconnect', { tabId: tab.tabId, rendererId: id });
+        // The old generation is discarded by this replacement: its attempt
+        // (if still unsettled) is cancelled by identity and its queue slot
+        // released, so a late event for the dead generation can neither
+        // re-claim the pending reconnect window nor hold the queue.
+        if (tab.tabId) _cancelSshAttemptOf(tab, tab.tabId, 'ssh-disconnect');
         if (_clearOnConnect(tab, null)) {
             if (tab.term) { try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
             const wrap = document.getElementById('wrap_' + id);
@@ -501,7 +576,9 @@ const TabManager = {
         this.updateStatus();
         setTimeout(() => {
             if (!this.tabs.find(t => t.id === id)) return;
-            _sshConnectWithCredentials(tab, null, id);
+            // A reconnect creates a NEW attempt identity (the old one was
+            // cancelled explicitly above — no implicit supersede needed).
+            _sshConnectWithCredentials(tab, null);
         }, 500);
     },
 
@@ -512,7 +589,11 @@ const TabManager = {
         tab._sshRetryToken = (tab._sshRetryToken || 0) + 1;
         const pane = findPane(tab, paneId);
         if (!pane) return;
-        if (pane.tabId) ipcRenderer.send('ssh-disconnect', { tabId: pane.tabId, rendererId: tabId });
+        if (pane.tabId) {
+            // Same identity-exact discard as reconnectTab: the pane's OWN
+            // attempt (backend id + token), never a display address.
+            _cancelSshAttemptOf(pane, pane.tabId, 'ssh-disconnect');
+        }
         if (_clearOnConnect(tab, pane)) {
             if (pane.term) { try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
             const body = document.getElementById('pane-body_' + pane.id);
@@ -530,7 +611,7 @@ const TabManager = {
         this.updateStatus();
         setTimeout(() => {
             if (!this.tabs.find(t => t.id === tab.id)) return;
-            _sshConnectWithCredentials(tab, pane, pane.requestId);
+            _sshConnectWithCredentials(tab, pane);
         }, 500);
     },
 
@@ -658,7 +739,7 @@ const TabManager = {
 
     _spawnBackendForPane(pane, tab) {
         if (pane.type === 'ssh' && (pane._sshHost || tab.host)) {
-            _sshConnectWithCredentials(tab, pane, pane.requestId);
+            _sshConnectWithCredentials(tab, pane);
         } else {
             ipcRenderer.send('pty-create', { shell: pane._command || tab.command || 'powershell.exe', args: pane._args || tab.args || [], cwd: _settingsConfig.startupDir || undefined, requestId: pane.requestId });
         }
@@ -685,6 +766,9 @@ const TabManager = {
             existing._smoothCursor = tab._smoothCursor;
             existing.tabId = tab.tabId;
             existing.focused = false;
+            // An in-flight SSH attempt follows its session onto the pane
+            // (identity transfer; migrations never create attempts).
+            sshAttempts.transferPendingAttempt(tab, existing);
             // The known-failed liveness marker (ipc.js) belongs to THIS
             // session and must survive the tab→pane promotion — a pending
             // paste would otherwise deliver into healthy siblings.
@@ -1222,22 +1306,39 @@ const TabManager = {
         const pane = findPane(tab, paneId);
         if (!pane) return;
         if (tab._maximizedPaneId === paneId) tab._maximizedPaneId = null;
-        // Destroy backend immediately but keep the DOM for exit animation
+        // Destroy backend immediately but keep the DOM for exit animation.
+        // The cancellation carries the pane's OWN attempt identity (backend
+        // id once claimed, else the attempt token): the main process locates
+        // exactly that pending generation wherever it lives, and the attempt's
+        // queue slot is released with it — never a display address.
         if (pane.tabId) {
             this._markClosed(pane.tabId);
-            ipcRenderer.send('pty-destroy', { tabId: pane.tabId, rendererId: tabId });
+            _cancelSshAttemptOf(pane, pane.tabId);
             delete ptyBuffers[pane.tabId]; // prevent permanent buffer leaks (a closed pane is never wired again)
+        } else {
+            // Pending-creation cancellation at initiation: a pane without a
+            // backend yet may still have its SSH attempt in flight. Cancel it
+            // now — after the pane leaves the tree nobody remains to destroy
+            // the completed session. (Local pending panes keep their
+            // requestId marker; a late local pty-created is orphan-destroyed
+            // by the pty-created handler.)
+            _cancelSshAttemptOf(pane, null);
         }
         if (pane.term) try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}
         // Closing is committed at initiation, not at the deferred removal:
         // drop the session slots immediately so the dying pane resolves to NO
         // owner during the exit animation (a pending right-click paste must
         // not reach the destroyed backend) and the sync-input broadcast skips
-        // it (only panes with a live tabId receive input). The pane element
-        // itself stays mounted purely for the fade animation.
+        // it (only panes with a live tabId receive input). requestId and the
+        // attempt binding go with them: a late pty-created/ssh-connecting
+        // must not claim the fading pane and resurrect a terminal nobody will
+        // dispose. The pane element itself stays mounted purely for the fade
+        // animation.
         pane.term = null;
         pane.fitAddon = null;
         pane.tabId = null;
+        pane.requestId = null;
+        pane._pendingAttempt = null;
         // Exit animation: fade + shrink, then remove from tree and re-render
         const rootEl = document.getElementById('split_' + tab.id);
         const paneEl = rootEl ? rootEl.querySelector('.split-pane[data-pane="' + paneId + '"]') : null;
@@ -1340,6 +1441,11 @@ const TabManager = {
         // from the extracted pane's own session — the source tab's fields may
         // belong to a different session and must not leak into the new tab
         adoptPaneFieldsIntoTab(nt, pane);
+        // An in-flight SSH attempt follows its session onto the extracted
+        // tab: the attempt keeps its immutable token/backend identity, only
+        // the owner binding moves (close/reconnect of the extracted wrapper
+        // cancels exactly this attempt — the proved extract-of-claimed case).
+        sshAttempts.transferPendingAttempt(pane, nt);
         // The pane's smooth-cursor wrapper follows its terminal onto the new
         // tab; the dropped pane must not keep a reference to the living wrapper
         nt._smoothCursor = pane._smoothCursor;
@@ -1380,6 +1486,7 @@ const TabManager = {
             // and the fresh backend is orphan-destroyed
             if (rp.tabId) delete st._ptyRequestId;
             else st._ptyRequestId = rp.requestId;
+            sshAttempts.transferPendingAttempt(rp, st);
             // The term moves from pane back to tab: dispose the pane's zombie onData listener and rebind to the tab
             if (rp._onDataDisp) { rp._onDataDisp.dispose(); rp._onDataDisp = null; }
             st.term = rp.term;
@@ -1449,6 +1556,11 @@ const TabManager = {
         let mt = null, mf = null, mid = null, sc = null, msc = null, mconn = false, mfailed = false;
         let paneName = sourceTab.name, paneType = sourceTab.type || 'local';
         let toolName = sourceTab._toolName;
+        // The wrapper whose in-flight SSH attempt must follow the moved
+        // session: the FOCUSED PANE for a split source (that object leaves
+        // the tree below; the source tab keeps only the surviving panes),
+        // or the source tab itself for a single-tab move.
+        let movedOwner = sourceTab;
         // Shell config comes from the MOVED session: a local pane dragged out
         // of an SSH-rooted tab must keep bash.exe and its args — the source
         // tab's command/args belong to a different session
@@ -1464,6 +1576,7 @@ const TabManager = {
             if (!focused || !focused.term || !focused.tabId) return;
             mt = focused.term; mf = focused.fitAddon; mid = focused.tabId;
             msc = focused?._smoothCursor ?? null;
+            movedOwner = focused;
             // Connection state travels with the MOVED session: a disconnected
             // (or still-connecting) pane must not read as online on arrival
             mconn = paneConnectedState(focused);
@@ -1495,9 +1608,12 @@ const TabManager = {
                     sc = () => {
                         const rp = rem[0];
                         // Pending backend hand-off: keep the surviving pane's
-                        // creation request claimable after the collapse
+                        // LOCAL creation request claimable after the collapse
+                        // (marker consumed by the pty-created handler); an
+                        // in-flight SSH attempt transfers by identity instead.
                         if (rp.tabId) delete sourceTab._ptyRequestId;
                         else sourceTab._ptyRequestId = rp.requestId;
+                        sshAttempts.transferPendingAttempt(rp, sourceTab);
                         // The term moves from pane back to tab: dispose the pane's zombie onData listener and rebind to the tab
                         if (rp._onDataDisp) { rp._onDataDisp.dispose(); rp._onDataDisp = null; }
                         sourceTab.term = rp.term;
@@ -1587,12 +1703,12 @@ const TabManager = {
             fp._onDataDisp = fp.term?.onData(data => {
                 _sendInputForTerm(fp.term, data);
             });
-            // Same transfer rule as the tool name: a pending-creation marker
-            // must move onto fp. Left on the tab it becomes unreachable (the
-            // claim branches only match single tabs), while _rendererIdAlive
-            // would keep the request "alive" — the connect would fire with no
-            // consumer and leak the session.
+            // Same transfer rule as the tool name: a pending LOCAL creation
+            // marker must move onto fp (left on the tab it becomes
+            // unreachable — the claim branches only match single tabs).
             if (targetTab._ptyRequestId) { fp.requestId = targetTab._ptyRequestId; delete targetTab._ptyRequestId; }
+            // An in-flight SSH attempt moves with the target's own session.
+            sshAttempts.transferPendingAttempt(targetTab, fp);
             // Same transfer rule as the terminal: the tool-provided name moves onto fp.
             if (targetTab._toolName !== undefined) { fp._toolName = targetTab._toolName; delete targetTab._toolName; }
             targetTab.splitRoot = this._createContainer('h');
@@ -1628,6 +1744,12 @@ const TabManager = {
         np._onDataDisp = mt?.onData(data => {
             _sendInputForTerm(mt, data);
         });
+        // An in-flight SSH attempt of the MOVED session follows it onto the
+        // new pane wrapper — transferred from the ACTUAL previous owner (the
+        // focused pane for a split source: that object is removed from the
+        // tree above, and the source tab never held its attempt; the source
+        // collapse keeps the SURVIVING pane's own binding untouched).
+        sshAttempts.transferPendingAttempt(movedOwner, np);
         if (toolName !== undefined) np._toolName = toolName;
         this.add(targetTab, np, focusedPane, side);
         getAllPanes(targetTab).forEach(p => p.focused = false);
@@ -1652,17 +1774,20 @@ const TabManager = {
         all.forEach((p, i) => {
             if (i > 0 && p.tabId) {
                 this._markClosed(p.tabId);
-                ipcRenderer.send('pty-destroy', { tabId: p.tabId, rendererId: tab.id });
+                // Attempt identity carries the pending cancel — see _closePane.
+                _cancelSshAttemptOf(p, p.tabId);
             }
             if (i > 0 && p.term) try { p._smoothCursor?.dispose(); p._smoothCursor = null; p.term.dispose(); } catch(e) {}
         });
         // Sync all tab fields from the surviving pane — otherwise tab.type/host/user etc. keep the old tab's type
         // (e.g. an SSH tab exits split leaving a local pane but stays marked SSH: after restart it would really connect via SSH with a mismatched pane name)
         if (fp) {
-            // Pending backend hand-off: the surviving pane's creation request
-            // must stay claimable on the tab after the split tree is gone
+            // Pending LOCAL backend hand-off: the surviving pane's creation
+            // request must stay claimable on the tab after the split tree is
+            // gone (an in-flight SSH attempt transfers by identity instead).
             if (fp.tabId) delete tab._ptyRequestId;
             else tab._ptyRequestId = fp.requestId;
+            sshAttempts.transferPendingAttempt(fp, tab);
             adoptPaneFieldsIntoTab(tab, fp);
         }
         tab.term = fp?.term || null;
@@ -2336,7 +2461,7 @@ const TabManager = {
             const { wrap: w, inner: wInner } = createTermWrap(tab);
             document.getElementById('main-area').appendChild(w);
             if (tabData.type === 'ssh' && tabData.host) {
-                _sshConnectWithCredentials(tab, null, tab.id);
+                _sshConnectWithCredentials(tab, null);
             } else {
                 ipcRenderer.send('pty-create', { shell: tab.command, args: tab.args || [], requestId: tab.id });
             }

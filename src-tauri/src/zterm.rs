@@ -190,18 +190,133 @@ pub struct HostKeyDecision {
 /// tabId -> channel awaiting the user's decision (registered while check_server_key is suspended)
 pub type KeyDecisionMap = Arc<Mutex<HashMap<String, oneshot::Sender<HostKeyDecision>>>>;
 
-/// Registry of in-flight SSH connections: rendererId -> cancel flag.
-/// Before a connection is registered in SessionMap, tab close / reconnect both
-/// cancel the task through it, preventing orphan sessions and duplicate connections.
+/// Registry of in-flight SSH connection ATTEMPTS, keyed by the renderer's
+/// immutable per-attempt token (attemptId) — never by a display address.
+/// Before a connection is registered in SessionMap, tab close / reconnect
+/// cancel the task through it, preventing orphan sessions and duplicate
+/// connections. Each entry also records the backend id this attempt will
+/// register under, so a cancellation naming a backend id locates exactly
+/// that pending generation wherever it lives (identity-changing migrations
+/// move the display address, never the attempt).
 pub struct PendingConnection {
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub backend: String,
 }
 pub type PendingMap = Arc<Mutex<HashMap<String, PendingConnection>>>;
+
+/// How a cancellation names the attempt it targets.
+pub enum PendingSelector<'a> {
+    /// Backend identity (authoritative once assigned): locates the pending
+    /// generation with this backend id ANYWHERE in the registry. An unknown
+    /// backend cancels nothing — it never falls through to another attempt.
+    Backend(&'a str),
+    /// The attempt's own token (close before the backend id is known to the
+    /// renderer): selects exactly that one attempt.
+    Attempt(&'a str),
+}
+
+/// Cancel the attempt named by the selector. Returns the cancelled attempt's
+/// backend id so the caller can also reject a hostkey decision suspended for
+/// exactly that attempt. Idempotent; unknown selectors are a no-op.
+pub fn cancel_pending(
+    pm: &mut HashMap<String, PendingConnection>,
+    selector: PendingSelector,
+) -> Option<String> {
+    let key = match selector {
+        PendingSelector::Backend(backend) => pm
+            .iter()
+            .find(|(_, entry)| entry.backend == backend)
+            .map(|(k, _)| k.clone())?,
+        PendingSelector::Attempt(attempt) => attempt.to_string(),
+    };
+    let entry = pm.remove(&key)?;
+    entry
+        .cancel
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    Some(entry.backend)
+}
+
+/// Registration + unconditional own-attempt cleanup as one cohesive unit.
+/// `new` inserts the pending entry (register-BEFORE-emit: create the guard,
+/// then emit the connecting event); `Drop` removes exactly this attempt's
+/// entry on EVERY terminal return — success tail, any post-registration
+/// error return (`?` on handshake/auth/key/PTY/shell), the silent cancelled
+/// exits, and task drop. An explicit `complete_pending`/`cancel_pending`
+/// that already removed the entry makes the drop a no-op; a successor
+/// attempt lives under its own key and is never touched.
+pub struct PendingGuard {
+    pm: PendingMap,
+    attempt: String,
+    backend: String,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PendingGuard {
+    pub fn new(pm: PendingMap, attempt: String, backend: String) -> Self {
+        // The SAME cancel Arc is inserted into the registry and retained
+        // here. A concurrent cancel_pending(Attempt(token)) between this
+        // insert and any later use sets THIS flag; the task must observe it
+        // at its checkpoints. Re-looking the entry up would race: the entry
+        // may already be removed-and-cancelled, and a fresh false fallback
+        // would discard the cancellation.
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        pm.lock().insert(
+            attempt.clone(),
+            PendingConnection {
+                cancel: Arc::clone(&cancel),
+                backend: backend.clone(),
+            },
+        );
+        PendingGuard {
+            pm,
+            attempt,
+            backend,
+            cancel,
+        }
+    }
+
+    /// The task's own cancel flag — the exact Arc the registry held, so a
+    /// cancellation that lands any time after construction is observed.
+    pub fn cancel_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        complete_pending(&mut *self.pm.lock(), &self.attempt, &self.backend);
+    }
+}
+
+/// Remove this attempt's registration on completion. Identity-checked (the
+/// key must be this attempt's token AND carry this attempt's backend id), so
+/// a finished task deletes only its own entry. Returns true when removed.
+pub fn complete_pending(
+    pm: &mut HashMap<String, PendingConnection>,
+    attempt: &str,
+    backend: &str,
+) -> bool {
+    if pm
+        .get(attempt)
+        .map(|e| e.backend == backend)
+        .unwrap_or(false)
+    {
+        pm.remove(attempt);
+        true
+    } else {
+        false
+    }
+}
 
 pub struct SshHandler {
     pub host: String,
     pub port: u16,
     pub tab_id: String,
+    /// The renderer attempt token this connection belongs to. The hostkey
+    /// mismatch event fires after the NATIVE connecting emit but possibly
+    /// before the FRONTEND processed the claim — the token lets the renderer
+    /// correlate the dialog with the right attempt regardless of order.
+    pub attempt: String,
     pub app: AppHandle,
     pub decisions: Arc<Mutex<HashMap<String, oneshot::Sender<HostKeyDecision>>>>,
     pub disconnect_reason: Arc<Mutex<Option<String>>>,
@@ -291,6 +406,7 @@ impl russh::client::Handler for SshHandler {
                     "ssh-hostkey-mismatch",
                     json!({
                         "tabId": self.tab_id,
+                        "attemptId": self.attempt,
                         "host": self.host,
                         "port": self.port,
                         "oldAlgorithm": old_algorithm,
@@ -1222,6 +1338,19 @@ pub async fn ssh_connect(
     if username.is_empty() {
         return Err("ssh-connect: missing username".into());
     }
+    // The renderer's immutable per-attempt token. Required: the queue slot,
+    // the claim correlation and every cancellation key on it. Rejected here
+    // BEFORE any emit — the own invocation rejection is the only failure
+    // signal for this path (no ssh-error event exists for it).
+    let attempt_id = params
+        .get("attemptId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if attempt_id.is_empty() {
+        return Err("ssh-connect: missing attemptId".into());
+    }
 
     // Parse login scripts
     let login_scripts = profile
@@ -1242,23 +1371,30 @@ pub async fn ssh_connect(
         SSH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     );
 
-    // Emit ssh-connecting immediately
+    // In-flight registration BEFORE the connecting event: once the renderer
+    // learns the backend id it may close the tab, and the cancellation must
+    // find this attempt already registered — a fast usual emit round trip is
+    // not synchronization. Keyed by the attempt token; a successor attempt of
+    // the same lineage registers separately (the renderer cancels the old one
+    // explicitly by identity before re-enqueueing — no implicit supersede).
+    // The guard's Drop removes exactly this attempt's entry on every terminal
+    // return (success, any post-registration error, silent cancel, task drop).
+    // The task's cancel flag is the SAME Arc the guard inserted — never
+    // re-read from the registry: a cancel_pending(Attempt) issued after the
+    // insert (the renderer knows the token before the backend id arrives)
+    // removes the entry and sets the flag; re-looking it up would miss the
+    // removal and fall back to a fresh false flag, discarding the
+    // cancellation.
+    let _guard = PendingGuard::new(
+        Arc::clone(&*pending_state.inner()),
+        attempt_id.clone(),
+        tab_id.clone(),
+    );
+    let cancel_flag = _guard.cancel_flag();
     let _ = app.emit(
         "ssh-connecting",
-        json!({ "tabId": tab_id, "rendererId": renderer_id }),
+        json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }),
     );
-
-    // In-flight registration: a new connect for the same rendererId cancels the old
-    // one (no duplicate sessions on mid-connect reconnect); tab close (pty_destroy/ssh_disconnect) cancels through it too
-    let cancel_flag = {
-        let mut pm = pending_state.lock();
-        if let Some(old) = pm.remove(&renderer_id) {
-            old.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        let c = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        pm.insert(renderer_id.clone(), PendingConnection { cancel: c.clone() });
-        c
-    };
     // Exit silently when cancelled (the frontend already closed the tab or started a new connection; no more events)
     macro_rules! cancelled {
         ($h:expr) => {
@@ -1268,7 +1404,7 @@ pub async fn ssh_connect(
                 let _ = $h
                     .disconnect(russh::Disconnect::ByApplication, "ZTerm cancelled", "")
                     .await;
-                return Ok(json!({ "cancelled": true, "tabId": tab_id, "rendererId": renderer_id }));
+                return Ok(json!({ "cancelled": true, "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }));
             }
         };
     }
@@ -1292,6 +1428,7 @@ pub async fn ssh_connect(
             host: host.clone(),
             port,
             tab_id: tab_id.clone(),
+            attempt: attempt_id.clone(),
             app: app.clone(),
             decisions: decision_state.inner().clone(),
             disconnect_reason: Arc::clone(&disconnect_reason),
@@ -1308,7 +1445,7 @@ pub async fn ssh_connect(
             // vs credential-side causes on the first report.
             let _ = app.emit(
                 "ssh-error",
-                json!({ "tabId": tab_id, "rendererId": renderer_id, "error": format!("SSH connect (tcp/handshake {addr}): {e}") }),
+                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH connect (tcp/handshake {addr}): {e}") }),
             );
             format!("SSH connect (tcp/handshake {addr}): {e}")
         })?;
@@ -1320,14 +1457,14 @@ pub async fn ssh_connect(
         let contents = std::fs::read_to_string(key_path).map_err(|e| {
             let _ = app.emit(
                 "ssh-error",
-                json!({ "tabId": tab_id, "rendererId": renderer_id, "error": format!("SSH key read: {e}") }),
+                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH key read: {e}") }),
             );
             format!("SSH key read: {e}")
         })?;
         let key = russh::keys::PrivateKey::from_openssh(contents.as_bytes()).map_err(|e| {
             let _ = app.emit(
                 "ssh-error",
-                json!({ "tabId": tab_id, "rendererId": renderer_id, "error": format!("SSH key parse: {e}") }),
+                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH key parse: {e}") }),
             );
             format!("SSH key parse: {e}")
         })?;
@@ -1341,7 +1478,7 @@ pub async fn ssh_connect(
                 }
                 let _ = app.emit(
                     "ssh-error",
-                    json!({ "tabId": tab_id, "rendererId": renderer_id, "error": format!("SSH auth: {e}") }),
+                    json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH auth: {e}") }),
                 );
                 format!("SSH auth: {e}")
             })?
@@ -1355,7 +1492,7 @@ pub async fn ssh_connect(
                 }
                 let _ = app.emit(
                     "ssh-error",
-                    json!({ "tabId": tab_id, "rendererId": renderer_id, "error": format!("SSH auth: {e}") }),
+                    json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH auth: {e}") }),
                 );
                 format!("SSH auth: {e}")
             })?
@@ -1368,7 +1505,7 @@ pub async fn ssh_connect(
         }
         let _ = app.emit(
             "ssh-error",
-            json!({ "tabId": tab_id, "rendererId": renderer_id, "error": "Authentication failed" }),
+            json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": "Authentication failed" }),
         );
         return Err("Authentication failed".into());
     }
@@ -1383,7 +1520,7 @@ pub async fn ssh_connect(
             }
             let _ = app.emit(
                 "ssh-error",
-                json!({ "tabId": tab_id, "rendererId": renderer_id, "error": format!("SSH channel: {e}") }),
+                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH channel: {e}") }),
             );
             format!("SSH channel: {e}")
         })?;
@@ -1396,7 +1533,7 @@ pub async fn ssh_connect(
         .map_err(|e| {
             let _ = app.emit(
                 "ssh-error",
-                json!({ "tabId": tab_id, "rendererId": renderer_id, "error": format!("SSH PTY: {e}") }),
+                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH PTY: {e}") }),
             );
             format!("SSH PTY: {e}")
         })?;
@@ -1425,7 +1562,7 @@ pub async fn ssh_connect(
             }
             let _ = app.emit(
                 "ssh-error",
-                json!({ "tabId": tab_id, "rendererId": renderer_id, "error": format!("SSH shell: {e}") }),
+                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH shell: {e}") }),
             );
             format!("SSH shell: {e}")
         })?;
@@ -1436,7 +1573,7 @@ pub async fn ssh_connect(
             }
             let _ = app.emit(
                 "ssh-error",
-                json!({ "tabId": tab_id, "rendererId": renderer_id, "error": format!("SSH shell: {e}") }),
+                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH shell: {e}") }),
             );
             format!("SSH shell: {e}")
         })?;
@@ -1638,7 +1775,10 @@ pub async fn ssh_connect(
 
     // Final check before registering: if cancelled meanwhile (tab close/reconnect), skip registration and events — the connection is dropped silently
     cancelled!(handle);
-    pending_state.lock().remove(&renderer_id);
+    // Remove only THIS attempt's registration (identity-checked by token +
+    // backend id): a successor attempt of the same lineage registers under
+    // its own token and must keep its cancel handle.
+    complete_pending(&mut *pending_state.lock(), &attempt_id, &tab_id);
 
     // Store session
     {
@@ -1660,9 +1800,9 @@ pub async fn ssh_connect(
 
     let _ = app.emit(
         "ssh-connected",
-        json!({ "tabId": tab_id, "rendererId": renderer_id }),
+        json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }),
     );
-    Ok(json!({ "tabId": tab_id }))
+    Ok(json!({ "tabId": tab_id, "attemptId": attempt_id }))
 }
 
 // ── Command: ssh_disconnect ──
@@ -1681,15 +1821,33 @@ pub async fn ssh_disconnect(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let renderer_id = params
-        .get("rendererId")
+    let attempt_id = params
+        .get("attemptId")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // Cancel the in-flight connection (on a mid-connect reconnect the old task exits here, so no duplicate session)
-    if !renderer_id.is_empty() {
-        if let Some(p) = pending_state.lock().remove(&renderer_id) {
-            p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Cancel the in-flight attempt (on a mid-connect reconnect the old task
+    // exits here, so no duplicate session). Identity-scoped, never
+    // address-scoped: a known backend id locates exactly that pending
+    // generation anywhere in the registry (migrations move display
+    // addresses, not attempts); otherwise the attempt token selects it. An
+    // unknown target cancels nothing and never falls through.
+    if !tab_id.is_empty() || !attempt_id.is_empty() {
+        let selector = if !tab_id.is_empty() {
+            PendingSelector::Backend(&tab_id)
+        } else {
+            PendingSelector::Attempt(&attempt_id)
+        };
+        let cancelled_backend = cancel_pending(&mut *pending_state.lock(), selector);
+        // A cancelled attempt suspended in a hostkey decision must unblock:
+        // its dialog can never be answered (the owner is gone/replaced).
+        if let Some(b) = cancelled_backend {
+            if let Some(tx) = decision_state.lock().remove(&b) {
+                let _ = tx.send(HostKeyDecision {
+                    accept: false,
+                    trust: false,
+                });
+            }
         }
     }
     // If the tab closes while a hostkey decision is pending, reject it to unblock check_server_key (parity with the Electron version)
@@ -1859,16 +2017,29 @@ pub async fn pty_destroy(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let renderer_id = params
-        .get("rendererId")
+    let attempt_id = params
+        .get("attemptId")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    // Cancel the in-flight SSH connection (closing the tab before the handshake
-    // completes means the session is not in the map yet; only the pending cancel makes the task exit at its next checkpoint)
-    if !renderer_id.is_empty() {
-        if let Some(p) = pending_state.lock().remove(&renderer_id) {
-            p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Cancel the in-flight SSH attempt (closing the tab before the handshake
+    // completes means the session is not in the map yet; only the pending cancel makes the task exit at its next checkpoint).
+    // Identity-scoped — see the identical block in ssh_disconnect.
+    if !tab_id.is_empty() || !attempt_id.is_empty() {
+        let selector = if !tab_id.is_empty() {
+            PendingSelector::Backend(&tab_id)
+        } else {
+            PendingSelector::Attempt(&attempt_id)
+        };
+        let cancelled_backend = cancel_pending(&mut *pending_state.lock(), selector);
+        // Unblock a hostkey decision suspended for the cancelled attempt.
+        if let Some(b) = cancelled_backend {
+            if let Some(tx) = decision_state.lock().remove(&b) {
+                let _ = tx.send(HostKeyDecision {
+                    accept: false,
+                    trust: false,
+                });
+            }
         }
     }
     // Reject any pending hostkey decision to unblock check_server_key's await (otherwise the connection task hangs forever)
@@ -4279,6 +4450,250 @@ pub fn clipboard_read_text(args: Vec<Value>) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(backend: &str) -> PendingConnection {
+        PendingConnection {
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            backend: backend.to_string(),
+        }
+    }
+
+    #[test]
+    fn cancel_pending_by_backend_locates_the_generation_anywhere() {
+        // The attempt lives under its token (a display address may have moved
+        // or been reused); a backend-named cancellation must still find it.
+        let mut pm = HashMap::new();
+        pm.insert("att_1".to_string(), entry("ssh_2"));
+        assert_eq!(
+            cancel_pending(&mut pm, PendingSelector::Backend("ssh_2")),
+            Some("ssh_2".to_string())
+        );
+        assert!(pm.is_empty());
+        // An unknown backend cancels nothing and never falls through to
+        // another attempt.
+        let mut pm2 = HashMap::new();
+        pm2.insert("att_1".to_string(), entry("ssh_5"));
+        pm2.insert("att_2".to_string(), entry("ssh_6"));
+        assert_eq!(
+            cancel_pending(&mut pm2, PendingSelector::Backend("ssh_9")),
+            None
+        );
+        assert_eq!(pm2.len(), 2);
+        assert!(!pm2["att_1"]
+            .cancel
+            .load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!pm2["att_2"]
+            .cancel
+            .load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn cancel_pending_by_attempt_selects_exactly_that_attempt() {
+        // Close before the backend id is known to the renderer: the token
+        // alone selects the attempt; sibling attempts stay untouched.
+        let mut pm = HashMap::new();
+        pm.insert("att_a".to_string(), entry("ssh_5"));
+        pm.insert("att_b".to_string(), entry("ssh_7"));
+        assert_eq!(
+            cancel_pending(&mut pm, PendingSelector::Attempt("att_a")),
+            Some("ssh_5".to_string())
+        );
+        assert_eq!(pm.len(), 1);
+        assert!(pm.contains_key("att_b"));
+        assert!(!pm["att_b"]
+            .cancel
+            .load(std::sync::atomic::Ordering::Relaxed));
+        // Unknown token is a no-op.
+        assert_eq!(
+            cancel_pending(&mut pm, PendingSelector::Attempt("att_ghost")),
+            None
+        );
+        assert_eq!(pm.len(), 1);
+    }
+
+    #[test]
+    fn complete_pending_never_removes_a_successor_entry() {
+        let mut pm = HashMap::new();
+        pm.insert("att_new".to_string(), entry("ssh_2"));
+        // The old task finishing must not remove a successor's entry — not
+        // via its own (now absent) token...
+        assert!(!complete_pending(&mut pm, "att_old", "ssh_2"));
+        assert_eq!(pm.len(), 1);
+        // ...and not via a stale backend id under a live token.
+        pm.insert("att_stale".to_string(), entry("ssh_1"));
+        assert!(!complete_pending(&mut pm, "att_stale", "ssh_99"));
+        assert_eq!(pm.len(), 2);
+        // Completing its own attempt (token + backend match) removes it.
+        assert!(complete_pending(&mut pm, "att_new", "ssh_2"));
+        assert!(!pm.contains_key("att_new"));
+        assert!(pm.contains_key("att_stale"));
+        // Completing with no entry is a no-op.
+        assert!(!complete_pending(&mut pm, "att_new", "ssh_2"));
+    }
+
+    #[test]
+    fn concurrent_lineage_attempts_do_not_supersede_each_other() {
+        // Registration is keyed by attempt token: a reconnect's NEW attempt
+        // registering while the OLD attempt is still pending leaves the old
+        // entry in place (the renderer cancels it explicitly by identity).
+        let mut pm = HashMap::new();
+        pm.insert("att_old".to_string(), entry("ssh_1"));
+        pm.insert("att_new".to_string(), entry("ssh_2"));
+        assert_eq!(pm.len(), 2, "no implicit supersede at registration");
+        // Explicit backend-named cancel of the old attempt leaves the new.
+        assert_eq!(
+            cancel_pending(&mut pm, PendingSelector::Backend("ssh_1")),
+            Some("ssh_1".to_string())
+        );
+        assert!(pm.contains_key("att_new"));
+    }
+
+    #[test]
+    fn pending_guard_registers_and_cleans_up_on_every_terminal_drop() {
+        let pm: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        // Registration happens at guard construction (register-before-emit).
+        {
+            let _g = PendingGuard::new(Arc::clone(&pm), "att_a".to_string(), "ssh_1".to_string());
+            assert!(pm.lock().contains_key("att_a"), "registered while in scope");
+        }
+        // Early error return shape: plain drop (any `?` bail) removes the own entry.
+        assert!(pm.lock().is_empty(), "own entry removed on drop");
+
+        // Success shape: explicit complete_pending first, then drop — no-op,
+        // no panic, successor entries untouched.
+        pm.lock().insert("att_other".to_string(), entry("ssh_9"));
+        {
+            let _g = PendingGuard::new(Arc::clone(&pm), "att_b".to_string(), "ssh_2".to_string());
+            assert!(complete_pending(&mut *pm.lock(), "att_b", "ssh_2"));
+        }
+        let pm2 = pm.lock();
+        assert!(!pm2.contains_key("att_b"));
+        assert!(
+            pm2.contains_key("att_other"),
+            "successor entry survives the drop"
+        );
+        drop(pm2);
+
+        // Cancellation shape: cancel_pending removed the entry before drop.
+        {
+            let _g = PendingGuard::new(Arc::clone(&pm), "att_c".to_string(), "ssh_3".to_string());
+            assert_eq!(
+                cancel_pending(&mut *pm.lock(), PendingSelector::Attempt("att_c")),
+                Some("ssh_3".to_string())
+            );
+        }
+        assert!(!pm.lock().contains_key("att_c"), "no re-insert by the drop");
+        assert!(pm.lock().contains_key("att_other"));
+    }
+
+    #[test]
+    fn pending_guard_error_path_between_registration_and_tail() {
+        // The registration-site lifetime integration: once the guard exists,
+        // EVERY path out of the scope — including an early `?` return modeled
+        // here as a mid-scope drop — leaves no entry behind, while a sibling
+        // attempt registered under its own key is isolated.
+        let pm: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let sibling =
+            PendingGuard::new(Arc::clone(&pm), "att_sib".to_string(), "ssh_5".to_string());
+        let result: Result<(), String> = (|| {
+            let _g = PendingGuard::new(Arc::clone(&pm), "att_err".to_string(), "ssh_4".to_string());
+            Err("SSH auth: boom".to_string()) // early bail, like every map_err `?`
+        })();
+        assert!(result.is_err());
+        let guard_map = pm.lock();
+        assert!(
+            !guard_map.contains_key("att_err"),
+            "error return cleaned its own entry"
+        );
+        assert!(
+            guard_map.contains_key("att_sib"),
+            "sibling still registered while in scope"
+        );
+        drop(guard_map);
+        drop(sibling);
+        assert!(pm.lock().is_empty());
+    }
+
+    #[test]
+    fn guard_retains_cancellation_flag_across_concurrent_remove() {
+        // Test-integration regression for the insert -> cancel/remove ->
+        // flag-use window (single-threaded here; in production the removal
+        // comes from a concurrent Tauri command thread). The task MUST
+        // observe its cancellation at subsequent checkpoints through the
+        // SAME Arc the guard inserted.
+        let pm: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let guard = PendingGuard::new(
+            Arc::clone(&pm),
+            "att_race".to_string(),
+            "ssh_10".to_string(),
+        );
+        // "Renderer" cancels by token right after the insert, before the
+        // task would have taken its flag: removes the entry AND sets the
+        // flag on the inserted Arc.
+        assert_eq!(
+            cancel_pending(&mut *pm.lock(), PendingSelector::Attempt("att_race")),
+            Some("ssh_10".to_string())
+        );
+        // Corrected behavior: the guard's own flag reads cancelled — this is
+        // the acquisition ssh_connect now performs (_guard.cancel_flag()).
+        let cancel_flag = guard.cancel_flag();
+        assert!(
+            cancel_flag.load(std::sync::atomic::Ordering::Relaxed),
+            "task must observe the cancellation that landed after the insert"
+        );
+        // Old source-faithful ordering, reproduced with the same real
+        // registry state: re-look the entry up AFTER the removal, with the
+        // fresh-false fallback the old call site had. That acquisition — and
+        // only that acquisition — discards the cancellation. (Test
+        // integration of the ordering; the concurrent interleaving in
+        // production is the same remove between insert and acquisition.)
+        let old_ordering_flag = {
+            let registry = pm.lock();
+            match registry.get("att_race") {
+                Some(entry) => Arc::clone(&entry.cancel),
+                None => Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        };
+        assert!(
+            !old_ordering_flag.load(std::sync::atomic::Ordering::Relaxed),
+            "old relookup ordering loses the cancellation (this must stay false)"
+        );
+        let registry_flag_gone = !pm.lock().contains_key("att_race");
+        assert!(registry_flag_gone, "entry already removed by the cancel");
+        drop(guard);
+        assert!(pm.lock().is_empty(), "drop after removal is a no-op");
+    }
+
+    #[test]
+    fn guard_cancellation_of_a_sibling_never_leaks_into_this_attempt() {
+        // Successor isolation on the same window: cancelling a DIFFERENT
+        // attempt by its own token leaves this guard's flag untouched.
+        let pm: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let guard = PendingGuard::new(
+            Arc::clone(&pm),
+            "att_keep".to_string(),
+            "ssh_11".to_string(),
+        );
+        {
+            let _victim = PendingGuard::new(
+                Arc::clone(&pm),
+                "att_victim".to_string(),
+                "ssh_12".to_string(),
+            );
+            assert_eq!(
+                cancel_pending(&mut *pm.lock(), PendingSelector::Attempt("att_victim")),
+                Some("ssh_12".to_string())
+            );
+        }
+        let cancel_flag = guard.cancel_flag();
+        assert!(
+            !cancel_flag.load(std::sync::atomic::Ordering::Relaxed),
+            "sibling cancellation must not cancel this attempt"
+        );
+        assert!(pm.lock().contains_key("att_keep"));
+        drop(guard);
+        assert!(pm.lock().is_empty());
+    }
 
     #[test]
     fn base64_roundtrip() {

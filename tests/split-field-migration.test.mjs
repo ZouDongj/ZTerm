@@ -9,6 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
 
 const src = f => readFileSync(new URL(`../src/renderer/${f}`, import.meta.url), 'utf8');
 
@@ -37,7 +38,7 @@ function fakeTerm() {
 function loadTabsVm() {
     const sends = [];
     const ctx = {
-        console, setTimeout: (fn) => { fn(); return 0; }, clearTimeout() {},
+        console, crypto: webcrypto, setTimeout: (fn) => { fn(); return 0; }, clearTimeout() {},
         document: { getElementById: () => fakeEl(), createElement: () => fakeEl(), querySelectorAll: () => [], querySelector: () => null, body: fakeEl(), addEventListener() {} },
         window: {},
         ipcRenderer: { send: (cmd, payload) => sends.push({ cmd, payload }), on() {}, invoke: async () => ({}) },
@@ -58,12 +59,13 @@ function loadTabsVm() {
     };
     ctx.globalThis = ctx;
     vm.createContext(ctx);
-    for (const f of ['split-layout.js', 'pane-fields.js', 'tab-title-utils.js', 'tabs.js']) {
+    for (const f of ['split-layout.js', 'pane-fields.js', 'ssh-attempts.js', 'tab-title-utils.js', 'tabs.js']) {
         vm.runInContext(src(f), ctx, { filename: f });
     }
     // Top-level `const TabManager` stays script-scoped in a VM context (only
     // function declarations attach to the global) — hoist it explicitly.
     ctx.TabManager = vm.runInContext('TabManager', ctx);
+    ctx.sshAttempts = vm.runInContext('sshAttempts', ctx);
     return { ctx, sends };
 }
 
@@ -126,30 +128,39 @@ test('moved local pane keeps its shell for later splits (ADR item 5)', () => {
     assert.deepEqual(spawn.payload.args, ['--login', '-i']);
 });
 
-test('drag-in transfers the pending marker off the target tab (review B1)', () => {
+test('drag-in transfers the pending marker and the attempt off the target tab (review B1)', () => {
     const { ctx } = loadTabsVm();
     const T = ctx.TabManager;
-    // Target collapsed to single while a creation was pending: marker set,
-    // no term, no backend.
+    // Target collapsed to single while a creation was pending: local marker
+    // and/or an in-flight SSH attempt, no term, no backend.
     const tgt = { id: 't_pending', name: 'pend', type: 'local', command: 'powershell.exe', args: [], connected: false, term: null, fitAddon: null, tabId: null, _ptyRequestId: 'p_77' };
     const src = { id: 't_donor', name: 'donor', type: 'local', command: 'cmd.exe', args: [], connected: true, term: fakeTerm(), fitAddon: {}, tabId: 'local_1' };
     T.tabs.push(tgt, src);
-    // Marker keeps the queue slot alive before the drag.
-    assert.equal(ctx._rendererIdAlive('p_77'), true, '_rendererIdAlive honors the tab marker');
+    const att = ctx.sshAttempts.createAttempt(tgt); // in-flight SSH attempt
     T._moveTerminalToTab('t_donor', 't_pending', 'l', null);
     assert.equal(tgt._ptyRequestId, undefined, 'tab marker consumed by the transfer');
-    const fp = ctx.getAllPanes(tgt).find(p => p.tabId === null && p !== undefined);
     const carrier = ctx.getAllPanes(tgt).find(p => p.requestId === 'p_77');
-    assert.ok(carrier, 'the wrapped fp pane carries the pending request id');
+    assert.ok(carrier, 'the wrapped fp pane carries the pending local request id');
     assert.equal(carrier.tabId, null, 'fp holds the (still pending) session slot');
+    // The attempt identity (not a display address) follows the same move.
+    assert.equal(ctx.sshAttempts.ownerOf(att), carrier, 'attempt owner moved onto fp');
+    assert.equal(carrier._pendingAttempt, att);
+    assert.equal(ctx.sshAttempts.ownerWants(att), true, 'the queue gate still wants it after the move');
 });
 
-test('_rendererIdAlive drops the request once the marker is claimed', () => {
+test('attempt ownership gate drops the request once it settles (replaces _rendererIdAlive)', () => {
     const { ctx } = loadTabsVm();
     const T = ctx.TabManager;
-    const tab = { id: 't_x', name: 'x', type: 'local', command: 'powershell.exe', args: [], connected: false, term: null, tabId: null, _ptyRequestId: 'p_5' };
+    const tab = { id: 't_x', name: 'x', type: 'ssh', host: 'h', user: 'u', connected: false, term: null, tabId: null };
     T.tabs.push(tab);
-    assert.equal(ctx._rendererIdAlive('p_5'), true);
-    delete tab._ptyRequestId; // what pty-created/ssh-connecting do on claim
-    assert.equal(ctx._rendererIdAlive('p_5'), false);
+    const att = ctx.sshAttempts.createAttempt(tab);
+    assert.equal(ctx.sshAttempts.ownerWants(att), true, 'bound attempt is wanted (unsent queue gate)');
+    // Claim + settle through the registry (what the shared transitions do):
+    // once terminal on both sides the owner field is cleared and the record
+    // retires — the equivalent of the old marker consumption.
+    ctx.sshAttempts.beginClaim(att, 'ssh_5');
+    ctx.sshAttempts.finishUi(att, 'ok');
+    ctx.sshAttempts.onRpcTerminal(att, 'ok', 'ssh_5');
+    assert.equal(tab._pendingAttempt, null, 'owner field cleared with the record');
+    assert.equal(ctx.sshAttempts.ownerWants(att), false);
 });

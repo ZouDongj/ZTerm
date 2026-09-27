@@ -30,6 +30,10 @@
 //!     counts only - never key material or terminal content.
 //!   - stdin control, one JSON object per line (UTF-8, LF):
 //!       {"op":"disconnect","conn":N}  deterministically disconnects conn N
+//!       {"op":"holdauth","ms":N}      one-shot delay of the NEXT accepted
+//!                                     publickey auth (batch-02 native
+//!                                     close-while-connecting probes; emits
+//!                                     an auth_hold event when consumed)
 //!       {"op":"status"}               active connection summary on stdout
 //!       {"op":"shutdown"}             graceful stop (also on stdin EOF)
 //!     Results come back as {"type":"control-result",...} lines on stdout.
@@ -208,6 +212,13 @@ struct Fixture {
     user_gens: Mutex<HashMap<String, u32>>,
     /// SHA256 fingerprint of the only accepted client public key.
     authorized_fp: String,
+    /// One-shot deterministic auth delay (batch 02): armed by the `holdauth`
+    /// control, consumed by the NEXT accepted publickey auth. Gives native
+    /// probes a reliable claimed/auth-pending window to close inside — the
+    /// SFTP-init path became fast after the phase-2b fail-and-close fix, so
+    /// timing luck is no longer a usable window. Loopback-only, opt-in per
+    /// probe run, never armed by the selftest.
+    hold_next_ms: Mutex<Option<u64>>,
 }
 
 impl Fixture {
@@ -386,6 +397,23 @@ impl russh::server::Handler for ConnHandler {
                 else { "key-not-authorized" },
         }));
         if accept {
+            // Optional one-shot auth hold (holdauth control): consumed here,
+            // before the Accept is returned, so the client stays inside its
+            // auth await — a cancel arriving during the hold takes effect at
+            // the client's first checkpoint AFTER the hold expires, which is
+            // exactly the checkpoint-delay behavior native probes must
+            // observe rather than assume.
+            let hold_ms = fx.hold_next_ms.lock().take();
+            if let Some(ms) = hold_ms {
+                self.log(json!({
+                    "type": "auth_hold",
+                    "conn": self.conn,
+                    "ms": ms,
+                }));
+                if ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                }
+            }
             self.auth_user = Some(user.to_string());
         }
         Ok(if accept {
@@ -681,6 +709,7 @@ async fn serve(state_dir: PathBuf) -> Result<()> {
         conns: Mutex::new(HashMap::new()),
         user_gens: Mutex::new(HashMap::new()),
         authorized_fp,
+        hold_next_ms: Mutex::new(None),
     });
 
     fixture.log.emit(json!({
@@ -879,6 +908,20 @@ async fn handle_control_line(fixture: &Arc<Fixture>, line: &str, shutdown: &mut 
             let mut reply = status;
             reply["type"] = json!("control-result");
             print_reply(&reply);
+        }
+        "holdauth" => {
+            // One-shot auth delay for the NEXT accepted publickey auth
+            // (batch-02 close-while-connecting probes). See Fixture::hold_next_ms.
+            let ms = cmd.get("ms").and_then(|m| m.as_u64());
+            let ok = match ms {
+                Some(ms) if ms <= 120_000 => {
+                    fixture.hold_next_ms.lock().replace(ms);
+                    true
+                }
+                _ => false,
+            };
+            fixture.log.emit(json!({"type": "control", "op": "holdauth", "ms": ms, "ok": ok }));
+            print_reply(&json!({ "type": "control-result", "op": "holdauth", "ok": ok, "ms": ms }));
         }
         "shutdown" => {
             fixture

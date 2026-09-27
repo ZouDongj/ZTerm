@@ -4,19 +4,21 @@
 // the pending pane collapses onto its tab carrying only its requestId. The
 // old tab branch (`tab.id === requestId`) never matched the pane's request,
 // so the handler fell through to the orphan path and DESTROYED the fresh
-// backend while the surviving tab sat without a terminal. The claim must now
-// also match `tab._ptyRequestId` (local pty) and the same marker on the SSH
-// lifecycle events (ssh-connecting / ssh-connected / ssh-error).
+// backend while the surviving tab sat without a terminal. Local claims match
+// `tab._ptyRequestId`; SSH lifecycle events correlate by ATTEMPT TOKEN (the
+// collapsed tab's in-flight attempt, created and bound before the collapse).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
 
-const ipcSource = readFileSync(new URL('../src/renderer/ipc.js', import.meta.url), 'utf8');
+const src = f => readFileSync(new URL(`../src/renderer/${f}`, import.meta.url), 'utf8');
 
 // TabManager stub whose single tab models the POST-COLLAPSE state: the split
 // tree is gone, the surviving pane's fields live on the tab, its backend is
-// still pending (_ptyRequestId set, tabId null).
+// still pending (_ptyRequestId set, tabId null). For the SSH flavor the tab
+// also carries its in-flight attempt binding.
 function fixture(over = {}) {
     const callbacks = new Map(), sent = [], wireCalls = [];
     const tab = {
@@ -38,12 +40,18 @@ function fixture(over = {}) {
         // the term the later handlers write into; _scheduleSettleResize lives
         // in terminal.js and is inert for these claims.
         wireTerminal: (t, backendId) => { wireCalls.push({ tab: t, backendId }); t.tabId = backendId; t.term = { write() {} }; },
+        wireTerminalToPane: (tb, p) => { wireCalls.push({ tab: tb, pane: p }); p.term = { write() {} }; },
+        _updatePaneDot() {},
         showToast: () => {},
         _scheduleSettleResize: () => {},
+        crypto: webcrypto,
         console,
     };
     vm.createContext(ctx);
-    vm.runInContext(ipcSource, ctx);
+    vm.runInContext(src('ssh-attempts.js'), ctx);
+    ctx.sshAttempts = vm.runInContext('sshAttempts', ctx);
+    if (over.type === 'ssh') tab._pendingAttempt = ctx.sshAttempts.createAttempt(tab);
+    vm.runInContext(src('ipc.js'), ctx);
     return { callbacks, sent, tab, wireCalls, ctx };
 }
 
@@ -68,17 +76,16 @@ test('pty-created still destroys a truly orphaned backend (explicit close)', () 
     assert.equal(destroys[0].payload.tabId, 'local_2');
 });
 
-test('ssh-connecting claims the collapsed pending pane via rendererId', () => {
+test('ssh-connecting claims the collapsed pending pane via its attempt token', () => {
     const f = fixture({ type: 'ssh' });
-    f.callbacks.get('ssh-connecting')({}, { tabId: 'ssh_7', rendererId: 'p_9' });
+    f.callbacks.get('ssh-connecting')({}, { tabId: 'ssh_7', rendererId: 'p_9', attemptId: f.tab._pendingAttempt });
     assert.equal(f.tab.tabId, 'ssh_7', 'connecting phase must adopt the backend id');
-    assert.equal(f.tab._ptyRequestId, undefined, 'marker consumed at the claim');
     assert.ok(f.wireCalls.some(c => c.tab === f.tab && c.backendId === 'ssh_7'), 'wireTerminal path invoked for the tab');
 });
 
 test('ssh-error reaches the collapsed pending pane (no misdirected toast-only path)', () => {
     const f = fixture({ type: 'ssh' });
-    f.callbacks.get('ssh-error')({}, { tabId: 'ssh_8', rendererId: 'p_9', error: 'auth failed' });
+    f.callbacks.get('ssh-error')({}, { tabId: 'ssh_8', rendererId: 'p_9', attemptId: f.tab._pendingAttempt, error: 'auth failed' });
     assert.equal(f.tab.tabId, 'ssh_8', 'error path records the backend id');
     assert.equal(f.tab.connected, false);
     assert.ok(f.wireCalls.some(c => c.tab === f.tab), 'error terminal still wired for the pane');
@@ -86,7 +93,7 @@ test('ssh-error reaches the collapsed pending pane (no misdirected toast-only pa
 
 test('ssh-connected marks the collapsed pending pane as connected', () => {
     const f = fixture({ type: 'ssh' });
-    f.callbacks.get('ssh-connected')({}, { tabId: 'ssh_9', rendererId: 'p_9' });
+    f.callbacks.get('ssh-connected')({}, { tabId: 'ssh_9', rendererId: 'p_9', attemptId: f.tab._pendingAttempt });
     assert.equal(f.tab.connected, true);
     assert.ok(f.wireCalls.some(c => c.tab === f.tab && c.backendId === 'ssh_9'));
 });

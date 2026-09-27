@@ -1,5 +1,10 @@
 // ZTerm - ipcRenderer listeners and pty-output routing
 
+// SSH attempt identity registry (ssh-attempts.js). Optional-chained so
+// partial harnesses loading only this file keep working; the real renderer
+// always loads the module first (renderer.html script order).
+const _sshAttempts = (typeof sshAttempts !== 'undefined') ? sshAttempts : null;
+
 // Update the pane status dot DOM (TabManager.render() does not repaint pane headers, so it must be updated manually)
 function _updatePaneDot(pane, connected) {
     pane.connected = connected;
@@ -210,8 +215,16 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
 ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
     if (requestId) {
         for (const tab of TabManager.tabs) {
+            // A tab inside its close window cancelled its pending requests at
+            // initiation and must not claim a new backend during the fade —
+            // skip it so the result falls through to the orphan destroy.
+            if (TabManager._closingTabs?.has(tab.id)) continue;
             if (tab.splitRoot) {
-                const pane = findPane(tab, requestId) || getAllPanes(tab).find(p => p.requestId === requestId);
+                // Claim only through a still-live request marker: close
+                // initiation clears pane.requestId, and a bare pane-id lookup
+                // (requestId === pane.id at spawn time) would match the dying
+                // pane anyway and resurrect a terminal nobody disposes.
+                const pane = getAllPanes(tab).find(p => p.requestId === requestId);
                 if (pane) {
                     if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(pane);
                     pane.tabId = tabId;
@@ -250,6 +263,22 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
     ipcRenderer.send('pty-destroy', { tabId });
 });
 
+// ── IPC: unclaimed SSH creation results ──
+// A creation result whose consumer is gone (tab closed while the handshake
+// was running, or a stale generation after a reconnect) owns a backend nobody
+// will ever input into or close — the main process registers the session and
+// its reader/keepalive tasks keep running until app exit. Dispose it here,
+// the same commitment the orphan branch of pty-created makes for local
+// creates: the backend id disconnects a registered session (and cancels a
+// still-in-flight attempt of exactly that generation), the attempt token
+// cancels a pre-claim attempt. Idempotent by construction.
+function _disposeUnclaimedSsh(tabId, attemptId) {
+    const payload = {};
+    if (tabId) payload.tabId = tabId;
+    if (attemptId) payload.attemptId = attemptId;
+    if (payload.tabId || payload.attemptId) ipcRenderer.send('ssh-disconnect', payload);
+}
+
 // ── IPC: SSH connecting ──
 // The SSH handshake starts here (onReady only arrives after auth completes, a window of seconds):
 // build the term and fit now, then immediately send the real cols/rows to the main process,
@@ -272,17 +301,13 @@ function _syncFitAndReportSize(tab, pane) {
 }
 
 // ── Session-owner resolution for backend lifecycle events ──
-// The backend id is a session's CURRENT identity; a rendererId/requestId only
-// identifies a creation that has not produced a backend yet. Pass 1 resolves
-// the backend id across ALL owners, so a delayed event reaches the session's
-// CURRENT owner even after its terminal migrated to another tab/pane. Pass 2
-// (pending fallback) only matches owners that hold NO assigned backend — a
-// tab/pane already carrying a different assigned backend must never absorb
-// another session's event (the old `t.id === rendererId` fallback wrote A's
-// tab failed when B's delayed error arrived after a drag/extract migration).
-// reconnectTab/_reconnectPane and the ssh-error retry branch null the old
-// backend id before re-enqueueing, so legitimate new generations still claim.
-function _findSessionOwner(tabId, rendererId) {
+// The backend id is a session's CURRENT identity (authoritative pass 1: a
+// delayed event reaches the session's CURRENT owner even after its terminal
+// migrated to another tab/pane). Pass 2 resolves the ATTEMPT TOKEN to the
+// wrapper currently awaiting it — identity, never a display address, so a
+// stale event for a replaced/cancelled attempt finds no owner (its token is
+// detached) and a migrated wrapper is still found after extract/collapse.
+function _findSessionOwner(tabId, attemptId) {
     for (const tab of TabManager.tabs) {
         if (tab.splitRoot) {
             const pane = getAllPanes(tab).find(p => tabId && p.tabId === tabId);
@@ -291,22 +316,41 @@ function _findSessionOwner(tabId, rendererId) {
             return { tab, pane: null };
         }
     }
+    if (!_sshAttempts || !attemptId || !_sshAttempts.ownerWants(attemptId)) return null;
+    const w = _sshAttempts.ownerOf(attemptId);
+    if (!w) return null;
     for (const tab of TabManager.tabs) {
+        // A tab inside its close window cancelled its attempts at initiation;
+        // it must not claim a new session during the fade.
+        if (TabManager._closingTabs?.has(tab.id)) continue;
         if (tab.splitRoot) {
-            const pane = getAllPanes(tab).find(p => rendererId && !p.tabId && p.requestId === rendererId);
+            const pane = getAllPanes(tab).find(p => p === w);
             if (pane) return { tab, pane };
-        } else if (rendererId && !tab.tabId
-            && ((tab._ptyRequestId && tab._ptyRequestId === rendererId) || tab.id === rendererId)) {
+        } else if (tab === w) {
             return { tab, pane: null };
         }
     }
     return null;
 }
 
-ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId }) => {
-    const hit = _findSessionOwner(tabId, rendererId);
-    if (!hit) return;
+// ── Shared, idempotent attempt-lifecycle transitions ──
+// The lifecycle events and the own invocation result travel independent
+// channels and may arrive in ANY order. Both sides funnel into these three
+// appliers; the attempt registry's beginClaim/finishUi guards make each UI
+// application happen exactly once, so neither order duplicates terminals,
+// banners or notifications, and a late duplicate regresses nothing.
+// Each applier returns true when an owner consumed the transition; false
+// means unclaimed (the caller disposes the result's own backend).
+
+function _applySshConnecting(attemptId, tabId) {
+    const hit = _findSessionOwner(tabId, attemptId);
+    if (!hit) return false;
     const { tab, pane } = hit;
+    // First connecting-application wins; a late/second one (duplicate event,
+    // or an event after an rpc-first claim) must not regress the owner.
+    // Legacy events without an attempt token skip the registry guard (the
+    // real producer always sends attemptId; pass 1 routed by backend id).
+    if (_sshAttempts && attemptId && !_sshAttempts.beginClaim(attemptId, tabId)) return true;
     if (pane) {
         if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(pane);
         pane.tabId = tabId;
@@ -319,17 +363,100 @@ ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId }) => {
             pane.term.write('\x1b[33mConnecting to ' + (pane._sshHost || tab.host || pane.name || tab.name) + '...\x1b[0m\r\n');
             _syncFitAndReportSize(tab, pane);
         }
-        return;
+        return true;
     }
     if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(tab);
-    // A collapsed pending pane claimed its creation event through the
-    // marker; consume it now that the backend id landed on the tab
-    delete tab._ptyRequestId;
     tab.tabId = tabId;
     tab._sessionFailed = false; // new generation — see the pane branch
     if (!tab.term) wireTerminal(tab, tabId);
     if (tab.term) tab.term.write('\x1b[33mConnecting to ' + (tab.host || tab.name) + '...\x1b[0m\r\n');
     _syncFitAndReportSize(tab, null);
+    return true;
+}
+
+function _applySshConnected(attemptId, tabId) {
+    if (!tabId) return false;
+    const hit = _findSessionOwner(tabId, attemptId);
+    if (!hit) return false;
+    const { tab, pane } = hit;
+    const firstApplication = !_sshAttempts || !attemptId || _sshAttempts.finishUi(attemptId, 'ok');
+    if (firstApplication) {
+        // First terminal application (either channel): full connected UI.
+        _resetCaretFilterById(tabId);
+        if (pane) {
+            tab._sshRetried = 0; // connected: re-arm THIS tab's handshake retry budget
+            if (!pane.term) wireTerminalToPane(tab, pane);
+            if (pane.term) pane.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
+            tab.connected = true;
+            pane._sessionFailed = false; // live again — pending input is valid
+            _updatePaneDot(pane, true);
+        } else {
+            tab._sshRetried = 0;
+            tab.connected = true;
+            tab._sessionFailed = false; // live again — see the split branch
+            if (!tab.term) wireTerminal(tab, tabId);
+            if (tab.term) tab.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
+        }
+        TabManager.render();
+        TabManager.updateStatus();
+        showToast('SSH 已连接: ' + _sshDisplayName(tab, pane));
+        // Fallback size settle: the connecting phase already fit and opened the PTY at the right size via pendingSizes,
+        // but if the container had zero size during connecting (tab hidden, etc.), settle once more here; after connected the size is registered and usable
+        _scheduleSettleResize(tab);
+        return true;
+    }
+    // Already applied by the other channel: a TRUE no-op. A duplicate success
+    // (late rpc result or duplicate event) must not regress newer lifecycle
+    // state — a real disconnection after the first success stays terminal
+    // (connected=false, _sessionFailed=true, terminal text and caret filter
+    // untouched), and no second banner/toast fires.
+    return true;
+}
+
+// Failure application shared by the ssh-error event and the own invocation
+// rejection (Rust validates host/port/username/attemptId BEFORE any emit, so
+// the rejection can be the ONLY failure signal). Applies at most once.
+function _applySshFailed(attemptId, tabId, error) {
+    const hit = _findSessionOwner(tabId, attemptId);
+    if (!hit) return false;
+    const { tab, pane } = hit;
+    if (_sshAttempts && attemptId && !_sshAttempts.finishUi(attemptId, 'failed')) return true; // other channel applied (legacy events without a token always apply)
+    const msg = error || 'SSH connect failed';
+    if (pane) {
+        if (pane.term) {
+            pane.term.write('\r\n\x1b[31m[SSH Error] ' + msg + '\x1b[0m\r\n');
+        } else {
+            wireTerminalToPane(tab, pane);
+            if (pane.term) pane.term.write('\r\n\x1b[31m[SSH Error] ' + msg + '\x1b[0m\r\n');
+        }
+        tab.connected = false;
+        // The terminal (and the backend id) is preserved, but the session is
+        // known failed — pending input for THIS pane must be cancelled even
+        // though the old id remains (sync input would relay it to siblings).
+        pane._sessionFailed = true;
+        _updatePaneDot(pane, false);
+    } else {
+        tab.connected = false;
+        tab._sessionFailed = true; // same liveness marker as the pane branch
+        if (!tab.tabId && tabId) tab.tabId = tabId;
+        if (tab.term) {
+            tab.term.write('\r\n\x1b[31m[SSH Error] ' + msg + '\x1b[0m\r\n');
+        } else {
+            wireTerminal(tab, tabId);
+            if (tab.term) tab.term.write('\r\n\x1b[31m[SSH Error] ' + msg + '\x1b[0m\r\n');
+        }
+    }
+    TabManager.render();
+    TabManager.updateStatus();
+    showToast('SSH 连接失败: ' + msg, true);
+    return true;
+}
+
+ipcRenderer.on('ssh-connecting', (event, { tabId, rendererId, attemptId } = {}) => {
+    // attemptId is always present from the current producer; without it the
+    // event still routes by backend identity (legacy shape) but cannot
+    // correlate with an attempt for the pending fallback.
+    if (!_applySshConnecting(attemptId, tabId)) _disposeUnclaimedSsh(tabId, attemptId);
 });
 
 // ── IPC: SSH connected ──
@@ -340,46 +467,47 @@ function _sshDisplayName(tab, pane) {
     return (prof && prof.name) || (pane && pane.name) || tab.host || tab.name;
 }
 
-ipcRenderer.on('ssh-connected', (event, { tabId, rendererId }) => {
-    _resetCaretFilterById(tabId);
-    const hit = _findSessionOwner(tabId, rendererId);
-    if (!hit) return;
-    const { tab, pane } = hit;
-    if (pane) {
-        tab._sshRetried = 0; // connected: re-arm THIS tab's handshake retry budget
-        if (!pane.term) wireTerminalToPane(tab, pane);
-        if (pane.term) pane.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
-        tab.connected = true;
-        pane._sessionFailed = false; // live again — pending input is valid
-        _updatePaneDot(pane, true);
-        TabManager.render();
-        TabManager.updateStatus();
-        showToast('SSH 已连接: ' + _sshDisplayName(tab, pane));
-        // Fallback size settle: the connecting phase already fit and opened the PTY at the right size via pendingSizes,
-        // but if the container had zero size during connecting (tab hidden, etc.), settle once more here; after connected the size is registered and usable
-        _scheduleSettleResize(tab);
-        return;
-    }
-    tab._sshRetried = 0; // connected: re-arm THIS tab's handshake retry budget
-    tab.connected = true;
-    tab._sessionFailed = false; // live again — see the split branch
-    if (!tab.term) wireTerminal(tab, tabId);
-    if (tab.term) tab.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
-    TabManager.render();
-    TabManager.updateStatus();
-    showToast('SSH 已连接: ' + _sshDisplayName(tab, null));
-    _scheduleSettleResize(tab); // fallback size settle, symmetric with the split branch
+ipcRenderer.on('ssh-connected', (event, { tabId, rendererId, attemptId } = {}) => {
+    if (!_applySshConnected(attemptId, tabId)) _disposeUnclaimedSsh(tabId, attemptId);
 });
 
+// The own invocation result may arrive before, between or after the
+// lifecycle events (independent channels). The registry calls this applier
+// on every rpc terminal state; it reuses the same guarded transitions, so
+// either order applies exactly once and a missed event still completes the
+// UI handoff (the success result carries the backend id).
+if (_sshAttempts) {
+    _sshAttempts.setRpcApplier((token, kind, backendId, errText) => {
+        if (kind === 'ok') {
+            _applySshConnecting(token, backendId);
+            if (!_applySshConnected(token, backendId)) _disposeUnclaimedSsh(backendId, token);
+        } else if (kind === 'failed') {
+            // No-event failure paths (early validation, transport rejection):
+            // apply to the still-current owner at most once; the attempt
+            // record retires with this terminal state.
+            _applySshFailed(token, backendId, errText);
+        }
+        // 'cancelled': our own cancel already released everything; the
+        // invocation exit is silent by design.
+    });
+}
+
 // ── IPC: SSH error ──
-ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
+ipcRenderer.on('ssh-error', (event, { tabId, rendererId, attemptId, error }) => {
     // Backend identity first (see _findSessionOwner): a delayed error must
-    // reach the session's current owner, never a tab that merely shares the
-    // original rendererId but now hosts a different live session.
-    const hit = _findSessionOwner(tabId, rendererId);
+    // reach the session's current owner, never a wrapper that merely shares
+    // a display address with a different live session.
+    const hit = _findSessionOwner(tabId, attemptId);
     const tab = hit ? hit.tab : null;
     const pane = hit ? hit.pane : null;
-    if (!tab) { showToast('[SSH] ' + error, true); return; }
+    // Stale-generation failures (the owner replaced/cancelled this attempt)
+    // surface nothing: the toast would describe a connection the user
+    // explicitly discarded, not the pending replacement.
+    if (!tab) {
+        if (_sshAttempts && attemptId ? _sshAttempts.finalState(attemptId) == null : true) showToast('[SSH] ' + error, true);
+        _disposeUnclaimedSsh(tabId, attemptId);
+        return;
+    }
     // Classify transient errors from the russh error text (timeout / connection dropped / key exchange failure)
     // and auto-retry only those; deterministic errors like auth failure or unknown host key are not retried.
     // The old regex /handshake|lost before/ was written for Electron ssh2 errors; regular russh errors never matched it, so transient failures were never retried
@@ -393,6 +521,10 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
     const isHandshakeErr = /timeout|timed out|connection (closed|refused|reset)|key exchange|network|eof|tcp\/handshake.*disconnected|os error 100(54|60|61)/i.test(error);
     const retryCount = (tab._sshRetried || 0);
     if (isHandshakeErr && retryCount < 3) {
+        // The failed attempt's UI side is terminal from here on (the retry
+        // line below is its own presentation); the shared failure applier is
+        // not used on this branch.
+        if (_sshAttempts && attemptId) _sshAttempts.finishUi(attemptId, 'failed');
         tab._sshRetried = retryCount + 1;
         const backoffMs = [2000, 5000, 10000][Math.min(retryCount, 2)];
         // Keep the terminal mounted through automatic retries: write the
@@ -406,7 +538,10 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
         if (retryTerm) retryTerm.write(`\r\n\x1b[33m[SSH] handshake dropped, retrying in ${Math.round(backoffMs / 1000)}s (${tab._sshRetried}/3)...\x1b[0m\r\n`);
         if (pane) {
             if (pane.tabId) {
-                ipcRenderer.send('ssh-disconnect', { tabId: pane.tabId, rendererId: tab.id });
+                // The retry REPLACES the failed generation: cancel its
+                // attempt by identity (backend id + token) — never a display
+                // address — and release its queue slot.
+                _cancelSshAttemptOf(pane, pane.tabId, 'ssh-disconnect');
                 delete ptyBuffers[pane.tabId];
                 // Reset the caret filter explicitly: the ssh-disconnected
                 // event lookup happens after pane.tabId is nulled and would
@@ -420,7 +555,7 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
             pane._sessionFailed = true;
         } else {
             if (tab.tabId) {
-                ipcRenderer.send('ssh-disconnect', { tabId: tab.tabId, rendererId: tab.id });
+                _cancelSshAttemptOf(tab, tab.tabId, 'ssh-disconnect'); // same identity-exact discard
                 delete ptyBuffers[tab.tabId];
                 delete tab._caretFilter; // same as the pane branch above
                 tab._altScreen = false;
@@ -429,54 +564,28 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, error }) => {
             tab._sessionFailed = true; // same liveness marker as the pane branch
         }
         // A manual reconnect (reconnectTab / clicking a down tab) supersedes
-        // this scheduled retry: both would enqueue a connect for the same
-        // rendererId and the loser's session gets orphaned. reconnectTab
-        // bumps the token, making superseded timers no-op. Pane liveness is
-        // checked separately — closing the pane (not the tab) during the
-        // backoff must not spawn a backend for a dead pane.
+        // this scheduled retry: both would start a new attempt and the
+        // loser's session gets orphaned. reconnectTab bumps the token, making
+        // superseded timers no-op. Pane liveness is checked separately —
+        // closing the pane (not the tab) during the backoff must not spawn a
+        // backend for a dead pane.
         const token = (tab._sshRetryToken = (tab._sshRetryToken || 0) + 1);
         const stillWanted = () => tab._sshRetryToken === token && TabManager.tabs.includes(tab)
             && (!pane || TabManager.tabs.some(t => t.id === tab.id && getAllPanes(t).some(p => p.id === pane.id)));
         setTimeout(() => {
             if (!stillWanted()) return; // superseded / tab or pane closed
-            _sshConnectWithCredentials(tab, pane, pane ? pane.requestId : tab.id);
+            // The retry is a NEW attempt identity (the old one was cancelled
+            // explicitly above — no implicit supersede).
+            _sshConnectWithCredentials(tab, pane);
         }, backoffMs);
         return;
     }
-    if (pane) {
-        if (pane.term) {
-            pane.term.write('\r\n\x1b[31m[SSH Error] ' + error + '\x1b[0m\r\n');
-        } else {
-            wireTerminalToPane(tab, pane);
-            if (pane.term) pane.term.write('\r\n\x1b[31m[SSH Error] ' + error + '\x1b[0m\r\n');
-        }
-        tab.connected = false;
-        // The terminal (and the backend id) is preserved, but the session is
-        // known failed — pending input for THIS pane must be cancelled even
-        // though the old id remains (sync input would relay it to siblings).
-        pane._sessionFailed = true;
-        _updatePaneDot(pane, false);
-        TabManager.render();
-        TabManager.updateStatus();
-        showToast('SSH 连接失败: ' + error, true);
-        return;
-    }
-    tab.connected = false;
-    tab._sessionFailed = true; // same liveness marker as the pane branch
-    if (!tab.tabId) tab.tabId = tabId;
-    if (tab.term) {
-        tab.term.write('\r\n\x1b[31m[SSH Error] ' + error + '\x1b[0m\r\n');
-    } else {
-        wireTerminal(tab, tabId);
-        if (tab.term) tab.term.write('\r\n\x1b[31m[SSH Error] ' + error + '\x1b[0m\r\n');
-    }
-    TabManager.render();
-    TabManager.updateStatus();
-    showToast('SSH 连接失败: ' + error, true);
+    // Deterministic failure: the shared, once-guarded application.
+    _applySshFailed(attemptId, tabId, error);
 });
 
 // ── IPC: SSH disconnected ──
-ipcRenderer.on('ssh-disconnected', (event, { tabId, rendererId, reason, path }) => {
+ipcRenderer.on('ssh-disconnected', (event, { tabId, reason, path }) => {
     // The filter may be stuck mid-sync-block from the dead session; drop it so
     // a reconnect cannot inherit a filter that swallows all fresh output.
     _resetCaretFilterById(tabId);
@@ -485,7 +594,8 @@ ipcRenderer.on('ssh-disconnected', (event, { tabId, rendererId, reason, path }) 
         return;
     }
     const line = '\r\n\x1b[33m[SSH Disconnected]\x1b[0m' + (reason ? ` \x1b[2m${reason}\x1b[0m` : '') + '\r\n';
-    const hit = _findSessionOwner(tabId, rendererId);
+    // Session-level event (no attempt payload): backend-id routing only.
+    const hit = _findSessionOwner(tabId, null);
     if (!hit) return;
     const { tab, pane } = hit;
     if (pane) {
@@ -611,7 +721,19 @@ ipcRenderer.on('config-corrupted', () => {
 // so stale callbacks would stack onto the next dialog (possibly trusting an unconfirmed host). Unbind the old one before opening a new dialog.
 let _activeHostkeyCleanup = null;
 
-ipcRenderer.on('ssh-hostkey-mismatch', (event, { tabId, host, oldAlgorithm, oldFingerprint, newAlgorithm, newFingerprint }) => {
+ipcRenderer.on('ssh-hostkey-mismatch', (event, { tabId, attemptId, host, oldAlgorithm, oldFingerprint, newAlgorithm, newFingerprint }) => {
+    // Correlate with the attempt BEFORE touching the shared dialog: the
+    // mismatch fires after the NATIVE connecting emit but possibly before
+    // the frontend processed the claim, so only the attempt token reliably
+    // identifies the consumer. A dead/unknown attempt (closed, cancelled,
+    // superseded, or a pre-reload epoch) must NOT open a modal or clean up
+    // another live attempt's dialog — reject only its own decision by
+    // backend id so the suspended task unblocks and exits. No security
+    // decision is ever auto-accepted.
+    if (!attemptId || !_sshAttempts || !_sshAttempts.ownerWants(attemptId)) {
+        ipcRenderer.send('ssh-hostkey-decision', { tabId, accept: false, trust: false });
+        return;
+    }
     if (_activeHostkeyCleanup) _activeHostkeyCleanup();
     // showConfirm (delete/update confirmations) shares this DOM but keeps its
     // own cleanup registry; unbind it too or this dialog's buttons would also

@@ -17,6 +17,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
 
 const src = f => readFileSync(new URL(`../src/renderer/${f}`, import.meta.url), 'utf8');
 
@@ -250,6 +251,7 @@ function loadVm() {
 
     const ctx = {
         console,
+        crypto: webcrypto, // the real WebView2 renderer always has this
         setTimeout: (fn, d) => tq.setTimeout(fn, d),
         clearTimeout: (id) => tq.clearTimeout(id),
         requestAnimationFrame: (fn) => { fn(); return 0; },
@@ -282,7 +284,9 @@ function loadVm() {
                 const i = l.indexOf(fn);
                 if (i >= 0) l.splice(i, 1);
             },
-            invoke: async () => ({}),
+            // Producer-shaped: an invocation stays pending until settled —
+            // instantly-fulfilled stubs would fake queue completion.
+            invoke: () => new Promise(() => {}),
         },
         require: () => ({ clipboard: clip }),
         Terminal: FakeTerminal,
@@ -323,7 +327,7 @@ function loadVm() {
     // split.js owns these as script-level `let`s; the parts of it terminal.js
     // reads at fit time are just the drag/window-resize suppression flags.
     vm.runInContext('var _spannerDrag = false; var _windowResizing = false;', ctx);
-    for (const f of ['split-layout.js', 'pane-fields.js', 'tab-title-utils.js', 'terminal.js', 'tabs.js', 'ipc.js']) {
+    for (const f of ['split-layout.js', 'pane-fields.js', 'ssh-attempts.js', 'tab-title-utils.js', 'terminal.js', 'tabs.js', 'ipc.js']) {
         vm.runInContext(src(f), ctx, { filename: f });
     }
     ctx.TabManager = vm.runInContext('TabManager', ctx);
@@ -342,6 +346,15 @@ function loadVm() {
 }
 
 const flushAsync = () => new Promise(r => setTimeout(r, 0));
+
+// Producer-shaped ssh-connecting claim: the real payload carries the attempt
+// token its owner awaits (created here, bound to the wrapper), so pre-claim
+// panes/tabs resolve through the attempt pass exactly like production.
+function sshConnecting(ctx, wrapper, tabId) {
+    const att = ctx.sshAttempts.createAttempt(wrapper);
+    ctx.__emit('ssh-connecting', { tabId, rendererId: 'legacy', attemptId: att });
+    return att;
+}
 
 // Single local tab wired through the REAL wireTerminal (term + callbacks).
 function wiredTab(ctx, id, backendId, over = {}) {
@@ -888,7 +901,7 @@ test('D-fail: deterministic failure keeps the id — paste is CANCELLED (real ha
     const tab = wiredTab(ctx, 't_df', 'ssh_2', { type: 'ssh', connected: true, host: 'h1', user: 'u1' });
     // Genuine reachable sequence: connecting → connected (live) → read →
     // deterministic failure with the terminal PRESERVED and the id retained.
-    ctx.__emit('ssh-connecting', { tabId: 'ssh_2', rendererId: tab.id });
+    sshConnecting(ctx, tab, 'ssh_2');
     ctx.__emit('ssh-connected', { tabId: 'ssh_2', rendererId: tab.id });
     assert.equal(tab.connected, true, 'source is live before the read');
     const done = startPaste(ctx, tab.term);
@@ -920,7 +933,7 @@ test('D-fail: failed SSH source pane cancels the paste everywhere (sync input, r
     const ctx = loadVm();
     const { tab, p1, p2 } = wiredSplitTab(ctx, 't_fs1', 'ssh_1', 'local_2');
     // Bring the SSH source pane live through the real lifecycle.
-    ctx.__emit('ssh-connecting', { tabId: 'ssh_1', rendererId: p1.requestId });
+    sshConnecting(ctx, p1, 'ssh_1');
     ctx.__emit('ssh-connected', { tabId: 'ssh_1', rendererId: p1.requestId });
     assert.equal(p1.connected, true, 'source pane live');
     assert.ok(p2.tabId === 'local_2' && !p2.term.disposed, 'sibling pane healthy');
@@ -943,7 +956,7 @@ test('D-fail: failed SSH source pane cancels the paste everywhere (sync input, r
 test('D-fail: failed SSH source tab cancels the paste without sync input (real handlers)', async () => {
     const ctx = loadVm();
     const tab = wiredTab(ctx, 't_fs2', 'ssh_3', { type: 'ssh', connected: true, host: 'h1', user: 'u1' });
-    ctx.__emit('ssh-connecting', { tabId: 'ssh_3', rendererId: tab.id });
+    sshConnecting(ctx, tab, 'ssh_3');
     ctx.__emit('ssh-connected', { tabId: 'ssh_3', rendererId: tab.id });
     const done = startPaste(ctx, tab.term);
     ctx.__emit('ssh-error', { tabId: 'ssh_3', rendererId: tab.id, error: 'authentication failed' });
@@ -955,7 +968,7 @@ test('D-fail: failed SSH source tab cancels the paste without sync input (real h
 test('D-fail: read started AFTER the failure is cancelled too (order b)', async () => {
     const ctx = loadVm();
     const tab = wiredTab(ctx, 't_fs3', 'ssh_4', { type: 'ssh', connected: true, host: 'h1', user: 'u1' });
-    ctx.__emit('ssh-connecting', { tabId: 'ssh_4', rendererId: tab.id });
+    sshConnecting(ctx, tab, 'ssh_4');
     ctx.__emit('ssh-connected', { tabId: 'ssh_4', rendererId: tab.id });
     ctx.__emit('ssh-error', { tabId: 'ssh_4', rendererId: tab.id, error: 'authentication failed' });
     const done = startPaste(ctx, tab.term);
@@ -981,13 +994,13 @@ test('D-fail: local process exit cancels the pending paste (real pty-exit handle
 test('D-fail: reconnect recovery re-enables pasting (order c, real handlers)', async () => {
     const ctx = loadVm();
     const tab = wiredTab(ctx, 't_fs5', 'ssh_5', { type: 'ssh', connected: true, host: 'h1', user: 'u1' });
-    ctx.__emit('ssh-connecting', { tabId: 'ssh_5', rendererId: tab.id });
+    sshConnecting(ctx, tab, 'ssh_5');
     ctx.__emit('ssh-connected', { tabId: 'ssh_5', rendererId: tab.id });
     ctx.__emit('ssh-error', { tabId: 'ssh_5', rendererId: tab.id, error: 'authentication failed' });
     // User reconnects: reconnectTab nulls the dead backend id BEFORE the new
     // generation is enqueued (tabs.js reconnectTab), then connecting fires.
     tab.tabId = null;
-    ctx.__emit('ssh-connecting', { tabId: 'ssh_50', rendererId: tab.id });
+    sshConnecting(ctx, tab, 'ssh_50');
     ctx.__emit('ssh-connected', { tabId: 'ssh_50', rendererId: tab.id });
     assert.equal(tab.connected, true, 'live again');
     const done = startPaste(ctx, tab.term);
@@ -1000,7 +1013,7 @@ test('D-fail: reconnect recovery re-enables pasting (order c, real handlers)', a
 test('D-fail: the failure marker follows the session across an extract (order e)', async () => {
     const ctx = loadVm();
     const { tab, p1, p2 } = wiredSplitTab(ctx, 't_fs6', 'local_1', 'ssh_6');
-    ctx.__emit('ssh-connecting', { tabId: 'ssh_6', rendererId: p2.requestId });
+    sshConnecting(ctx, p2, 'ssh_6');
     ctx.__emit('ssh-connected', { tabId: 'ssh_6', rendererId: p2.requestId });
     const done = startPaste(ctx, p2.term);
     ctx.__emit('ssh-error', { tabId: 'ssh_6', rendererId: p2.requestId, error: 'authentication failed' });
@@ -1021,7 +1034,7 @@ test('D-fail: the failure marker follows the session across an extract (order e)
 test('P-fail: first-split promotion keeps the failure marker (sync, healthy sibling via real pty-created)', async () => {
     const ctx = loadVm();
     const tab = wiredTab(ctx, 't_p1', 'ssh_1', { type: 'ssh', connected: true, host: 'h1', user: 'u1' });
-    ctx.__emit('ssh-connecting', { tabId: 'ssh_1', rendererId: tab.id });
+    sshConnecting(ctx, tab, 'ssh_1');
     ctx.__emit('ssh-connected', { tabId: 'ssh_1', rendererId: tab.id });
     assert.equal(tab._sessionFailed, false);
     const done = startPaste(ctx, tab.term);
@@ -1055,7 +1068,7 @@ test('P-fail: drag target-conversion fp keeps the failure marker (sync, healthy 
     const ctx = loadVm();
     const tgt = wiredTab(ctx, 't_p2t', 'ssh_2', { type: 'ssh', connected: true, host: 'h1', user: 'u1' });
     const src = wiredTab(ctx, 't_p2s', 'local_3');
-    ctx.__emit('ssh-connecting', { tabId: 'ssh_2', rendererId: tgt.id });
+    sshConnecting(ctx, tgt, 'ssh_2');
     ctx.__emit('ssh-connected', { tabId: 'ssh_2', rendererId: tgt.id });
     const termT = tgt.term;
     const done = startPaste(ctx, termT);
@@ -1128,7 +1141,7 @@ function independentAOverB_extract(ctx) {
     const tabA = wiredTab(ctx, 't_A', 'ssh_A', { type: 'ssh', connected: true, host: 'a', user: 'u' });
     const tabB = wiredTab(ctx, 't_B', 'ssh_B', { type: 'ssh', connected: false, host: 'b', user: 'u' });
     // Real connecting setup for B (preserved terminal, backend assigned).
-    ctx.__emit('ssh-connecting', { tabId: 'ssh_B', rendererId: 't_B' });
+    sshConnecting(ctx, tabB, 'ssh_B');
     const termB = tabB.term;
     ctx.TabManager._moveTerminalToTab('t_A', 't_B', 't', null);
     const bottomB = ctx.getAllPanes(tabB).find(p => p.term === termB);
@@ -1168,7 +1181,7 @@ test('X-delayed: stale error after B reconnects is dropped for everyone', () => 
     // B fails, then reconnects (new generation, real handler pair).
     ctx.__emit('ssh-error', { tabId: 'ssh_B', rendererId: 't_B', error: 'authentication failed' });
     ntB.tabId = null; // what reconnectTab does before re-enqueueing
-    ctx.__emit('ssh-connecting', { tabId: 'ssh_B2', rendererId: ntB.id });
+    sshConnecting(ctx, ntB, 'ssh_B2');
     ctx.__emit('ssh-connected', { tabId: 'ssh_B2', rendererId: ntB.id });
     assert.equal(ntB.connected, true, 'B live on its new generation');
 
