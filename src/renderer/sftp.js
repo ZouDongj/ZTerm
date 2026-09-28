@@ -5,7 +5,13 @@ const SFTP = {
     _tabId: null,      // main-process tabId of the current SSH connection (the pty/ssh tabId)
     _path: '/',        // current remote path
     _files: [],        // file list of the current directory
+    _listed: false,    // whether the current panel binding has a valid rendered listing (reset on open)
     _reqSeq: 0,        // request sequence number: async response ownership check (prevents stale responses after fast tab switches)
+    _viewReq: null,    // identity {seq,epoch} of the LATEST unsettled view request (open/navigate) of the current binding; the view is loading while this is set. Superseded requests of the same binding no longer count: only the latest request owns the loading state
+    _viewEpoch: 0,     // panel-binding generation: open()/close() bump it, so an obsolete request's finally block cannot touch the loading identity
+    _refreshInFlight: null,  // identity {epoch} of the upload-refresh run that owns the coalescing slot; only that run's own finally may clear/drain it (a stale finally cannot touch a successor view)
+    _refreshQueued: null,    // owner {tabId,path} owed one coalesced follow-up refresh once the current binding's in-flight refresh settles
+    _editingPath: false, // breadcrumb path edit in progress (a cwd follow must not destroy it)
     _pinned: {},       // tabId -> boolean, per-tab pin state
     _pinnedPath: {},   // tabId -> path, per-tab pinned path
 
@@ -33,8 +39,21 @@ const SFTP = {
         const tab = TabManager.tabs.find(t => t.tabId === tabId);
         const connEl = document.getElementById('sftp-conn');
         if (connEl && tab) connEl.textContent = tab.name || '';
-        // always show the loading state first, then fetch the file list
+        // always show the loading state first, then fetch the file list; reset ALL
+        // session-bound listing state before the first await so a later failure can
+        // never render the previous session's rows into this panel
         this._path = '/';
+        this._files = [];
+        this._listed = false;
+        // A fresh binding starts a new request generation: in-flight requests of
+        // the previous binding (even of this same backend after close/reopen) no
+        // longer count as loads of this view and cannot re-arm its refreshes.
+        // Retiring the refresh slot also disowns the previous binding's running
+        // refresh: its finally can no longer clear or drain anything here.
+        this._viewEpoch++;
+        this._viewReq = null;
+        this._refreshQueued = null;
+        this._refreshInFlight = null;
         document.getElementById('sftp-breadcrumb').innerHTML = '<span>/</span>';
         document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载中…</div>';
         document.getElementById('overlay-sftp').classList.add('open');
@@ -50,34 +69,56 @@ const SFTP = {
         // the panel meanwhile; a stale response must not overwrite the current panel state
         const myTab = tabId;
         const seq = ++SFTP._reqSeq;
-        let result;
+        const req = { seq, epoch: this._viewEpoch };
+        this._viewReq = req;
         try {
-            result = await ipcRenderer.invoke('sftp-open', { tabId });
-        } catch (e) {
-            // Rust returns Err (invoke rejects) when the session is missing/disconnected; do not leave an unhandled rejection
-            showToast('无法打开 SFTP: ' + (e?.message || '会话不可用'), true);
-            document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载失败</div>';
-            return;
+            let result;
+            try {
+                result = await ipcRenderer.invoke('sftp-open', { tabId });
+            } catch (e) {
+                // Rust returns Err (invoke rejects) when the session is missing/disconnected; do not leave an unhandled rejection.
+                // The ownership check applies to failures and to hidden panels alike:
+                // closeOverlay (the Esc/backdrop route) only removes the .open class, so a
+                // request whose panel is no longer visible must not surface its obsolete error.
+                if (seq !== SFTP._reqSeq || this._tabId !== myTab || !SFTP.isOpen) return;
+                showToast('无法打开 SFTP: ' + (e?.message || '会话不可用'), true);
+                document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载失败</div>';
+                return;
+            }
+            if (seq !== SFTP._reqSeq || this._tabId !== myTab || !SFTP.isOpen) return;
+            const { path: homePath, files, error } = result;
+            if (error) {
+                showToast(error, true);
+                document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载失败</div>';
+                return;
+            }
+            this._path = homePath || '/';
+            this._files = (files || []).sort((a, b) => {
+                if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+                return a.name.localeCompare(b.name);
+            });
+            this._listed = true;
+            this._renderBreadcrumb();
+            this._renderFiles();
+        } finally {
+            // Only the latest request of the current binding owns the loading
+            // state; a superseded or retired request's finally touches nothing.
+            if (this._viewReq === req) this._viewReq = null;
         }
-        if (seq !== SFTP._reqSeq || this._tabId !== myTab) return;
-        const { path: homePath, files, error } = result;
-        if (error) {
-            showToast(error, true);
-            document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载失败</div>';
-            return;
-        }
-        this._path = homePath || '/';
-        this._files = (files || []).sort((a, b) => {
-            if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-            return a.name.localeCompare(b.name);
-        });
-        this._renderBreadcrumb();
-        this._renderFiles();
     },
 
     close() {
         document.getElementById('overlay-sftp').classList.remove('open');
         this._tabId = null;
+        // The binding is gone: retire its request generation so no in-flight
+        // open/navigate of the old view can touch the loading identity or re-arm
+        // a deferred refresh, and disown the old view's running refresh so its
+        // finally cannot clear/drain a successor view's slot; the next open()
+        // starts from a clean slate.
+        this._viewEpoch++;
+        this._viewReq = null;
+        this._refreshQueued = null;
+        this._refreshInFlight = null;
         // Refocus terminal after closing SFTP panel
         const tab = TabManager.getActive();
         if (tab) {
@@ -94,49 +135,91 @@ const SFTP = {
         return document.getElementById('overlay-sftp').classList.contains('open');
     },
 
-async navigate(path) {
-    if (!this._tabId) return;
-    const prevPath = this._path;
-    // validate the path before refreshing the view
-    const body = document.getElementById('sftp-body');
-    body.innerHTML = '<div class="sftp-empty">加载中…</div>';
-    // Request sequence + ownership check (same as open)
-    const myTab = this._tabId;
-    const seq = ++SFTP._reqSeq;
-    let result;
-    try {
-        result = await ipcRenderer.invoke('sftp-readdir', { tabId: myTab, path });
-    } catch (e) {
-        // Rust returns Err (invoke rejects) on session disconnect; show the error and restore the previous content
-        showToast('无法访问: ' + (e?.message || '会话不可用'), true);
-        if (seq === SFTP._reqSeq && this._tabId === myTab) {
-            this._renderBreadcrumb();
-            this._renderFiles();
+    async navigate(path, opts) {
+        if (!this._tabId) return;
+        // validate the path before refreshing the view
+        const body = document.getElementById('sftp-body');
+        body.innerHTML = '<div class="sftp-empty">加载中…</div>';
+        // Request sequence + ownership check (same as open); a closed panel
+        // (any close route, including closeOverlay's class-only removal) owns nothing
+        const myTab = this._tabId;
+        const seq = ++SFTP._reqSeq;
+        const req = { seq, epoch: this._viewEpoch };
+        // The latest request takes over the loading state: an earlier request of
+        // this same binding is now obsolete and must no longer suppress the
+        // view's upload refreshes once it settles.
+        this._viewReq = req;
+        try {
+            let result;
+            try {
+                result = await ipcRenderer.invoke('sftp-readdir', { tabId: myTab, path });
+            } catch (e) {
+                // Rust returns Err (invoke rejects) on session disconnect. Failures obey the
+                // same ownership check as successes: a superseded request's rejection must be silent.
+                if (seq === SFTP._reqSeq && this._tabId === myTab && SFTP.isOpen) {
+                    if (opts && opts.follow && this._isPinned(myTab)) { this._dropFollow(); return; }
+                    this._navFailed(e?.message || '会话不可用', opts);
+                }
+                return;
+            }
+            if (seq !== SFTP._reqSeq || this._tabId !== myTab || !SFTP.isOpen) return;
+            if (opts && opts.follow && this._isPinned(myTab)) { this._dropFollow(); return; }
+            const { files, error } = result;
+            if (error) {
+                this._navFailed(error, opts);
+                return;
+            }
+            this._path = path;
+            // directories first, then alphabetical by name within each kind
+            this._files = (files || []).sort((a, b) => {
+                if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+                return a.name.localeCompare(b.name);
+            });
+            this._listed = true;
+            this._renderListing(opts && (opts.follow || opts.refresh));
+        } finally {
+            // Only the latest request of the current binding owns the loading
+            // state; a superseded or retired request's finally touches nothing.
+            if (this._viewReq === req) this._viewReq = null;
         }
-        return;
-    }
-    if (seq !== SFTP._reqSeq || this._tabId !== myTab) return;
-    const { files, error } = result;
-    if (error) {
-        showToast('无法访问: ' + error, true);
-        // restore the previous content
-        this._renderBreadcrumb();
+    },
+
+    // A cwd follow that was in flight when the user pinned the panel: the pinned
+    // directory stays fixed, so the stale follow result (success or failure) is
+    // dropped silently and the pinned listing is put back on screen.
+    _dropFollow() {
+        this._renderListing(true);
+    },
+
+    // Render breadcrumb + file list. A non-user navigation (cwd follow, upload
+    // refresh) arriving while the user is editing the breadcrumb path must not
+    // destroy the editor: the listing state is still updated (the panel did move
+    // for a follow), the file list renders so the body is never stuck loading,
+    // and the editor's own Enter/Esc exit re-renders the breadcrumb from the
+    // then-current path. Direct user navigations still end an in-progress edit.
+    _renderListing(nonUser) {
+        if (!(nonUser && this._editingPath)) this._renderBreadcrumb();
         this._renderFiles();
-        return;
-    }
-    this._path = path;
-    this._renderBreadcrumb();
-        // directories first, then alphabetical by name within each kind
-        this._files = (files || []).sort((a, b) => {
-            if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-            return a.name.localeCompare(b.name);
-        });
-        this._renderFiles();
+    },
+
+    // Current-owner navigation failure: report the error, and either keep this
+    // panel's last valid listing or — when the panel never obtained one (fresh
+    // open, pinned reopen, follow that superseded the initial listing request) —
+    // show an honest failure state instead of the previous session's rows or a
+    // misleading "empty directory".
+    _navFailed(msg, opts) {
+        showToast('无法访问: ' + msg, true);
+        if (!this._listed) {
+            document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载失败</div>';
+        } else {
+            this._renderListing(opts && (opts.follow || opts.refresh));
+        }
     },
 
     _renderBreadcrumb() {
         const el = document.getElementById('sftp-breadcrumb');
         el.innerHTML = '';
+        this._editingPath = false; // any listing render ends an in-progress path edit
         const root = document.createElement('span');
         root.textContent = '/';
         root.addEventListener('click', () => this.navigate('/'));
@@ -162,6 +245,7 @@ async navigate(path) {
     _editPath() {
         const el = document.getElementById('sftp-breadcrumb');
         if (!el || el.querySelector('input')) return; // already in edit mode
+        this._editingPath = true;
         const input = document.createElement('input');
         input.className = 'sftp-path-input inline-edit';
         input.value = this._path || '/';
@@ -233,7 +317,34 @@ async navigate(path) {
     },
 
     async refresh() {
-        await this.navigate(this._path);
+        await this.navigate(this._path, { refresh: true });
+    },
+
+    // Upload-triggered refreshes are background cleanup of the unchanged view:
+    // concurrent completions coalesce behind the one refresh already in flight,
+    // and the owed follow-up re-validates ownership before firing so a newer
+    // user navigation or panel binding is never overwritten by the cleanup.
+    // Each run carries its binding identity: only the run that still owns the
+    // slot may clear it and drain the queue, so a stale finally (its panel was
+    // closed/rebound, or a newer run already took the slot) touches nothing.
+    _startOwnerRefresh() {
+        this._refreshQueued = null;
+        const run = { epoch: this._viewEpoch };
+        this._refreshInFlight = run;
+        this.refresh().catch(() => {}).finally(() => {
+            if (this._refreshInFlight !== run) return;
+            this._refreshInFlight = null;
+            this._drainQueuedRefresh();
+        });
+    },
+
+    _drainQueuedRefresh() {
+        if (!this._refreshQueued || this._refreshInFlight) return;
+        const owed = this._refreshQueued;
+        this._refreshQueued = null;
+        if (SFTP.isOpen && this._tabId === owed.tabId && this._path === owed.path && !this._viewReq) {
+            this._startOwnerRefresh();
+        }
     },
 
     async download(remotePath, filename) {
@@ -261,13 +372,16 @@ async navigate(path) {
         }
     },
 
-    async uploadLocal(localPath) {
+    // owner = { tabId, path } captured when the batch started: every file in the
+    // batch targets that session/path even if the panel closes or rebinds to
+    // another session mid-batch (transfers are background work by design).
+    async uploadLocal(localPath, owner) {
         const filename = localPath.split(/[\\/]/).pop();
-        const remotePath = (this._path === '/' ? '' : this._path) + '/' + filename;
-        const tid = TransferManager.add(filename, 'upload', this._tabId);
+        const remotePath = (owner.path === '/' ? '' : owner.path) + '/' + filename;
+        const tid = TransferManager.add(filename, 'upload', owner.tabId);
         let transferResult;
         try {
-            transferResult = await ipcRenderer.invoke('sftp-upload', { tabId: this._tabId, localPath, remotePath, transferId: tid });
+            transferResult = await ipcRenderer.invoke('sftp-upload', { tabId: owner.tabId, localPath, remotePath, transferId: tid });
         } catch (e) {
             TransferManager.cancel(tid);
             showToast('上传失败: ' + (e?.message || '会话不可用'), true);
@@ -283,15 +397,33 @@ async navigate(path) {
             }
         } else {
             TransferManager.complete(tid);
-            await this.refresh();
+            // Refresh only the view that still owns this upload, and only as
+            // background cleanup: the panel must still be open on the owner's
+            // session/path, and the LATEST view request of that binding being in
+            // flight (a newer USER navigation) owns the view — issuing a refresh
+            // here would supersede it with the upload's now-stale path. A refresh
+            // already running for THIS binding's earlier completion coalesces into
+            // one follow-up readdir; a foreign binding's refresh (its panel was
+            // closed/rebound) owns nothing here and must not delay this view.
+            if (SFTP.isOpen && this._tabId === owner.tabId && this._path === owner.path) {
+                const inflight = this._refreshInFlight;
+                if (inflight && inflight.epoch === this._viewEpoch) {
+                    this._refreshQueued = owner;
+                } else if (!this._viewReq) {
+                    this._startOwnerRefresh();
+                }
+            }
         }
     },
 
     async upload() {
+        // Snapshot the operation target BEFORE the file-dialog await: the panel
+        // may be closed or rebound to another session while the dialog is open.
+        const owner = { tabId: this._tabId, path: this._path };
         const result = await ipcRenderer.invoke('show-open-dialog', { properties: ['openFile', 'multiSelections'] });
         if (result.canceled || !result.filePaths.length) return;
         for (const localPath of result.filePaths) {
-            await this.uploadLocal(localPath);
+            await this.uploadLocal(localPath, owner);
         }
     },
 
@@ -620,10 +752,13 @@ ipcRenderer.on('sftp-progress', (event, { tabId, transferred, total, transferId 
     TransferManager.update(transferId, transferred, total);
 });
 
-// SFTP cwd follow: auto-navigate when the SSH terminal cd's (unless the tab is pinned)
-ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd }) => {
-    if (SFTP.isOpen && !SFTP._pinned[tabId] && SFTP._tabId === tabId) {
-        SFTP.navigate(cwd);
+// SFTP cwd follow: auto-navigate when the SSH terminal cd's. Ownership rules:
+// only the OPEN panel's own live session follows (background other-session
+// events never steer it), pinned sessions stay fixed, and an in-progress
+// breadcrumb path edit must not be destroyed by a follow re-render.
+ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd } = {}) => {
+    if (SFTP.isOpen && !SFTP._isPinned(tabId) && SFTP._tabId === tabId && !SFTP._editingPath) {
+        SFTP.navigate(cwd, { follow: true });
     }
 });
 
@@ -638,6 +773,9 @@ ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd }) => {
     // Handle a batch of local paths uniformly: reject folders + upload files one by one
     function _handleDroppedPaths(paths) {
         if (!SFTP.isOpen || !SFTP._tabId) return;
+        // Same ownership contract as upload(): one snapshot for the whole batch,
+        // taken synchronously at drop time (uploads still start concurrently).
+        const owner = { tabId: SFTP._tabId, path: SFTP._path };
         (paths || []).forEach(p => {
             if (!p) return;
             try {
@@ -646,7 +784,7 @@ ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd }) => {
                     return;
                 }
             } catch(err) {}
-            SFTP.uploadLocal(p);
+            SFTP.uploadLocal(p, owner);
         });
     }
 

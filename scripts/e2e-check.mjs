@@ -987,6 +987,351 @@ async function main() {
     const sftpClosed = await cdp.eval(`!document.getElementById('overlay-sftp').classList.contains('open')`);
     check('SFTP 面板关闭', sftpClosed === true, `overlay-sftp.open=${!sftpClosed}`);
 
+    // 12a. SFTP session/operation ownership (batch 06): real DOM + REAL renderer
+    //      methods (SFTP.open/upload/navigate/togglePin) behind a synthetic
+    //      SFTP/dialog IPC boundary — no real file picker, upload, clipboard or
+    //      server. ipcRenderer.invoke is wrapped only for the sftp-*/dialog
+    //      commands with programmable deferred settlements; everything is
+    //      restored (and the restore VERIFIED) in the finally block so later
+    //      sections see a clean page. Synthetic session ids never reach the real
+    //      backend. Cdp.eval awaits promises, so gated actions must be STARTED
+    //      through __sftpGate.run (void start + rejection recording) and then
+    //      driven with bounded polls of the observed gate state — never by
+    //      awaiting the action's own deferred promise.
+    await cdp.eval(`(() => {
+      window.__sftpOrigInvoke = ipcRenderer.invoke.bind(ipcRenderer);
+      window.__sftpGate = {
+        log: [],
+        errors: [],    // unexpected action rejections — fail the section, never hidden
+        cleanup: false, // true while the section unwinds: rejections caused by the cleanup itself are expected
+        run(label, fn) {
+          try {
+            const p = fn();
+            if (p && typeof p.catch === 'function') {
+              p.catch(e => { if (!this.cleanup) this.errors.push(label + ': ' + (e && e.message || e)); });
+            }
+          } catch (e) {
+            this.errors.push(label + ' (sync): ' + (e && e.message || e));
+          }
+          return 'started';
+        },
+        settle(pred, value) {
+          const c = this.log.find(c => !c.settled && pred(c));
+          if (c) { c.settled = true; c.resolve(value); }
+          return !!c;
+        },
+        fail(pred, err) {
+          const c = this.log.find(c => !c.settled && pred(c));
+          if (c) { c.settled = true; c.reject(new Error(err)); }
+          return !!c;
+        },
+        pending(pred) {
+          return this.log.filter(c => !c.settled && (!pred || pred(c))).map(c => ({ cmd: c.cmd, args: c.args }));
+        },
+      };
+      ipcRenderer.invoke = (cmd, args) => {
+        if (['sftp-open', 'sftp-readdir', 'sftp-upload', 'show-open-dialog', 'show-save-dialog'].includes(cmd)) {
+          return new Promise((resolve, reject) => { window.__sftpGate.log.push({ cmd, args, resolve, reject, settled: false }); });
+        }
+        return window.__sftpOrigInvoke(cmd, args);
+      };
+      return 'armed';
+    })()`);
+    try {
+      const A = 'zterm-e2e-a', B = 'zterm-e2e-b';
+      // A) Upload batch keeps the owner captured at start across a panel rebind:
+      //    the queued file 2 must go to A's session/path and the completion must
+      //    not re-list B's panel through A's stale callback.
+      await cdp.eval(`window.__sftpGate.run('open-a1', () => SFTP.open(${JSON.stringify(A)}))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, { path: '/srv/app', files: [] })`);
+      await sleep(300);
+      await cdp.eval(`window.__sftpGate.run('upload-a1', () => SFTP.upload())`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'show-open-dialog').length`, 1, 5000);
+      const dlgSettled = await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'show-open-dialog', { canceled: false, filePaths: ['C:/e2e/f1.txt', 'C:/e2e/f2.txt'] })`);
+      await sleep(300);
+      const u1 = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-upload')[0] || null`);
+      check('SFTP 归属：上传批次首个文件发往所属会话 A', dlgSettled === true && !!u1 && u1.args.tabId === A && u1.args.remotePath === '/srv/app/f1.txt', JSON.stringify(u1));
+      await cdp.eval(`window.__sftpGate.run('rebind-b1', () => { SFTP.close(); return SFTP.open(${JSON.stringify(B)}); })`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(B)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(B)}, { path: '/home/bob', files: [{ name: 'readme.md', isDir: false, size: 3, mtime: 0 }] })`);
+      await sleep(300);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-upload' && c.args.remotePath === '/srv/app/f1.txt', {})`);
+      await sleep(300);
+      const sftpOwnerA = await cdp.eval(`({
+        bReaddirs: window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.tabId === ${JSON.stringify(B)}),
+        nextUpload: window.__sftpGate.pending(c => c.cmd === 'sftp-upload')[0] || null,
+        bRows: [...document.querySelectorAll('#sftp-body .sftp-item-name')].map(e => e.textContent),
+      })`);
+      check('SFTP 归属：面板改绑 B 后排队文件仍发往 A 且不改刷 B',
+        sftpOwnerA.bReaddirs.length === 0 && !!sftpOwnerA.nextUpload &&
+        sftpOwnerA.nextUpload.args.tabId === A && sftpOwnerA.nextUpload.args.remotePath === '/srv/app/f2.txt' &&
+        sftpOwnerA.bRows.includes('readme.md'),
+        JSON.stringify(sftpOwnerA));
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-upload' && c.args.tabId === ${JSON.stringify(A)}, {})`);
+      await sleep(300);
+
+      // B) A late rejection of a superseded open must not overwrite B's listing.
+      await cdp.eval(`window.__sftpGate.run('rebind-a2', () => { SFTP.close(); return SFTP.open(${JSON.stringify(A)}); })`); // A's open stays pending
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
+      await sleep(300);
+      await cdp.eval(`window.__sftpGate.run('rebind-b2', () => { SFTP.close(); return SFTP.open(${JSON.stringify(B)}); })`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(B)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(B)}, { path: '/home/bob', files: [{ name: 'readme.md', isDir: false, size: 3, mtime: 0 }] })`);
+      await sleep(300);
+      await cdp.eval(`window.__sftpGate.fail(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, 'SFTP not available')`);
+      await sleep(300);
+      const sftpLateRej = await cdp.eval(`({
+        failed: document.getElementById('sftp-body').innerHTML.includes('加载失败'),
+        rows: [...document.querySelectorAll('#sftp-body .sftp-item-name')].map(e => e.textContent),
+      })`);
+      check('SFTP 归属：被取代的 open 迟到失败不覆盖 B 的列表', sftpLateRej.failed === false && sftpLateRej.rows.includes('readme.md'), JSON.stringify(sftpLateRej));
+
+      // C) Failed pinned reopen shows the honest failure state in the REAL DOM:
+      //    the previous session's rows must be gone (innerHTML replacement), and
+      //    no stale row can dispatch a download against the new session.
+      await cdp.eval(`SFTP.close()`);
+      await sleep(200);
+      await cdp.eval(`window.__sftpGate.run('open-b3', () => SFTP.open(${JSON.stringify(B)}))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(B)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(B)}, { path: '/var/log', files: [{ name: 'syslog', isDir: false, size: 5, mtime: 0 }] })`);
+      await sleep(300);
+      await cdp.eval(`SFTP.togglePin()`);
+      await cdp.eval(`SFTP.close()`);
+      await sleep(200);
+      await cdp.eval(`window.__sftpGate.run('open-a3', () => SFTP.open(${JSON.stringify(A)}))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, { path: '/home/alice', files: [{ name: 'report.txt', isDir: false, size: 9, mtime: 0 }] })`);
+      await sleep(300);
+      await cdp.eval(`SFTP.close()`);
+      await sleep(200);
+      await cdp.eval(`window.__sftpGate.run('open-b4', () => SFTP.open(${JSON.stringify(B)}))`); // pinned: straight to /var/log readdir
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.tabId === ${JSON.stringify(B)}).length`, 1, 5000);
+      const pinnedNav = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-readdir')[0] || null`);
+      await cdp.eval(`window.__sftpGate.fail(c => c.cmd === 'sftp-readdir' && c.args.tabId === ${JSON.stringify(B)}, 'connection lost')`);
+      await sleep(300);
+      const sftpPinned = await cdp.eval(`({
+        failed: document.getElementById('sftp-body').innerHTML.includes('加载失败'),
+        rows: [...document.querySelectorAll('#sftp-body .sftp-item')].length,
+        aliceNames: document.getElementById('sftp-body').innerHTML.includes('report.txt'),
+      })`);
+      check('SFTP 归属：固定的重开失败显示真实错误态且无上一会话文件行',
+        !!pinnedNav && pinnedNav.args.tabId === B && pinnedNav.args.path === '/var/log' &&
+        sftpPinned.failed === true && sftpPinned.rows === 0 && sftpPinned.aliceNames === false,
+        JSON.stringify({ pinnedNav, ...sftpPinned }));
+
+      // D) cwd follow (synthetic backend events through the real Tauri event
+      //    channel): only the panel's own live session follows; pinned stays.
+      await cdp.eval(`SFTP.close()`);
+      await sleep(200);
+      await cdp.eval(`window.__sftpGate.run('open-a4', () => SFTP.open(${JSON.stringify(A)}))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, { path: '/srv/app', files: [] })`);
+      await sleep(300);
+      await cdp.eval(`window.__TAURI__.event.emit('sftp-cwd-changed', { tabId: ${JSON.stringify(A)}, cwd: '/tmp' })`);
+      await sleep(300);
+      const sftpFollow = await cdp.eval(`({
+        pending: window.__sftpGate.pending(c => c.cmd === 'sftp-readdir'),
+      })`);
+      const followOk = sftpFollow.pending.length === 1 && sftpFollow.pending[0].args.tabId === A && sftpFollow.pending[0].args.path === '/tmp';
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/tmp', { files: [{ name: 'tmpfile.txt', isDir: false, size: 1, mtime: 0 }] })`);
+      await sleep(300);
+      const sftpFollowRendered = await cdp.eval(`({
+        path: SFTP._path,
+        rows: [...document.querySelectorAll('#sftp-body .sftp-item-name')].map(e => e.textContent),
+      })`);
+      check('SFTP 归属：cwd 跟随仅导航所属会话并渲染', followOk && sftpFollowRendered.path === '/tmp' && sftpFollowRendered.rows.includes('tmpfile.txt'),
+        JSON.stringify({ sftpFollow, ...sftpFollowRendered }));
+      await cdp.eval(`window.__TAURI__.event.emit('sftp-cwd-changed', { tabId: ${JSON.stringify(B)}, cwd: '/elsewhere' })`);
+      await sleep(300);
+      const sftpFollowOther = await cdp.eval(`window.__sftpGate.pending().length`);
+      check('SFTP 归属：其他会话的 cwd 事件不导航当前面板', sftpFollowOther === 0, `pending=${sftpFollowOther}`);
+      await cdp.eval(`SFTP.togglePin()`);
+      await sleep(200);
+      await cdp.eval(`window.__TAURI__.event.emit('sftp-cwd-changed', { tabId: ${JSON.stringify(A)}, cwd: '/pinned-should-stay' })`);
+      await sleep(300);
+      const sftpFollowPinned = await cdp.eval(`({
+        pending: window.__sftpGate.pending().length,
+        path: SFTP._path,
+      })`);
+      check('SFTP 归属：固定（pin）后 cwd 跟随不再导航', sftpFollowPinned.pending === 0 && sftpFollowPinned.path === '/tmp', JSON.stringify(sftpFollowPinned));
+
+      // E) (batch 06 correction 1) A late open failure of a panel hidden through
+      //    the ORDINARY overlay-close route (real closeOverlay: class removal
+      //    only) must not surface its obsolete error; a visible panel's own
+      //    failure keeps its real feedback.
+      await cdp.eval(`SFTP.togglePin()`); // unpin A again for the later sections
+      await sleep(200);
+      await cdp.eval(`SFTP.close()`);
+      await sleep(200);
+      await cdp.eval(`window.__sftpGate.run('open-a5', () => SFTP.open(${JSON.stringify(A)}))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
+      await cdp.eval(`closeOverlay('overlay-sftp')`); // the real Esc/backdrop close route
+      await sleep(200);
+      await cdp.eval(`window.__sftpGate.fail(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, 'connection lost')`);
+      await sleep(300);
+      const sftpOverlayClose = await cdp.eval(`({
+        failed: document.getElementById('sftp-body').innerHTML.includes('加载失败'),
+        toastMsg: document.getElementById('toast').textContent,
+        toastShown: document.getElementById('toast').classList.contains('show'),
+      })`);
+      check('SFTP 归属：overlay 普通关闭后迟到的 open 失败不再报错',
+        sftpOverlayClose.failed === false && !sftpOverlayClose.toastMsg.includes('无法打开 SFTP'),
+        JSON.stringify(sftpOverlayClose));
+      await cdp.eval(`window.__sftpGate.run('open-a6', () => SFTP.open(${JSON.stringify(A)}))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.fail(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, 'connection lost')`);
+      await sleep(300);
+      const sftpOverlayCloseCtl = await cdp.eval(`({
+        failed: document.getElementById('sftp-body').innerHTML.includes('加载失败'),
+        toastMsg: document.getElementById('toast').textContent,
+      })`);
+      check('SFTP 归属：可见面板自身的 open 失败仍显示错误（对照）',
+        sftpOverlayCloseCtl.failed === true && sftpOverlayCloseCtl.toastMsg.includes('无法打开 SFTP'),
+        JSON.stringify(sftpOverlayCloseCtl));
+
+      // F) A follow completing while the user edits the breadcrumb path keeps
+      //    the editor (real DOM input), renders the listing behind it, and the
+      //    editor's Enter still navigates the typed path.
+      await cdp.eval(`SFTP.close()`);
+      await sleep(200);
+      await cdp.eval(`window.__sftpGate.run('open-a7', () => SFTP.open(${JSON.stringify(A)}))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, { path: '/srv/app', files: [] })`);
+      await sleep(300);
+      await cdp.eval(`window.__TAURI__.event.emit('sftp-cwd-changed', { tabId: ${JSON.stringify(A)}, cwd: '/tmp' })`);
+      await sleep(300);
+      const editMounted = await cdp.eval(`(() => { SFTP._editPath(); const i = document.querySelector('#sftp-breadcrumb input'); if (i) i.value = '/typed/path'; return !!i; })()`);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/tmp', { files: [{ name: 'tmpfile.txt', isDir: false, size: 1, mtime: 0 }] })`);
+      await sleep(300);
+      const sftpEditFollow = await cdp.eval(`(() => {
+        const input = document.querySelector('#sftp-breadcrumb input');
+        return {
+          editorAlive: !!input && input.value === '/typed/path',
+          loading: document.getElementById('sftp-body').innerHTML.includes('加载中'),
+          rows: [...document.querySelectorAll('#sftp-body .sftp-item-name')].map(e => e.textContent),
+        };
+      })()`);
+      check('SFTP 归属：路径编辑中完成的 cwd 跟随保留编辑器并渲染列表',
+        editMounted === true && sftpEditFollow.editorAlive === true &&
+        sftpEditFollow.loading === false && sftpEditFollow.rows.includes('tmpfile.txt'),
+        JSON.stringify({ editMounted, ...sftpEditFollow }));
+      await cdp.eval(`(() => { const i = document.querySelector('#sftp-breadcrumb input'); if (i) i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); return true; })()`);
+      await sleep(300);
+      const typedNav = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.path === '/typed/path').length`);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/typed/path', { files: [] })`);
+      await sleep(300);
+      const sftpEditEnter = await cdp.eval(`({
+        path: SFTP._path,
+        editorGone: !document.querySelector('#sftp-breadcrumb input'),
+        crumbs: document.getElementById('sftp-breadcrumb').textContent,
+      })`);
+      check('SFTP 归属：保留的编辑器 Enter 仍按输入路径导航',
+        typedNav === 1 && sftpEditEnter.path === '/typed/path' && sftpEditEnter.editorGone === true,
+        JSON.stringify({ typedNav, ...sftpEditEnter }));
+
+      // G) A stale in-flight open of a previous binding must not suppress the
+      //    current view's upload-completion refresh.
+      await cdp.eval(`SFTP.close()`);
+      await sleep(200);
+      await cdp.eval(`window.__sftpGate.run('open-a8', () => SFTP.open(${JSON.stringify(A)}))`); // A's open stays pending
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
+      await sleep(300);
+      await cdp.eval(`window.__sftpGate.run('rebind-b6', () => { SFTP.close(); return SFTP.open(${JSON.stringify(B)}); })`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(B)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(B)}, { path: '/home/bob', files: [{ name: 'readme.md', isDir: false, size: 3, mtime: 0 }] })`);
+      await sleep(300);
+      await cdp.eval(`window.__sftpGate.run('upload-b6', () => SFTP.uploadLocal('C:/e2e/new.txt', { tabId: ${JSON.stringify(B)}, path: '/home/bob' }))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-upload' && c.args.tabId === ${JSON.stringify(B)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-upload' && c.args.tabId === ${JSON.stringify(B)}, {})`);
+      await sleep(300);
+      const sftpEpochRefresh = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.tabId === ${JSON.stringify(B)}).length`);
+      check('SFTP 归属：前一会话未完成的 open 不阻塞当前视图的上传刷新', sftpEpochRefresh === 1, `pending=${sftpEpochRefresh}`);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.tabId === ${JSON.stringify(B)}, { files: [{ name: 'readme.md', isDir: false, size: 3, mtime: 0 }, { name: 'new.txt', isDir: false, size: 1, mtime: 0 }] })`);
+      await sleep(300);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, { path: '/old', files: [] })`);
+      await sleep(300);
+
+      // H) Concurrent upload completions coalesce: the unchanged view eventually
+      //    lists every completed file.
+      await cdp.eval(`SFTP.close()`);
+      await sleep(200);
+      await cdp.eval(`window.__sftpGate.run('open-a9', () => SFTP.open(${JSON.stringify(A)}))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, { path: '/srv/app', files: [] })`);
+      await sleep(300);
+      await cdp.eval(`(() => { const o = { tabId: ${JSON.stringify(A)}, path: '/srv/app' }; window.__sftpGate.run('coalesce-1', () => SFTP.uploadLocal('C:/e2e/one.txt', o)); window.__sftpGate.run('coalesce-2', () => SFTP.uploadLocal('C:/e2e/two.txt', o)); return 'started'; })()`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-upload').length`, 2, 5000);
+      const sftpCoalesceUps = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-upload').length`);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-upload' && c.args.remotePath === '/srv/app/one.txt', {})`);
+      await sleep(300);
+      const sftpCoalesceFirst = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-readdir').length`);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-upload' && c.args.remotePath === '/srv/app/two.txt', {})`);
+      await sleep(300);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app', { files: [{ name: 'one.txt', isDir: false, size: 1, mtime: 0 }] })`);
+      await sleep(300);
+      const sftpCoalesceFollowup = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app').length`);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app', { files: [{ name: 'one.txt', isDir: false, size: 1, mtime: 0 }, { name: 'two.txt', isDir: false, size: 2, mtime: 0 }] })`);
+      await sleep(300);
+      const sftpCoalesce = await cdp.eval(`({
+        rows: [...document.querySelectorAll('#sftp-body .sftp-item-name')].map(e => e.textContent),
+      })`);
+      check('SFTP 归属：并发上传的合并刷新最终列出全部完成文件',
+        sftpCoalesceUps === 2 && sftpCoalesceFirst === 1 && sftpCoalesceFollowup === 1 &&
+        sftpCoalesce.rows.includes('one.txt') && sftpCoalesce.rows.includes('two.txt'),
+        JSON.stringify({ sftpCoalesceUps, sftpCoalesceFirst, sftpCoalesceFollowup, ...sftpCoalesce }));
+
+      // Unexpected action rejections recorded by the gate fail the section
+      // explicitly instead of dying as background console errors.
+      const sftpGateErrors = await cdp.eval(`window.__sftpGate ? window.__sftpGate.errors.slice() : ['gate-missing']`);
+      check('SFTP 归属：fixture 未记录未预期的动作拒绝', Array.isArray(sftpGateErrors) && sftpGateErrors.length === 0, JSON.stringify(sftpGateErrors));
+    } finally {
+      // Phase 1 (gate still armed): mark cleanup so rejections caused by the
+      // unwinding itself are expected, then reject every still-pending synthetic
+      // call — bounded rounds absorb follow-up requests the rejections trigger,
+      // so no gated promise is left hanging and none escapes to the backend.
+      let drainInfo = null;
+      for (let round = 0; round < 5; round++) {
+        drainInfo = await cdp.eval(`(() => {
+          const g = window.__sftpGate;
+          if (!g) return { gate: false, pending: -1 };
+          g.cleanup = true;
+          const open = g.log.filter(c => !c.settled);
+          for (const c of open) { c.settled = true; try { c.reject(new Error('e2e sftp section end')); } catch (e) {} }
+          return { gate: true, pending: open.length };
+        })()`).catch(e => ({ gate: false, pending: -1, evalError: String(e && e.message || e) }));
+        if (!drainInfo || drainInfo.pending <= 0) break;
+        await sleep(200);
+      }
+      // Phase 2: restore the real invoke and the owned fixture state, and VERIFY
+      // the restore — an unconfirmed restore must fail the gate, not pass
+      // silently as a clean run.
+      const sftpRestore = await cdp.eval(`(() => {
+        const g = window.__sftpGate;
+        const r = { gate: !!g, invokeRestored: false, pendingAtRestore: -1, stateReset: false, errors: g ? g.errors.slice() : ['gate-missing'] };
+        if (g && window.__sftpOrigInvoke) {
+          ipcRenderer.invoke = window.__sftpOrigInvoke;
+          r.invokeRestored = ipcRenderer.invoke === window.__sftpOrigInvoke;
+          r.pendingAtRestore = g.log.filter(c => !c.settled).length;
+        }
+        try {
+          SFTP.close();
+          SFTP._pinned = {}; SFTP._pinnedPath = {};
+          SFTP._editingPath = false; SFTP._viewReq = null; SFTP._refreshInFlight = null; SFTP._refreshQueued = null;
+          TransferManager._transfers = []; TransferManager._history = [];
+          try { TransferManager._render(); } catch (e) { r.renderError = String(e && e.message || e); }
+          r.stateReset = true;
+        } catch (e) { r.stateError = String(e && e.message || e); }
+        delete window.__sftpGate; delete window.__sftpOrigInvoke;
+        return r;
+      })()`).catch(e => ({ evalError: String(e && e.message || e) }));
+      check('SFTP 归属：fixture 清理完成且原 invoke 恢复经过验证',
+        !!sftpRestore && sftpRestore.invokeRestored === true && sftpRestore.stateReset === true &&
+        sftpRestore.pendingAtRestore === 0 && Array.isArray(sftpRestore.errors) && sftpRestore.errors.length === 0,
+        JSON.stringify({ drainInfo, sftpRestore }));
+      await sleep(300);
+    }
+
     // 13.5 xterm keyboard→onData path (regression guard for the
     // attachCustomKeyEventHandler semantics: an inverted pass-through return
     // value swallows every key). Synthetic lowercase keydown is reliable on

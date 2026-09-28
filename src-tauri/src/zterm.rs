@@ -764,27 +764,35 @@ pub fn get_profiles(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
 
 // ── Command: pty_create (local shell, emits pty-created) ──
 
+/// OSC 7 cwd report pattern (`ESC]7;file://host/path` + BEL/ST terminator).
+const OSC7_CWD_PATTERN: &str = r"\x1b\]7;file://[^/\x07\x1b\\]*(/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)";
+
 /// Parse an OSC 7 cwd (`ESC]7;file://host/pathESC\`, as printed by _zt_cwd's printf).
-/// Pure function for unit tests; returns the path (with leading /), or None when unmatched.
+/// Pure function for unit tests; returns the path (with leading /) of the
+/// LATEST complete report — the reader feeds a rolling window that can retain
+/// earlier reports — or None when unmatched.
 fn parse_osc7_cwd(text: &str) -> Option<String> {
-    let re = regex::Regex::new(r"\x1b\]7;file://[^/\x07\x1b\\]*(\/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)")
-        .ok()?;
-    let m = re.captures(text)?;
-    m.get(1).map(|g| g.as_str().to_string())
+    let re = regex::Regex::new(OSC7_CWD_PATTERN).ok()?;
+    let caps = re.captures_iter(text).last()?;
+    caps.get(1).map(|g| g.as_str().to_string())
 }
 
 /// Parse an iTerm2 OSC 1337 CurrentDir (`ESC]1337;CurrentDir=<path>BEL` or `ST`).
 /// fish ≥3.x emits this natively at every prompt (no shell integration needed),
 /// making it the primary follow-cwd source under fish; iTerm2-style toolchains
-/// often send the `file://host/path` variant. Pure function for unit tests; returns the absolute path without scheme/host, or None when unmatched.
+/// often send the `file://host/path` variant. Pure function for unit tests;
+/// returns the absolute path (without scheme/host) of the LATEST complete
+/// report — the reader feeds a rolling window that can retain earlier
+/// reports — or None when unmatched.
+/// OSC 1337 CurrentDir report pattern (`ESC]1337;CurrentDir=<path>` with an
+/// optional `file://host` prefix, BEL/ST terminator).
+const CURRENTDIR_1337_PATTERN: &str = r"\x1b\]1337;CurrentDir=(?:file://[^/\x07\x1b\\]*)?(/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)";
+
 fn parse_1337_currentdir(text: &str) -> Option<String> {
     // path segment: up to the terminator; an optional file://[host] prefix is allowed (take from the first /)
-    let re = regex::Regex::new(
-        r"\x1b\]1337;CurrentDir=(?:file://[^/\x07\x1b\\]*)?(/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)",
-    )
-    .ok()?;
-    let m = re.captures(text)?;
-    let raw = m.get(1)?.as_str();
+    let re = regex::Regex::new(CURRENTDIR_1337_PATTERN).ok()?;
+    let caps = re.captures_iter(text).last()?;
+    let raw = caps.get(1)?.as_str();
     // fish prints $PWD verbatim (spaces unescaped); iTerm2 variants may %XX-encode, so decode where possible
     let decoded = percent_decode_loose(raw);
     if decoded.starts_with('/') {
@@ -792,6 +800,51 @@ fn parse_1337_currentdir(text: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Rolling cwd-report window update from the SSH reader loop (pure function
+/// for unit tests; the reader keeps the per-session dedup + emit). Appends the
+/// chunk to the persistent window, selects the cwd the window proves, and only
+/// then trims the history: selection happens before the trim so a complete
+/// report followed by a long burst of output is never silently dropped.
+fn window_cwd_after(window: &mut String, text: &str) -> Option<String> {
+    window.push_str(text);
+    let selected = latest_cwd_report(window);
+    if window.chars().count() > 1024 {
+        let keep = window
+            .char_indices()
+            .nth(window.chars().count() - 512)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        window.drain(..keep);
+    }
+    selected
+}
+
+/// The LATEST complete cwd report in the window, across both protocols (the
+/// login wrapper's OSC 7 and fish's per-prompt 1337 CurrentDir). Reports never
+/// overlap, so sequence start order equals emission order: the report that
+/// starts latest is the newest, and older reports retained in the rolling
+/// window must not shadow it. Reports whose path is not absolute are skipped.
+fn latest_cwd_report(window: &str) -> Option<String> {
+    let osc7 = regex::Regex::new(OSC7_CWD_PATTERN).ok()?;
+    let c1337 = regex::Regex::new(CURRENTDIR_1337_PATTERN).ok()?;
+    let mut reports: Vec<(usize, String)> = Vec::new();
+    for caps in osc7.captures_iter(window) {
+        if let (Some(all), Some(path)) = (caps.get(0), caps.get(1)) {
+            reports.push((all.start(), path.as_str().to_string()));
+        }
+    }
+    for caps in c1337.captures_iter(window) {
+        if let (Some(all), Some(path)) = (caps.get(0), caps.get(1)) {
+            reports.push((all.start(), percent_decode_loose(path.as_str())));
+        }
+    }
+    reports.sort_by(|a, b| b.0.cmp(&a.0)); // newest sequence first
+    reports
+        .into_iter()
+        .map(|(_, path)| path)
+        .find(|path| path.starts_with('/'))
 }
 
 /// Lenient %XX decoding: only valid percent escapes are decoded; invalid sequences pass through unchanged (a bare % is common in real paths).
@@ -1700,33 +1753,9 @@ pub async fn ssh_connect(
                             } else {
                                 // Parse OSC 7 for cwd tracking (active for both rc wrapper and typed injection)
                                 if track_cwd {
-                                    // An OSC 7 sequence can be split across SSH data chunks: keep the previous
-                                    // chunk's tail for a joined match, or per-chunk regexes silently drop it (cwd never tracked)
-                                    osc7_window.push_str(&text);
-                                    if osc7_window.chars().count() > 1024 {
-                                        let keep = osc7_window
-                                            .char_indices()
-                                            .nth(osc7_window.chars().count() - 512)
-                                            .map(|(i, _)| i)
-                                            .unwrap_or(0);
-                                        osc7_window.drain(..keep);
-                                    }
-                                    // Both cwd sequence kinds can coexist in the window
-                                    // (the login wrapper's OSC 7 plus fish's per-prompt
-                                    // 1337): take the one that appears later, so a stale
-                                    // OSC 7 cannot shadow the new path
-                                    let osc7_cwd = parse_osc7_cwd(&osc7_window);
-                                    let c1337_cwd = parse_1337_currentdir(&osc7_window);
-                                    let new_cwd: Option<String> = match (&osc7_cwd, &c1337_cwd) {
-                                        (Some(a), Some(b)) => {
-                                            let pa = osc7_window.find("\x1b]7;file://").unwrap_or(0);
-                                            let pb = osc7_window.find("\x1b]1337;CurrentDir=").unwrap_or(0);
-                                            Some(if pb >= pa { b.clone() } else { a.clone() })
-                                        }
-                                        (Some(a), None) => Some(a.clone()),
-                                        (None, Some(b)) => Some(b.clone()),
-                                        (None, None) => None,
-                                    };
+                                    // An OSC 7 sequence can be split across SSH data chunks: the rolling
+                                    // window in window_cwd_after keeps the previous chunk's tail joined
+                                    let new_cwd = window_cwd_after(&mut osc7_window, &text);
                                     if let Some(new_cwd) = new_cwd {
                                         let changed = {
                                             let mut c = cwd_reader.lock();
@@ -5450,6 +5479,71 @@ mod tests {
         let pa = window.find("\u{1b}]7;file://").unwrap_or(0);
         let pb = window.find("\u{1b}]1337;CurrentDir=").unwrap_or(0);
         assert!(pb > pa, "1337 必须出现在更靠后的位置");
+    }
+
+    #[test]
+    fn cwd_window_retained_osc7_reports_latest() {
+        // Two prompts coalesced into one read (or an earlier report retained
+        // across chunks): the rolling window holds BOTH complete OSC 7 reports.
+        // The tracked cwd must be the LATEST one — first-match parsing returned
+        // /old and the per-session dedup then suppressed the real /new change.
+        let mut w = String::new();
+        assert_eq!(
+            window_cwd_after(&mut w, "\u{1b}]7;file://h/old\u{7}user@h $ ").as_deref(),
+            Some("/old")
+        );
+        assert_eq!(
+            window_cwd_after(&mut w, "cd new\r\n\u{1b}]7;file://h/new\u{7}user@h $ ").as_deref(),
+            Some("/new")
+        );
+    }
+
+    #[test]
+    fn cwd_window_retained_1337_reports_latest() {
+        // Same shape under fish: two per-prompt 1337 CurrentDir reports retained.
+        let mut w = String::new();
+        assert_eq!(
+            window_cwd_after(&mut w, "\u{1b}]1337;CurrentDir=/old\u{7}❯ ").as_deref(),
+            Some("/old")
+        );
+        assert_eq!(
+            window_cwd_after(&mut w, "\u{1b}]1337;CurrentDir=/new\u{7}❯ ").as_deref(),
+            Some("/new")
+        );
+    }
+
+    #[test]
+    fn cwd_window_retained_mixed_reports_latest() {
+        // The login wrapper's OSC 7 plus fish's per-prompt 1337, several
+        // reports retained: the NEWEST sequence by position must win no matter
+        // which protocol it belongs to.
+        let w1 = "\u{1b}]1337;CurrentDir=/a\u{7}\u{1b}]7;file://h/b\u{7}\u{1b}]1337;CurrentDir=/c\u{7}";
+        assert_eq!(window_cwd_after(&mut String::new(), w1).as_deref(), Some("/c"));
+        let w2 = "\u{1b}]7;file://h/a\u{7}\u{1b}]1337;CurrentDir=/b\u{7}\u{1b}]7;file://h/c\u{7}";
+        assert_eq!(window_cwd_after(&mut String::new(), w2).as_deref(), Some("/c"));
+    }
+
+    #[test]
+    fn cwd_window_large_trailing_output_keeps_report() {
+        // A complete report followed by >512 chars of command output inside one
+        // big chunk: the tail trim must not discard the newest report before
+        // parsing (the cd would go untracked for that whole prompt cycle).
+        let mut w = String::new();
+        let mut chunk = String::from("\u{1b}]7;file://h/new\u{7}");
+        chunk.push_str(&"x".repeat(1100));
+        assert_eq!(window_cwd_after(&mut w, &chunk).as_deref(), Some("/new"));
+    }
+
+    #[test]
+    fn cwd_window_split_sequence_joins_across_chunks() {
+        // Cross-chunk join preserved through the rolling window: neither half
+        // matches alone, the joined window does.
+        let mut w = String::new();
+        assert_eq!(window_cwd_after(&mut w, "noise\u{1b}]7;file://h/ho"), None);
+        assert_eq!(
+            window_cwd_after(&mut w, "me/user\u{7}$ ").as_deref(),
+            Some("/home/user")
+        );
     }
 
     #[test]
