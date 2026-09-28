@@ -88,6 +88,23 @@ export function seedIsolatedConfig(sandbox, appData = process.env.APPDATA) {
   return target;
 }
 
+// ── Process ownership (batch 05) ────────────────────────────────────────────
+// Rules enforced by every helper below:
+//   1. Startup/debug-port discovery is READ-ONLY: an occupied or unqueryable
+//      port is reported and skipped, never freed by killing its holder — an
+//      image-name match proves nothing (the user may run their own ZTerm or
+//      WebView2 from the same binaries).
+//   2. Termination requires per-PID ownership evidence taken from a query
+//      made for THIS decision, never from an earlier snapshot: pids get
+//      reused and port holders get replaced underneath a long test run.
+//      This includes retries: a kill may only follow a kill-or-verify
+//      failure of a process that was just re-proven ours — never a mere
+//      existence check.
+//   3. OS queries distinguish successful-empty from failure (structured
+//      envelope below). Unknown is never downgraded to free/gone/dead.
+//   4. When ownership cannot be proven the process stays alive and the caller
+//      receives an explicit report. No fallback ever widens the kill set.
+
 export function ownsProcess(child, executable, actual) {
   return Boolean(child && Number.isInteger(child.pid) && child.pid > 0 &&
     child.exitCode === null && child.signalCode == null &&
@@ -95,99 +112,510 @@ export function ownsProcess(child, executable, actual) {
     resolve(actual.ExecutablePath).toLowerCase() === resolve(executable).toLowerCase());
 }
 
-// WebView2 browser processes can outlive their host on this machine (see the
-// startApp comment in e2e-check.mjs): after the host dies they keep the CDP
-// port bound and a relaunch then collides with EADDRINUSE. The sandbox path
-// appears in their --user-data-folder argument, which is a strong ownership
-// signal (fresh mkdtemp per run), so sweeping them is safe.
-export function killSandboxBrowsers(sandboxDirectory) {
-  if (!sandboxDirectory) return;
-  try {
-    const escaped = sandboxDirectory.replace(/'/g, "''");
-    const output = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-      `Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains('${escaped}') } | Select-Object -ExpandProperty ProcessId`],
-      { encoding: 'utf8' }).trim();
-    if (!output) return;
-    for (const line of output.split(/\r?\n/)) {
-      const pid = Number.parseInt(line, 10);
-      if (Number.isInteger(pid) && pid > 0) {
-        try { execFileSync('taskkill.exe', ['/PID', String(pid), '/F'], { stdio: 'ignore' }); } catch { /* already gone */ }
-      }
-    }
-  } catch { /* sweep is best-effort; the port-quiet poll remains the guard */ }
+// Certainty verdict for a process record's executable identity. A valid
+// DIFFERENT path is positive evidence of pid reuse; an absent/unreadable/
+// malformed path is 'unknown' and must never be used as positive evidence of
+// death or foreign identity.
+function executableVerdict(record, executable) {
+  const path = record?.ExecutablePath;
+  if (typeof path !== 'string' || path === '') return 'unknown';
+  return resolve(path).toLowerCase() === resolve(executable).toLowerCase() ? 'owned' : 'foreign';
 }
 
-// Force-killed WebView2 browsers can survive their host with an unreadable
-// command line (mid-teardown), so the sandbox-path sweep cannot see them.
-// The suite asserts the debug port is free at startup, so any LISTENING
-// process on it at cleanup time belongs to this run.
-export function killPortHolder(port) {
-  if (!Number.isInteger(port)) return;
+// Absolute-Windows-path form used for ownership comparisons: case-insensitive
+// (NTFS), separators normalized, trailing separators dropped. Relative or
+// non-path values yield null — they can never be proven equal to the sandbox.
+function normalizedPath(value) {
+  if (typeof value !== 'string' || value === '' || value.includes('"')) return null;
+  if (!/^([a-z]:[\\/]|\\\\)/i.test(value)) return null;
+  try { return resolve(value).toLowerCase().replace(/[\\/]+$/, ''); } catch { return null; }
+}
+
+// Windows command-line tokenizer following the MSVCRT/CommandLineToArgvW
+// argument rules: double quotes toggle quoting, 2n backslashes before a quote
+// collapse to n (an odd backslash escapes the quote), backslashes elsewhere
+// are literal, and a quote immediately followed by another quote inside a
+// quoted argument is an escaped LITERAL quote that does not end the argument
+// (pinned by the Node-child argv comparison in batch 05 — this is a rule-set
+// implementation with boundary cases under test, not a claim of full
+// equivalence). Returns null for a malformed line (unterminated quote) so
+// callers reject the evidence instead of guessing at token boundaries.
+function tokenizeWindowsCommandLine(line) {
+  const tokens = [];
+  let current = '';
+  let started = false;
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '\\') {
+      let backslashes = 0;
+      while (line[i] === '\\') { backslashes++; i++; }
+      i--;
+      const nextIsQuote = line[i + 1] === '"';
+      current += '\\'.repeat(nextIsQuote ? backslashes >> 1 : backslashes);
+      if (nextIsQuote && backslashes % 2 === 1) { current += '"'; i++; }
+      started = true;
+      continue;
+    }
+    if (ch === '"') {
+      if (inQuotes && line[i + 1] === '"') { current += '"'; i++; continue; } // escaped literal quote
+      inQuotes = !inQuotes;
+      started = true;
+      continue;
+    }
+    if (!inQuotes && (ch === ' ' || ch === '\t')) {
+      if (started) { tokens.push(current); current = ''; started = false; }
+      continue;
+    }
+    current += ch;
+    started = true;
+  }
+  if (inQuotes) return null;
+  if (started) tokens.push(current);
+  return tokens;
+}
+
+// The browser profile switch recognized as ownership evidence. Microsoft's
+// CoreWebView2EnvironmentOptions.AdditionalBrowserArguments documentation
+// names --user-data-dir as the switch important to WebView2 functionality and
+// states that repeated switches use the last instance. Similar names such
+// as --user-data-folder are not interchangeable evidence. Unsupported or
+// ambiguous forms remain unknown; changes to the accepted switch contract
+// require owned-runtime evidence, never a fallback to image or port matches.
+const PROFILE_SWITCH = '--user-data-dir';
+
+// Classify a browser command line's EFFECTIVE profile against this run's
+// sandbox: 'owned' (positively our profile), 'foreign' (positively a valid
+// different profile — evidence the process is not ours, without killing it),
+// or 'unknown' (absent / malformed / ambiguous — never evidence of either).
+// Only real switch tokens count: argv0 is skipped, everything after a bare
+// `--` terminator is positional, and any bare (value-less) --user-data-dir
+// occurrence makes the effective value undeterminable. Pure function.
+export function sandboxProfileVerdict(commandLine, sandboxDirectory) {
+  if (typeof commandLine !== 'string') return 'unknown';
+  const sandbox = normalizedPath(sandboxDirectory);
+  if (!sandbox) return 'unknown';
+  const tokens = tokenizeWindowsCommandLine(commandLine);
+  if (tokens === null || tokens.length === 0) return 'unknown'; // malformed → reject
+  const prefix = PROFILE_SWITCH.toLowerCase() + '=';
+  const values = [];
+  for (let i = 1; i < tokens.length; i++) { // i=1: argv0 is the executable, never a switch
+    const token = tokens[i];
+    if (token === '--') break; // switch terminator: later tokens are positional data
+    const lower = token.toLowerCase();
+    if (lower === PROFILE_SWITCH.toLowerCase()) return 'unknown'; // bare override: effective value undeterminable
+    if (!lower.startsWith(prefix)) continue;
+    const value = normalizedPath(token.slice(prefix.length));
+    if (value === null) return 'unknown'; // unparseable value at the effective position
+    values.push(value);
+  }
+  if (values.length === 0) return 'unknown';
+  if (values.some((value) => value !== values[values.length - 1])) return 'unknown'; // conflicting switches → ambiguous
+  const effective = values[values.length - 1]; // documented last-instance rule
+  return effective === sandbox || effective.startsWith(sandbox + '\\') ? 'owned' : 'foreign';
+}
+
+// Boolean convenience over the verdict for callers that only gate on
+// ownership (enumeration candidacy etc.).
+export function ownsSandboxProfile(commandLine, sandboxDirectory) {
+  return sandboxProfileVerdict(commandLine, sandboxDirectory) === 'owned';
+}
+
+// ── Structured OS query protocol ────────────────────────────────────────────
+// Every PowerShell query is wrapped so its stdout is a two-line envelope:
+//     __ZT_OK__  + JSON payload   the query executed; the payload may be empty
+//     __ZT_ERR__ + JSON message   the query itself failed (e.g. access denied)
+// Queries are written so that "no results" is a SUCCESSFUL empty payload, not
+// an error (e.g. listeners are filtered client-side instead of via
+// -LocalPort, whose no-match case raises). Anything else — powershell.exe
+// failing to run, a missing marker, unparsable JSON — is { ok: false }, never
+// an empty success. $ErrorActionPreference='Stop' routes terminating errors
+// (permissions, missing cmdlets) into the catch branch.
+function runStructuredQuery(innerScript) {
+  const script = `$ErrorActionPreference='Stop'\n$out = $null\ntry { $out = @( ${innerScript} ) } catch { Write-Output '__ZT_ERR__'; ConvertTo-Json -Compress -InputObject ([string]$_.Exception.Message); exit 0 }\nWrite-Output '__ZT_OK__'\nConvertTo-Json -Compress -InputObject @($out)`;
+  let raw;
   try {
-    const output = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-      `Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess`],
-      { encoding: 'utf8' }).trim();
-    if (!output) return;
-    for (const line of output.split(/\r?\n/)) {
-      const pid = Number.parseInt(line, 10);
-      if (Number.isInteger(pid) && pid > 0) {
-        try { execFileSync('taskkill.exe', ['/PID', String(pid), '/F'], { stdio: 'ignore' }); } catch { /* already gone */ }
+    raw = execFileSync('powershell.exe', ['-NoProfile', '-Command', script], { encoding: 'utf8' });
+  } catch (e) {
+    // Nonzero exit with captured stdout can still carry a well-formed
+    // envelope; only a missing/unreadable output is "unavailable".
+    raw = e && e.stdout != null ? e.stdout : null;
+  }
+  if (raw == null) return { ok: false, reason: 'unavailable' };
+  const text = String(raw);
+  const okAt = text.indexOf('__ZT_OK__');
+  const errAt = text.indexOf('__ZT_ERR__');
+  if (errAt >= 0 && (okAt < 0 || errAt < okAt)) {
+    let message;
+    try { message = JSON.parse(text.slice(errAt + 11).trim()); } catch { message = null; }
+    return { ok: false, reason: 'query', error: typeof message === 'string' ? message : undefined };
+  }
+  if (okAt < 0) return { ok: false, reason: 'protocol' };
+  let payload;
+  try { payload = JSON.parse(text.slice(okAt + 9).trim()); } catch { return { ok: false, reason: 'protocol' }; }
+  return { ok: true, payload };
+}
+
+// Read-only: pids with a LISTEN socket on the port. Returns
+//   { ok: true, pids: number[] }   [] means provably nothing listens (free)
+//   { ok: false, ... }             query/permission/protocol failure (unknown)
+// A payload entry that is not a positive integer makes the whole result
+// unknown — malformed pid text is never silently discarded.
+export function listPortListenerPids(port) {
+  if (!Number.isInteger(port)) return { ok: false, reason: 'invalid-port' };
+  const query = runStructuredQuery(
+    `Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalPort -eq ${port} } | Select-Object -ExpandProperty OwningProcess | Sort-Object -Unique`);
+  if (!query.ok) return query;
+  const pids = query.payload;
+  if (!Array.isArray(pids) || !pids.every((pid) => Number.isInteger(pid) && pid > 0)) {
+    return { ok: false, reason: 'malformed-pids' };
+  }
+  return { ok: true, pids };
+}
+
+// Read-only identity lookup for one pid (structured contract):
+//   { ok: true, records: [] }                     no process object — gone
+//   { ok: true, records: [ { Name, CommandLine,
+//     ExecutablePath, ParentProcessId } ] }        live (fields may be null)
+//   { ok: false, ... }                            query/parse failure — OR a
+//     malformed record shape (e.g. a [null] payload): explicit unknown,
+//     never a crash and never a silently-dropped identity.
+function queryProcessRecord(pid) {
+  const query = runStructuredQuery(
+    `Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' -ErrorAction Stop | Select-Object Name,CommandLine,ExecutablePath,ParentProcessId`);
+  if (!query.ok) return query;
+  if (!Array.isArray(query.payload) || query.payload.length > 1) return { ok: false, reason: 'protocol' };
+  const record = query.payload[0];
+  if (record === undefined) return { ok: true, records: [] };
+  if (record === null || typeof record !== 'object' || Array.isArray(record)) return { ok: false, reason: 'protocol' };
+  return { ok: true, records: [record] };
+}
+
+// Diagnostic-only image name for port reports; null when unavailable.
+function queryProcessImageName(pid) {
+  const query = runStructuredQuery(`[string](Get-Process -Id ${pid} -ErrorAction Stop).ProcessName`);
+  if (!query.ok || !Array.isArray(query.payload) || query.payload.length !== 1) return null;
+  const name = query.payload[0];
+  return typeof name === 'string' && name ? name : null;
+}
+
+// Terminate WebView2 browser processes proven to belong to this run. Proof is
+// two queries per pid: the enumeration surfaces candidates, then EACH pid is
+// re-queried at the termination boundary and must STILL be an msedgewebview2
+// whose effective --user-data-dir resolves into this run's sandbox (the
+// enumeration is a snapshot; the pid may be replaced between the queries).
+// Image name alone, substring coincidence, or port occupancy prove nothing.
+// Report shape (callers must aggregate, never assume):
+//   terminated     pids provably ours that were terminated
+//   failed         pids provably ours whose termination attempt failed
+//   unconfirmed    candidates whose boundary recheck could not be read
+//                  (uncertainty — reported, not killed)
+//   foreignNow     candidates whose fresh record no longer proves ownership
+//                  (left alive; correctly NOT killed)
+//   skippedUnproven msedgewebview2 records without profile evidence
+//   enumerationFailed  the enumeration itself failed (owned-browser state
+//                  unknown — explicit uncertainty, not empty success)
+export function killSandboxBrowsers(sandboxDirectory) {
+  const report = { terminated: [], failed: [], unconfirmed: [], foreignNow: [], skippedUnproven: 0, enumerationFailed: false };
+  if (!sandboxDirectory) return report;
+  const enumeration = runStructuredQuery(
+    `Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction Stop | Select-Object ProcessId,CommandLine`);
+  if (!enumeration.ok || !Array.isArray(enumeration.payload)) {
+    report.enumerationFailed = true;
+    return report;
+  }
+  for (const record of enumeration.payload) {
+    if (record === null || typeof record !== 'object' || Array.isArray(record) ||
+      !Number.isInteger(record.ProcessId) || record.ProcessId <= 0) {
+      // Malformed identity in the enumeration: the sweep's view is untrustworthy.
+      report.enumerationFailed = true;
+      continue;
+    }
+    const pid = record.ProcessId;
+    const commandLine = typeof record.CommandLine === 'string' ? record.CommandLine : null;
+    if (sandboxProfileVerdict(commandLine, sandboxDirectory) !== 'owned') { report.skippedUnproven += 1; continue; }
+    const fresh = queryProcessRecord(pid);
+    if (!fresh.ok) { report.unconfirmed.push(pid); continue; }
+    if (fresh.records.length === 0) continue; // already gone: nothing to kill
+    const record2 = fresh.records[0];
+    if (typeof record2.Name !== 'string' || record2.Name === '') {
+      // Identity unreadable at the boundary: uncertainty, not a kill and not
+      // a foreign classification.
+      report.unconfirmed.push(pid);
+      continue;
+    }
+    if (record2.Name.toLowerCase() !== 'msedgewebview2.exe') {
+      // The pid now hosts a different image: the original browser is gone
+      // (reuse) — nothing of ours to kill, recorded for reporting.
+      report.foreignNow.push(pid);
+      continue;
+    }
+    const profile = sandboxProfileVerdict(record2.CommandLine, sandboxDirectory);
+    if (profile === 'unknown') { report.unconfirmed.push(pid); continue; }
+    if (profile === 'foreign') { report.foreignNow.push(pid); continue; } // positively a different browser
+    try {
+      execFileSync('taskkill.exe', ['/PID', String(pid), '/F'], { stdio: 'ignore' });
+      report.terminated.push(pid);
+    } catch { report.failed.push(pid); }
+  }
+  return report;
+}
+
+// READ-ONLY classification of what still holds a port AFTER this run's owned
+// cleanup ran. Nothing is ever terminated here; callers turn non-clean
+// findings into an explicit incomplete-cleanup condition. Classification uses
+// a FRESH query — a port that was free (or ours) at startup does not stay
+// ours for the whole run, so no earlier snapshot may vote.
+//   free        nothing listens (successful empty result)
+//   unknown     the listener query failed (never the same as free)
+//   gone        socket outlived its process — nothing left to prove or kill
+//   owned-browser  live msedgewebview2 whose effective profile is this run's
+//                  sandbox (it survived the sweep — cleanup incomplete)
+//   foreign     live process not provably ours (holder replacement / pid
+//               reuse) — left alive and reported
+export function auditPortListeners(port, sandboxDirectory) {
+  const listeners = listPortListenerPids(port);
+  if (!listeners.ok) return { state: 'unknown' };
+  if (listeners.pids.length === 0) return { state: 'free' };
+  const findings = [];
+  for (const pid of listeners.pids) {
+    const query = queryProcessRecord(pid);
+    if (!query.ok) { findings.push({ pid, class: 'unknown' }); continue; }
+    if (query.records.length === 0) { findings.push({ pid, class: 'gone' }); continue; }
+    const record = query.records[0];
+    // Browser identity must be POSITIVELY established: a missing name is an
+    // unknown finding, never a bypass of the kind check.
+    if (typeof record.Name !== 'string' || record.Name === '') { findings.push({ pid, class: 'unknown' }); continue; }
+    if (record.Name.toLowerCase() !== 'msedgewebview2.exe') { findings.push({ pid, class: 'foreign', name: record.Name }); continue; }
+    const profile = sandboxProfileVerdict(record.CommandLine, sandboxDirectory);
+    if (profile === 'owned') { findings.push({ pid, class: 'owned-browser', name: record.Name }); continue; }
+    if (profile === 'foreign') { findings.push({ pid, class: 'foreign', name: record.Name }); continue; }
+    findings.push({ pid, class: 'unknown' });
+  }
+  return { state: 'held', findings };
+}
+
+// Terminate the owned host child. Kills happen ONLY behind fresh identity
+// proof; a failed or UNREADABLE identity query re-queries (bounded) and
+// otherwise leaves the process alive — an existence check NEVER authorizes a
+// kill, and transport success is never mistaken for identity certainty:
+// "killed" requires the record to be gone or to show a VALID different
+// executable (proven reuse). A record whose executable is null/unreadable is
+// 'unknown' — incomplete cleanup with the live handle retained. taskkill may
+// lose the race against an exiting process, so its failure is settled by a
+// fresh identity query; still provably ours = ONE more verified termination
+// attempt, then failure. Dispositions: dead | killed | mismatch | unknown | failed.
+function killOwnedHostChild(child, executable) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const identity = queryProcessRecord(child.pid);
+    if (!identity.ok) continue; // transient query failure: re-query, never kill
+    if (identity.records.length === 0) return { disposition: 'dead', reasons: [] };
+    const initial = executableVerdict(identity.records[0], executable);
+    if (initial === 'unknown') continue; // unreadable identity: re-query, never kill
+    if (initial === 'foreign') {
+      return { disposition: 'mismatch',
+        reasons: [`host pid ${child.pid} no longer runs the sandbox executable (pid reuse/metadata change) — left alive`] };
+    }
+    try {
+      execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    } catch { /* race against an exiting process — the fresh query below settles it */ }
+    let verify = queryProcessRecord(child.pid);
+    if (!verify.ok) return { disposition: 'unknown', reasons: [`host pid ${child.pid}: post-termination identity query failed — termination unverified`] };
+    if (verify.records.length === 0) return { disposition: 'killed', reasons: [] };
+    let after = executableVerdict(verify.records[0], executable);
+    if (after === 'foreign') return { disposition: 'killed', reasons: [] }; // proven reuse: the original is gone
+    if (after === 'unknown') {
+      return { disposition: 'unknown', reasons: [`host pid ${child.pid}: post-termination executable identity unreadable — termination unverified`] };
+    }
+    // Still provably ours: one more VERIFIED termination attempt.
+    try {
+      execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+    } catch { /* settled by the final query below */ }
+    verify = queryProcessRecord(child.pid);
+    if (!verify.ok) return { disposition: 'unknown', reasons: [`host pid ${child.pid}: post-retry identity query failed — termination unverified`] };
+    if (verify.records.length === 0) return { disposition: 'killed', reasons: [] };
+    after = executableVerdict(verify.records[0], executable);
+    if (after === 'foreign') return { disposition: 'killed', reasons: [] };
+    if (after === 'unknown') {
+      return { disposition: 'unknown', reasons: [`host pid ${child.pid}: post-retry executable identity unreadable — termination unverified`] };
+    }
+    return { disposition: 'failed', reasons: [`host pid ${child.pid} survived repeated verified termination attempts`] };
+  }
+  return { disposition: 'unknown', reasons: [`host pid ${child.pid}: identity unreadable — ownership unverifiable, left alive`] };
+}
+
+// Orchestrates the FULL owned-runtime cleanup (this is the real killExisting
+// logic, exported so the actual decision path is testable with a mocked OS
+// boundary): host child, sandbox browsers (with per-PID revalidation), and a
+// read-only post-cleanup audit of the launch port. Every relevant outcome is
+// aggregated — a browser whose verified termination FAILED counts even when
+// the debug port is free (a free port is not proof of complete owned
+// cleanup), enumeration failures count as explicit uncertainty, and foreign
+// or unreadable port holders are reported and left alive. Returns exactly
+// true when cleanup is established, else { ok: false, reasons, hostDisposition }
+// — restarts and the final run gate treat that as a failure.
+export function killOwnedRuntime({ child, executable, sandboxDirectory, launchPort, launched }) {
+  const reasons = [];
+  let hostDisposition = 'dead';
+  const hasLiveHandle = child && Number.isInteger(child.pid) && child.pid > 0 &&
+    child.exitCode === null && child.signalCode == null;
+  if (hasLiveHandle) {
+    const host = killOwnedHostChild(child, executable);
+    hostDisposition = host.disposition;
+    reasons.push(...host.reasons);
+  }
+  // Browsers: bounded rounds. A browser proven ours that still listens after
+  // a verified sweep is re-swept (each round re-proves per PID with fresh
+  // queries). Foreign/unreadable holders and dead-pid zombie sockets (no
+  // process left, relaunches use fresh ports anyway) are reported/diagnostic
+  // only and never retried by killing.
+  for (let round = 0; round < 3; round++) {
+    const report = killSandboxBrowsers(sandboxDirectory);
+    if (report.enumerationFailed) reasons.push('sandbox browser enumeration failed — owned browser cleanup unverifiable');
+    for (const pid of report.failed) reasons.push(`sandbox browser pid ${pid} survived a verified termination attempt`);
+    for (const pid of report.unconfirmed) reasons.push(`sandbox browser candidate pid ${pid} could not be re-verified at termination time — not killed, ownership uncertain`);
+    if (!launched || !Number.isInteger(launchPort)) break;
+    const audit = auditPortListeners(launchPort, sandboxDirectory);
+    if (audit.state === 'free') break;
+    if (audit.state === 'unknown') {
+      reasons.push(`debug port ${launchPort}: listener query failed — cleanup not verifiable`);
+      break;
+    }
+    let ownedListening = false;
+    for (const finding of audit.findings) {
+      if (finding.class === 'gone') continue;
+      if (finding.class === 'owned-browser') { ownedListening = true; continue; }
+      if (finding.class === 'unknown') {
+        reasons.push(`debug port ${launchPort}: pid ${finding.pid} metadata unreadable — not provably ours, left alive`);
+      } else {
+        const who = finding.name ? `${finding.name} (pid ${finding.pid})` : `pid ${finding.pid}`;
+        reasons.push(`debug port ${launchPort} still held by ${who}; not proven owned by this run — left alive`);
       }
     }
-  } catch { /* best-effort; the port-quiet poll remains the guard */ }
+    if (!ownedListening || round === 2) {
+      if (ownedListening) reasons.push(`debug port ${launchPort}: this run's sandbox browser still listens after repeated verified sweeps`);
+      break;
+    }
+  }
+  if (reasons.length > 0) return { ok: false, reasons: [...new Set(reasons)], hostDisposition };
+  return true;
+}
+
+// Prove the CDP endpoint belongs to THIS run before any attach/evaluate:
+// the debug-port listener must be a live msedgewebview2 whose parent chain
+// reaches the host pid, and that host pid must STILL run the sandbox
+// executable (fresh metadata, not a launch-time snapshot). Returns true or
+// { ok: false, reasons } — callers refuse to attach on anything but true.
+export function verifyCdpEndpointOwnership(port, child, executable) {
+  if (!child || !Number.isInteger(child.pid) || child.pid <= 0 ||
+    child.exitCode !== null || child.signalCode != null) {
+    return { ok: false, reasons: ['no live owned host process handle'] };
+  }
+  const listeners = listPortListenerPids(port);
+  if (!listeners.ok) return { ok: false, reasons: [`debug port ${port}: listener query failed — endpoint identity unverifiable`] };
+  if (listeners.pids.length === 0) return { ok: false, reasons: [`debug port ${port}: no listener (endpoint gone)`] };
+  const host = queryProcessRecord(child.pid);
+  if (!host.ok) return { ok: false, reasons: [`host pid ${child.pid}: identity query failed — endpoint ownership unverifiable`] };
+  if (host.records.length === 0) return { ok: false, reasons: [`host pid ${child.pid} is gone`] };
+  const hostVerdict = executableVerdict(host.records[0], executable);
+  if (hostVerdict === 'foreign') {
+    return { ok: false, reasons: [`host pid ${child.pid} no longer runs the sandbox executable — endpoint not proven ours`] };
+  }
+  if (hostVerdict === 'unknown') {
+    return { ok: false, reasons: [`host pid ${child.pid}: executable identity unreadable — endpoint ownership unproven`] };
+  }
+  const reasons = [];
+  for (const pid of listeners.pids) {
+    const hop = listenerReachesHost(pid, child.pid, 0);
+    if (hop !== true) reasons.push(`debug port ${port} listener ${typeof hop === 'string' ? hop : `pid ${pid}: not proven part of the owned browser tree`}`);
+  }
+  return reasons.length > 0 ? { ok: false, reasons } : true;
+}
+
+// Walk a bounded parent chain: every hop must be POSITIVELY identified as a
+// live msedgewebview2 (a missing name is unreadable, not a pass) until the
+// host pid is reached. Returns true or a human-readable failure reason.
+function listenerReachesHost(pid, hostPid, depth) {
+  if (pid === hostPid) return true;
+  if (depth >= 5) return `pid ${pid}: parent chain does not reach the host within bounds`;
+  const query = queryProcessRecord(pid);
+  if (!query.ok) return `pid ${pid}: identity query failed`;
+  if (query.records.length === 0) return `pid ${pid}: no live process record`;
+  const record = query.records[0];
+  if (typeof record.Name !== 'string' || record.Name === '') return `pid ${pid}: browser identity unreadable`;
+  if (record.Name.toLowerCase() !== 'msedgewebview2.exe') {
+    return `pid ${pid}: listener is ${record.Name}, not msedgewebview2`;
+  }
+  if (!Number.isInteger(record.ParentProcessId) || record.ParentProcessId <= 0) return `pid ${pid}: no parent metadata`;
+  return listenerReachesHost(record.ParentProcessId, hostPid, depth + 1);
+}
+
+// Gate between endpoint discovery and CDP attachment. Two independent proofs
+// are required, in order:
+//   1. DESTINATION BINDING: the discovered ws URL must point at the expected
+//      loopback target (ws(s) scheme, 127.0.0.1/localhost host, the exact
+//      expected port, a /devtools/page/ target) — otherwise the ownership
+//      proof could approve a connection to a DIFFERENT endpoint than the one
+//      discovery returned.
+//   2. OWNERSHIP: verify(port) — verifyCdpEndpointOwnership for that SAME
+//      port — must return exactly true.
+// Discovery itself (fetching /json) is harmless, but attach+evaluate can
+// interfere with whoever REALLY owns an endpoint (Runtime.evaluate vs real
+// SSH sessions is a recorded failure class). Any failure throws BEFORE the
+// caller can construct a CDP session — zero CDP actions on an unowned,
+// replaced or mismatched endpoint.
+export async function acquireVerifiedPage({ discover, expectedPort, verify }) {
+  const wsUrl = await discover();
+  if (typeof wsUrl !== 'string' || wsUrl === '') {
+    throw new Error(`refusing CDP attach: discovery returned no endpoint (${String(wsUrl)})`);
+  }
+  let parsed;
+  try { parsed = new URL(wsUrl); } catch { throw new Error(`refusing CDP attach: discovered endpoint is not a URL: ${wsUrl}`); }
+  if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') {
+    throw new Error(`refusing CDP attach: endpoint scheme ${parsed.protocol} is not a devtools WebSocket`);
+  }
+  const loopback = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' || parsed.hostname === '::1';
+  const port = Number.parseInt(parsed.port, 10);
+  if (!loopback || !Number.isInteger(port) || port !== expectedPort) {
+    throw new Error(`refusing CDP attach: endpoint ${wsUrl} does not match the expected loopback target 127.0.0.1:${expectedPort}`);
+  }
+  if (!parsed.pathname.startsWith('/devtools/page/')) {
+    throw new Error(`refusing CDP attach: endpoint path ${parsed.pathname} is not a devtools page target`);
+  }
+  let verdict;
+  try { verdict = await verify(port); }
+  catch (error) { verdict = { ok: false, reasons: [`endpoint verification error: ${error?.message ?? error}`] }; }
+  if (verdict !== true) {
+    const detail = verdict && Array.isArray(verdict.reasons) ? verdict.reasons.join('; ') : 'ownership not proven';
+    throw new Error(`refusing CDP attach: ${detail}`);
+  }
+  return wsUrl;
 }
 
 export async function restartOwnedApp({ stop, waitUntilQuiet, start }) {
-  if (stop() !== true) throw new Error('Owned process cleanup failed; refusing restart');
+  // stop must return exactly true: a hard failure AND an incomplete-cleanup
+  // report object both refuse the restart — an uncertain cleanup is never
+  // treated as established.
+  if (stop() !== true) throw new Error('Owned process cleanup was not established; refusing restart');
   await waitUntilQuiet();
   return start();
 }
 
-// Startup sweep for the per-launch debug port range. Per-launch ports isolate
-// launches WITHIN one run, but a stale listener from a PREVIOUS run can still
-// squat on one (observed: launch 3's port was already served by an orphaned
-// browser — /json answered yet never listed the renderer page). Kill holders
-// whose image belongs to us (msedgewebview2/zterm); a foreign process or a
-// dead-PID zombie socket cannot be killed, so that port is reported occupied
-// and the caller shifts the base port instead. Returns still-occupied ports.
-export function sweepDebugPortRange(base, count) {
+// READ-ONLY startup discovery for the per-launch debug port range. Per-launch
+// ports isolate launches WITHIN one run, but a listener from OUTSIDE this run
+// (a previous run's orphaned browser, or the user's own ZTerm/WebView2) can
+// squat on one — observed: /json answered yet never listed the renderer page.
+// Holders are never killed here (rule 1): an image name is recorded for
+// diagnostics only. Returns one entry per non-free port, so the caller can
+// shift the base port while anything stays occupied or unqueryable:
+//   { port, holders: [{ pid, name }], unknown }   unknown=true → query failed.
+export function probeDebugPortRange(base, count) {
   const occupied = [];
-  const listenersOf = (port) => {
-    // Get-NetTCPConnection exits 1 with EMPTY stdout when nothing listens
-    // (its "no matching objects" error is suppressed but still sets the code)
-    // — a free port and a hard query failure must stay distinguishable, so
-    // read stdout off the thrown error before giving up.
-    try {
-      return execFileSync('powershell.exe', ['-NoProfile', '-Command',
-        `Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess | Get-Unique`],
-        { encoding: 'utf8' }).trim();
-    } catch (e) {
-      if (e && e.stdout != null) return String(e.stdout).trim();
-      return null; // powershell itself failed → treat as unknown/occupied
-    }
-  };
   for (let port = base; port < base + count; port++) {
-    let pids = listenersOf(port);
-    if (pids === null) { occupied.push(port); continue; }
-    if (pids) {
-      for (const line of pids.split(/\r?\n/)) {
-        const pid = Number.parseInt(line, 10);
-        if (!Number.isInteger(pid) || pid <= 0) continue;
-        let name = '';
-        try {
-          name = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-            `(Get-Process -Id ${pid} -ErrorAction SilentlyContinue).ProcessName`],
-            { encoding: 'utf8' }).trim();
-        } catch { /* unknown → do not touch */ }
-        if (/^(msedgewebview2|zterm)$/i.test(name)) {
-          try { execFileSync('taskkill.exe', ['/PID', String(pid), '/F'], { stdio: 'ignore' }); } catch { /* already gone */ }
-        }
-      }
-      // Re-check after the sweep: a killed process can leave the socket bound
-      // briefly, and foreign/dead-PID holders were deliberately not touched.
-      pids = listenersOf(port);
-      if (pids === null || pids) occupied.push(port);
-    }
+    const listeners = listPortListenerPids(port);
+    if (!listeners.ok) { occupied.push({ port, holders: [], unknown: true }); continue; }
+    if (listeners.pids.length === 0) continue;
+    occupied.push({ port, holders: listeners.pids.map((pid) => ({ pid, name: queryProcessImageName(pid) })), unknown: false });
   }
   return occupied;
 }

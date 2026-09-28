@@ -21,7 +21,7 @@ import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync
 import { resolve, dirname, join } from 'node:path';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { createE2eSandbox, ownsProcess, restartOwnedApp, killSandboxBrowsers, killPortHolder, sweepDebugPortRange } from './e2e-isolation.mjs';
+import { createE2eSandbox, restartOwnedApp, killOwnedRuntime, verifyCdpEndpointOwnership, acquireVerifiedPage, probeDebugPortRange } from './e2e-isolation.mjs';
 
 const SOURCE_EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
 let EXE = SOURCE_EXE;
@@ -30,9 +30,13 @@ const PORT = Number(process.argv[3] ?? 9222);
 // WebView2 can leave a zombie LISTEN socket whose owning PID no longer exists
 // — nothing left to kill, only the kernel releases it — so reusing one port
 // across restarts is a deterministic EADDRINUSE under load. Per-launch ports
-// make restarts immune. BASE_PORT is resolved in main(): the launch range
-// BASE..BASE+4 is swept first (stale listeners from PREVIOUS runs) and the
-// base shifts by 10 while any port stays occupied.
+// make restarts immune. This suite performs 6 launches (initial run plus 5
+// restarts), so the whole plan BASE..BASE+5 must be free. BASE_PORT is
+// resolved in main(): the launch range is probed READ-ONLY first (any holder
+// — including the user's own ZTerm or WebView2 — is reported and left alone)
+// and the base shifts by 10 while any planned port stays occupied or
+// unqueryable; startApp revalidates its exact port again before spawning.
+const LAUNCH_PLAN = 6;
 let BASE_PORT = PORT;
 let launchPort = PORT;
 let sandbox = null;
@@ -103,63 +107,26 @@ function restoreConfig() {
   configExistedAtStart = null;
 }
 
-// Only the exact process launched from this fresh sandbox may be terminated.
-// Never use an image-name kill: even a failed preflight runs the exit hook.
+// Binder for the exported killOwnedRuntime orchestration (the decision logic
+// lives in e2e-isolation.mjs so it is testable against a mocked OS boundary).
+// Only processes PROVEN to belong to this run are terminated; everything else
+// stays alive and is reported. Returns exactly true when cleanup is
+// established, or { ok: false, reasons } — restarts and the final gate treat
+// that as a failure instead of silently assuming a clean state.
 function killExisting() {
   const child = ownedChild;
-  // The port sweep is only safe once this run has actually launched an
-  // instance: on a failed preflight (never launched) a foreign listener on
-  // PORT is someone else's process and must not be killed.
-  const sweepPort = () => { if (launchCount > 0) killPortHolder(launchPort); };
-  if (!sandbox || !child?.pid || child.exitCode !== null) {
-    ownedChild = null;
-    // The host may be gone while its WebView2 browsers still hold the CDP
-    // port — sweep them by sandbox path and by port or the restart below
-    // collides.
-    killSandboxBrowsers(sandbox?.directory);
-    sweepPort();
-    return true;
-  }
-  try {
-    const output = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-      `Get-CimInstance Win32_Process -Filter 'ProcessId=${child.pid}' | Select-Object ProcessId,ExecutablePath | ConvertTo-Json -Compress`], { encoding: 'utf8' }).trim();
-    const actual = output ? JSON.parse(output) : null;
-    if (!actual) { ownedChild = null; killSandboxBrowsers(sandbox.directory); sweepPort(); return true; }
-    if (!ownsProcess(child, EXE, actual)) {
-      console.error('[e2e] refusing cleanup: process ownership mismatch');
-      return false;
-    }
-    execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
-    killSandboxBrowsers(sandbox.directory);
-    sweepPort();
-    ownedChild = null;
-    return true;
-  } catch (error) {
-    // taskkill can lose the race against a process that is already exiting;
-    // confirm via WMI and only refuse the restart when the host provably
-    // survives a second attempt.
-    try {
-      const alive = () => {
-        const out = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-          `Get-CimInstance Win32_Process -Filter 'ProcessId=${child.pid}' | Select-Object -ExpandProperty ProcessId`], { encoding: 'utf8' }).trim();
-        return !!out;
-      };
-      if (alive()) {
-        try { execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* fall through */ }
-      }
-      if (alive()) {
-        console.error('[e2e] owned process cleanup failed:', error.message);
-        return false;
-      }
-      killSandboxBrowsers(sandbox.directory);
-      sweepPort();
-      ownedChild = null;
-      return true;
-    } catch (inner) {
-      console.error('[e2e] owned process cleanup failed:', inner.message);
-      return false;
-    }
-  }
+  const result = killOwnedRuntime({
+    child,
+    executable: EXE,
+    sandboxDirectory: sandbox?.directory,
+    launchPort,
+    launched: launchCount > 0,
+  });
+  if (result === true) { ownedChild = null; return true; }
+  // Keep the handle only while it still refers to something that may be ours
+  // (mismatch/unknown/failed); dead/killed handles are released.
+  if (result.hostDisposition === 'dead' || result.hostDisposition === 'killed') ownedChild = null;
+  return result;
 }
 // Compile the virtual-desktop move helper into the run sandbox, once per run
 // (sandbox cleanup then removes it automatically). csc wants native Windows
@@ -235,6 +202,17 @@ function startApp() {
   // browser to attach to.
   const udf = join(sandbox.directory, `webview-${++launchCount}`);
   launchPort = BASE_PORT + launchCount - 1;
+  // Revalidate THIS launch's port read-only right before spawning: a foreign
+  // process may have taken it since startup (holder replacement). Report and
+  // abort — never kill the holder, never launch onto a taken port.
+  const occupied = probeDebugPortRange(launchPort, 1);
+  if (occupied.length > 0) {
+    const o = occupied[0];
+    const detail = o.unknown
+      ? `${o.port}（监听查询失败）`
+      : `${o.port}（${o.holders.map((h) => `${h.pid}:${h.name ?? '未知进程'}`).join('/')}，不会被终止）`;
+    throw new Error(`调试端口 ${detail} 在启动前被占用；拒绝在非自有端口上启动`);
+  }
   const child = spawn(EXE, [], {
     detached: true,
     stdio: 'ignore',
@@ -356,15 +334,21 @@ async function waitForValue(cdp, expression, expected, timeoutMs = 8000, mode = 
 
 async function main() {
   if (!existsSync(SOURCE_EXE)) throw new Error(`exe 不存在: ${SOURCE_EXE}`);
-  // The launch range BASE..BASE+4 must be fully free: sweep stale holders
-  // from previous runs (image-verified msedgewebview2/zterm only), and shift
-  // the base by 10 while anything remains (foreign listener or an unkillable
-  // dead-PID zombie socket — a stale port can serve /json yet never list the
-  // renderer page).
+  // The complete launch plan BASE..BASE+LAUNCH_PLAN-1 must be free. Discovery
+  // is READ-ONLY: holders are never killed (an image name proves nothing —
+  // the user may run their own ZTerm or WebView2 on these ports). Shift the
+  // base by 10 while anything stays occupied or unqueryable (a stale port can
+  // serve /json yet never list the renderer page), and fail with holder
+  // diagnostics when the bounded range is exhausted.
   for (let shift = 0; ; shift += 10) {
-    const occupied = sweepDebugPortRange(PORT + shift, 5);
+    const occupied = probeDebugPortRange(PORT + shift, LAUNCH_PLAN);
     if (occupied.length === 0) { BASE_PORT = PORT + shift; launchPort = BASE_PORT; break; }
-    if (shift >= 20) throw new Error(`调试端口段均被占用（${occupied.join(', ')}），无法启动 E2E`);
+    if (shift >= 20) {
+      const detail = occupied.map((o) => o.unknown
+        ? `${o.port}（查询失败）`
+        : `${o.port}（${o.holders.map((h) => `${h.pid}:${h.name ?? '未知进程'}`).join('/')}，不会被终止）`).join('、');
+      throw new Error(`调试端口段均被占用（${detail}），无法启动 E2E`);
+    }
   }
   await assertUnusedPort(BASE_PORT);
   sandbox = createE2eSandbox(SOURCE_EXE);
@@ -375,7 +359,18 @@ async function main() {
   killExisting();
   backupConfig();
   startApp();
-  const wsUrl = await waitForPage();
+  // Identity gate BEFORE any attach/evaluate: /json discovery is harmless,
+  // but a CDP session on a replaced/foreign endpoint could interfere with
+  // someone else's instance (Runtime.evaluate vs real SSH sessions is a
+  // recorded failure class). The gate binds the ownership proof to the
+  // discovered endpoint's own loopback address/port. The later
+  // get-data-dir-info check stays as an independent in-page guard, not the
+  // ownership proof.
+  const wsUrl = await acquireVerifiedPage({
+    discover: () => waitForPage(),
+    expectedPort: launchPort,
+    verify: (port) => verifyCdpEndpointOwnership(port, ownedChild, EXE),
+  });
   const cdp = new Cdp(wsUrl);
   await cdp.connect();
 
@@ -3579,7 +3574,13 @@ async function main() {
         } catch { break; } // connection refused → old browser is gone
       }
       } });
-      const url = await waitForPage();
+      // Same pre-attach identity gate (destination binding + ownership) as
+      // the initial connection.
+      const url = await acquireVerifiedPage({
+        discover: () => waitForPage(),
+        expectedPort: launchPort,
+        verify: (port) => verifyCdpEndpointOwnership(port, ownedChild, EXE),
+      });
       const c2 = new Cdp(url);
       await c2.connect();
       return c2;
@@ -3709,7 +3710,10 @@ async function main() {
     cdp.close();
     const stopped = killExisting();
     restoreConfig();
-    if (!stopped) throw new Error('Owned runtime cleanup failed');
+    // Anything other than exactly true — owned kill failure or an explicit
+    // incomplete-cleanup report (unproven live holder on a launch port) —
+    // fails the run; uncertain cleanup is never treated as success.
+    if (stopped !== true) throw new Error(`Owned runtime cleanup failed: ${stopped.reasons.join('; ')}`);
   }
 
   const failed = results.filter((r) => !r.pass);
