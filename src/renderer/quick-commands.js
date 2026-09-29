@@ -25,7 +25,10 @@ function saveQuickCommands() {
 }
 
 function openQC() {
-    document.getElementById('overlay-qc').classList.add('open');
+    // Single-overlay policy: open through the canonical openOverlay path (as
+    // openQCEdit does) so an already-open overlay (e.g. the SFTP panel) is
+    // closed first instead of stacking — Esc then closes just this overlay.
+    openOverlay('overlay-qc');
     document.getElementById('qc-input').value = '';
     _qcSelected = 0;
     qcFilter();
@@ -46,6 +49,9 @@ function closeQC() {
 
 function qcFilter() {
     const query = document.getElementById('qc-input').value.toLowerCase();
+    // The query reshapes the visible set: reset the selection (same as
+    // paletteFilter) so Enter always acts on a visible highlighted row.
+    _qcSelected = 0;
     const filtered = filterQuickCommands(_qcCommands, query);
     const list = document.getElementById('qc-list');
     if (filtered.length === 0) {
@@ -75,8 +81,12 @@ function qcFilter() {
 
 function qcSelect(i) {
     _qcSelected = i;
-    document.querySelectorAll('#qc-list .v3-item').forEach((el, idx) => {
-        if (idx === i) {
+    document.querySelectorAll('#qc-list .v3-item').forEach(el => {
+        // Grouped rendering reorders rows: a row's position among the .v3-item
+        // nodes diverges from the flat filtered-list index that the render
+        // (data-index), the hover callbacks and the Enter dispatch all share.
+        // Match on the row's own flat index, never its DOM position.
+        if (Number(el.dataset.index) === i) {
             el.setAttribute('data-selected', '');
             el.setAttribute('aria-selected', 'true');
             el.scrollIntoView({ block: 'nearest' });
