@@ -1367,8 +1367,15 @@ async fn detect_shell(sftp: &russh_sftp::client::SftpSession, username: &str) ->
 fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>, String)> {
     if shell.ends_with("/bash") {
         let rc_path = format!("/tmp/.zterm-rc-{}", stamp);
+        // bash --rcfile starts a NON-login interactive shell: it reads neither
+        // /etc/profile (RHEL/CentOS keep their PATH setup in /etc/profile.d/*.sh,
+        // sourced from there) nor ~/.bashrc. Source /etc/profile first, then the
+        // first existing user login profile, with ~/.bashrc as the final fallback
+        // (when no login profile exists, the || chain would otherwise fail as a
+        // whole and leave even ~/.bashrc unread).
         let rc = format!(
-            "{{ [ -f ~/.bash_profile ] && . ~/.bash_profile; }} || {{ [ -f ~/.bash_login ] && . ~/.bash_login; }} || {{ [ -f ~/.profile ] && . ~/.profile; }}\n\
+            "[ -f /etc/profile ] && . /etc/profile\n\
+             {{ [ -f ~/.bash_profile ] && . ~/.bash_profile; }} || {{ [ -f ~/.bash_login ] && . ~/.bash_login; }} || {{ [ -f ~/.profile ] && . ~/.profile; }} || {{ [ -f ~/.bashrc ] && . ~/.bashrc; }}\n\
              _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }}\n\
              PROMPT_COMMAND=\"_zt_cwd;${{PROMPT_COMMAND}}\"\n\
              rm -f {}\n",
@@ -1380,20 +1387,30 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
         ))
     } else if shell.ends_with("/zsh") {
         let dir = format!("/tmp/.zterm-zdot-{}", stamp);
+        // ZDOTDIR redirects EVERY zsh startup file, so the wrapper set must
+        // forward all four in read order — .zshenv (always read first: nvm/
+        // pyenv/cargo/homebrew PATH setup commonly lives there) and .zlogin
+        // (read last for login shells) too, or they are silently skipped.
         let zshrc = format!(
             "[ -f ~/.zshrc ] && . ~/.zshrc\n\
              _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }}\n\
-             precmd_functions+=(_zt_cwd)\n\
-             rm -rf {}\n",
-            dir
+             precmd_functions+=(_zt_cwd)\n"
         );
+        // The temp dir is removed by .zlogin, the LAST file zsh reads: removing
+        // it in .zshrc would delete .zlogin before zsh gets to it.
+        let zlogin = format!("[ -f ~/.zlogin ] && . ~/.zlogin\nrm -rf {}\n", dir);
         Some((
             vec![
-                (format!("{}/.zshrc", dir), zshrc.into_bytes()),
+                (
+                    format!("{}/.zshenv", dir),
+                    b"[ -f ~/.zshenv ] && . ~/.zshenv\n".to_vec(),
+                ),
                 (
                     format!("{}/.zprofile", dir),
                     b"[ -f ~/.zprofile ] && . ~/.zprofile\n".to_vec(),
                 ),
+                (format!("{}/.zshrc", dir), zshrc.into_bytes()),
+                (format!("{}/.zlogin", dir), zlogin.into_bytes()),
             ],
             format!("exec env ZDOTDIR={} zsh -il", dir),
         ))
@@ -6133,6 +6150,49 @@ mod tests {
         assert_eq!(parse_osc7_cwd("plain text"), None);
         assert_eq!(parse_osc7_cwd("\x1b]7;file://host"), None, "无终止符不匹配");
         assert_eq!(parse_osc7_cwd(""), None);
+    }
+
+    #[test]
+    fn zsh_wrapper_forwards_the_full_startup_file_set() {
+        // ZDOTDIR redirects every zsh startup file: the wrapper must forward
+        // all four in read order, or the redirected ones (e.g. .zshenv with the
+        // user's nvm/pyenv/cargo PATH) are silently skipped.
+        let (files, exec) = cwd_wrapper_files("/bin/zsh", "t").expect("zsh wrapper");
+        assert!(exec.contains("zsh -il"));
+        let names: Vec<&str> = files
+            .iter()
+            .map(|(p, _)| p.rsplit('/').next().unwrap())
+            .collect();
+        assert_eq!(names, [".zshenv", ".zprofile", ".zshrc", ".zlogin"]);
+        for (path, content) in &files {
+            let name = path.rsplit('/').next().unwrap();
+            let text = String::from_utf8_lossy(content);
+            assert!(
+                text.contains(&format!("~/{name}")),
+                "{name} must forward to the real ~/{name}: {text}"
+            );
+        }
+        // The temp dir is removed by the LAST file zsh reads (.zlogin) —
+        // removing it in .zshrc would delete .zlogin before zsh gets to it.
+        let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
+        assert!(!String::from_utf8_lossy(&zshrc.1).contains("rm -rf"));
+        let zlogin = files.iter().find(|(p, _)| p.ends_with("/.zlogin")).unwrap();
+        assert!(String::from_utf8_lossy(&zlogin.1).contains("rm -rf"));
+    }
+
+    #[test]
+    fn bash_wrapper_sources_system_profile_and_bashrc_fallback() {
+        // bash --rcfile is a non-login shell: /etc/profile (RHEL/CentOS
+        // /etc/profile.d/*.sh) must be sourced explicitly, and ~/.bashrc is the
+        // fallback when none of the login profiles exists (otherwise the || chain
+        // fails as a whole and not even ~/.bashrc is read).
+        let (files, _) = cwd_wrapper_files("/bin/bash", "t").expect("bash wrapper");
+        let rc = String::from_utf8_lossy(&files[0].1);
+        assert!(rc.contains("[ -f /etc/profile ] && . /etc/profile"));
+        assert!(
+            rc.contains("|| { [ -f ~/.bashrc ] && . ~/.bashrc; }"),
+            "rc must fall back to ~/.bashrc: {rc}"
+        );
     }
 
     #[test]
