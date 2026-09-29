@@ -415,13 +415,30 @@ const TabManager = {
         // class, re-switch tabs and stack extra deferred removals.
         if (this._closingTabs.has(id)) return;
         if (this.aliveCount() <= 1) {
+            // A settings tab carries no session and no terminal: as the last
+            // tab alive it cannot be "reset to a local shell" — that fallback
+            // used to convert it in place into an invisible terminal while
+            // the settings layer stayed mounted as an orphan over whatever
+            // came next. Close it for real: drop the layer, remove the tab,
+            // and leave the empty state the + button (createTab) serves.
+            const st = this.tabs.find(t => t.id === id && t.type === 'settings');
+            if (st) {
+                document.getElementById('settings-pane')?.classList.remove('active');
+                this.tabs.splice(this.tabs.indexOf(st), 1);
+                if (this.activeId === id) {
+                    this.activeId = null;
+                    this.updateActiveClass();
+                }
+                this.render();
+                return;
+            }
             // The last tab cannot be closed; if its split tree was already emptied (0 panes, error path),
             // or it was reduced to a terminal-less shell with nothing pending (all of its panes died in
             // the same close window), reset it to the default local terminal as a fallback so no
             // unclosable empty dead tab remains. A tab with a live connect attempt or a pending local
             // creation is NOT dead — closing is simply refused as before.
             const t = this.tabs[0];
-            const deadShell = t && !t.splitRoot && !t.term && !t.tabId && !sshAttempts.ownerAttempt(t) && !t._ptyRequestId;
+            const deadShell = t && t.type !== 'settings' && !t.splitRoot && !t.term && !t.tabId && !sshAttempts.ownerAttempt(t) && !t._ptyRequestId;
             if (t && ((t.splitRoot && getAllPanes(t).length === 0) || deadShell)) {
                 t.splitRoot = null;
                 t.type = 'local';
@@ -623,11 +640,28 @@ const TabManager = {
         tab.connected = false;
         this.render();
         this.updateStatus();
+        // The wrapper awaiting this reconnect is the one carrying the kept
+        // terminal (null when the profile clears on connect): a first split
+        // inside the 500ms window migrates that terminal onto a pane, and a
+        // request still aimed at the tab binds its new attempt to a split
+        // root that no session-owner resolution can ever match — the result
+        // is orphan-disposed and the reconnect silently lost. Terminal
+        // identity IS the session identity (ADR-0004), so resolving by the
+        // kept terminal at fire time follows every later migration too.
+        const keptTerm = tab.term || null;
         setTimeout(() => {
             if (!this.tabs.find(t => t.id === id)) return;
-            // A reconnect creates a NEW attempt identity (the old one was
-            // cancelled explicitly above — no implicit supersede needed).
-            _sshConnectWithCredentials(tab, null);
+            if (!tab.splitRoot) {
+                // A reconnect creates a NEW attempt identity (the old one was
+                // cancelled explicitly above — no implicit supersede needed).
+                _sshConnectWithCredentials(tab, null);
+                return;
+            }
+            // The first split promoted the kept terminal onto a pane (or a
+            // collapse inside the window would have cleared splitRoot and
+            // taken the branch above): the reconnect follows it there.
+            const pane = keptTerm && getAllPanes(tab).find(p => p.term === keptTerm);
+            if (pane) _sshConnectWithCredentials(tab, pane);
         }, 500);
     },
 
@@ -2621,8 +2655,19 @@ const TabManager = {
         // enter the runtime: closing its last pane would leave an unclosable empty-split dead tab. Degraded trees restore as normal tabs.
         if (tab.splitRoot) {
             normalize(tab.splitRoot);
-            if (getAllPanes(tab).length === 0) {
+            const panes = getAllPanes(tab);
+            if (panes.length === 0) {
                 tab.splitRoot = null;
+            } else if (!panes.some(p => p.focused)) {
+                // Every focus-gated path reads p.focused (switchTo's refocus,
+                // reconnectTab's pane pick, wireTerminalToPane's arrival
+                // focus, the active-pane highlight), and the deserialized
+                // tree ships none — typing went nowhere and clicking a
+                // disconnected split SSH tab never reconnected. The saved
+                // format carries no focus state, so the first pane takes the
+                // marker: a restored tree always lands with exactly one
+                // focus owner.
+                panes[0].focused = true;
             }
         }
         this.tabs.push(tab);
