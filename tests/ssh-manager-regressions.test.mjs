@@ -241,3 +241,74 @@ test('(guard) a profile with a saved password keeps the status-row flow', () => 
     assert.equal(statusEl.style.display, 'flex', 'Esc cancels back to the status row');
     assert.equal(ctx.__overlayCloseCalls, 0, 'Esc does not close the dialog here');
 });
+
+// ── SFTP menu action ──
+// The menu item is enabled when ANY pane of the tab is a connected SSH
+// session (toggleMenuPopup), but the action required the FOCUSED pane to be
+// one — with the focus on a local pane the enabled item silently did
+// nothing. The action now falls back to any connected SSH pane (focused
+// first), matching the enable check.
+
+function stageSftp(ctx, tab) {
+    const opens = [];
+    ctx.TabManager.getActive = () => tab;
+    ctx.getAllPanes = (t) => t._panes || [];
+    ctx.SFTP = { open: (tabId) => opens.push(tabId) };
+    return opens;
+}
+
+test('SFTP opens from a connected SSH pane when the focus is on a local pane', () => {
+    const ctx = loadSshVm();
+    const tab = {
+        type: 'local', splitRoot: {},
+        _panes: [
+            { focused: true, type: 'local', tabId: 'local_1' },
+            { type: 'ssh', tabId: 'ssh_9' },
+        ],
+    };
+    const opens = stageSftp(ctx, tab);
+
+    ctx.openSFTPFromMenu();
+
+    assert.deepEqual(opens, ['ssh_9'], 'falls back to the connected SSH pane');
+});
+
+test('the focused SSH pane still wins in a split', () => {
+    const ctx = loadSshVm();
+    const tab = {
+        type: 'ssh', splitRoot: {},
+        _panes: [
+            { focused: true, type: 'ssh', tabId: 'ssh_1' },
+            { type: 'ssh', tabId: 'ssh_2' },
+        ],
+    };
+    const opens = stageSftp(ctx, tab);
+
+    ctx.openSFTPFromMenu();
+
+    assert.deepEqual(opens, ['ssh_1']);
+});
+
+test('no connected SSH pane means no SFTP session', () => {
+    const ctx = loadSshVm();
+    const splitOpens = stageSftp(ctx, {
+        type: 'local', splitRoot: {},
+        _panes: [
+            { focused: true, type: 'local', tabId: 'local_1' },
+            { type: 'ssh' }, // connecting, no backend tabId yet
+        ],
+    });
+    ctx.openSFTPFromMenu();
+    assert.deepEqual(splitOpens, []);
+
+    const localOpens = stageSftp(ctx, { type: 'local', tabId: 'local_1' });
+    ctx.openSFTPFromMenu();
+    assert.deepEqual(localOpens, []);
+});
+
+test('(guard) a non-split SSH tab opens SFTP on itself', () => {
+    const ctx = loadSshVm();
+    const opens = stageSftp(ctx, { type: 'ssh', tabId: 'ssh_3' });
+    ctx.openSFTPFromMenu();
+    assert.deepEqual(opens, ['ssh_3']);
+});

@@ -55,8 +55,12 @@ function openSFTPFromMenu() {
     const tab = TabManager.getActive();
     if (!tab) return;
     if (tab.splitRoot) {
-        const focused = getAllPanes(tab).find(p => p.focused);
-        if (focused && focused.tabId && focused.type === 'ssh') SFTP.open(focused.tabId);
+        // Same bar as the menu item's enable check (toggleMenuPopup): any
+        // connected SSH pane serves — the focused one first.
+        const panes = getAllPanes(tab);
+        const target = panes.find(p => p.focused && p.tabId && p.type === 'ssh')
+            || panes.find(p => p.type === 'ssh' && p.tabId);
+        if (target) SFTP.open(target.tabId);
     } else if (tab.tabId && tab.type === 'ssh') {
         SFTP.open(tab.tabId);
     }
