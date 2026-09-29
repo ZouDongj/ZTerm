@@ -74,6 +74,24 @@ document.addEventListener('click', (e) => {
     }
 });
 
+// Escape while a custom dropdown menu is open must close just that menu, not
+// the dialog/overlay underneath it (e.g. the auth select in the SSH edit
+// dialog). Capture phase + stopImmediatePropagation terminates the key before
+// the global overlay-close chain in shortcuts.js runs (settings.js loads
+// before shortcuts.js, so this listener is registered first on the same
+// node/phase). Dropdowns left 'open' inside an already hidden overlay
+// (display:none) have no client rects and are skipped, so they never swallow
+// Escape presses meant for the terminal.
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const open = Array.from(document.querySelectorAll('.cust-dropdown.open'))
+        .filter(d => d.getClientRects().length > 0);
+    if (!open.length) return;
+    open.forEach(d => d.classList.remove('open'));
+    e.preventDefault();
+    e.stopImmediatePropagation();
+}, true);
+
 
 function openSettings(page) {
     // If already open, just switch to it
@@ -582,7 +600,19 @@ function saveAppearance() {
     const uiFont = _fontSelectValue('set-ui-font', _settingsConfig.uiFont);
     const uiFallbackFont = _fontSelectValue('set-ui-fallback-font', _settingsConfig.uiFallbackFont);
     const fontSize = parseFloat(document.getElementById('set-font-size')?.value) || 16;
-    const lineHeight = parseFloat(document.getElementById('set-line-height')?.value) || 1.125;
+    // Line-height validation: xterm's option setter throws on any value < 1,
+    // which would abort every later appearance hot-apply with no feedback
+    // until the app restarts. Reject the bad value instead: revert the input
+    // to the last valid config value (default 1.125), toast, and keep saving
+    // the remaining fields — same policy as the accent check below.
+    const lhEl = document.getElementById('set-line-height');
+    let lineHeight = parseFloat(lhEl?.value);
+    if (!Number.isFinite(lineHeight) || lineHeight < 1) {
+        const prev = parseFloat(_settingsConfig.lineHeight);
+        lineHeight = (Number.isFinite(prev) && prev >= 1) ? prev : 1.125;
+        if (lhEl) lhEl.value = String(lineHeight);
+        showToast('行高需为不小于 1 的数值', true);
+    }
     const fontWeight = _clampFontWeight(document.getElementById('set-font-weight')?.value, '400');
     const fontWeightBold = _clampFontWeight(document.getElementById('set-font-weight-bold')?.value, '600');
     // The persisted accent must pass the same 6-digit hex check as
@@ -652,7 +682,19 @@ function saveAppearance() {
 
 function saveTerminal() {
     const cursor = document.getElementById('set-cursor')?.value || 'bar';
-    const scrollback = parseInt(document.getElementById('set-scrollback')?.value) || 10000;
+    // Scrollback validation: xterm's option setter throws on a negative
+    // value, which would abort every later terminal-settings hot-apply.
+    // Reject the bad value instead: revert the input to the last valid
+    // config value (default 10000), toast, and keep saving the remaining
+    // fields — same policy as the invalid-accent check in saveAppearance.
+    const sbEl = document.getElementById('set-scrollback');
+    let scrollback = parseInt(sbEl?.value);
+    if (!Number.isFinite(scrollback) || scrollback < 0) {
+        const prev = parseInt(_settingsConfig.scrollback);
+        scrollback = (Number.isFinite(prev) && prev >= 0) ? prev : 10000;
+        if (sbEl) sbEl.value = String(scrollback);
+        showToast('回滚行数需为不小于 0 的整数', true);
+    }
     const bell = document.getElementById('set-bell')?.value || 'off';
     const cursorBlink = (document.getElementById('set-blink')?.value || 'on') === 'on';
     const autoCopy = getToggle('toggle-autocopy');
