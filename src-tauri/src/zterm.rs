@@ -4460,23 +4460,50 @@ pub async fn sftp_download(
 /// Move an uploaded temp file into place. russh-sftp 2.3's rename is a bare
 /// SSH_FXP_RENAME (no posix-rename extension), which OpenSSH's sftp-server
 /// rejects with SSH_FX_FAILURE when the destination exists — so an existing
-/// destination is removed first, after all bytes are safely in the temp file.
+/// destination is renamed aside to a temp backup first, the temp file takes
+/// its place, and the backup is removed last. Deleting the destination before
+/// the rename instead would lose both copies when the rename fails; this way
+/// a failed swap-in restores the backup (best effort), so at least one
+/// complete copy of the data always survives.
 /// Split from sftp_upload's transfer loop for unit testing.
 async fn finalize_upload_rename(
     sftp: &russh_sftp::client::SftpSession,
     tmp_remote: &str,
     remote_final: &str,
+    remote_backup: &str,
 ) -> Result<(), String> {
     // lstat (not stat): a dangling symlink must count as existing too, or the
     // rename onto it fails just the same.
     if sftp.symlink_metadata(remote_final).await.is_ok() {
-        sftp.remove_file(remote_final)
+        // A stale backup from an earlier crashed run would block the rename
+        // aside (rename cannot overwrite); clear it first.
+        if sftp.symlink_metadata(remote_backup).await.is_ok() {
+            sftp.remove_file(remote_backup)
+                .await
+                .map_err(|e| format!("stale backup remove: {e}"))?;
+        }
+        sftp.rename(remote_final, remote_backup)
             .await
-            .map_err(|e| format!("overwrite remove: {e}"))?;
+            .map_err(|e| format!("backup rename: {e}"))?;
+        if let Err(e) = sftp.rename(tmp_remote, remote_final).await {
+            // Put the original back; if even that fails, the backup still
+            // holds it, so the error says where it is.
+            return Err(match sftp.rename(remote_backup, remote_final).await {
+                Ok(()) => format!("rename: {e}"),
+                Err(r) => {
+                    format!("rename: {e}; original kept at {remote_backup} (restore failed: {r})")
+                }
+            });
+        }
+        sftp.remove_file(remote_backup).await.map_err(|e| {
+            format!("backup remove: {e}; new file is in place, old copy left at {remote_backup}")
+        })?;
+    } else {
+        sftp.rename(tmp_remote, remote_final)
+            .await
+            .map_err(|e| format!("rename: {e}"))?;
     }
-    sftp.rename(tmp_remote, remote_final)
-        .await
-        .map_err(|e| format!("rename: {e}"))
+    Ok(())
 }
 
 #[tauri::command]
@@ -4509,6 +4536,10 @@ pub async fn sftp_upload(
         c.insert(transfer_id_key.clone(), cancelled.clone());
     }
 
+    // Same-directory backup name finalize_upload_rename swaps the old file
+    // aside to; carries the transfer id like the temp name so concurrent
+    // uploads of one destination cannot collide on it.
+    let remote_backup = format!("{}.zterm-bak-{}", remote_path, transfer_id_num);
     // Clean up the cancel registry when init fails
     let init_result: Result<_, String> = async {
         use russh_sftp::protocol::OpenFlags;
@@ -4583,7 +4614,7 @@ pub async fn sftp_upload(
             file.sync_all().await.map_err(|e| format!("sync: {e}"))?;
             drop(file);
             // Atomically move into place on success
-            finalize_upload_rename(&sftp2, &tmp_remote, &remote_final).await?;
+            finalize_upload_rename(&sftp2, &tmp_remote, &remote_final, &remote_backup).await?;
             Ok::<_, String>(total)
         }
         .await;
@@ -5515,18 +5546,47 @@ mod tests {
     // Mimics OpenSSH sftp-server semantics: a rename onto an existing
     // destination fails (bare SSH_FXP_RENAME has no overwrite).
 
+    // Failure injection shared with the handler task: arms specific rename
+    // sources / remove targets to fail, so finalize's recovery paths can be
+    // exercised deterministically.
+    #[derive(Clone, Default)]
+    struct SftpFailures {
+        renames: Arc<Mutex<Vec<String>>>,
+        removes: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl SftpFailures {
+        fn fail_renames_for(&self, oldpath: &str) {
+            self.renames.lock().push(oldpath.to_string());
+        }
+
+        fn fail_removes_for(&self, filename: &str) {
+            self.removes.lock().push(filename.to_string());
+        }
+
+        fn blocks_rename(&self, oldpath: &str) -> bool {
+            self.renames.lock().iter().any(|p| p == oldpath)
+        }
+
+        fn blocks_remove(&self, filename: &str) -> bool {
+            self.removes.lock().iter().any(|p| p == filename)
+        }
+    }
+
     struct TestSftpHandler {
         root: PathBuf,
         handles: HashMap<String, std::fs::File>,
         next_handle: u32,
+        failures: SftpFailures,
     }
 
     impl TestSftpHandler {
-        fn new(root: PathBuf) -> Self {
+        fn new(root: PathBuf, failures: SftpFailures) -> Self {
             Self {
                 root,
                 handles: HashMap::new(),
                 next_handle: 0,
+                failures,
             }
         }
 
@@ -5614,6 +5674,9 @@ mod tests {
             id: u32,
             filename: String,
         ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            if self.failures.blocks_remove(&filename) {
+                return Err(russh_sftp::protocol::StatusCode::Failure);
+            }
             std::fs::remove_file(self.path(&filename))
                 .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
             Ok(sftp_ok_status(id))
@@ -5625,6 +5688,9 @@ mod tests {
             oldpath: String,
             newpath: String,
         ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            if self.failures.blocks_rename(&oldpath) {
+                return Err(russh_sftp::protocol::StatusCode::Failure);
+            }
             let new = self.path(&newpath);
             // OpenSSH sftp-server rejects SSH_FXP_RENAME onto an existing path.
             if std::fs::symlink_metadata(&new).is_ok() {
@@ -5636,13 +5702,17 @@ mod tests {
         }
     }
 
-    async fn test_sftp_session(root: PathBuf) -> russh_sftp::client::SftpSession {
+    async fn test_sftp_session(root: PathBuf) -> (russh_sftp::client::SftpSession, SftpFailures) {
+        let failures = SftpFailures::default();
         let (client_side, server_side) = tokio::io::duplex(64 * 1024);
         tokio::spawn(russh_sftp::server::run(
             server_side,
-            TestSftpHandler::new(root),
+            TestSftpHandler::new(root, failures.clone()),
         ));
-        russh_sftp::client::SftpSession::new(client_side).await.unwrap()
+        let session = russh_sftp::client::SftpSession::new(client_side)
+            .await
+            .unwrap();
+        (session, failures)
     }
 
     async fn write_remote_file(sftp: &russh_sftp::client::SftpSession, path: &str, data: &[u8]) {
@@ -5663,7 +5733,7 @@ mod tests {
     #[tokio::test]
     async fn upload_finalize_overwrites_existing_destination() {
         let dir = config_test_dir("sftp-overwrite");
-        let sftp = test_sftp_session(dir.clone()).await;
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
         write_remote_file(&sftp, "dest.txt", b"old").await;
         write_remote_file(&sftp, "dest.txt.zterm-tmp-7", b"new-content").await;
         // Bare SSH_FXP_RENAME cannot overwrite (OpenSSH semantics) — the
@@ -5673,24 +5743,170 @@ mod tests {
             .await
             .is_err());
         assert!(dir.join("dest.txt.zterm-tmp-7").exists());
-        finalize_upload_rename(&sftp, "dest.txt.zterm-tmp-7", "dest.txt")
-            .await
-            .unwrap();
+        finalize_upload_rename(
+            &sftp,
+            "dest.txt.zterm-tmp-7",
+            "dest.txt",
+            "dest.txt.zterm-bak-7",
+        )
+        .await
+        .unwrap();
         assert_eq!(std::fs::read(dir.join("dest.txt")).unwrap(), b"new-content");
         assert!(!dir.join("dest.txt.zterm-tmp-7").exists());
+        assert!(!dir.join("dest.txt.zterm-bak-7").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn upload_finalize_renames_cleanly_when_destination_absent() {
         let dir = config_test_dir("sftp-fresh");
-        let sftp = test_sftp_session(dir.clone()).await;
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
         write_remote_file(&sftp, "dest.txt.zterm-tmp-9", b"fresh").await;
-        finalize_upload_rename(&sftp, "dest.txt.zterm-tmp-9", "dest.txt")
-            .await
-            .unwrap();
+        finalize_upload_rename(
+            &sftp,
+            "dest.txt.zterm-tmp-9",
+            "dest.txt",
+            "dest.txt.zterm-bak-9",
+        )
+        .await
+        .unwrap();
         assert_eq!(std::fs::read(dir.join("dest.txt")).unwrap(), b"fresh");
         assert!(!dir.join("dest.txt.zterm-tmp-9").exists());
+        assert!(!dir.join("dest.txt.zterm-bak-9").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn upload_finalize_keeps_original_when_swap_in_fails() {
+        // Regression: with delete-then-rename, a rename failure after the
+        // delete lost BOTH copies — the destination was gone and the caller's
+        // error path removes the temp. The swap-aside restores the original.
+        let dir = config_test_dir("sftp-keep-original");
+        let (sftp, failures) = test_sftp_session(dir.clone()).await;
+        write_remote_file(&sftp, "dest.txt", b"old").await;
+        write_remote_file(&sftp, "dest.txt.zterm-tmp-7", b"new").await;
+        failures.fail_renames_for("dest.txt.zterm-tmp-7");
+        let err = finalize_upload_rename(
+            &sftp,
+            "dest.txt.zterm-tmp-7",
+            "dest.txt",
+            "dest.txt.zterm-bak-7",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.starts_with("rename:"), "unexpected error: {err}");
+        // The caller's error path deletes the temp file (sftp_upload cleanup).
+        let _ = sftp.remove_file("dest.txt.zterm-tmp-7").await;
+        assert!(
+            dir.join("dest.txt").exists(),
+            "the original must survive a failed swap-in"
+        );
+        assert_eq!(std::fs::read(dir.join("dest.txt")).unwrap(), b"old");
+        // The restore consumed the backup — no leftovers on either side.
+        assert!(!dir.join("dest.txt.zterm-bak-7").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn upload_finalize_keeps_backup_when_restore_also_fails() {
+        // Swap-in fails AND the restore fails: the original must survive at
+        // the backup path, with the error pointing there.
+        let dir = config_test_dir("sftp-keep-backup");
+        let (sftp, failures) = test_sftp_session(dir.clone()).await;
+        write_remote_file(&sftp, "dest.txt", b"old").await;
+        write_remote_file(&sftp, "dest.txt.zterm-tmp-7", b"new").await;
+        failures.fail_renames_for("dest.txt.zterm-tmp-7");
+        failures.fail_renames_for("dest.txt.zterm-bak-7");
+        let err = finalize_upload_rename(
+            &sftp,
+            "dest.txt.zterm-tmp-7",
+            "dest.txt",
+            "dest.txt.zterm-bak-7",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.starts_with("rename:"), "unexpected error: {err}");
+        assert!(err.contains("dest.txt.zterm-bak-7"), "error: {err}");
+        assert!(!dir.join("dest.txt").exists());
+        assert_eq!(
+            std::fs::read(dir.join("dest.txt.zterm-bak-7")).unwrap(),
+            b"old"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn upload_finalize_backup_rename_failure_leaves_untouched() {
+        // The aside itself fails: nothing has changed yet — the original
+        // stays in place and the temp is left for the caller's cleanup.
+        let dir = config_test_dir("sftp-aside-fails");
+        let (sftp, failures) = test_sftp_session(dir.clone()).await;
+        write_remote_file(&sftp, "dest.txt", b"old").await;
+        write_remote_file(&sftp, "dest.txt.zterm-tmp-7", b"new").await;
+        failures.fail_renames_for("dest.txt");
+        let err = finalize_upload_rename(
+            &sftp,
+            "dest.txt.zterm-tmp-7",
+            "dest.txt",
+            "dest.txt.zterm-bak-7",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.starts_with("backup rename:"), "unexpected error: {err}");
+        assert_eq!(std::fs::read(dir.join("dest.txt")).unwrap(), b"old");
+        assert!(dir.join("dest.txt.zterm-tmp-7").exists());
+        assert!(!dir.join("dest.txt.zterm-bak-7").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn upload_finalize_reports_leftover_backup_when_cleanup_fails() {
+        // Backup removal fails: the new file is already in place, so nothing
+        // is lost — the old copy stays at the backup path and the error says
+        // so instead of silently leaking it.
+        let dir = config_test_dir("sftp-cleanup-fails");
+        let (sftp, failures) = test_sftp_session(dir.clone()).await;
+        write_remote_file(&sftp, "dest.txt", b"old").await;
+        write_remote_file(&sftp, "dest.txt.zterm-tmp-7", b"new").await;
+        failures.fail_removes_for("dest.txt.zterm-bak-7");
+        let err = finalize_upload_rename(
+            &sftp,
+            "dest.txt.zterm-tmp-7",
+            "dest.txt",
+            "dest.txt.zterm-bak-7",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.starts_with("backup remove:"), "unexpected error: {err}");
+        assert!(err.contains("dest.txt.zterm-bak-7"), "error: {err}");
+        assert_eq!(std::fs::read(dir.join("dest.txt")).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(dir.join("dest.txt.zterm-bak-7")).unwrap(),
+            b"old"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn upload_finalize_clears_stale_backup_before_swap() {
+        // A leftover backup from an earlier crashed run (transfer ids repeat
+        // across app restarts) must not brick the swap — it is cleared first.
+        let dir = config_test_dir("sftp-stale-backup");
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
+        write_remote_file(&sftp, "dest.txt", b"current").await;
+        write_remote_file(&sftp, "dest.txt.zterm-bak-7", b"stale").await;
+        write_remote_file(&sftp, "dest.txt.zterm-tmp-7", b"new").await;
+        finalize_upload_rename(
+            &sftp,
+            "dest.txt.zterm-tmp-7",
+            "dest.txt",
+            "dest.txt.zterm-bak-7",
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(dir.join("dest.txt")).unwrap(), b"new");
+        assert!(!dir.join("dest.txt.zterm-tmp-7").exists());
+        assert!(!dir.join("dest.txt.zterm-bak-7").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
