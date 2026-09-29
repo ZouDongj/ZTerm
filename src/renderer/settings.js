@@ -558,10 +558,21 @@ function applyUiFont() {
     document.body.style.fontFamily = family || DEFAULT_UI_FONT;
 }
 
+// Read a font select's current value. While the async system-font enumeration
+// has not populated any options yet the select reads ''; persist the
+// configured value in that window instead, so an early appearance save cannot
+// blank the stored fonts. Once options exist the select is authoritative —
+// '' is then a real choice ('系统默认' / '无').
+function _fontSelectValue(id, fallback) {
+    const el = document.getElementById(id);
+    if (!el || el.options.length === 0) return fallback || '';
+    return el.value;
+}
+
 // Font-weight validation: a number 1-1000 (xterm accepts only a number 1-1000 or 'normal'/'bold'/'100'..'900'
 // hundred-step strings; numeric strings like '550' are silently reset to the default — so this must return a number)
 function saveAppearance() {
-    const fontFamily = document.getElementById('set-font')?.value || '';
+    const fontFamily = _fontSelectValue('set-font', _settingsConfig.fontFamily);
     const uiFont = document.getElementById('set-ui-font')?.value || _settingsConfig.uiFont || '';
     const uiFallbackFont = document.getElementById('set-ui-fallback-font')?.value || _settingsConfig.uiFallbackFont || '';
     const fontSize = parseFloat(document.getElementById('set-font-size')?.value) || 16;
@@ -569,7 +580,7 @@ function saveAppearance() {
     const fontWeight = _clampFontWeight(document.getElementById('set-font-weight')?.value, '400');
     const fontWeightBold = _clampFontWeight(document.getElementById('set-font-weight-bold')?.value, '600');
     const accentColor = document.getElementById('set-accent')?.value || '#61afef';
-    const fallbackFont = document.getElementById('set-fallback-font')?.value || '';
+    const fallbackFont = _fontSelectValue('set-fallback-font', _settingsConfig.fallbackFont);
     updateAccentDot();
     const animations = getToggle('toggle-animations');
     const showStatusDot = getToggle('toggle-statusdot');
