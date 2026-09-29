@@ -786,15 +786,7 @@ fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
         // Corrupt config: back up the original file and notify the renderer (once only),
         // so later saves don't silently overwrite user data (SSH profiles / encrypted passwords) with defaults
         if !CONFIG_CORRUPT_HANDLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let backup = path.with_file_name(format!("config.json.corrupt-{}", ts));
-            let _ = std::fs::copy(path, &backup);
-            if let Some(app) = APP_HANDLE.get() {
-                let _ = app.emit("config-corrupted", json!({}));
-            }
+            backup_corrupt_config(path);
         }
     } else if anchor.exists() {
         if let Ok(content) = std::fs::read_to_string(anchor) {
@@ -811,8 +803,51 @@ fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
                 }
             }
         }
+        // Corrupt anchor: keep a timestamped copy of the remnants, then
+        // rebuild the anchor with defaults so the next launch does not
+        // re-detect (and re-back-up) the same corruption and the fallback
+        // mirror keeps working. Same notify-once policy as the branch above.
+        if !CONFIG_CORRUPT_HANDLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            backup_corrupt_config(anchor);
+            if let Some(parent) = anchor.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = atomic_write_config(
+                anchor,
+                &serde_json::to_string_pretty(&default_config()).unwrap_or_default(),
+            );
+        }
     }
     default_config()
+}
+
+/// Copy a corrupt config file aside as a timestamped sibling and notify the
+/// renderer, before any later save overwrites the remnants. The once-per-
+/// process notification cadence is the caller's CONFIG_CORRUPT_HANDLED
+/// check. Split from load_config_from's file IO for unit testing.
+fn backup_corrupt_config(path: &std::path::Path) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let backup = path.with_file_name(format!("config.json.corrupt-{}", ts));
+    let _ = std::fs::copy(path, &backup);
+    if let Some(app) = APP_HANDLE.get() {
+        let _ = app.emit("config-corrupted", json!({}));
+    }
+}
+
+/// Atomic config write: write to a temp sibling, then rename it over the
+/// target, so a crash mid-write cannot truncate an existing config (rename
+/// replaces an existing destination). Any leftover temp file is removed when
+/// a step fails. Split from save_config for unit testing.
+fn atomic_write_config(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    let res = std::fs::write(&tmp, content).and_then(|()| std::fs::rename(&tmp, path));
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
 }
 
 fn save_config(config: &Value) -> Result<(), String> {
@@ -822,11 +857,9 @@ fn save_config(config: &Value) -> Result<(), String> {
     }
     let content = serde_json::to_string_pretty(config).unwrap_or_default();
     // Atomic write: tmp + rename, so a mid-write crash cannot leave a corrupt config
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, &content).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+    if atomic_write_config(&path, &content).is_ok() {
         return Ok(());
     }
-    let _ = std::fs::remove_file(&tmp);
     // Fallback: default data dir not writable (e.g. no permission in
     // Program Files) — persist to the anchor dir so data is not lost.
     // The anchor also holds the custom dataDir pointer, so merge over its
@@ -843,9 +876,9 @@ fn save_config(config: &Value) -> Result<(), String> {
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok());
     let merged = anchor_fallback_content(existing, config);
-    std::fs::write(
+    atomic_write_config(
         &anchor,
-        serde_json::to_string_pretty(&merged).unwrap_or_default(),
+        &serde_json::to_string_pretty(&merged).unwrap_or_default(),
     )
     .map_err(|e| {
         format!(
@@ -2799,6 +2832,9 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // Explicit opt-in to overwriting a config.json that already lives in the
+    // target dir; the renderer confirms with the user before setting it.
+    let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
     let anchor_dir = PathBuf::from(
         std::env::var("APPDATA")
             .or_else(|_| std::env::var("HOME"))
@@ -2809,16 +2845,28 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
     let _ = std::fs::create_dir_all(&anchor_dir);
 
     if dir.is_empty() {
-        restore_default_data_dir(
-            &default_data_dir().join("config.json"),
-            &anchor_config,
-            &load_config(),
-        );
+        let default_dir_config = default_data_dir().join("config.json");
+        // Resetting overwrites whatever config still sits in the default dir
+        // (e.g. left there from before the switch to a custom dir): refuse
+        // without an explicit force, same as the custom-dir branch below.
+        if !force {
+            if let Some(err) = data_dir_conflict_error(&default_dir_config) {
+                return Ok(err);
+            }
+        }
+        restore_default_data_dir(&default_dir_config, &anchor_config, &load_config());
     } else {
         let current_config = load_config();
         let mut clean_config = current_config.clone();
         if let Value::Object(ref mut m) = clean_config {
             m.remove("dataDir");
+        }
+        // The target must not silently clobber a config that already lives in
+        // it (SSH profiles / encrypted passwords would be lost for good).
+        if !force {
+            if let Some(err) = data_dir_conflict_error(&PathBuf::from(&dir).join("config.json")) {
+                return Ok(err);
+            }
         }
         // The target must actually hold the config before the anchor is
         // repointed at it, or an unwritable directory is reported as a
@@ -2837,14 +2885,40 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
         if let Value::Object(ref mut m) = anchor {
             m.insert("dataDir".into(), json!(dir));
         }
-        if let Err(e) = std::fs::write(
+        if let Err(e) = atomic_write_config(
             &anchor_config,
-            serde_json::to_string_pretty(&anchor).unwrap_or_default(),
+            &serde_json::to_string_pretty(&anchor).unwrap_or_default(),
         ) {
             return Ok(json!({ "error": format!("write {}: {e}", anchor_config.display()) }));
         }
     }
     Ok(json!({ "ok": true }))
+}
+
+/// True when the file exists and holds at least one byte; a zero-length
+/// remnant (e.g. left by a crash between create and write) counts as absent.
+fn config_has_content(path: &std::path::Path) -> bool {
+    matches!(std::fs::metadata(path), Ok(m) if m.len() > 0)
+}
+
+/// A data-dir switch whose target already holds a non-empty config.json must
+/// not overwrite it by default: the SSH profiles and encrypted passwords
+/// stored there would be lost. Returns the command's error payload (message
+/// plus a stable code the renderer can offer a confirm-and-force retry on),
+/// or None when the switch may proceed. Split from set_data_dir for unit
+/// testing.
+fn data_dir_conflict_error(target_config: &std::path::Path) -> Option<Value> {
+    if config_has_content(target_config) {
+        Some(json!({
+            "error": format!(
+                "{} already contains a config.json; retry with force to overwrite it",
+                target_config.display()
+            ),
+            "code": "target-config-exists"
+        }))
+    } else {
+        None
+    }
 }
 
 /// Write `config` as <dir>/config.json, creating the directory first. Split
@@ -2853,7 +2927,7 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
 fn write_config_to_dir(dir: &std::path::Path, config: &Value) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = dir.join("config.json");
-    std::fs::write(&path, serde_json::to_string_pretty(config).unwrap_or_default())
+    atomic_write_config(&path, &serde_json::to_string_pretty(config).unwrap_or_default())
         .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
@@ -2876,9 +2950,9 @@ fn restore_default_data_dir(
     if let Some(parent) = default_config_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(
+    let _ = atomic_write_config(
         default_config_path,
-        serde_json::to_string_pretty(&clean).unwrap_or_default(),
+        &serde_json::to_string_pretty(&clean).unwrap_or_default(),
     );
     let existing = std::fs::read_to_string(anchor_config)
         .ok()
@@ -2887,9 +2961,9 @@ fn restore_default_data_dir(
     if let Value::Object(ref mut m) = anchor {
         m.remove("dataDir");
     }
-    let _ = std::fs::write(
+    let _ = atomic_write_config(
         anchor_config,
-        serde_json::to_string_pretty(&anchor).unwrap_or_default(),
+        &serde_json::to_string_pretty(&anchor).unwrap_or_default(),
     );
 }
 
@@ -5410,6 +5484,11 @@ mod tests {
         dir
     }
 
+    // The corrupt-config backup is once-per-process (CONFIG_CORRUPT_HANDLED):
+    // serialize tests that trip the flag so they cannot flip each other's
+    // guard between the reset and the load call.
+    static CORRUPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn load_config_from_reads_back_anchor_when_data_dir_config_missing() {
         // The data dir staying unwritable must not reset settings to factory:
@@ -5454,6 +5533,9 @@ mod tests {
 
     #[test]
     fn load_config_from_defaults_when_nothing_readable() {
+        // The corrupt-anchor branch below trips the once-per-process backup
+        // flag; hold the shared lock so flag-sensitive tests stay isolated.
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
         let dir = config_test_dir("nothing");
         let missing = dir.join("missing").join("config.json");
         // Both missing → factory defaults.
@@ -5518,6 +5600,134 @@ mod tests {
         let bad = blocker.join("sub");
         assert!(write_config_to_dir(&bad, &json!({})).is_err());
         assert!(!bad.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn data_dir_conflict_error_flags_nonempty_target_config() {
+        // Missing file (or whole missing dir): the switch may proceed, so the
+        // empty-target migration behavior is unchanged.
+        let dir = config_test_dir("conflict-guard");
+        assert!(data_dir_conflict_error(&dir.join("none").join("config.json")).is_none());
+        // A zero-length remnant (crash between create and write) counts as absent.
+        let empty = dir.join("empty").join("config.json");
+        std::fs::create_dir_all(empty.parent().unwrap()).unwrap();
+        std::fs::write(&empty, "").unwrap();
+        assert!(data_dir_conflict_error(&empty).is_none());
+        // A real config is refused with a stable code the renderer can offer a
+        // confirm-and-force retry on.
+        let full = dir.join("full").join("config.json");
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, r#"{ "sshProfiles": [] }"#).unwrap();
+        let err = data_dir_conflict_error(&full).expect("non-empty target must conflict");
+        assert_eq!(err["code"], "target-config-exists");
+        assert!(err["error"]
+            .as_str()
+            .unwrap()
+            .contains("already contains a config.json"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_config_to_dir_replaces_existing_config_without_temp_remnants() {
+        // After set_data_dir's conflict guard passes (empty target, or an
+        // explicit force), the write itself must fully replace any prior
+        // content and leave no temp file behind.
+        let dir = config_test_dir("write-config-overwrite");
+        let target = dir.join("target");
+        write_config_to_dir(&target, &json!({ "appearance": { "fontSize": 15 } })).unwrap();
+        write_config_to_dir(&target, &json!({ "appearance": { "fontSize": 99 } })).unwrap();
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(target.join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(written["appearance"]["fontSize"], 99);
+        assert!(!target.join("config.json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_config_failure_keeps_existing_content() {
+        // A failed write must leave the existing config byte-identical — the
+        // temp-then-rename order is what keeps a full reset from happening on
+        // a mid-write crash or a failed write.
+        let dir = config_test_dir("atomic-fail");
+        let target = dir.join("config.json");
+        std::fs::write(&target, r#"{ "appearance": { "fontSize": 20 } }"#).unwrap();
+        // Block the temp slot with a directory so the initial write fails.
+        std::fs::create_dir_all(dir.join("config.json.tmp")).unwrap();
+        assert!(atomic_write_config(&target, r#"{ "appearance": { "fontSize": 1 } }"#).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            r#"{ "appearance": { "fontSize": 20 } }"#
+        );
+        // Once the blocker is gone the write succeeds and replaces the target,
+        // leaving no temp file.
+        std::fs::remove_dir_all(dir.join("config.json.tmp")).unwrap();
+        atomic_write_config(&target, r#"{ "appearance": { "fontSize": 1 } }"#).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            r#"{ "appearance": { "fontSize": 1 } }"#
+        );
+        assert!(!dir.join("config.json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_default_data_dir_writes_leave_no_temp_files() {
+        // Both restore writes (default-dir config + anchor mirror) go through
+        // the atomic helper: no .tmp sibling may survive the call.
+        let dir = config_test_dir("restore-default-atomic");
+        let default_config = dir.join("default").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        std::fs::write(
+            &anchor,
+            serde_json::to_string(&json!({ "dataDir": "D:/zterm-data" })).unwrap(),
+        )
+        .unwrap();
+        restore_default_data_dir(
+            &default_config,
+            &anchor,
+            &json!({ "appearance": { "fontSize": 21 } }),
+        );
+        let written_default: Value =
+            serde_json::from_str(&std::fs::read_to_string(&default_config).unwrap()).unwrap();
+        assert_eq!(written_default["appearance"]["fontSize"], 21);
+        assert!(!default_config.with_extension("json.tmp").exists());
+        assert!(!anchor.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_config_from_backs_up_and_rebuilds_corrupt_anchor() {
+        // A corrupt anchor must not be silently replaced by defaults: the
+        // remnants survive as a timestamped copy, the renderer is notified
+        // (once per process), and the anchor is rebuilt as valid JSON so the
+        // next launch does not re-detect the same corruption.
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_CORRUPT_HANDLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let dir = config_test_dir("anchor-corrupt");
+        let data_dir_config = dir.join("data").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        std::fs::write(&anchor, "{ not json").unwrap();
+        let cfg = load_config_from(&data_dir_config, &anchor);
+        assert_eq!(cfg, default_config());
+        let anchor_parent = anchor.parent().unwrap();
+        let backups: Vec<String> = std::fs::read_dir(anchor_parent)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("config.json.corrupt-"))
+            .collect();
+        assert_eq!(backups.len(), 1, "exactly one timestamped backup, got {backups:?}");
+        assert_eq!(
+            std::fs::read_to_string(anchor_parent.join(&backups[0])).unwrap(),
+            "{ not json"
+        );
+        let rebuilt: Value =
+            serde_json::from_str(&std::fs::read_to_string(&anchor).unwrap()).unwrap();
+        assert!(rebuilt.is_object(), "anchor must be rebuilt as valid JSON");
+        assert!(!anchor.with_extension("json.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
