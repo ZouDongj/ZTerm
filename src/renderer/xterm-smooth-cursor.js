@@ -411,6 +411,14 @@
     }
 
     function readCursor() {
+      // The stock blink state manager (cursorBlink option) keeps toggling
+      // underneath the takeover and re-renders the cursor rows on every
+      // phase flip. Its off phase makes the caret not drawable here, which
+      // routes through the same freeze/base-only path as any other hidden
+      // period — without it the adapter repaints a lit cursor every pass.
+      if (renderer._cursorBlinkStateManager?.value?.isCursorVisible === false) {
+        return { drawable: false };
+      }
       if (sw.enqueued > sw.watermark) {
         clearSoftwareVisual();
         // The base renderer alone owns the uncommitted display. In

@@ -196,6 +196,35 @@ test('hidden, reduced-motion, disabled, and disposal paths restore native behavi
   assert.ok(f.counts().stockRecolors >= 2);
 });
 
+test('cursor blink off-phase suppresses the custom cursor and freezes the animation anchor', () => {
+  const f = fixture();
+  f.renderer._cursorBlinkStateManager = { value: { isCursorVisible: true } };
+  f.renderer.renderRows(0, 2);
+  f.active.cursorX = 4;
+  f.renderer.renderRows(0, 2);
+  assert.equal(f.adapter.motion.animating, true);
+  const drawn = f.rectangleDraws.length;
+
+  // Blink off-phase: the adapter must not paint its own cursor, and the
+  // in-flight animation freezes exactly like any other hidden period.
+  f.setTime(45);
+  f.renderer._cursorBlinkStateManager.value.isCursorVisible = false;
+  f.active.cursorX = 8;
+  f.renderer.renderRows(0, 2);
+  assert.equal(f.rectangleDraws.length, drawn, 'no cursor draw during the blink off-phase');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base-only');
+  assert.deepEqual(f.adapter.snapshot().visual, { x: 1, y: 0 });
+  assert.equal(f.adapter.snapshot().animationActive, true);
+
+  // Blink on-phase: the slide resumes from the frozen anchor.
+  f.setTime(60);
+  f.renderer._cursorBlinkStateManager.value.isCursorVisible = true;
+  f.renderer.renderRows(0, 2);
+  assert.equal(f.adapter.motion.from.x, 1);
+  assert.equal(f.adapter.motion.target.x, 8);
+  assert.equal(f.rectangleDraws.length, drawn + 1);
+});
+
 test('rapid target changes retarget from the current visual and long jumps land immediately', () => {
   const f = fixture();
   f.renderer.renderRows(0, 2);
