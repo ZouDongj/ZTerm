@@ -1311,11 +1311,16 @@ function initGroupCombo() {
             const div = document.createElement('div');
             div.className = 'dd-option';
             div.textContent = g;
-            div.addEventListener('mousedown', (e) => {
+            // The keydown Enter branch picks via click(): answer both events.
+            // A real mouse press fires mousedown then click; the pick is
+            // idempotent, so handling it twice is harmless.
+            const pick = (e) => {
                 e.preventDefault();
                 input.value = g;
                 menu.classList.remove('open');
-            });
+            };
+            div.addEventListener('mousedown', pick);
+            div.addEventListener('click', pick);
             menu.appendChild(div);
         });
         // "Create new" option when no exact match
@@ -1324,10 +1329,12 @@ function initGroupCombo() {
             div.className = 'dd-option create';
             // filter is user input: escape it now that the row is HTML, not plain text
             div.innerHTML = Icons.iconSvg('plus', 11) + ' 创建分组 "' + escHtml(filter) + '"';
-            div.addEventListener('mousedown', (e) => {
+            const pickCreate = (e) => {
                 e.preventDefault();
                 menu.classList.remove('open');
-            });
+            };
+            div.addEventListener('mousedown', pickCreate);
+            div.addEventListener('click', pickCreate);
             menu.appendChild(div);
         }
         if (matched.length > 0 || q) {

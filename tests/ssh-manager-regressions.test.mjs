@@ -119,3 +119,55 @@ test('clicking the confirm button commits once and does not re-enter rename', ()
     assert.equal(btn.getAttribute('onclick'), 'event.stopPropagation();startRenameGroup(this)',
         'pencil attribute handler restored for the next rename');
 });
+
+// ── Group combobox keyboard selection ──
+// The dropdown options historically listened only for mousedown; the
+// keydown handler's Enter branch dispatches click(), which no one answered —
+// keyboard selection was dead.
+
+function openCombo(ctx, profiles) {
+    ctx.TabManager.sshProfiles = profiles;
+    ctx.initGroupCombo();
+    const input = ctx.document.getElementById('ssh-edit-group');
+    const menu = ctx.document.getElementById('group-menu');
+    input.dispatch('focus', mkEvt());
+    return { input, menu };
+}
+
+test('Enter picks the active option in the SSH group dropdown', () => {
+    const ctx = loadSshVm();
+    const { input, menu } = openCombo(ctx, [{ id: 'a', group: 'Prod' }, { id: 'b', group: 'Dev' }]);
+    assert.equal(menu.children.length, 2, 'options rendered');
+
+    input.dispatch('keydown', mkEvt({ key: 'ArrowDown' }));
+    assert.equal(menu.children[0].classList.contains('active'), true);
+    input.dispatch('keydown', mkEvt({ key: 'Enter' }));
+
+    assert.equal(input.value, 'Prod', 'Enter selects the active group');
+    assert.equal(menu.classList.contains('open'), false, 'menu closed after the pick');
+});
+
+test('Enter on the create row keeps the typed group name', () => {
+    const ctx = loadSshVm();
+    const { input, menu } = openCombo(ctx, [{ id: 'a', group: 'Prod' }]);
+    input.value = 'Staging';
+    input.dispatch('input', mkEvt());
+    assert.equal(menu.children.length, 1, 'only the create row matches');
+    assert.equal(menu.children[0].classList.contains('create'), true);
+
+    input.dispatch('keydown', mkEvt({ key: 'ArrowDown' }));
+    input.dispatch('keydown', mkEvt({ key: 'Enter' }));
+
+    assert.equal(input.value, 'Staging', 'the typed name is kept');
+    assert.equal(menu.classList.contains('open'), false, 'menu closed after the pick');
+});
+
+test('a real mouse pick still works through the shared handler', () => {
+    const ctx = loadSshVm();
+    const { input, menu } = openCombo(ctx, [{ id: 'a', group: 'Prod' }, { id: 'b', group: 'Dev' }]);
+
+    menu.children[1].dispatch('mousedown', mkEvt());
+
+    assert.equal(input.value, 'Dev', 'mousedown picks as before');
+    assert.equal(menu.classList.contains('open'), false);
+});
