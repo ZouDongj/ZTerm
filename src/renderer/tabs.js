@@ -2358,7 +2358,14 @@ const TabManager = {
         el.replaceWith(input);
         input.focus();
         input.select();
+        // One-shot guard (same pattern as sftp.js _editPath): finish() renders,
+        // and removing the still-focused input from the document makes Blink
+        // dispatch blur SYNCHRONOUSLY — without the guard the nested blur
+        // re-enters finish(true) and an Esc cancel still commits the typed name.
+        let done = false;
         const finish = (save) => {
+            if (done) return;
+            done = true;
             if (save && input.value.trim()) {
                 tab.name = input.value.trim();
                 tab._customName = true; // lock the custom name so pane changes no longer overwrite it
