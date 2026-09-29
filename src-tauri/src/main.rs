@@ -148,13 +148,20 @@ async fn main() {
                     if let (Ok(pos), Ok(size)) =
                         (win_for_state.outer_position(), win_for_state.outer_size())
                     {
-                        zterm::save_window_state(&zterm::WindowState {
-                            x: pos.x,
-                            y: pos.y,
-                            width: size.width,
-                            height: size.height,
-                            maximized: win_for_state.is_maximized().unwrap_or(false),
-                        });
+                        // Closing while minimized must keep the last valid state (see minimized_at_close)
+                        if !minimized_at_close(
+                            win_for_state.is_minimized().unwrap_or(false),
+                            pos.x,
+                            pos.y,
+                        ) {
+                            zterm::save_window_state(&zterm::WindowState {
+                                x: pos.x,
+                                y: pos.y,
+                                width: size.width,
+                                height: size.height,
+                                maximized: win_for_state.is_maximized().unwrap_or(false),
+                            });
+                        }
                     }
                     // Hold the window open until the renderer's final save hits
                     // disk: without prevent_close, tao destroys the window and
@@ -220,5 +227,40 @@ fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) {
     });
     if let Err(e) = dispatch {
         eprintln!("[zterm] with_webview dispatch failed: {e}");
+    }
+}
+
+/// Whether the geometry captured at close time must NOT overwrite the saved
+/// window state: a minimized window reports Windows' (-32000, -32000) sentinel
+/// position and `is_maximized() == false`, so saving it would wipe the last
+/// valid position/size/maximized. The sentinel check also covers the case
+/// where the is_minimized query itself fails. Pure function for unit tests.
+fn minimized_at_close(is_minimized: bool, x: i32, y: i32) -> bool {
+    is_minimized || (x <= -32000 && y <= -32000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::minimized_at_close;
+
+    #[test]
+    fn normal_placement_is_saved() {
+        // On-screen and multi-monitor negative-axis positions are real placements.
+        assert!(!minimized_at_close(false, 100, 100));
+        assert!(!minimized_at_close(false, -1919, 0));
+        assert!(!minimized_at_close(false, -1919, -1079));
+        // One axis alone at the sentinel value is still a valid placement.
+        assert!(!minimized_at_close(false, -32000, 100));
+        assert!(!minimized_at_close(false, 100, -32000));
+    }
+
+    #[test]
+    fn minimized_close_keeps_last_valid_state() {
+        // IsIconic is true as soon as the window is minimized, even before the
+        // OS parks it at the sentinel position.
+        assert!(minimized_at_close(true, 100, 100));
+        // Windows parks minimized windows at (-32000, -32000).
+        assert!(minimized_at_close(false, -32000, -32000));
+        assert!(minimized_at_close(false, -40000, -32001));
     }
 }
