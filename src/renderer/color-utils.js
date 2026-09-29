@@ -9,7 +9,10 @@ function hexToRgb(hex) {
 }
 
 function rgbToHex(r, g, b) {
-    return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
+    // Clamp to 0-255: an out-of-range component would stringify to more than
+    // two hex digits (999 → '3e7') and produce an invalid '#rrggbb'.
+    const byte = (x) => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0');
+    return '#' + [r, g, b].map(byte).join('');
 }
 
 // 0-255 RGB → {h: 0-360, s: 0-1, v: 0-1}

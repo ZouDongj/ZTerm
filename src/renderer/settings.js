@@ -331,9 +331,12 @@ function initColorPickerEvents() {
     // RGB input changes
     ['cp-r', 'cp-g', 'cp-b'].forEach(id => {
         document.getElementById(id).onchange = () => {
-            const r = parseInt(document.getElementById('cp-r').value) || 0;
-            const g = parseInt(document.getElementById('cp-g').value) || 0;
-            const b = parseInt(document.getElementById('cp-b').value) || 0;
+            // Clamp to 0-255: an out-of-range component would push HSV past
+            // its bounds and make the confirmed hex invalid.
+            const clamp8 = (v) => Math.max(0, Math.min(255, parseInt(v) || 0));
+            const r = clamp8(document.getElementById('cp-r').value);
+            const g = clamp8(document.getElementById('cp-g').value);
+            const b = clamp8(document.getElementById('cp-b').value);
             const hsv = rgbToHsv(r, g, b);
             _cpHue = hsv.h; _cpSat = hsv.s; _cpVal = hsv.v;
             updateColorPickerUI();
@@ -582,7 +585,20 @@ function saveAppearance() {
     const lineHeight = parseFloat(document.getElementById('set-line-height')?.value) || 1.125;
     const fontWeight = _clampFontWeight(document.getElementById('set-font-weight')?.value, '400');
     const fontWeightBold = _clampFontWeight(document.getElementById('set-font-weight-bold')?.value, '600');
-    const accentColor = document.getElementById('set-accent')?.value || '#61afef';
+    // The persisted accent must pass the same 6-digit hex check as
+    // applyAccentColor; an invalid input (e.g. 3-digit '#fff', which the
+    // accent dot still renders as valid CSS) would otherwise be saved and
+    // silently fall back to the default on the next launch. Revert the input
+    // to the last valid value instead of persisting the bad one.
+    const accentInput = document.getElementById('set-accent');
+    const hex6 = /^#?[0-9a-f]{6}$/i;
+    let accentColor = accentInput?.value || '#61afef';
+    if (!hex6.test(accentColor)) {
+        const prev = _settingsConfig.accentColor;
+        accentColor = (prev && hex6.test(prev)) ? prev : '#61afef';
+        if (accentInput) accentInput.value = accentColor;
+        showToast('强调色需为 6 位十六进制颜色', true);
+    }
     const fallbackFont = _fontSelectValue('set-fallback-font', _settingsConfig.fallbackFont);
     updateAccentDot();
     const animations = getToggle('toggle-animations');

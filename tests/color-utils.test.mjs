@@ -36,6 +36,12 @@ test('rgbToHex 补零与格式', () => {
     assert.equal(rgbToHex(10, 1, 0), '#0a0100');
 });
 
+test('rgbToHex 超范围分量钳制到 0-255（不产生非法 hex）', () => {
+    assert.equal(rgbToHex(999, 254, 254), '#fffefe');
+    assert.equal(rgbToHex(-5, 0, 260), '#0000ff');
+    assert.equal(rgbToHex(256, 256, 256), '#ffffff');
+});
+
 test('hex → rgb → hex roundtrip 保真', () => {
     for (const hex of ['#61afef', '#0a0b0c', '#ffffff', '#000000']) {
         const rgb = hexToRgb(hex);

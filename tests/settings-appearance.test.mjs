@@ -65,6 +65,21 @@ function loadSettingsVm() {
     els.set('set-accent', mkInput('#61afef'));
     els.set('set-terminal-scheme', mkInput('onedark'));
     els.set('set-contrast', mkInput('4'));
+    // Color-picker overlay elements openColorPicker/updateColorPickerUI touch.
+    const mkBox = () => ({
+        tagName: 'DIV', value: '', style: {},
+        classList: { add() {}, remove() {}, toggle() {} },
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
+    });
+    els.set('cp-r', mkInput('0'));
+    els.set('cp-g', mkInput('0'));
+    els.set('cp-b', mkInput('0'));
+    els.set('cp-hex', mkInput('#000000'));
+    els.set('cp-canvas', mkBox());
+    els.set('cp-canvas-dot', mkBox());
+    els.set('cp-hue', mkBox());
+    els.set('cp-hue-dot', mkBox());
+    els.set('color-picker-overlay', mkBox());
 
     const context = {
         console,
@@ -188,4 +203,61 @@ test('_buildFontSelects：已保存"系统默认"（uiFont 为空）重建后正
     // select it, not leave the alphabetically first font auto-selected.
     assert.equal(vm1.els.get('set-ui-font').value, '');
     assert.equal(vm1.els.get('set-ui-fallback-font').value, '');
+});
+
+// ── 强调色 hex 校验 ──
+
+test('颜色选择器：RGB 输入超范围被钳制到 0-255', () => {
+    const vm1 = loadSettingsVm();
+    vm1.run("openColorPicker('#61afef')");
+    vm1.els.get('cp-r').value = '999';
+    vm1.els.get('cp-g').value = '254';
+    vm1.els.get('cp-b').value = '254';
+    vm1.run('document.getElementById("cp-r").onchange()');
+    const cpVal = vm1.run('_cpVal');
+    assert.ok(cpVal <= 1, `_cpVal ${cpVal} must stay within HSV bounds`);
+    assert.match(vm1.els.get('cp-hex').value, /^#[0-9a-f]{6}$/i);
+});
+
+test('saveAppearance：非法强调色不落盘，回退上次合法值并提示', () => {
+    const vm1 = loadSettingsVm();
+    vm1.context._settingsConfig = { accentColor: '#9CA3FF' };
+    vm1.els.get('set-accent').value = '#fff'; // valid CSS but not 6-digit hex
+    vm1.run('saveAppearance()');
+    const payload = vm1.appearancePayload();
+    assert.equal(payload.accentColor, '#9CA3FF');
+    assert.equal(vm1.els.get('set-accent').value, '#9CA3FF'); // input reverted
+    assert.equal(vm1.toasts.length, 1);
+    assert.equal(vm1.toasts[0].isError, true);
+});
+
+test('saveAppearance：输入与旧配置均非法时回退默认强调色', () => {
+    const vm1 = loadSettingsVm();
+    vm1.context._settingsConfig = { accentColor: 'garbage' };
+    vm1.els.get('set-accent').value = '#3e7fefe';
+    vm1.run('saveAppearance()');
+    assert.equal(vm1.appearancePayload().accentColor, '#61afef');
+});
+
+test('saveAppearance：合法强调色（含无 # 前缀）照常落盘且无提示', () => {
+    const vm1 = loadSettingsVm();
+    vm1.context._settingsConfig = { accentColor: '#61afef' };
+    vm1.els.get('set-accent').value = '#9CA3FF';
+    vm1.run('saveAppearance()');
+    assert.equal(vm1.appearancePayload().accentColor, '#9CA3FF');
+    vm1.els.get('set-accent').value = '8bc4ff'; // applyAccentColor accepts missing '#'
+    vm1.run('saveAppearance()');
+    assert.equal(vm1.appearancePayload().accentColor, '8bc4ff');
+    assert.equal(vm1.toasts.length, 0);
+});
+
+test('颜色选择器：RGB 超范围输入最终确认的强调色仍是合法 hex', () => {
+    const vm1 = loadSettingsVm();
+    vm1.context._settingsConfig = { accentColor: '#61afef' };
+    vm1.run("openColorPicker('#61afef')");
+    vm1.els.get('cp-r').value = '999';
+    vm1.run('document.getElementById("cp-r").onchange()');
+    vm1.run('confirmColorPicker()');
+    assert.match(vm1.appearancePayload().accentColor, /^#[0-9a-f]{6}$/i);
+    assert.equal(vm1.toasts.length, 0);
 });
