@@ -4322,6 +4322,28 @@ pub async fn sftp_download(
     }
 }
 
+/// Move an uploaded temp file into place. russh-sftp 2.3's rename is a bare
+/// SSH_FXP_RENAME (no posix-rename extension), which OpenSSH's sftp-server
+/// rejects with SSH_FX_FAILURE when the destination exists — so an existing
+/// destination is removed first, after all bytes are safely in the temp file.
+/// Split from sftp_upload's transfer loop for unit testing.
+async fn finalize_upload_rename(
+    sftp: &russh_sftp::client::SftpSession,
+    tmp_remote: &str,
+    remote_final: &str,
+) -> Result<(), String> {
+    // lstat (not stat): a dangling symlink must count as existing too, or the
+    // rename onto it fails just the same.
+    if sftp.symlink_metadata(remote_final).await.is_ok() {
+        sftp.remove_file(remote_final)
+            .await
+            .map_err(|e| format!("overwrite remove: {e}"))?;
+    }
+    sftp.rename(tmp_remote, remote_final)
+        .await
+        .map_err(|e| format!("rename: {e}"))
+}
+
 #[tauri::command]
 pub async fn sftp_upload(
     app: AppHandle,
@@ -4426,10 +4448,7 @@ pub async fn sftp_upload(
             file.sync_all().await.map_err(|e| format!("sync: {e}"))?;
             drop(file);
             // Atomically move into place on success
-            sftp2
-                .rename(&tmp_remote, &remote_final)
-                .await
-                .map_err(|e| format!("rename: {e}"))?;
+            finalize_upload_rename(&sftp2, &tmp_remote, &remote_final).await?;
             Ok::<_, String>(total)
         }
         .await;
@@ -5319,6 +5338,189 @@ mod tests {
         assert!(!open_dialog_wants_directory(&[json!({})]));
         assert!(!open_dialog_wants_directory(&[json!({ "properties": "openDirectory" })]));
         assert!(!open_dialog_wants_directory(&[json!({ "properties": [42] })]));
+    }
+
+    // ── In-process SFTP server for upload-finalize tests ──
+    // Mimics OpenSSH sftp-server semantics: a rename onto an existing
+    // destination fails (bare SSH_FXP_RENAME has no overwrite).
+
+    struct TestSftpHandler {
+        root: PathBuf,
+        handles: HashMap<String, std::fs::File>,
+        next_handle: u32,
+    }
+
+    impl TestSftpHandler {
+        fn new(root: PathBuf) -> Self {
+            Self {
+                root,
+                handles: HashMap::new(),
+                next_handle: 0,
+            }
+        }
+
+        fn path(&self, p: &str) -> PathBuf {
+            self.root.join(p)
+        }
+    }
+
+    fn sftp_ok_status(id: u32) -> russh_sftp::protocol::Status {
+        russh_sftp::protocol::Status {
+            id,
+            status_code: russh_sftp::protocol::StatusCode::Ok,
+            error_message: String::new(),
+            language_tag: String::new(),
+        }
+    }
+
+    impl russh_sftp::server::Handler for TestSftpHandler {
+        type Error = russh_sftp::protocol::StatusCode;
+
+        fn unimplemented(&self) -> Self::Error {
+            russh_sftp::protocol::StatusCode::OpUnsupported
+        }
+
+        async fn open(
+            &mut self,
+            id: u32,
+            filename: String,
+            pflags: russh_sftp::protocol::OpenFlags,
+            _attrs: russh_sftp::protocol::FileAttributes,
+        ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
+            let file = std::fs::OpenOptions::from(pflags)
+                .open(self.path(&filename))
+                .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
+            self.next_handle += 1;
+            let handle = format!("h{}", self.next_handle);
+            self.handles.insert(handle.clone(), file);
+            Ok(russh_sftp::protocol::Handle { id, handle })
+        }
+
+        async fn close(
+            &mut self,
+            id: u32,
+            handle: String,
+        ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            self.handles
+                .remove(&handle)
+                .ok_or(russh_sftp::protocol::StatusCode::Failure)?;
+            Ok(sftp_ok_status(id))
+        }
+
+        async fn write(
+            &mut self,
+            id: u32,
+            handle: String,
+            offset: u64,
+            data: Vec<u8>,
+        ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            use std::io::{Seek, SeekFrom, Write};
+            let file = self
+                .handles
+                .get_mut(&handle)
+                .ok_or(russh_sftp::protocol::StatusCode::Failure)?;
+            file.seek(SeekFrom::Start(offset))
+                .and_then(|_| file.write_all(&data))
+                .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
+            Ok(sftp_ok_status(id))
+        }
+
+        async fn lstat(
+            &mut self,
+            id: u32,
+            path: String,
+        ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
+            let meta = std::fs::symlink_metadata(self.path(&path))
+                .map_err(|_| russh_sftp::protocol::StatusCode::NoSuchFile)?;
+            Ok(russh_sftp::protocol::Attrs {
+                id,
+                attrs: russh_sftp::protocol::FileAttributes::from(&meta),
+            })
+        }
+
+        async fn remove(
+            &mut self,
+            id: u32,
+            filename: String,
+        ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            std::fs::remove_file(self.path(&filename))
+                .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
+            Ok(sftp_ok_status(id))
+        }
+
+        async fn rename(
+            &mut self,
+            id: u32,
+            oldpath: String,
+            newpath: String,
+        ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            let new = self.path(&newpath);
+            // OpenSSH sftp-server rejects SSH_FXP_RENAME onto an existing path.
+            if std::fs::symlink_metadata(&new).is_ok() {
+                return Err(russh_sftp::protocol::StatusCode::Failure);
+            }
+            std::fs::rename(self.path(&oldpath), &new)
+                .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
+            Ok(sftp_ok_status(id))
+        }
+    }
+
+    async fn test_sftp_session(root: PathBuf) -> russh_sftp::client::SftpSession {
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(russh_sftp::server::run(
+            server_side,
+            TestSftpHandler::new(root),
+        ));
+        russh_sftp::client::SftpSession::new(client_side).await.unwrap()
+    }
+
+    async fn write_remote_file(sftp: &russh_sftp::client::SftpSession, path: &str, data: &[u8]) {
+        use tokio::io::AsyncWriteExt;
+        let mut file = sftp
+            .open_with_flags(
+                path,
+                russh_sftp::protocol::OpenFlags::CREATE
+                    | russh_sftp::protocol::OpenFlags::TRUNCATE
+                    | russh_sftp::protocol::OpenFlags::WRITE,
+            )
+            .await
+            .unwrap();
+        file.write_all(data).await.unwrap();
+        file.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_finalize_overwrites_existing_destination() {
+        let dir = config_test_dir("sftp-overwrite");
+        let sftp = test_sftp_session(dir.clone()).await;
+        write_remote_file(&sftp, "dest.txt", b"old").await;
+        write_remote_file(&sftp, "dest.txt.zterm-tmp-7", b"new-content").await;
+        // Bare SSH_FXP_RENAME cannot overwrite (OpenSSH semantics) — the
+        // failure mode this helper works around; the temp file survives it.
+        assert!(sftp
+            .rename("dest.txt.zterm-tmp-7", "dest.txt")
+            .await
+            .is_err());
+        assert!(dir.join("dest.txt.zterm-tmp-7").exists());
+        finalize_upload_rename(&sftp, "dest.txt.zterm-tmp-7", "dest.txt")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(dir.join("dest.txt")).unwrap(), b"new-content");
+        assert!(!dir.join("dest.txt.zterm-tmp-7").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn upload_finalize_renames_cleanly_when_destination_absent() {
+        let dir = config_test_dir("sftp-fresh");
+        let sftp = test_sftp_session(dir.clone()).await;
+        write_remote_file(&sftp, "dest.txt.zterm-tmp-9", b"fresh").await;
+        finalize_upload_rename(&sftp, "dest.txt.zterm-tmp-9", "dest.txt")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(dir.join("dest.txt")).unwrap(), b"fresh");
+        assert!(!dir.join("dest.txt.zterm-tmp-9").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // open_url validation matrix (pure; no OS side effects).
