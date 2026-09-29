@@ -67,6 +67,7 @@ async fn main() {
             zterm::sftp_upload,
             zterm::sftp_cancel_transfer,
             zterm::open_in_explorer,
+            zterm::local_path_stat,
             zterm::encrypt_password,
             zterm::register_credential,
             zterm::revoke_credential,

@@ -8,7 +8,9 @@
 //   so async orderings are deterministic (no timers, no real IPC, no SSH).
 // - showToast / formatSize / formatDate recorded stubs.
 // - webUtils.getPathForFile shim so the REAL Electron drop handler reaches the
-//   real _handleDroppedPaths with synthetic paths.
+//   real _handleDroppedPaths with synthetic paths; the folder guard's
+//   local-path-stat auto-answers "not a directory" (staged overrides via
+//   statAnswers) so drop tests drive the real guard.
 // Backend events are dispatched through the shared seam's __emit (the same
 // channel/payload path ipc-polyfill delivers). Effects only ever name SYNTHETIC
 // sessions (sessA/sessB) and synthetic paths — no real SSH, files, dialogs or
@@ -98,9 +100,21 @@ export async function loadSftpVm() {
     // Electron drop path: files carry a .path the shim maps through.
     ctx.webUtils = { getPathForFile: (f) => (f && f.path) || '' };
 
-    // Controllable invoke bus: records every call, settles only on demand.
+    // Controllable invoke bus: records every call, settles only on demand —
+    // except the drop folder-guard's local-path-stat, which models the fake
+    // FILESYSTEM rather than backend session state: it auto-answers "not a
+    // directory" so file drops flow straight through, while folder scenarios
+    // stage their own answers via statAnswers ({isDir:true} or {error}).
     const calls = [];
+    const statAnswers = [];
     ctx.ipcRenderer.invoke = (cmd, args) => new Promise((resolve, reject) => {
+        if (cmd === 'local-path-stat') {
+            const answer = statAnswers.length ? statAnswers.shift() : { isDir: false, isFile: true };
+            calls.push({ cmd, args, resolve: null, reject: null, settled: true });
+            if (answer && answer.error) reject(new Error(answer.error));
+            else resolve(answer);
+            return;
+        }
         calls.push({ cmd, args, resolve, reject, settled: false });
     });
 
@@ -124,6 +138,6 @@ export async function loadSftpVm() {
     return {
         ctx, SFTP, TransferManager, toasts,
         els: { body, breadcrumb, overlay, sftpWin },
-        calls, pending, settle, fail, of, emit, drain,
+        calls, pending, settle, fail, of, emit, drain, statAnswers,
     };
 }

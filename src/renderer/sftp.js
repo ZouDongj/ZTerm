@@ -799,21 +799,26 @@ ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd } = {}) => {
     let dragDepth = 0;
 
     // Handle a batch of local paths uniformly: reject folders + upload files one by one
-    function _handleDroppedPaths(paths) {
+    async function _handleDroppedPaths(paths) {
         if (!SFTP.isOpen || !SFTP._tabId) return;
         // Same ownership contract as upload(): one snapshot for the whole batch,
         // taken synchronously at drop time (uploads still start concurrently).
         const owner = { tabId: SFTP._tabId, path: SFTP._path };
-        (paths || []).forEach(p => {
-            if (!p) return;
+        for (const p of (paths || [])) {
+            if (!p) continue;
+            // The renderer fs shim's statSync is a stub whose isDirectory() is
+            // always false, so folders are detected through the backend BEFORE
+            // a transfer entry and its toasts are created; a failed stat falls
+            // through to the backend's own init guard (the backstop).
             try {
-                if (fs.statSync(p).isDirectory()) {
-                    showToast('暂不支持上传文件夹: ' + String(p).split(/[\/]/).pop(), true);
-                    return;
+                const st = await ipcRenderer.invoke('local-path-stat', { path: p });
+                if (st && st.isDir) {
+                    showToast('暂不支持上传文件夹: ' + String(p).split(/[\\/]/).pop(), true);
+                    continue;
                 }
-            } catch(err) {}
+            } catch (err) {}
             SFTP.uploadLocal(p, owner);
-        });
+        }
     }
 
     // Tauri drag events are window-level, so we must check whether the drop point falls inside the SFTP panel

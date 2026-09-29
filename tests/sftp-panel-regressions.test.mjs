@@ -202,3 +202,70 @@ test('breadcrumb path edit still opens during a background cwd follow (control)'
     await vm.drain();
     assert.equal(vm.SFTP._editingPath, true, 'follow completion preserves the editor');
 });
+
+test('dropping a folder is rejected up front: no transfer entry, no start toast', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+    vm.statAnswers.push({ isDir: true, isFile: false });
+    vm.els.sftpWin.dispatch('drop', {
+        preventDefault() {}, stopPropagation() {},
+        dataTransfer: { files: [{ path: 'D:/synthetic/dir' }] },
+    });
+    await vm.drain();
+    assert.equal(vm.of('sftp-upload').length, 0, 'a folder never reaches the upload command');
+    assert.equal(vm.TransferManager._transfers.length, 0, 'no transfer entry created for the folder');
+    assert.ok(!vm.toasts.some(t => t.msg.includes('开始上传')),
+        `no start toast: ${JSON.stringify(vm.toasts.map(t => t.msg))}`);
+    assert.equal(vm.toasts.filter(t => t.msg.includes('暂不支持上传文件夹') && t.isErr).length, 1,
+        `exactly one folder rejection toast: ${JSON.stringify(vm.toasts.map(t => t.msg))}`);
+});
+
+test('dropping a regular file passes the stat guard and uploads (control)', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+    vm.statAnswers.push({ isDir: false, isFile: true });
+    vm.els.sftpWin.dispatch('drop', {
+        preventDefault() {}, stopPropagation() {},
+        dataTransfer: { files: [{ path: 'D:/synthetic/one.txt' }] },
+    });
+    await vm.drain();
+    const up = vm.pending('sftp-upload')[0];
+    assert.ok(up && up.args.localPath === 'D:/synthetic/one.txt', 'file proceeds to upload');
+    assert.ok(vm.toasts.some(t => t.msg.includes('开始上传')), 'start toast for a real file');
+    vm.settle(up, {});
+    await vm.drain();
+});
+
+test('a mixed drop rejects the folder and uploads the file', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+    vm.statAnswers.push({ isDir: true, isFile: false }, { isDir: false, isFile: true });
+    vm.els.sftpWin.dispatch('drop', {
+        preventDefault() {}, stopPropagation() {},
+        dataTransfer: { files: [{ path: 'D:/synthetic/dir' }, { path: 'D:/synthetic/one.txt' }] },
+    });
+    await vm.drain();
+    const uploads = vm.pending('sftp-upload');
+    assert.equal(uploads.length, 1, 'only the file reaches the upload command');
+    assert.equal(uploads[0].args.localPath, 'D:/synthetic/one.txt');
+    assert.equal(vm.TransferManager._transfers.length, 1, 'one transfer entry (the file)');
+    assert.ok(vm.toasts.some(t => t.msg.includes('暂不支持上传文件夹')), 'folder rejected with its toast');
+    vm.settle(uploads[0], {});
+    await vm.drain();
+});
+
+test('a failed stat falls through to the backend init guard (fail-open)', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+    vm.statAnswers.push({ error: 'access denied' });
+    vm.els.sftpWin.dispatch('drop', {
+        preventDefault() {}, stopPropagation() {},
+        dataTransfer: { files: [{ path: 'D:/synthetic/gone.txt' }] },
+    });
+    await vm.drain();
+    const up = vm.pending('sftp-upload')[0];
+    assert.ok(up, 'upload still dispatched; the backend init guard remains the backstop');
+    vm.settle(up, { error: 'stat: access denied' });
+    await vm.drain();
+    assert.ok(vm.toasts.some(t => t.msg.includes('上传失败')), 'backend rejection reported');
+});

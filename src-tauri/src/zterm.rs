@@ -4496,6 +4496,27 @@ pub fn open_in_explorer(args: Vec<Value>) -> Result<Value, String> {
     Ok(json!({ "ok": true }))
 }
 
+// Local filesystem probe for the drag-drop folder guard: the renderer's fs
+// shim cannot stat, so the SFTP drop handler asks here before creating a
+// transfer entry for a dropped path.
+#[tauri::command]
+pub async fn local_path_stat(args: Vec<Value>) -> Result<Value, String> {
+    let params = args.into_iter().next().unwrap_or(json!({}));
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if path.is_empty() {
+        return Ok(json!({ "error": "missing path" }));
+    }
+    match tokio::fs::metadata(&path).await {
+        Ok(meta) => Ok(json!({ "isDir": meta.is_dir(), "isFile": meta.is_file() })),
+        Err(e) => Ok(json!({ "error": format!("{e}") })),
+    }
+}
+
 // ── Native file dialogs ──
 
 /// The renderer passes Electron-style dialog `properties`; only openDirectory
@@ -6344,5 +6365,27 @@ mod tests {
         let p = ready_installer_path(name, abc_sha).expect("matching hash must be ready");
         assert!(p.ends_with(name));
         let _ = std::fs::remove_file(dir.join(name));
+    }
+
+    #[tokio::test]
+    async fn local_path_stat_reports_directories_files_and_missing_paths() {
+        // A directory reports isDir (the drop guard's folder signal).
+        let r = local_path_stat(vec![json!({ "path": env!("CARGO_MANIFEST_DIR") })])
+            .await
+            .unwrap();
+        assert_eq!(r["isDir"], json!(true));
+        // A regular file reports isFile and not isDir.
+        let file = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+        let r = local_path_stat(vec![json!({ "path": file })]).await.unwrap();
+        assert_eq!(r["isDir"], json!(false));
+        assert_eq!(r["isFile"], json!(true));
+        // A missing path reports a structured error (the frontend then falls
+        // through to the upload init guard, the backstop).
+        let missing = format!("{}/no-such-path-anywhere", env!("CARGO_MANIFEST_DIR"));
+        let r = local_path_stat(vec![json!({ "path": missing })]).await.unwrap();
+        assert!(r.get("error").is_some());
+        // An empty path is rejected without touching the filesystem.
+        let r = local_path_stat(vec![json!({ "path": "  " })]).await.unwrap();
+        assert_eq!(r["error"], json!("missing path"));
     }
 }
