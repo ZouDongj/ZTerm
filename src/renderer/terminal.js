@@ -552,7 +552,7 @@ function wireTerminal(tab, tabId) {
         _sendInputForTerm(term, data);
     });
     _wireTabRenameChannel(term);
-    _bindSyncExitOnClick(tab, term.element);
+    _bindSyncExitOnClick(tab, term.element, term);
 
     // ── Bell notification ──
     term.onBell(() => {
@@ -681,7 +681,7 @@ function _applyToolName(ownerTab, paneLike, name) {
 // The owning tab is looked up dynamically: term.element's DOM position changes after a
 // move (drag-split), so resolve .split-pane[data-pane] back to its pane and then its tab,
 // avoiding a closure over the stale tab that would break the exit.
-function _bindSyncExitOnClick(tab, element) {
+function _bindSyncExitOnClick(tab, element, term) {
     if (!element || element._syncExitBound) return;
     element._syncExitBound = true;
     element.addEventListener('mousedown', () => {
@@ -689,12 +689,24 @@ function _bindSyncExitOnClick(tab, element) {
         // pane.id, then TabManager.tabs yields the owning tab (automatically points at the
         // new tab after a move)
         const paneEl = element.closest('.split-pane');
-        let ownerTab = tab; // fallback: non-split (single tab) uses the captured tab directly
+        let ownerTab = null;
         if (paneEl) {
+            ownerTab = tab; // fallback: pane id matched nothing, keep the wired tab
             const paneId = paneEl.getAttribute('data-pane');
             for (const t of TabManager.tabs) {
                 if (t.splitRoot && getAllPanes(t).some(p => p.id === paneId)) { ownerTab = t; break; }
             }
+        } else {
+            // No .split-pane ancestor: single-tab DOM. The captured tab is
+            // only a guess here — an extract/drag may have moved this
+            // terminal onto another tab without rebinding (the
+            // _syncExitBound guard), so resolve the CURRENT owner by
+            // terminal identity. An unresolvable owner (mid-teardown) exits
+            // nothing: flipping the stale capture would silently turn sync
+            // input off on a tab the user is not even looking at.
+            const resolved = _resolveTermOwner(term);
+            if (!resolved) return;
+            ownerTab = resolved.tab;
         }
         if (!ownerTab.syncInput) return;
         ownerTab.syncInput = false;
@@ -786,7 +798,7 @@ function wireTerminalToPane(tab, pane) {
         _sendInputForTerm(term, data);
     });
     _wireTabRenameChannel(term);
-    _bindSyncExitOnClick(tab, term.element);
+    _bindSyncExitOnClick(tab, term.element, term);
 
     // ── Bell notification ──
     term.onBell(() => {

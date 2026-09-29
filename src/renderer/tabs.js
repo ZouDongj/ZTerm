@@ -1608,6 +1608,10 @@ const TabManager = {
         } else if (rem.length === 1) {
             const rp = rem[0];
             st.splitRoot = null;
+            // The collapse ends sync input with the split: a leftover flag
+            // would silently resume broadcasting on the next re-split (and
+            // fire the exit-on-click toast on a tab that shows no split).
+            st.syncInput = false;
             if (!rem.some(p => p.focused)) rp.focused = true;
             // Pending backend hand-off: the surviving pane's creation request
             // must survive the collapse, or its pty-created finds no consumer
@@ -1749,6 +1753,9 @@ const TabManager = {
                         sourceTab._smoothCursor = rp._smoothCursor;
                         sourceTab.tabId = rp.tabId;
                         sourceTab.splitRoot = null;
+                        // Same collapse rule as _extractPaneToTab: sync input
+                        // dies with the split tree.
+                        sourceTab.syncInput = false;
                         sourceTab.name = rp.name || sourceTab.name;
                         // Session identity follows the surviving pane — the
                         // tab's old host/credential/command may belong to the
@@ -1943,6 +1950,9 @@ const TabManager = {
         // surviving pane at all the tab is simply offline.
         if (!fp) tab.connected = false;
         tab.splitRoot = null;
+        // Sync input belongs to the split tree: reset it on the merge so a
+        // later re-split does not silently resume broadcasting.
+        tab.syncInput = false;
         tab._maximizedPaneId = null;
         // The term moves from pane back to tab: the pane's onData listener must be disposed and rebound to the tab,
         // otherwise it stays on the term as a permanent zombie and re-splitting double-binds it — every keypress inputs twice
