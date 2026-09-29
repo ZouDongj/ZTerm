@@ -399,9 +399,13 @@ const TabManager = {
         if (this._closingTabs.has(id)) return;
         if (this.aliveCount() <= 1) {
             // The last tab cannot be closed; if its split tree was already emptied (0 panes, error path),
-            // reset it to the default local terminal as a fallback so no unclosable empty-split dead tab remains
+            // or it was reduced to a terminal-less shell with nothing pending (all of its panes died in
+            // the same close window), reset it to the default local terminal as a fallback so no
+            // unclosable empty dead tab remains. A tab with a live connect attempt or a pending local
+            // creation is NOT dead — closing is simply refused as before.
             const t = this.tabs[0];
-            if (t && t.splitRoot && getAllPanes(t).length === 0) {
+            const deadShell = t && !t.splitRoot && !t.term && !t.tabId && !sshAttempts.ownerAttempt(t) && !t._ptyRequestId;
+            if (t && ((t.splitRoot && getAllPanes(t).length === 0) || deadShell)) {
                 t.splitRoot = null;
                 t.type = 'local';
                 t.command = t.command || 'powershell.exe';
@@ -921,7 +925,7 @@ const TabManager = {
                 reconnectPaneBtn +
                 '<button title="extract" onclick="event.stopPropagation();TabManager._extractPaneToTab(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('external-link', 12) + '</button>' +
                 '<button title="maximize" onclick="event.stopPropagation();TabManager._maximizePane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('maximize', 13) + '</button>' +
-                '<button title="close" onclick="event.stopPropagation();TabManager._closePane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('x', 13) + '</button>';
+                '<button title="close" onclick="event.stopPropagation();TabManager._closePane(\'' + tab.id + '\',\'' + pane.id + '\');this.blur()">' + Icons.iconSvg('x', 13) + '</button>';
             el.appendChild(hdr);
             // Drag-reorder: same pointer-based drag as Tabby (mousedown tracking, no HTML5 draggable)
             hdr.addEventListener('mousedown', (e) => this._onPaneHeaderMouseDown(e, tab, pane));
@@ -1324,6 +1328,14 @@ const TabManager = {
         if (!tab || !tab.splitRoot) return;
         const pane = findPane(tab, paneId);
         if (!pane) return;
+        // Dying guard: the close button keeps focus after its click (Enter/
+        // Space re-fires it) and a repeated close shortcut still resolves to
+        // this pane while its exit animation runs. A second close must not
+        // schedule a second removal — after the first one collapses the tree,
+        // the late one would close the whole tab and kill the survivor's
+        // live session.
+        if (pane._closing) return;
+        pane._closing = true;
         if (tab._maximizedPaneId === paneId) tab._maximizedPaneId = null;
         // Destroy backend immediately but keep the DOM for exit animation.
         // The cancellation carries the pane's OWN attempt identity (backend
@@ -1358,18 +1370,34 @@ const TabManager = {
         pane.tabId = null;
         pane.requestId = null;
         pane._pendingAttempt = null;
+        // The dying pane must not stay the focus marker owner: a repeated
+        // close shortcut inside the exit window resolves the focused pane and
+        // would hit it again. Hand the marker to the next sibling in tree
+        // order (exactly what the deferred removal would pick).
+        if (pane.focused) {
+            pane.focused = false;
+            const sibling = getAllPanes(tab).find(p => p !== pane && !p._closing);
+            if (sibling) sibling.focused = true;
+        }
         // Exit animation: fade + shrink, then remove from tree and re-render
         const rootEl = document.getElementById('split_' + tab.id);
         const paneEl = rootEl ? rootEl.querySelector('.split-pane[data-pane="' + paneId + '"]') : null;
         const doRemove = () => {
+            // The pane may already be out of the tree (the whole tab closed
+            // inside the fade window): that teardown path owns the tree.
             const parent = getParentOf(tab, pane);
-            if (parent) {
-                const idx = parent.children.indexOf(pane);
-                if (idx >= 0) { parent.children.splice(idx, 1); parent.ratios.splice(idx, 1); }
-            }
+            if (!parent) return;
+            const idx = parent.children.indexOf(pane);
+            if (idx >= 0) { parent.children.splice(idx, 1); parent.ratios.splice(idx, 1); }
             normalize(tab.splitRoot);
             const rem = getAllPanes(tab);
-            if (rem.length === 0) {
+            // A lone survivor that is itself mid-close (its session slots were
+            // already dropped at initiation but its own removal timer is still
+            // pending) is dead: promoting it would leave a terminal-less shell
+            // tab that still reads connected. Take the no-survivor path
+            // instead; its own pending removal finishes the tree teardown.
+            const survivorDead = rem.length === 1 && !rem[0].term && !rem[0].tabId && !rem[0].requestId && !rem[0]._pendingAttempt;
+            if (rem.length === 0 || survivorDead) {
                 this.closeTab(tabId);
             } else if (rem.length === 1) {
                 tab.name = rem[0]?.name || tab.name;
