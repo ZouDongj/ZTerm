@@ -84,3 +84,38 @@ test('a real blur (clicking away) still commits the group rename', () => {
 
     assert.equal(savesOf(ctx, 'save-ssh-profiles').length, 1, 'blur commits');
 });
+
+// ── Confirm (✓) button ──
+// The ✓ is the same <button> as the pencil. Without a mousedown guard the
+// press moves focus to the button first, the input's blur commits, and the
+// arriving click then lands on the just-restored pencil handler — the
+// confirm re-enters rename mode instead of finishing.
+
+test('the confirm button blocks the mousedown focus shift', () => {
+    const ctx = loadSshVm();
+    ctx.TabManager.sshProfiles = [{ id: 'a', group: 'Prod' }];
+    const { btn, input } = startRename(ctx, 'Prod');
+
+    const ev = mkEvt();
+    btn.dispatch('mousedown', ev);
+
+    assert.equal(ev.defaultPrevented, true, 'mousedown default prevented so the input keeps focus');
+    assert.equal(ctx.document.activeElement, input, 'focus stays in the rename input');
+});
+
+test('clicking the confirm button commits once and does not re-enter rename', () => {
+    const ctx = loadSshVm();
+    ctx.TabManager.sshProfiles = [{ id: 'a', group: 'Prod' }];
+    const { header, btn, input } = startRename(ctx, 'Prod');
+    input.value = 'Renamed';
+
+    btn.dispatch('mousedown', mkEvt());
+    btn.dispatch('click', mkEvt());
+
+    assert.equal(savesOf(ctx, 'save-ssh-profiles').length, 1, 'the click commits exactly once');
+    assert.equal(header.querySelector('input'), null, 'rename finished — no re-entry');
+    assert.equal(header.querySelector('.group-name-text').textContent, 'Renamed');
+    assert.equal(btn.onclick, null, 'finish closure cleared');
+    assert.equal(btn.getAttribute('onclick'), 'event.stopPropagation();startRenameGroup(this)',
+        'pencil attribute handler restored for the next rename');
+});

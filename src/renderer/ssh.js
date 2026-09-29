@@ -666,6 +666,7 @@ function startRenameGroup(btn, oldName) {
         // startRenameGroup), otherwise the leftover finish closure would take
         // the save path on the next click instead of restarting the rename
         btn.onclick = null;
+        btn.onmousedown = null;
         if (originalOnClick) btn.setAttribute('onclick', originalOnClick);
 
         if (save && newName && newName !== oldName) {
@@ -686,6 +687,11 @@ function startRenameGroup(btn, oldName) {
     };
 
     btn.onclick = (e) => { e.stopPropagation(); finish(true); };
+    // Block the mousedown focus shift (same treatment as the inline password
+    // buttons below): otherwise the press first blurs the input — committing
+    // through the blur path — and the arriving click then lands on the
+    // just-restored pencil handler, re-entering rename instead of confirming.
+    btn.onmousedown = (e) => e.preventDefault();
     input.addEventListener('blur', () => finish(true));
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
