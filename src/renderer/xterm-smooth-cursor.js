@@ -208,7 +208,13 @@
       // pending candidate if its unit completed inside the parsed range.
       parsed(seq) {
         if (disposed) return;
-        if (typeof seq === 'number' && seq > sw.watermark) sw.watermark = seq;
+        // Advance only through a chunk the live observer actually enqueued:
+        // _inkFeed always enqueues a chunk before writing it, so a seq above
+        // enqueued can only be a stale write callback from a previous
+        // observer's numbering (wrapper migration kept the old owner's
+        // fields alive) — accepting it would push the watermark ahead of the
+        // real parse front and break the checkpoint binding.
+        if (typeof seq === 'number' && seq > sw.watermark && seq <= sw.enqueued) sw.watermark = seq;
         if (sw.enqueued > sw.watermark) return;
         if (sw.pending && sw.pending.chunkSeq <= sw.watermark && sw.candidateGeneration === sw.generation) {
           if (!softwareCellMatches(sw.pending)) {
@@ -232,6 +238,25 @@
           sw.watermark = 0;
           sw.enqueued = 0;
         }
+      },
+      // Wrapper migration (split/extract/collapse/drag) keeps this adapter and
+      // its terminal alive but moves them onto a new owner, and _inkFeed then
+      // builds a fresh observer whose chunkSeq restarts at 1. The counters
+      // below still number the dead observer's chunks: enqueued's Math.max
+      // pins it above every new seq, and the dropped owner's in-flight write
+      // callbacks can never raise the watermark again, so the suspend gate
+      // (enqueued > watermark) disables the cursor chain until a reconnect.
+      // Rebase both counters to the new observer's numbering and drop the
+      // dead observer's pending candidate and trust run; the published
+      // descriptor, the coordinate generation and every animation parameter
+      // stay untouched — the buffer and the app's painted caret are unchanged
+      // by the move, so this is bookkeeping, not a session boundary.
+      rebindObserver() {
+        if (disposed) return;
+        sw.enqueued = 0;
+        sw.watermark = 0;
+        sw.pending = null;
+        sw.runStreak = 0;
       },
     };
 

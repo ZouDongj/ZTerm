@@ -76,6 +76,14 @@ function _inkFeed(owner, tab, pane, data) {
             ? createInkCaretObserver
             : window.createInkCaretObserver;
         if (!factory) return null;
+        // Wrapper migration (split/extract/collapse/drag) moved this adapter
+        // and terminal onto a new owner: the fresh observer created below
+        // restarts chunkSeq at 1 while the adapter still counts the dead
+        // observer's numbering. Rebase the adapter's watermark counters
+        // BEFORE the first push (port.candidate fires synchronously inside
+        // it) or the Math.max-pinned counters suspend the cursor chain until
+        // a reconnect. No-op for genuinely fresh adapters/sessions.
+        port.rebindObserver?.();
         const term = (pane || tab)?.term;
         owner._inkObserver = factory({
             rows: term?.rows,
