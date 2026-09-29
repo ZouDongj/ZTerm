@@ -2367,10 +2367,13 @@ pub fn get_quick_commands(app: AppHandle, args: Vec<Value>) -> Result<Value, Str
 
 #[tauri::command]
 pub fn save_quick_commands(args: Vec<Value>) -> Result<Value, String> {
+    // Hold the lock across the whole load->insert->save (like the other save_*
+    // commands): a narrower scope lets a concurrent writer persist a stale
+    // snapshot afterwards, silently rolling the quick commands back on disk.
+    let _config_guard = CONFIG_WRITE_LOCK.lock();
     let commands = args.into_iter().next().unwrap_or(json!([]));
     let mut config = load_config();
     if let Value::Object(ref mut c) = config {
-        let _config_guard = CONFIG_WRITE_LOCK.lock();
         c.insert("quickCommands".into(), commands);
     }
     save_config(&config)?;
