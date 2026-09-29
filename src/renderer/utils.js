@@ -24,6 +24,12 @@ function showToast(msg, isError) {
 
 // ── Overlay helpers ──
 function closeAllOverlays() {
+    // The hostkey dialog owes the backend a decision on EVERY dismissal
+    // (check_server_key awaits it; a dialog that just loses .open hangs the
+    // connection attempt forever): its cleanup sends an idempotent reject, so
+    // Escape must run it. The plain confirm dialog needs no such signal — its
+    // stale listeners are unbound lazily when the next dialog opens.
+    if (typeof _activeHostkeyCleanup === 'function' && _activeHostkeyCleanup) _activeHostkeyCleanup();
     document.querySelectorAll('.overlay.open').forEach(o => o.classList.remove('open'));
 }
 

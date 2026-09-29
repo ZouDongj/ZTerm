@@ -717,8 +717,13 @@ ipcRenderer.on('config-corrupted', () => {
 });
 
 // SSH host key mismatch alert (possible MITM): let the user decide whether to keep connecting.
-// Cleanup for the currently active hostkey dialog: closing via Escape (closeAllOverlays) does not run cleanup,
-// so stale callbacks would stack onto the next dialog (possibly trusting an unconfirmed host). Unbind the old one before opening a new dialog.
+// Cleanup for the currently active hostkey dialog. EVERY dismissal path must
+// resolve the backend's suspended decision: check_server_key awaits it on a
+// oneshot (zterm.rs), so a dialog that vanishes without one hangs the attempt
+// at "Connecting to ..." forever and leaks the russh task. The cleanup below
+// therefore sends an idempotent reject itself; only the buttons record an
+// explicit decision first. closeAllOverlays (Escape) runs this cleanup, and a
+// second mismatch / showConfirm supersedes the dialog through it.
 let _activeHostkeyCleanup = null;
 
 ipcRenderer.on('ssh-hostkey-mismatch', (event, { tabId, attemptId, host, oldAlgorithm, oldFingerprint, newAlgorithm, newFingerprint }) => {
@@ -747,6 +752,16 @@ ipcRenderer.on('ssh-hostkey-mismatch', (event, { tabId, attemptId, host, oldAlgo
     cancelBtn.textContent = '拒绝';
     okBtn.textContent = '信任并连接';
 
+    // Exactly one decision per dialog, whatever the dismissal path: the
+    // non-button paths (Escape via closeAllOverlays, superseded by a second
+    // mismatch or by showConfirm) only run cleanup, so the refusal defaults
+    // here — reject, never auto-accept. onAccept pre-records its decision.
+    let decided = false;
+    const decide = (accept, trust) => {
+        if (decided) return;
+        decided = true;
+        ipcRenderer.send('ssh-hostkey-decision', { tabId, accept, trust });
+    };
     const cleanup = () => {
         _activeHostkeyCleanup = null;
         overlay.classList.remove('open');
@@ -756,14 +771,14 @@ ipcRenderer.on('ssh-hostkey-mismatch', (event, { tabId, attemptId, host, oldAlgo
         // Restore the default button labels
         cancelBtn.textContent = '取消';
         okBtn.textContent = '删除';
+        decide(false, false);
     };
     const onReject = () => {
         cleanup();
-        ipcRenderer.send('ssh-hostkey-decision', { tabId, accept: false, trust: false });
     };
     const onAccept = () => {
+        decide(true, true);
         cleanup();
-        ipcRenderer.send('ssh-hostkey-decision', { tabId, accept: true, trust: true });
     };
 
     cancelBtn.addEventListener('click', onReject);
