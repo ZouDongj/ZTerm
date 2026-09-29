@@ -2681,17 +2681,16 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
         );
     } else {
         let current_config = load_config();
-        let new_dir = PathBuf::from(&dir);
-        let _ = std::fs::create_dir_all(&new_dir);
-        let new_config_path = new_dir.join("config.json");
         let mut clean_config = current_config.clone();
         if let Value::Object(ref mut m) = clean_config {
             m.remove("dataDir");
         }
-        let _ = std::fs::write(
-            &new_config_path,
-            serde_json::to_string_pretty(&clean_config).unwrap_or_default(),
-        );
+        // The target must actually hold the config before the anchor is
+        // repointed at it, or an unwritable directory is reported as a
+        // successful migration (and the next launch reads factory defaults).
+        if let Err(e) = write_config_to_dir(&PathBuf::from(&dir), &clean_config) {
+            return Ok(json!({ "error": e }));
+        }
         let mut anchor: Value = if anchor_config.exists() {
             std::fs::read_to_string(&anchor_config)
                 .ok()
@@ -2703,12 +2702,24 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
         if let Value::Object(ref mut m) = anchor {
             m.insert("dataDir".into(), json!(dir));
         }
-        let _ = std::fs::write(
+        if let Err(e) = std::fs::write(
             &anchor_config,
             serde_json::to_string_pretty(&anchor).unwrap_or_default(),
-        );
+        ) {
+            return Ok(json!({ "error": format!("write {}: {e}", anchor_config.display()) }));
+        }
     }
     Ok(json!({ "ok": true }))
+}
+
+/// Write `config` as <dir>/config.json, creating the directory first. Split
+/// from set_data_dir for unit testing; any IO failure is reported so the
+/// caller can abort before repointing the anchor at an unusable directory.
+fn write_config_to_dir(dir: &std::path::Path, config: &Value) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let path = dir.join("config.json");
+    std::fs::write(&path, serde_json::to_string_pretty(config).unwrap_or_default())
+        .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// Reset-to-default data dir: carry the effective settings back, or everything
@@ -5228,6 +5239,26 @@ mod tests {
         assert_eq!(written_anchor["appearance"]["fontSize"], 20);
         assert_eq!(written_anchor["legacyKey"], 1);
         assert!(written_anchor.get("dataDir").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_config_to_dir_reports_unwritable_targets() {
+        // Success: a missing directory is created and the config lands in it.
+        let dir = config_test_dir("write-config");
+        let target = dir.join("new-dir");
+        write_config_to_dir(&target, &json!({ "appearance": { "fontSize": 15 } })).unwrap();
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(target.join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(written["appearance"]["fontSize"], 15);
+        // Failure: a path through a regular file cannot become a directory —
+        // the error must surface instead of being swallowed.
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, "file").unwrap();
+        let bad = blocker.join("sub");
+        assert!(write_config_to_dir(&bad, &json!({})).is_err());
+        assert!(!bad.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
