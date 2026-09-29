@@ -222,6 +222,10 @@ const TabManager = {
                 }
                 const tid = this.createTabSilent(t.name, t.command || 'powershell.exe', t.type || 'local', sshOpts, t.args);
                 const tab = this.tabs.find(x => x.id === tid);
+                // Restore the manual-rename lock with the name: without it a
+                // later split's auto-naming would overwrite the user's rename
+                // (the lock itself was lost across the restart).
+                if (tab) tab._customName = t.customName === true;
                 if (tab && t.content) tab._contentBuffer = normalizeRestoredContent(t.content);
 
                 if (sshOpts && sshOpts._encryptedPwd) {
@@ -2598,6 +2602,10 @@ const TabManager = {
             command: tabData.command || 'powershell.exe',
             args: tabData.args || [],
             connected: false,
+            // Restore the manual-rename lock BEFORE the _updateTabName calls
+            // below: unlocked, they would rejoin the pane names over the
+            // user's rename and the original name is lost for good.
+            _customName: tabData.customName === true,
         };
         if (tabData.type === 'ssh') {
             Object.assign(tab, {
