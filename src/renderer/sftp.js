@@ -35,10 +35,22 @@ const SFTP = {
     async open(tabId) {
         // tabId here is the main-process tabId, not TabManager's tab id
         this._tabId = tabId;
-        // set connection info
-        const tab = TabManager.tabs.find(t => t.tabId === tabId);
+        // set connection info — pane-aware: a split tab's own tabId is
+        // structurally null (the session lives on its panes), so the pane
+        // holding this backend id names the connection (same lookup order as
+        // _findSessionOwner in ipc.js).
+        let sessionName = null;
+        for (const t of TabManager.tabs) {
+            if (t.splitRoot) {
+                const pane = getAllPanes(t).find(p => p.tabId === tabId);
+                if (pane) { sessionName = pane.name || t.name || ''; break; }
+            } else if (t.tabId === tabId) {
+                sessionName = t.name || '';
+                break;
+            }
+        }
         const connEl = document.getElementById('sftp-conn');
-        if (connEl && tab) connEl.textContent = tab.name || '';
+        if (connEl && sessionName !== null) connEl.textContent = sessionName;
         // always show the loading state first, then fetch the file list; reset ALL
         // session-bound listing state before the first await so a later failure can
         // never render the previous session's rows into this panel

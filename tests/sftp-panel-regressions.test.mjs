@@ -71,3 +71,30 @@ test('transfer session label keeps non-split and closed-session behavior (contro
     assert.equal(vm.TransferManager._transfers.find(t => t.id === solo).sessionLabel, 'Unnamed Panes Host',
         'nameless pane labeled with its split tab name');
 });
+
+test('panel header names the split-pane session being browsed', async () => {
+    const vm = await loadSftpVm();
+    pushSplitTab(vm.ctx);
+    const connEl = vm.ctx.document.getElementById('sftp-conn');
+
+    await openOn(vm, 'sessA', '/home/a', []);
+    assert.equal(connEl.textContent, 'Host A', 'non-split header (control)');
+
+    await openOn(vm, 'sessL', '/home/l', []);
+    assert.equal(connEl.textContent, 'Left Pane',
+        `header must switch to the split pane session, not keep the stale name (saw: ${connEl.textContent})`);
+
+    await openOn(vm, 'sessR', '/home/r', []);
+    assert.equal(connEl.textContent, 'Right Pane', 'header follows the other pane');
+});
+
+test('panel header falls back to the split tab name for a nameless pane', async () => {
+    const vm = await loadSftpVm();
+    vm.ctx.TabManager.tabs.push({
+        id: 'tabSplit2', tabId: null, name: 'Unnamed Panes Host', type: 'ssh',
+        splitRoot: { id: 'paneOnly', tabId: 'sessSolo', type: 'ssh' },
+    });
+    const connEl = vm.ctx.document.getElementById('sftp-conn');
+    await openOn(vm, 'sessSolo', '/home/solo', []);
+    assert.equal(connEl.textContent, 'Unnamed Panes Host');
+});
