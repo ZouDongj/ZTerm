@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const { SmoothCursorMotion } = require("../src/renderer/smooth-cursor-overlay.js");
 const { createXtermWebglSmoothCursor } = require("../src/renderer/xterm-smooth-cursor.js");
 
-function fixture({ reduced = false } = {}) {
+function fixture({ reduced = false, cursorStyle = 'bar' } = {}) {
   let time = 0;
   let widthByColumn = new Map();
   const rawCell = {
@@ -85,7 +85,7 @@ function fixture({ reduced = false } = {}) {
   const terminal = {
     cols: 10,
     rows: 3,
-    options: { cursorWidth: 1, cursorStyle: 'bar' },
+    options: { cursorWidth: 1, cursorStyle },
     buffer: { active },
     element,
     _core: {
@@ -191,7 +191,7 @@ test('hidden, reduced-motion, disabled, and disposal paths restore native behavi
   f.adapter.setCursorStyle('block');
   f.adapter.dispose();
   assert.notEqual(f.renderer.renderRows, wrapped);
-  assert.equal(f.terminal.options.cursorStyle, 'bar');
+  assert.equal(f.terminal.options.cursorStyle, 'block', 'disposal keeps the live style');
   f.renderer.renderRows(0, 2);
   assert.ok(f.counts().stockRecolors >= 2);
 });
@@ -223,6 +223,20 @@ test('cursor blink off-phase suppresses the custom cursor and freezes the animat
   assert.equal(f.adapter.motion.from.x, 1);
   assert.equal(f.adapter.motion.target.x, 8);
   assert.equal(f.rectangleDraws.length, drawn + 1);
+});
+
+test('refuses to bind when the terminal uses a cursor style the adapter cannot draw', () => {
+  assert.throws(() => fixture({ cursorStyle: 'underline' }), /cursor style/);
+});
+
+test('dispose keeps an externally applied cursor style instead of rolling it back', () => {
+  const f = fixture();
+  // The underline fallback applies the new style to terminal.options before
+  // retiring the adapter; disposal must not restore the stale
+  // construction-time style over it.
+  f.terminal.options.cursorStyle = 'underline';
+  f.adapter.dispose();
+  assert.equal(f.terminal.options.cursorStyle, 'underline');
 });
 
 test('rapid target changes retarget from the current visual and long jumps land immediately', () => {

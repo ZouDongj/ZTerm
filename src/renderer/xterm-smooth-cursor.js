@@ -34,7 +34,13 @@
 
     const duration = Math.max(0, finite(options?.duration, DEFAULT_DURATION));
     const jumpDistance = Math.max(0, finite(options?.jumpDistance, DEFAULT_JUMP_DISTANCE));
-    const originalCursorStyle = terminal.options.cursorStyle;
+    // Only bar/block have an adapter-drawn caret. Any other terminal style
+    // (underline) must stay with the stock renderer, so refuse to bind here —
+    // the caller catches this and keeps the native caret.
+    const terminalCursorStyle = terminal.options.cursorStyle;
+    if (terminalCursorStyle !== 'bar' && terminalCursorStyle !== 'block') {
+      throw new Error(`Smooth cursor cannot draw the '${terminalCursorStyle}' cursor style`);
+    }
     const motion = new Motion({ duration, jumpDistance, now: clock });
     const mediaQuery = options?.reducedMotionQuery || root.matchMedia?.('(prefers-reduced-motion: reduce)') || null;
     const originalRenderRows = renderer.renderRows;
@@ -813,7 +819,9 @@
         diagnostic.held = false;
         diagnostic.remaining = 0;
         renderer.renderRows = originalRenderRows;
-        if (terminal.options.cursorStyle !== originalCursorStyle) terminal.options.cursorStyle = originalCursorStyle;
+        // terminal.options.cursorStyle is always the user's current style —
+        // written by setCursorStyle or by the caller before retiring the
+        // adapter (underline fallback) — so disposal must not roll it back.
         for (const subscription of subscriptions.splice(0)) subscription.dispose();
         motion.dispose();
         renderer._requestRedrawViewport();
