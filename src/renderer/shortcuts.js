@@ -414,8 +414,13 @@ function startShortcutCapture(actionId, btn) {
         if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return; // wait for a non-modifier key
         finish(_comboFromEvent(e));
     };
+    // Clicking anywhere (tab bar, settings close, another control) cancels the
+    // capture like Esc: otherwise the keydown listener stays armed after the
+    // user moved on and silently binds the next combo pressed anywhere.
+    const onMouseDown = () => finish(null);
     const finish = (combo) => {
         document.removeEventListener('keydown', onKey, true);
+        document.removeEventListener('mousedown', onMouseDown, true);
         _shortcutCapture = null;
         if (combo) {
             const keyPart = combo.split('+').pop();
@@ -436,6 +441,7 @@ function startShortcutCapture(actionId, btn) {
         if (typeof updateMenuShortcuts === 'function') updateMenuShortcuts();
     };
     document.addEventListener('keydown', onKey, true);
+    document.addEventListener('mousedown', onMouseDown, true);
 }
 
 function resetShortcut(actionId) {
