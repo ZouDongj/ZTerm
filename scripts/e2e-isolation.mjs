@@ -729,9 +729,18 @@ export function killOwnedRuntime({ child, executable, sandboxDirectory, launchPo
 // Prove the CDP endpoint belongs to THIS run before any attach/evaluate:
 // the debug-port listener must be a live msedgewebview2 whose parent chain
 // reaches the host pid, and that host pid must STILL run the sandbox
-// executable (fresh metadata, not a launch-time snapshot). Returns true or
-// { ok: false, reasons } — callers refuse to attach on anything but true.
-export function verifyCdpEndpointOwnership(port, child, executable) {
+// executable (fresh metadata, not a launch-time snapshot). The parent chain
+// is not guaranteed to exist, though: the WebView2 loader can start the
+// browser process OUTSIDE the host's descendant tree (observed on this
+// machine: browser parented directly to explorer.exe while the endpoint was
+// provably this launch's). When the optional sandboxDirectory is provided,
+// a listener whose chain walk fails gets a second, independent proof — the
+// exact evidence class the teardown trusts for kill decisions: a live
+// msedgewebview2 whose effective --user-data-dir profile IS this run's
+// sandbox. Either proof accepts the listener; everything else still refuses.
+// Returns true or { ok: false, reasons } — callers refuse to attach on
+// anything but true.
+export function verifyCdpEndpointOwnership(port, child, executable, sandboxDirectory) {
   if (!child || !Number.isInteger(child.pid) || child.pid <= 0 ||
     child.exitCode !== null || child.signalCode != null) {
     return { ok: false, reasons: ['no live owned host process handle'] };
@@ -752,9 +761,31 @@ export function verifyCdpEndpointOwnership(port, child, executable) {
   const reasons = [];
   for (const pid of listeners.pids) {
     const hop = listenerReachesHost(pid, child.pid, 0);
-    if (hop !== true) reasons.push(`debug port ${port} listener ${typeof hop === 'string' ? hop : `pid ${pid}: not proven part of the owned browser tree`}`);
+    if (hop === true) continue;
+    // Chain walk failed: fall back to profile evidence (same 'owned-browser'
+    // class auditPortListeners uses) before refusing. Fail-closed preserved —
+    // only a POSITIVE owned-profile verdict accepts the listener.
+    const profile = listenerSandboxProfile(pid, sandboxDirectory);
+    if (profile === 'owned') continue;
+    const chainReason = `debug port ${port} listener ${typeof hop === 'string' ? hop : `pid ${pid}: not proven part of the owned browser tree`}`;
+    reasons.push(sandboxDirectory ? `${chainReason}; sandbox profile verdict: ${profile}` : chainReason);
   }
   return reasons.length > 0 ? { ok: false, reasons } : true;
+}
+
+// Profile-evidence verdict for one listener pid against this run's sandbox:
+// 'owned' (live msedgewebview2 whose effective profile is this run's sandbox),
+// 'foreign', 'unknown' (unreadable/ambiguous — never evidence of either),
+// 'gone', or 'query-failed'. Mirrors auditPortListeners' classification.
+function listenerSandboxProfile(pid, sandboxDirectory) {
+  if (typeof sandboxDirectory !== 'string' || sandboxDirectory === '') return 'not-attempted';
+  const query = queryProcessRecord(pid);
+  if (!query.ok) return 'query-failed';
+  if (query.records.length === 0) return 'gone';
+  const record = query.records[0];
+  if (typeof record.Name !== 'string' || record.Name === '') return 'unknown';
+  if (record.Name.toLowerCase() !== 'msedgewebview2.exe') return 'foreign';
+  return sandboxProfileVerdict(record.CommandLine, sandboxDirectory);
 }
 
 // Walk a bounded parent chain: every hop must be POSITIVELY identified as a

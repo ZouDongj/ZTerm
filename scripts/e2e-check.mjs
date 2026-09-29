@@ -369,7 +369,10 @@ async function main() {
   const wsUrl = await acquireVerifiedPage({
     discover: () => waitForPage(),
     expectedPort: launchPort,
-    verify: (port) => verifyCdpEndpointOwnership(port, ownedChild, EXE),
+    // sandbox.directory enables the profile fallback: the WebView2 loader can
+    // parent the browser outside the host tree (observed via explorer.exe),
+    // which alone must not refuse a provably owned endpoint.
+    verify: (port) => verifyCdpEndpointOwnership(port, ownedChild, EXE, sandbox.directory),
   });
   const cdp = new Cdp(wsUrl);
   await cdp.connect();
@@ -3919,12 +3922,12 @@ async function main() {
         } catch { break; } // connection refused → old browser is gone
       }
       } });
-      // Same pre-attach identity gate (destination binding + ownership) as
-      // the initial connection.
+      // Same pre-attach identity gate (destination binding + ownership,
+      // including the sandbox-profile fallback) as the initial connection.
       const url = await acquireVerifiedPage({
         discover: () => waitForPage(),
         expectedPort: launchPort,
-        verify: (port) => verifyCdpEndpointOwnership(port, ownedChild, EXE),
+        verify: (port) => verifyCdpEndpointOwnership(port, ownedChild, EXE, sandbox.directory),
       });
       const c2 = new Cdp(url);
       await c2.connect();
