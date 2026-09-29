@@ -1274,21 +1274,32 @@ async fn open_sftp_channel(
         .map(Arc::new)
 }
 
+/// Fields of `username`'s /etc/passwd entry after the username itself:
+/// [password, uid, gid, gecos, home, shell].
+fn passwd_entry_fields<'a>(passwd: &'a str, username: &str) -> Option<Vec<&'a str>> {
+    let prefix = format!("{}:", username);
+    passwd
+        .lines()
+        .find_map(|l| l.strip_prefix(&prefix))
+        .map(|rest| rest.split(':').collect())
+}
+
+/// Home directory of `username` from /etc/passwd contents (5th field of the entry).
+fn passwd_home(passwd: &str, username: &str) -> Option<String> {
+    passwd_entry_fields(passwd, username).and_then(|f| f.get(4).map(|h| h.to_string()))
+}
+
+/// Login shell of `username` from /etc/passwd contents (last field of the entry).
+fn passwd_login_shell(passwd: &str, username: &str) -> Option<String> {
+    passwd_entry_fields(passwd, username).and_then(|f| f.last().map(|s| s.trim().to_string()))
+}
+
 /// Clean residual injection artifacts from ~/.bash_history and ~/.zsh_history
 async fn clean_history_artifacts(sftp: &russh_sftp::client::SftpSession, username: &str) {
     // Resolve home dir from /etc/passwd (SFTP doesn't expand ~)
     let home = {
         let content = sftp.read("/etc/passwd").await.ok();
-        content.and_then(|c| {
-            let text = String::from_utf8_lossy(&c);
-            let prefix = format!("{}:", username);
-            text.lines()
-                .find_map(|l| l.strip_prefix(&prefix))
-                .and_then(|rest| {
-                    let fields: Vec<&str> = rest.split(':').collect();
-                    fields.get(5).map(|h| h.to_string())
-                })
-        })
+        content.and_then(|c| passwd_home(&String::from_utf8_lossy(&c), username))
     };
     let home = match home {
         Some(h) if !h.is_empty() => h,
@@ -1348,15 +1359,7 @@ async fn sftp_write_file(
 /// Detect user's login shell by reading /etc/passwd via SFTP
 async fn detect_shell(sftp: &russh_sftp::client::SftpSession, username: &str) -> Option<String> {
     let content = sftp.read("/etc/passwd").await.ok()?;
-    let text = String::from_utf8_lossy(&content);
-    let prefix = format!("{}:", username);
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix(&prefix) {
-            let shell = rest.rsplit(':').next()?.trim().to_string();
-            return Some(shell);
-        }
-    }
-    None
+    passwd_login_shell(&String::from_utf8_lossy(&content), username)
 }
 
 /// Generate the followCwd RC wrapper files (pure function, unit-testable).
@@ -5771,6 +5774,29 @@ mod tests {
         let sends = execute_unconditional(&mut scripts);
         assert!(sends.is_empty());
         assert_eq!(scripts.len(), 1);
+    }
+
+    #[test]
+    fn passwd_home_picks_home_field_not_shell() {
+        // Regression: clean_history_artifacts resolved the home from the entry's
+        // 6th field (the login shell), producing /bin/bash/.bash_history — a
+        // path that never exists, so every history cleanup silently skipped.
+        let passwd = "root:x:0:0:root:/root:/bin/bash\n\
+                      alice:x:1000:1000:Alice,,,:/home/alice:/bin/zsh\n";
+        assert_eq!(passwd_home(passwd, "alice").as_deref(), Some("/home/alice"));
+        assert_eq!(passwd_home(passwd, "root").as_deref(), Some("/root"));
+        assert_eq!(passwd_home(passwd, "nobody"), None);
+    }
+
+    #[test]
+    fn passwd_login_shell_picks_last_field() {
+        // Shared parser with passwd_home: both read the same entry shape.
+        let passwd = "alice:x:1000:1000:Alice:/home/alice:/bin/zsh\n";
+        assert_eq!(
+            passwd_login_shell(passwd, "alice").as_deref(),
+            Some("/bin/zsh")
+        );
+        assert_eq!(passwd_login_shell(passwd, "nobody"), None);
     }
 
     #[test]
