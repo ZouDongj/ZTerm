@@ -148,6 +148,18 @@ function _hexToRgb(hex) {
     return { r: (int >> 16) & 255, g: (int >> 8) & 255, b: int & 255 };
 }
 
+// Normalize a rule color to the #rrggbb form the terminal path (_hexToRgb)
+// accepts: the 3-digit shorthand is expanded, anything else (4/5/7/8 digits,
+// non-hex, missing #) returns null. An empty value stays empty (no color).
+// CSS renders 3/4/8-digit values in the settings preview while the terminal
+// silently dropped them, so the two paths must agree on one stored form.
+function normalizeHighlightColor(hex) {
+    if (!hex) return hex;
+    const short = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(hex);
+    if (short) return `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}`;
+    return /^#[0-9a-f]{6}$/i.test(hex) ? hex : null;
+}
+
 function applyHighlightToLine(line, rules) {
     if (!line) return line;
     // Collect all matches from each rule
@@ -193,6 +205,7 @@ if (typeof module !== 'undefined' && module.exports) {
         sgrStatesAt,
         buildHighlightEndSeq,
         applyHighlightToLine,
+        normalizeHighlightColor,
         _getEscapeRanges,
         _getHighlightBeginSeq,
         _hexToRgb,

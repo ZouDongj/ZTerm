@@ -119,3 +119,48 @@ test('saveHighlightEdit 非正则关键字含元字符照常保存（回归：�
     assert.equal(rules.length, 1, 'literal keywords with regex metacharacters must still save');
     assert.equal(rules[0].text, '(ERROR');
 });
+
+test('saveHighlightEdit 三位 hex 保存时展开为六位', () => {
+    const vm1 = loadHighlightVm();
+    stage(vm1.els, { text: 'ERROR', foreground: true, foregroundColor: '#abc' });
+    vm1.run('saveHighlightEdit()');
+    const rules = vm1.savedRules();
+    assert.equal(rules.length, 1);
+    assert.equal(rules[0].foregroundColor, '#aabbcc', 'shorthand must be expanded to the terminal-renderable form');
+    assert.deepEqual(vm1.toasts.map(t => t.msg), ['规则已保存']);
+});
+
+test('saveHighlightEdit 六位 hex 原样保存（回归）', () => {
+    const vm1 = loadHighlightVm();
+    stage(vm1.els, { text: 'ERROR', foregroundColor: '#e06c75' });
+    vm1.run('saveHighlightEdit()');
+    assert.equal(vm1.savedRules()[0].foregroundColor, '#e06c75');
+});
+
+test('saveHighlightEdit 4 位 hex 拒绝保存并报错', () => {
+    const vm1 = loadHighlightVm();
+    stage(vm1.els, { text: 'ERROR', foreground: true, foregroundColor: '#abcd' });
+    vm1.run('saveHighlightEdit()');
+    assert.equal(vm1.sends.filter(s => s.cmd === 'save-highlight-rules').length, 0, '4-digit hex must not persist');
+    assert.equal(vm1.toasts.length, 1);
+    assert.equal(vm1.toasts[0].isError, true);
+});
+
+test('saveHighlightEdit 8 位 hex 背景色拒绝保存并报错', () => {
+    const vm1 = loadHighlightVm();
+    stage(vm1.els, { text: 'ERROR', background: true, backgroundColor: '#aabbccdd' });
+    vm1.run('saveHighlightEdit()');
+    assert.equal(vm1.sends.filter(s => s.cmd === 'save-highlight-rules').length, 0, '8-digit hex must not persist');
+    assert.equal(vm1.toasts.length, 1);
+    assert.equal(vm1.toasts[0].isError, true);
+});
+
+test('saveHighlightEdit 空颜色照常保存（回归：不渲染颜色）', () => {
+    const vm1 = loadHighlightVm();
+    stage(vm1.els, { text: 'ERROR', foreground: false, foregroundColor: '', background: false, backgroundColor: '' });
+    vm1.run('saveHighlightEdit()');
+    const rules = vm1.savedRules();
+    assert.equal(rules.length, 1);
+    assert.equal(rules[0].foregroundColor, '');
+    assert.equal(rules[0].backgroundColor, '');
+});

@@ -138,14 +138,19 @@ function saveHighlightEdit() {
     const isCaseSensitive = document.getElementById('hl-edit-case').classList.contains('on');
     // Compile now so an invalid regex is rejected with feedback instead of being saved and then silently skipped at apply time
     if (isRegExp && !buildHighlightRegex(text, true, isCaseSensitive)) { showToast('正则表达式无效', true); return; }
+    // Normalize colors to the #rrggbb the terminal renders: the 3-digit shorthand expands, anything else is rejected
+    const foregroundColor = normalizeHighlightColor(document.getElementById('hl-edit-fgcolor').value.trim());
+    if (foregroundColor === null) { showToast('前景色格式无效，支持 #RGB 或 #RRGGBB', true); return; }
+    const backgroundColor = normalizeHighlightColor(document.getElementById('hl-edit-bgcolor').value.trim());
+    if (backgroundColor === null) { showToast('背景色格式无效，支持 #RGB 或 #RRGGBB', true); return; }
     const rule = {
         text,
         isRegExp,
         isCaseSensitive,
         foreground: document.getElementById('hl-edit-fg').classList.contains('on'),
-        foregroundColor: document.getElementById('hl-edit-fgcolor').value.trim(),
+        foregroundColor,
         background: document.getElementById('hl-edit-bg').classList.contains('on'),
-        backgroundColor: document.getElementById('hl-edit-bgcolor').value.trim(),
+        backgroundColor,
         bold: document.getElementById('hl-edit-bold').classList.contains('on'),
         italic: document.getElementById('hl-edit-italic').classList.contains('on'),
         underline: document.getElementById('hl-edit-underline').classList.contains('on'),

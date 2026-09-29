@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { buildHighlightRegex, applySgrParams, sgrStatesAt, buildHighlightEndSeq, applyHighlightToLine, createSgrState } =
+const { buildHighlightRegex, applySgrParams, sgrStatesAt, buildHighlightEndSeq, applyHighlightToLine, createSgrState, normalizeHighlightColor, _hexToRgb } =
     require('../src/renderer/highlight-utils.js');
 
 test('buildHighlightRegex 普通关键字被转义（正则元字符无效）', () => {
@@ -164,4 +164,26 @@ test('applyHighlightToLine 零宽匹配不死循环且不改变可见文本', ()
     const rule = { ...fgRule, text: '(?=b)', isRegExp: true };
     const out = applyHighlightToLine('ab ab', [rule]);
     assert.equal(out.replace(/\x1b\[[0-9;]*m/g, ''), 'ab ab', 'visible text unchanged');
+});
+
+test('normalizeHighlightColor 三位 hex 展开为六位且终端可渲染', () => {
+    assert.equal(normalizeHighlightColor('#abc'), '#aabbcc');
+    assert.equal(normalizeHighlightColor('#Ab3'), '#AAbb33');
+    assert.deepEqual(_hexToRgb(normalizeHighlightColor('#abc')), { r: 0xaa, g: 0xbb, b: 0xcc },
+        'the expanded form must be accepted by the terminal color path');
+});
+
+test('normalizeHighlightColor 六位 hex 原样保留', () => {
+    assert.equal(normalizeHighlightColor('#e06c75'), '#e06c75');
+    assert.equal(normalizeHighlightColor('#E06C75'), '#E06C75');
+});
+
+test('normalizeHighlightColor 4/5/7/8 位及其他非法值返回 null', () => {
+    for (const bad of ['#abcd', '#abcde', '#abcdef1', '#abcdef12', 'aabbcc', '#xyzabc', 'red', '#']) {
+        assert.equal(normalizeHighlightColor(bad), null, JSON.stringify(bad) + ' must be rejected');
+    }
+});
+
+test('normalizeHighlightColor 空值原样保留（不渲染颜色）', () => {
+    assert.equal(normalizeHighlightColor(''), '');
 });
