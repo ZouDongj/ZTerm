@@ -802,8 +802,9 @@ document.addEventListener('keydown', e => {
         }
         if (document.querySelector('.overlay.open')) {
             closeAllOverlays();
-            const tab = TabManager.getActive();
-            if (tab && tab.term) setTimeout(() => tab.term.focus(), 50);
+            // Split-aware refocus: a split tab has tab.term === null, so the
+            // focused pane must be resolved (at fire time, like closeSearch).
+            setTimeout(() => _refocusActiveTerminal(), 50);
             e.preventDefault(); e.stopPropagation();
             return;
         }
