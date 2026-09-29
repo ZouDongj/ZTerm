@@ -5,9 +5,23 @@ let _highlightSettings = { highlightEnabled: true, highlightAlternateDisable: tr
 let _editingHLId = null;
 // Alternate-screen state is tracked per backend tabId: a previous global boolean paused highlighting in every tab as soon as one tab entered vim
 const _hlAlternate = new Set();
+// Cross-chunk SGR baseline per backend tabId (issue #9 residual): the rendition
+// carried into the next write(). Each chunk advances it line by line, so a
+// color set in an earlier chunk/line is restored at the highlight end sequence
+// instead of being washed to default. Known residual: banner lines that
+// ipc.js writes directly to the terminal (bypassing applyHighlight) end at
+// SGR 0 and are not tracked; the baseline resyncs at the stream's next
+// complete SGR. Sessions clear their entry with the alternate-screen flag.
+const _hlSgrCarry = new Map();
 
+// Called on backend session death (ssh-disconnected / pty-exit): those paths
+// write a banner ending at SGR 0, so the carried baseline is dropped with the
+// alternate-screen flag instead of going stale for a reused tabId.
 function clearAlternateScreen(tabId) {
-    if (tabId != null) _hlAlternate.delete(tabId);
+    if (tabId != null) {
+        _hlAlternate.delete(tabId);
+        _hlSgrCarry.delete(tabId);
+    }
 }
 
 function loadHighlightRules() {
@@ -169,23 +183,47 @@ function saveHighlightEdit() {
 
 // ── Highlight application (pty-output interception) ──
 function applyHighlight(data, tabId) {
-    if (!_highlightSettings.highlightEnabled || _highlightRules.length === 0) return data;
+    if (!_highlightSettings.highlightEnabled || _highlightRules.length === 0) {
+        _advanceHlSgrCarry(tabId, data);
+        return data;
+    }
     // Check alternate screen (vim/htop) — simplified check for alternate screen enter/exit sequences
     if (_highlightSettings.highlightAlternateDisable) {
         if (tabId != null) {
             if (data.includes('\x1b[?1049h') || data.includes('\x1b[?47h')) _hlAlternate.add(tabId);
             if (data.includes('\x1b[?1049l') || data.includes('\x1b[?47l')) _hlAlternate.delete(tabId);
-            if (_hlAlternate.has(tabId)) return data;
+            if (_hlAlternate.has(tabId)) {
+                _advanceHlSgrCarry(tabId, data);
+                return data;
+            }
         }
     }
     const enabledRules = _highlightRules.filter(r => r.enabled);
-    if (enabledRules.length === 0) return data;
+    if (enabledRules.length === 0) {
+        _advanceHlSgrCarry(tabId, data);
+        return data;
+    }
     // Split by \n and process each line. applyHighlightToLine and its SGR
     // helpers live in highlight-utils.js (pure, node:test-able); the end of a
     // match restores the rendition active at the match position (issue #9).
+    // `carry` threads the cross-chunk SGR baseline through this chunk's lines
+    // and persists it for the next write(); a fresh tabId starts from the
+    // default state, which is exactly the pre-fix fallback.
+    const carry = tabId != null ? (_hlSgrCarry.get(tabId) || createSgrState()) : null;
     const lines = data.split('\n');
-    const result = lines.map(line => applyHighlightToLine(line, enabledRules));
+    const result = lines.map(line => applyHighlightToLine(line, enabledRules, carry));
+    if (carry) _hlSgrCarry.set(tabId, carry);
     return result.join('\n');
+}
+
+// Advance the carried SGR baseline for chunks that skip highlight injection
+// (disabled, no enabled rules, alternate screen): the bytes still reach the
+// terminal, so the baseline must follow the stream or it would go stale.
+function _advanceHlSgrCarry(tabId, data) {
+    if (tabId == null || typeof data !== 'string' || !data) return;
+    const carry = _hlSgrCarry.get(tabId) || createSgrState();
+    advanceSgrState(carry, data);
+    _hlSgrCarry.set(tabId, carry);
 }
 
 // ── Menu popup ──

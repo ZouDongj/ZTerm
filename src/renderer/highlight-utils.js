@@ -14,10 +14,11 @@ function buildHighlightRegex(text, isRegExp, isCaseSensitive) {
 // The end sequence of a highlighted keyword must RESTORE the rendition that
 // was active at the match position — the pre-fix code reset to the DEFAULT
 // (39/49/22/23/24), which washed the original colors of everything after the
-// keyword on the same line (issue #9). State is line-local: a color carried
-// over from a previous line/chunk is invisible here, and the end sequence
-// then still emits a plain reset — no worse than the pre-fix behavior, while
-// in-line colors (the reported case) are restored correctly.
+// keyword on the same line (issue #9). The line-start baseline is supplied by
+// the caller: highlight.js threads a state carried across write() calls, so a
+// color set in an earlier chunk/line is restored as well. With no carried
+// state the line starts from defaults — the plain-reset fallback is then no
+// worse than the pre-fix behavior.
 
 function createSgrState() {
     return { fg: null, bg: null, bold: false, italic: false, underline: false };
@@ -61,10 +62,12 @@ function applySgrParams(state, paramStr) {
 }
 
 // Rendition state at each of `positions` (ascending), tracking the line's own
-// SGR sequences. Returns one CLONE per position so callers can keep them.
-function sgrStatesAt(line, positions) {
+// SGR sequences from an optional `initialState` (the line-start baseline
+// carried in by the caller). Returns one CLONE per position so callers can
+// keep them; `initialState` itself is never mutated.
+function sgrStatesAt(line, positions, initialState) {
     const result = [];
-    const state = createSgrState();
+    const state = initialState ? { ...initialState } : createSgrState();
     let pi = 0;
     const re = /\x1b\[([0-9;]*)m/g;
     let m;
@@ -80,6 +83,16 @@ function sgrStatesAt(line, positions) {
         pi++;
     }
     return result;
+}
+
+// Advance `state` in place past every SGR sequence in `line`: the line-end
+// rendition, i.e. the line-start baseline for the next line/chunk. Callers
+// thread one state object through the stream (issue #9 cross-chunk residual).
+function advanceSgrState(state, line) {
+    const re = /\x1b\[([0-9;]*)m/g;
+    let m;
+    while ((m = re.exec(line)) !== null) applySgrParams(state, m[1]);
+    return state;
 }
 
 // End sequence for one highlighted match: re-emit the rendition active at the
@@ -160,8 +173,21 @@ function normalizeHighlightColor(hex) {
     return /^#[0-9a-f]{6}$/i.test(hex) ? hex : null;
 }
 
-function applyHighlightToLine(line, rules) {
+function applyHighlightToLine(line, rules, carriedState) {
     if (!line) return line;
+    // Cross-chunk baseline (issue #9 residual): snapshot the rendition carried
+    // into this line — it drives the restore sequences below — then advance
+    // the caller's baseline past this line. Advancing happens on lines with no
+    // match too, so the next line/chunk starts from the correct state. The
+    // injection is restore-neutral for the tracked attributes (a match never
+    // contains an escape sequence and the end sequence re-emits the
+    // match-start rendition), so scanning the ORIGINAL line keeps the baseline
+    // identical to what the terminal holds after the injected output.
+    let startState = null;
+    if (carriedState) {
+        startState = { ...carriedState };
+        advanceSgrState(carriedState, line);
+    }
     // Collect all matches from each rule
     const matches = [];
     for (const rule of rules) {
@@ -181,7 +207,7 @@ function applyHighlightToLine(line, rules) {
     // Sort by start position, first match wins on overlap
     validMatches.sort((a, b) => a.start - b.start);
     // SGR state at each match start drives the restore sequence (issue #9).
-    const states = sgrStatesAt(line, validMatches.map(m => m.start));
+    const states = sgrStatesAt(line, validMatches.map(m => m.start), startState);
     // Build result with ANSI color injection
     let result = '';
     let last = 0;
@@ -203,6 +229,7 @@ if (typeof module !== 'undefined' && module.exports) {
         createSgrState,
         applySgrParams,
         sgrStatesAt,
+        advanceSgrState,
         buildHighlightEndSeq,
         applyHighlightToLine,
         normalizeHighlightColor,
