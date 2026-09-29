@@ -1,9 +1,12 @@
-// Regression: the saveConfig lastTabs payload must carry the manual-rename
-// lock (`customName`). tabs.js sets tab._customName on rename so pane changes
-// stop overwriting the name, but the flag used to live only in memory — after
-// a restart the restore-side recompute overwrote the user's rename with the
-// pane-derived name. The REAL saveConfig (main.js) is extracted so the test
-// tracks the implementation instead of a copied stub.
+// Regression: the saveConfig lastTabs payload must (1) carry the
+// manual-rename lock (`customName`) — tabs.js sets tab._customName on rename
+// so pane changes stop overwriting the name, but the flag used to live only
+// in memory, so a restart recomputed the name over the user's rename — and
+// (2) gate the persisted terminal `content` on the opt-in
+// 'restoreLocalContent' setting (default off) — the captured scrollback used
+// to hit config.json every 15s even with the switch off, while the replay
+// side alone checked the setting. The REAL saveConfig (main.js) is extracted
+// so the test tracks the implementation instead of a copied stub.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -70,4 +73,27 @@ test('(guard) settings tabs are still excluded from the payload', async () => {
     const entries = await savedEntries(tabs);
     assert.equal(entries.length, 1);
     assert.equal(entries[0].name, 'shell');
+});
+
+test('captured scrollback is not persisted while restoreLocalContent is off', async () => {
+    const tabs = [{ id: 't1', name: 'shell', type: 'local', command: 'powershell.exe', args: [], _contentBuffer: 'secret output' }];
+    for (const cfg of [{}, { restoreLocalContent: false }]) {
+        const entries = await savedEntries(tabs, cfg);
+        assert.equal(entries[0].content, '', 'no plaintext scrollback may reach the payload without opt-in');
+    }
+});
+
+test('captured scrollback is persisted when restoreLocalContent is on', async () => {
+    const tabs = [{ id: 't1', name: 'shell', type: 'local', command: 'powershell.exe', args: [], _contentBuffer: 'some output' }];
+    const entries = await savedEntries(tabs, { restoreLocalContent: true });
+    assert.equal(entries[0].content, 'some output', 'opt-in behavior unchanged');
+});
+
+test('(guard) split tabs never persist content, even with the setting on', async () => {
+    const tabs = [{
+        id: 't1', name: 'split', type: 'local', command: 'powershell.exe', args: [], _contentBuffer: 'pane output',
+        splitRoot: { orientation: 'h', children: [{ id: 'p1' }, { id: 'p2' }], ratios: [0.5, 0.5] },
+    }];
+    const entries = await savedEntries(tabs, { restoreLocalContent: true });
+    assert.equal(entries[0].content, '');
 });
