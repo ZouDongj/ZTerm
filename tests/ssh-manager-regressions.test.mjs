@@ -171,3 +171,73 @@ test('a real mouse pick still works through the shared handler', () => {
     assert.equal(input.value, 'Dev', 'mousedown picks as before');
     assert.equal(menu.classList.contains('open'), false);
 });
+
+// ── Password status row ──
+// The "view" mode row claims "密码已加密保存". blur/Esc/× switched to it
+// whenever an existing profile was edited — even one that never had a
+// password, where the row is a lie. A password-less profile must keep the
+// plain edit field (same shape as a new profile's).
+
+function openEdit(ctx, profile) {
+    ctx.TabManager.sshProfiles = [profile];
+    ctx.openSSHEdit(false, profile.id);
+    ctx.__advance(200); // openSSHEdit's deferred slider/select/focus pass
+    return {
+        statusEl: ctx.document.getElementById('ssh-pwd-status'),
+        pwdInput: ctx.document.getElementById('ssh-edit-password'),
+        editBtn: ctx.document.getElementById('ssh-pwd-edit-btn'),
+        cancelBtn: ctx.document.getElementById('ssh-pwd-inline-cancel'),
+    };
+}
+
+test('editing a password-less profile never shows the encrypted-saved row on blur', () => {
+    const ctx = loadSshVm();
+    const { statusEl, pwdInput } = openEdit(ctx, { id: 'p1', name: 'n1', host: 'h1' });
+    assert.equal(statusEl.style.display, 'none', 'edit field shown, no status row');
+
+    pwdInput.value = 'secret';
+    pwdInput.onblur();
+
+    assert.equal(statusEl.style.display, 'none', 'blur must not raise the false status row');
+    assert.equal(pwdInput.style.display, '', 'the edit field stays');
+    assert.equal(pwdInput.value, 'secret', 'the typed password survives until the dialog saves');
+});
+
+test('editing a password-less profile hides the cancel-back button', () => {
+    const ctx = loadSshVm();
+    const { cancelBtn } = openEdit(ctx, { id: 'p1', name: 'n1', host: 'h1' });
+    assert.equal(cancelBtn.classList.contains('show'), false,
+        'no × without a status row to cancel back to (new-profile shape)');
+});
+
+test('Escape in the password field of a password-less profile closes the dialog', () => {
+    const ctx = loadSshVm();
+    const { statusEl, pwdInput } = openEdit(ctx, { id: 'p1', name: 'n1', host: 'h1' });
+    pwdInput.value = 'secret';
+
+    pwdInput.onkeydown(mkEvt({ key: 'Escape' }));
+
+    assert.equal(ctx.__overlayCloseCalls, 1, 'same as Esc on the name/host/user fields');
+    assert.equal(statusEl.style.display, 'none', 'no false status row either');
+});
+
+test('(guard) a profile with a saved password keeps the status-row flow', () => {
+    const ctx = loadSshVm();
+    const { statusEl, pwdInput, editBtn, cancelBtn } =
+        openEdit(ctx, { id: 'p1', name: 'n1', host: 'h1', encryptedPassword: 'enc' });
+    assert.equal(statusEl.style.display, 'flex', 'status row shown for a saved password');
+
+    editBtn.onclick(); // 修改 -> edit mode
+    assert.equal(statusEl.style.display, 'none');
+    assert.equal(cancelBtn.classList.contains('show'), true, '× offered to cancel back');
+
+    pwdInput.value = 'newpass';
+    pwdInput.onblur(); // clicking away cancels the edit
+    assert.equal(statusEl.style.display, 'flex', 'blur cancels back to the status row');
+    assert.equal(ctx.__overlayCloseCalls, 0);
+
+    editBtn.onclick();
+    pwdInput.onkeydown(mkEvt({ key: 'Escape' }));
+    assert.equal(statusEl.style.display, 'flex', 'Esc cancels back to the status row');
+    assert.equal(ctx.__overlayCloseCalls, 0, 'Esc does not close the dialog here');
+});

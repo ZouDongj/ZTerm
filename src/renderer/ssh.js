@@ -721,6 +721,16 @@ function _updatePwdBtnVisibility() {
     if (saveBtn) saveBtn.classList.toggle('show', hasText && !!_editingSSHId);
 }
 
+// The "view" mode row claims the password is saved encrypted — only truthful
+// when the profile being edited actually carries one. A password-less profile
+// has no status row to fall back to, so its field behaves like a new
+// profile's (plain edit input, no cancel-back button).
+function _editingProfileHasPassword() {
+    if (!_editingSSHId) return false;
+    const p = (TabManager.sshProfiles || []).find(x => x.id === _editingSSHId);
+    return !!(p && p.encryptedPassword);
+}
+
 function _renderPasswordField(mode) {
     const statusEl = document.getElementById('ssh-pwd-status');
     const inputEl = document.getElementById('ssh-edit-password');
@@ -741,11 +751,11 @@ function _renderPasswordField(mode) {
         if (eyeBtn) { eyeBtn.classList.remove('active'); eyeBtn.title = '显示密码'; }
         inputEl.value = '';
         inputEl.focus();
-        // New profile (no _editingSSHId): the password is saved together with
+        // New or password-less profile: the password is saved together with
         // the dialog, so the inline ✓ (saves into an existing profile) and ×
-        // (restores the "已加密保存" status row — meaningless for a new
-        // profile) both stay hidden; the eye moves to the trailing slot.
-        const isNew = !_editingSSHId;
+        // (restores the "已加密保存" status row — a lie without a saved
+        // password) both stay hidden; the eye moves to the trailing slot.
+        const isNew = !_editingSSHId || !_editingProfileHasPassword();
         if (cancelBtn) cancelBtn.classList.toggle('show', !isNew);
         if (eyeBtn) eyeBtn.style.right = isNew ? '8px' : '44px';
         inputEl.style.paddingRight = isNew ? '32px' : '64px';
@@ -1197,10 +1207,11 @@ function openSSHEdit(isNew, profileId) {
             if (e.key === 'Escape') {
                 e.preventDefault();
                 e.stopPropagation();
-                if (!_editingSSHId) {
-                    // New profile: nothing to cancel back to. The global Esc
-                    // handler skips inline-edit inputs, so close the dialog
-                    // here — same as Esc on the name/host/user fields.
+                if (!_editingSSHId || !_editingProfileHasPassword()) {
+                    // New or password-less profile: no status row to cancel
+                    // back to. The global Esc handler skips inline-edit
+                    // inputs, so close the dialog here — same as Esc on the
+                    // name/host/user fields.
                     closeAllOverlays();
                     const tab = TabManager.getActive();
                     if (tab && tab.term) setTimeout(() => tab.term.focus(), 50);
@@ -1224,11 +1235,12 @@ function openSSHEdit(isNew, profileId) {
             }
         };
         pwdInput.onblur = () => {
-            // Only the edit-existing flow cancels back to the status row on
-            // blur. For a new profile the typed password must survive until
-            // the dialog saves — discarding it here silently saved the
-            // profile without a password.
-            if (_editingSSHId && _sshPwdDirty) {
+            // Only the edit-existing flow with a saved password cancels back
+            // to the status row on blur. For a new or password-less profile
+            // the typed password must survive until the dialog saves —
+            // discarding it here silently saved the profile without a
+            // password (and the status row would lie about one existing).
+            if (_editingSSHId && _sshPwdDirty && _editingProfileHasPassword()) {
                 _sshPwdDirty = false;
                 _renderPasswordField('view');
                 showToast('已取消密码修改');
