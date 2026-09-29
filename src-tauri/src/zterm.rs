@@ -1063,6 +1063,30 @@ fn drain_utf8(carry: &mut Vec<u8>, data: &[u8]) -> String {
     out
 }
 
+/// End index (just past the marker) of the real ZTERM_INJECTED output line in
+/// the injection filter buffer — a line that STARTS with the marker.
+///
+/// Canonical shells without a line editor (sh/dash/ash) echo every typed line
+/// the moment its bytes arrive, so the whole injection script — including the
+/// literal line `echo ZTERM_INJECTED` — is echoed back BEFORE `stty -echo`
+/// takes effect. A plain substring search hits that echo line first and cuts
+/// the filter early, leaking the real marker output and the `stty echo` echo
+/// to the terminal. The echo line carries its `echo ` prefix, so anchoring the
+/// match at a line start selects only the marker actually printed by the
+/// `echo ZTERM_INJECTED` command.
+fn injected_marker_end(buffer: &str) -> Option<usize> {
+    const MARKER: &str = "ZTERM_INJECTED";
+    let mut search_from = 0;
+    while let Some(pos) = buffer[search_from..].find(MARKER) {
+        let abs = search_from + pos;
+        if abs == 0 || buffer.as_bytes()[abs - 1] == b'\n' {
+            return Some(abs + MARKER.len());
+        }
+        search_from = abs + MARKER.len();
+    }
+    None
+}
+
 #[tauri::command]
 pub async fn pty_create(
     app: AppHandle,
@@ -1839,10 +1863,14 @@ pub async fn ssh_connect(
                             if filtering_reader.load(std::sync::atomic::Ordering::Relaxed) {
                                 // Filter injection echo until ZTERM_INJECTED marker
                                 inject_buffer.push_str(&text);
-                                if inject_buffer.contains("ZTERM_INJECTED") {
+                                // Match the marker at a LINE START only: canonical
+                                // shells echo the typed `echo ZTERM_INJECTED` line
+                                // before stty -echo takes effect, and a plain
+                                // substring match would cut the filter at that echo
+                                // line, leaking the real marker to the terminal.
+                                if let Some(marker_end) = injected_marker_end(&inject_buffer) {
                                     filtering_reader.store(false, std::sync::atomic::Ordering::Relaxed);
                                     // Strip everything up to and including the marker + trailing newline
-                                    let marker_end = inject_buffer.find("ZTERM_INJECTED").unwrap() + "ZTERM_INJECTED".len();
                                     let remainder = inject_buffer[marker_end..].trim_start_matches(['\n', '\r']).to_string();
                                     inject_buffer.clear();
                                     if !remainder.is_empty() {
@@ -5969,6 +5997,31 @@ mod tests {
         let out = drain_utf8(&mut carry, b"");
         assert_eq!(out, "");
         assert_eq!(carry, vec![0xE4], "空输入不得动 carry");
+    }
+
+    #[test]
+    fn injected_marker_ignores_the_typed_echo_line() {
+        // Canonical shells (sh/dash) echo every typed line before stty -echo
+        // takes effect: the buffer holds the echoed `echo ZTERM_INJECTED` line
+        // BEFORE the real marker output. A plain substring match would cut the
+        // filter at the echo line and leak the real marker + stty echo output.
+        let buffer = " set +o history\r\nstty -echo\r\necho ZTERM_INJECTED\r\nstty echo\r\nZTERM_INJECTED\r\n$ ";
+        let end = injected_marker_end(buffer).expect("real marker line must match");
+        assert_eq!(&buffer[end..], "\r\n$ ", "cut must happen at the real marker line");
+        // Only the typed echo so far (the real marker has not been printed yet):
+        // the filter must keep waiting instead of cutting early.
+        let echo_only = "$ echo ZTERM_INJECTED\r\n$ ";
+        assert_eq!(injected_marker_end(echo_only), None);
+    }
+
+    #[test]
+    fn injected_marker_matches_at_buffer_start() {
+        // No typed echo (shell with a line editor honors stty -echo in time):
+        // the marker line is the first thing in the buffer.
+        let buffer = "ZTERM_INJECTED\r\n$ ";
+        let end = injected_marker_end(buffer).expect("marker at buffer start");
+        assert_eq!(&buffer[end..], "\r\n$ ");
+        assert_eq!(injected_marker_end("no marker here"), None);
     }
 
     #[test]
