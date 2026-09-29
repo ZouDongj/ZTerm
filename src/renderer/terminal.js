@@ -933,6 +933,25 @@ function _getActiveSearchTarget() {
 function _wireSearchAddon(term, searchAddon) {
     if (!term || !searchAddon) return;
     _searchAddonByTerm.set(term, searchAddon);
+    // Open the placing window around every addon find, not just the explicit
+    // doSearch/_navigateSearch calls: the addon also re-runs finds on its own
+    // (onWriteParsed/onResize schedule a delayed refresh whose findPrevious
+    // re-selects a match, possibly at coordinates that moved since the last
+    // find — resize reflow, scrollback trim). select() fires onSelectionChange
+    // BEFORE the addon's results event refreshes the snapshot, so the snapshot
+    // alone cannot recognize those re-selections and auto-copy would clobber
+    // the clipboard with the match text. The flag makes every addon-placed
+    // selection search-owned; a later manual selection still copies normally.
+    for (const name of ['findNext', 'findPrevious']) {
+        const orig = searchAddon[name];
+        if (typeof orig !== 'function') continue;
+        searchAddon[name] = function (...args) {
+            const prev = _searchPlacingSelection;
+            _searchPlacingSelection = true;
+            try { return orig.apply(this, args); }
+            finally { _searchPlacingSelection = prev; }
+        };
+    }
     searchAddon.onDidChangeResults(r => {
         if (_searchOwnerTerm !== term) return;
         document.getElementById('search-count').textContent = _formatSearchCount(r);
