@@ -466,7 +466,10 @@ function _buildFontSelects(allFonts) {
                 extra.textContent = current.replace(/'/g, '').replace(/,sans-serif$/, '');
                 uiFontEl.appendChild(extra);
             }
-            if (current) uiFontEl.value = current;
+            // Same restore pattern as the fallback selects below: assign even
+            // an empty current so a saved '系统默认' re-selects that option
+            // instead of leaving the first font auto-selected.
+            uiFontEl.value = current || '';
         }
 
         // Populate UI fallback font dropdown
@@ -573,8 +576,8 @@ function _fontSelectValue(id, fallback) {
 // hundred-step strings; numeric strings like '550' are silently reset to the default — so this must return a number)
 function saveAppearance() {
     const fontFamily = _fontSelectValue('set-font', _settingsConfig.fontFamily);
-    const uiFont = document.getElementById('set-ui-font')?.value || _settingsConfig.uiFont || '';
-    const uiFallbackFont = document.getElementById('set-ui-fallback-font')?.value || _settingsConfig.uiFallbackFont || '';
+    const uiFont = _fontSelectValue('set-ui-font', _settingsConfig.uiFont);
+    const uiFallbackFont = _fontSelectValue('set-ui-fallback-font', _settingsConfig.uiFallbackFont);
     const fontSize = parseFloat(document.getElementById('set-font-size')?.value) || 16;
     const lineHeight = parseFloat(document.getElementById('set-line-height')?.value) || 1.125;
     const fontWeight = _clampFontWeight(document.getElementById('set-font-weight')?.value, '400');

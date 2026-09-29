@@ -143,3 +143,49 @@ test('saveAppearance：select 已填充后采用 select 当前值（含显式选
     payload = vm1.appearancePayload();
     assert.equal(payload.fallbackFont, '');
 });
+
+// ── 界面字体空值选择（'系统默认' / '无'，option value=''）──
+
+test('saveAppearance：显式选择"系统默认"/"无"（空值）必须落盘为空而非旧配置', () => {
+    const vm1 = loadSettingsVm();
+    vm1.context._settingsConfig = {
+        uiFont: "'FontA',sans-serif",
+        uiFallbackFont: 'FbA',
+        accentColor: '#61afef',
+    };
+    const uiFontEl = vm1.els.get('set-ui-font');
+    uiFontEl.appendChild({ value: "'FontA',sans-serif", textContent: 'FontA' });
+    uiFontEl.appendChild({ value: '', textContent: '系统默认' });
+    uiFontEl.value = ''; // user picked '系统默认'
+    const uiFbEl = vm1.els.get('set-ui-fallback-font');
+    uiFbEl.appendChild({ value: 'FbA', textContent: 'FbA' });
+    uiFbEl.appendChild({ value: '', textContent: '无' });
+    uiFbEl.value = ''; // user picked '无'
+    vm1.run('saveAppearance()');
+    const payload = vm1.appearancePayload();
+    assert.equal(payload.uiFont, '');
+    assert.equal(payload.uiFallbackFont, '');
+});
+
+test('saveAppearance：界面字体 select 未填充时仍回退已配置值（竞态兜底不被误伤）', () => {
+    const vm1 = loadSettingsVm();
+    vm1.context._settingsConfig = {
+        uiFont: "'FontA',sans-serif",
+        uiFallbackFont: 'FbA',
+        accentColor: '#61afef',
+    };
+    vm1.run('saveAppearance()');
+    const payload = vm1.appearancePayload();
+    assert.equal(payload.uiFont, "'FontA',sans-serif");
+    assert.equal(payload.uiFallbackFont, 'FbA');
+});
+
+test('_buildFontSelects：已保存"系统默认"（uiFont 为空）重建后正确回显而非首字体', () => {
+    const vm1 = loadSettingsVm();
+    vm1.context._settingsConfig = { uiFont: '', uiFallbackFont: '' };
+    vm1.run("_buildFontSelects(['FontA','FontB'])");
+    // '系统默认' is the trailing value='' option; the rebuilt select must
+    // select it, not leave the alphabetically first font auto-selected.
+    assert.equal(vm1.els.get('set-ui-font').value, '');
+    assert.equal(vm1.els.get('set-ui-fallback-font').value, '');
+});
