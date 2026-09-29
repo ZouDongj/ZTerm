@@ -34,6 +34,14 @@ function openQC() {
 
 function closeQC() {
     document.getElementById('overlay-qc').classList.remove('open');
+    // Closing via the mask or the × button leaves focus on <body>; restore the
+    // active terminal like closePalette does. Re-checked at fire time: when
+    // the overlay reopened (or another one opened in between), that overlay
+    // keeps its focus.
+    setTimeout(() => {
+        if (document.querySelector('.overlay.open')) return;
+        if (typeof _refocusActiveTerminal === 'function') _refocusActiveTerminal();
+    }, 50);
 }
 
 function qcFilter() {
@@ -395,10 +403,13 @@ function deleteQC(id) {
 function initQCGroupCombo() {
     const input = document.getElementById('qc-edit-group');
     const menu = document.getElementById('qc-group-menu');
-    const groups = [...new Set(_qcCommands.map(c => c.group).filter(Boolean))];
     let activeIdx = -1;
 
     function renderOptions(filter) {
+        // Read the groups at render time: openQCEdit re-runs this init on
+        // every open, and the once-bound listeners below must still see the
+        // current command set.
+        const groups = [...new Set(_qcCommands.map(c => c.group).filter(Boolean))];
         const q = (filter || '').toLowerCase();
         const matched = groups.filter(g => g.toLowerCase().includes(q));
         menu.innerHTML = '';
@@ -406,21 +417,28 @@ function initQCGroupCombo() {
             const div = document.createElement('div');
             div.className = 'dd-option';
             div.textContent = g;
-            div.addEventListener('mousedown', (e) => {
+            // The keydown Enter branch picks via click(): answer both events.
+            // A real mouse press fires mousedown then click; the pick is
+            // idempotent, so handling it twice is harmless.
+            const pick = (e) => {
                 e.preventDefault();
                 input.value = g;
                 menu.classList.remove('open');
-            });
+            };
+            div.addEventListener('mousedown', pick);
+            div.addEventListener('click', pick);
             menu.appendChild(div);
         });
         if (q && !groups.some(g => g.toLowerCase() === q)) {
             const div = document.createElement('div');
             div.className = 'dd-option create';
             div.textContent = '创建分组 "' + filter + '"';
-            div.addEventListener('mousedown', (e) => {
+            const pickCreate = (e) => {
                 e.preventDefault();
                 menu.classList.remove('open');
-            });
+            };
+            div.addEventListener('mousedown', pickCreate);
+            div.addEventListener('click', pickCreate);
             menu.appendChild(div);
         }
         if (matched.length > 0 || q) menu.classList.add('open');
@@ -428,6 +446,11 @@ function initQCGroupCombo() {
         activeIdx = -1;
     }
 
+    // The input persists across dialog opens and openQCEdit re-runs this init
+    // every time: bind once, otherwise each open stacks another full listener
+    // set on it (every key/focus event then fires N times).
+    if (input._qcComboBound) return;
+    input._qcComboBound = true;
     input.addEventListener('focus', () => renderOptions(input.value));
     input.addEventListener('input', () => renderOptions(input.value));
     // mousedown triggers renderOptions: clicking the input again after Esc closed

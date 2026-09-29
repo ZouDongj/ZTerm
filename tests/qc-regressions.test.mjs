@@ -91,3 +91,109 @@ test('a real blur (clicking away) still commits the group rename', () => {
 
     assert.equal(savesOf(ctx, 'save-quick-commands').length, 1, 'blur commits');
 });
+
+// ── Group combobox ──
+// Same keyboard defect as the SSH editor's dropdown (options answered only
+// mousedown while Enter dispatches click()), plus a mount leak: openQCEdit
+// re-runs initQCGroupCombo on every open, stacking another full listener set
+// on the persistent input each time.
+
+function openCombo(ctx) {
+    ctx.initQCGroupCombo();
+    const input = ctx.document.getElementById('qc-edit-group');
+    const menu = ctx.document.getElementById('qc-group-menu');
+    input.dispatch('focus', mkEvt());
+    return { input, menu };
+}
+
+test('Enter picks the active option in the quick-command group dropdown', () => {
+    const ctx = loadQcVm();
+    setCommands(ctx, COMMANDS);
+    const { input, menu } = openCombo(ctx);
+    assert.equal(menu.children.length, 2, 'options rendered');
+
+    input.dispatch('keydown', mkEvt({ key: 'ArrowDown' }));
+    input.dispatch('keydown', mkEvt({ key: 'Enter' }));
+
+    assert.equal(input.value, 'Ops', 'Enter selects the active group');
+    assert.equal(menu.classList.contains('open'), false, 'menu closed after the pick');
+});
+
+test('reopening the dialog does not stack another listener set', () => {
+    const ctx = loadQcVm();
+    setCommands(ctx, COMMANDS);
+    const input = ctx.document.getElementById('qc-edit-group');
+    const menu = ctx.document.getElementById('qc-group-menu');
+    let appends = 0;
+    const realAppend = menu.appendChild.bind(menu);
+    menu.appendChild = (c) => { appends++; return realAppend(c); };
+
+    ctx.initQCGroupCombo();
+    ctx.initQCGroupCombo(); // a second openQCEdit
+    input.dispatch('focus', mkEvt());
+
+    assert.equal(appends, 2, 'one render pass for two groups — the mount is idempotent');
+});
+
+test('the once-bound dropdown still sees commands added after the first open', () => {
+    const ctx = loadQcVm();
+    setCommands(ctx, COMMANDS);
+    ctx.initQCGroupCombo();
+    setCommands(ctx, [...COMMANDS, { id: '4', name: 'd', command: 'w', group: 'New' }]);
+    ctx.initQCGroupCombo(); // reopen after the command set changed
+
+    const input = ctx.document.getElementById('qc-edit-group');
+    const menu = ctx.document.getElementById('qc-group-menu');
+    input.dispatch('focus', mkEvt());
+
+    const labels = menu.children.map(c => c.textContent);
+    assert.deepEqual(labels.sort(), ['Git', 'New', 'Ops'], 'groups are read at render time');
+});
+
+// ── closeQC focus restore ──
+// Closing via the mask click or the × button (renderer.html inline handlers
+// call closeQC directly) left focus on <body> — typing went nowhere. Same
+// restore as closePalette: 50ms delay, re-checking at fire time so a
+// reopened overlay keeps its own focus.
+
+function stageQcOverlay(ctx) {
+    const overlay = ctx.document.getElementById('overlay-qc');
+    overlay.className = 'overlay open';
+    const refocus = { calls: 0 };
+    ctx._refocusActiveTerminal = () => { refocus.calls++; };
+    return { overlay, refocus };
+}
+
+test('closeQC restores terminal focus after 50ms', () => {
+    const ctx = loadQcVm();
+    const { overlay, refocus } = stageQcOverlay(ctx);
+
+    ctx.closeQC();
+    assert.equal(overlay.classList.contains('open'), false);
+    assert.equal(refocus.calls, 0, 'the refocus keeps its 50ms delay');
+
+    ctx.__advance(50);
+    assert.equal(refocus.calls, 1, 'the active terminal is refocused');
+});
+
+test('no refocus when the overlay reopened inside the window', () => {
+    const ctx = loadQcVm();
+    const { overlay, refocus } = stageQcOverlay(ctx);
+
+    ctx.closeQC();
+    overlay.classList.add('open'); // reopened before the timer fires
+    ctx.__advance(50);
+    assert.equal(refocus.calls, 0, 'the reopened overlay keeps its input focus');
+});
+
+test('no refocus when another overlay opened inside the window', () => {
+    const ctx = loadQcVm();
+    const { refocus } = stageQcOverlay(ctx);
+
+    ctx.closeQC();
+    const other = ctx.document.createElement('div');
+    other.className = 'overlay open';
+    ctx.document.body.appendChild(other);
+    ctx.__advance(50);
+    assert.equal(refocus.calls, 0, 'the successor overlay keeps its focus');
+});
