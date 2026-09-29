@@ -230,6 +230,11 @@ pub type KeyDecisionMap = Arc<Mutex<HashMap<String, oneshot::Sender<HostKeyDecis
 pub struct PendingConnection {
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
     pub backend: String,
+    /// Latest terminal size the renderer reported for this attempt's backend id
+    /// while the handshake was still in flight (the session is registered only
+    /// after the handshake, so a pty_resize before that has nowhere to go).
+    /// ssh_connect uses it for request_pty instead of the 80x24 default.
+    pub size: Option<(u16, u16)>,
 }
 pub type PendingMap = Arc<Mutex<HashMap<String, PendingConnection>>>;
 
@@ -294,6 +299,7 @@ impl PendingGuard {
             PendingConnection {
                 cancel: Arc::clone(&cancel),
                 backend: backend.clone(),
+                size: None,
             },
         );
         PendingGuard {
@@ -335,6 +341,30 @@ pub fn complete_pending(
     } else {
         false
     }
+}
+
+/// Cache a renderer-reported terminal size for the in-flight attempt owning
+/// this backend id (session not registered yet, so pty_resize has no session
+/// to forward to). Unknown or already-registered ids match no attempt and
+/// cache nothing — stale resizes must not grow the registry. Latest wins.
+/// Returns true when a pending attempt absorbed the size.
+fn cache_pending_size(
+    pm: &mut HashMap<String, PendingConnection>,
+    backend: &str,
+    size: (u16, u16),
+) -> bool {
+    match pm.values_mut().find(|e| e.backend == backend) {
+        Some(entry) => {
+            entry.size = Some(size);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The size cached for this attempt, if the renderer reported one.
+fn pending_size_for(pm: &HashMap<String, PendingConnection>, attempt: &str) -> Option<(u16, u16)> {
+    pm.get(attempt).and_then(|e| e.size)
 }
 
 pub struct SshHandler {
@@ -1702,9 +1732,12 @@ pub async fn ssh_connect(
         })?;
     cancelled!(handle);
 
-    // Request PTY (default 80x24, renderer sends resize after fit)
+    // Request PTY at the size the renderer reported while the handshake was in
+    // flight (cached on this attempt by pty_resize); default 80x24 when none arrived.
+    let (pty_cols, pty_rows) =
+        pending_size_for(&pending_state.lock(), &attempt_id).unwrap_or((80, 24));
     channel
-        .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
+        .request_pty(false, "xterm-256color", pty_cols as u32, pty_rows as u32, 0, 0, &[])
         .await
         .map_err(|e| {
             let _ = app.emit(
@@ -2128,7 +2161,11 @@ pub async fn pty_input(state: State<'_, SessionMap>, args: Vec<Value>) -> Result
 }
 
 #[tauri::command]
-pub fn pty_resize(state: State<'_, SessionMap>, args: Vec<Value>) -> Result<(), String> {
+pub fn pty_resize(
+    state: State<'_, SessionMap>,
+    pending_state: State<'_, PendingMap>,
+    args: Vec<Value>,
+) -> Result<(), String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
     let tab_id = params
         .get("tabId")
@@ -2154,7 +2191,14 @@ pub fn pty_resize(state: State<'_, SessionMap>, args: Vec<Value>) -> Result<(), 
         Some(SessionType::Ssh(session)) => {
             let _ = session.resize_tx.try_send((cols, rows));
         }
-        None => {}
+        None => {
+            // SSH handshake still in flight (the renderer fits and reports the
+            // size right after ssh-connecting, long before the session is
+            // registered): cache it on the pending attempt so ssh_connect can
+            // open the PTY at the real size instead of 80x24.
+            drop(map);
+            cache_pending_size(&mut pending_state.lock(), &tab_id, (cols, rows));
+        }
     }
     Ok(())
 }
@@ -4709,6 +4753,7 @@ mod tests {
         PendingConnection {
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             backend: backend.to_string(),
+            size: None,
         }
     }
 
@@ -4783,6 +4828,41 @@ mod tests {
         assert!(pm.contains_key("att_stale"));
         // Completing with no entry is a no-op.
         assert!(!complete_pending(&mut pm, "att_new", "ssh_2"));
+    }
+
+    #[test]
+    fn pending_resize_is_cached_on_the_attempt_and_used_for_request_pty() {
+        // The renderer fits and reports the real size right after
+        // ssh-connecting — long before the handshake registers the session.
+        // That resize must land on the pending attempt so request_pty opens
+        // the PTY at the real size instead of the 80x24 default.
+        let mut pm = HashMap::new();
+        pm.insert("att_1".to_string(), entry("ssh_7"));
+        assert!(cache_pending_size(&mut pm, "ssh_7", (132, 43)));
+        assert_eq!(pending_size_for(&pm, "att_1"), Some((132, 43)));
+        // Latest report wins (the user may keep resizing during the handshake).
+        assert!(cache_pending_size(&mut pm, "ssh_7", (100, 30)));
+        assert_eq!(pending_size_for(&pm, "att_1"), Some((100, 30)));
+        // No cached size -> the caller falls back to its default.
+        pm.insert("att_2".to_string(), entry("ssh_8"));
+        assert_eq!(pending_size_for(&pm, "att_2"), None);
+    }
+
+    #[test]
+    fn pending_resize_for_an_unknown_backend_caches_nothing() {
+        // Stale resizes (destroyed session, already-registered tab) match no
+        // pending attempt and must not grow or corrupt the registry.
+        let mut pm = HashMap::new();
+        pm.insert("att_1".to_string(), entry("ssh_7"));
+        assert!(!cache_pending_size(&mut pm, "ssh_gone", (200, 50)));
+        assert_eq!(pm.len(), 1);
+        assert_eq!(pending_size_for(&pm, "att_1"), None);
+        // Caching is scoped to the matching attempt: a sibling attempt's
+        // cached size is untouched by another attempt's resize.
+        pm.insert("att_2".to_string(), entry("ssh_9"));
+        assert!(cache_pending_size(&mut pm, "ssh_7", (120, 40)));
+        assert_eq!(pending_size_for(&pm, "att_1"), Some((120, 40)));
+        assert_eq!(pending_size_for(&pm, "att_2"), None);
     }
 
     #[test]
