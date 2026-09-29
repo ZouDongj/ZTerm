@@ -150,14 +150,15 @@ function _hexToRgb(hex) {
 
 function applyHighlightToLine(line, rules) {
     if (!line) return line;
-    // Collect first match from each rule
+    // Collect all matches from each rule
     const matches = [];
     for (const rule of rules) {
         const regex = buildHighlightRegex(rule.text, rule.isRegExp, rule.isCaseSensitive);
         if (!regex) continue; // invalid regex: skip this rule
-        const match = regex.exec(line);
-        if (match) {
+        let match;
+        while ((match = regex.exec(line)) !== null) {
             matches.push({ start: match.index, end: match.index + match[0].length, rule });
+            if (match[0].length === 0) regex.lastIndex++; // zero-width match: advance past it or exec loops forever
         }
     }
     if (matches.length === 0) return line;

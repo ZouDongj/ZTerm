@@ -138,3 +138,30 @@ test('applyHighlightToLine 转义序列区间内的匹配仍被丢弃（回归�
     const out = applyHighlightToLine(line, [fgRule]);
     assert.equal(out, line, 'OSC 内的关键字不可注入');
 });
+
+test('applyHighlightToLine 同一行内同一关键字的每次出现都被高亮', () => {
+    const line = 'ERROR first ERROR second';
+    const out = applyHighlightToLine(line, [fgRule]);
+    const painted = out.match(/\x1b\[38;2;224;108;117mERROR\x1b\[39m/g) || [];
+    assert.equal(painted.length, 2, 'both occurrences must be painted, got: ' + JSON.stringify(out));
+});
+
+test('applyHighlightToLine 正则规则的多个匹配全部高亮', () => {
+    const rule = { ...fgRule, text: '\\d+', isRegExp: true };
+    const out = applyHighlightToLine('a1 b22 ccc', [rule]);
+    assert.ok(out.includes('\x1b[38;2;224;108;117m1\x1b[39m'), 'first number painted');
+    assert.ok(out.includes('\x1b[38;2;224;108;117m22\x1b[39m'), 'second number painted');
+});
+
+test('applyHighlightToLine 相邻不重叠的匹配都保留', () => {
+    const rule = { ...fgRule, text: 'aa' };
+    const out = applyHighlightToLine('aaaa', [rule]);
+    const painted = out.match(/\x1b\[38;2;224;108;117maa\x1b\[39m/g) || [];
+    assert.equal(painted.length, 2, 'both non-overlapping matches must be painted');
+});
+
+test('applyHighlightToLine 零宽匹配不死循环且不改变可见文本', () => {
+    const rule = { ...fgRule, text: '(?=b)', isRegExp: true };
+    const out = applyHighlightToLine('ab ab', [rule]);
+    assert.equal(out.replace(/\x1b\[[0-9;]*m/g, ''), 'ab ab', 'visible text unchanged');
+});
