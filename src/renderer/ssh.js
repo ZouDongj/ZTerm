@@ -82,6 +82,11 @@ document.addEventListener('click', (e) => {
 let _sessionSel = null;
 
 function openSessionSelector() {
+    // The add-connection menu is a floating popup (not an .overlay), so the
+    // closeAllOverlays pass inside openOverlay never dismisses it: close it
+    // here, or a keyboard open (Ctrl+Shift+N) leaves it floating above the
+    // fullscreen selector after a session is picked.
+    closeSSHAddMenu(false);
     const opener = document.activeElement;
     _sessionSel = {
         activeId: null,
@@ -397,6 +402,10 @@ function _sshMgrView(containerId) {
 }
 
 function openSSHManager() {
+    // Same single-overlay rule as openSessionSelector: the manager can also be
+    // opened by keyboard (Ctrl+Shift+S) while the add-connection menu is
+    // floating; close it so only one overlay layer stays on screen.
+    closeSSHAddMenu(false);
     renderSSHManager();
     openOverlay('overlay-ssh-manager');
     setTimeout(() => {
@@ -1258,8 +1267,12 @@ function openSSHEdit(isNew, profileId) {
     // focus -> input blur), so preventDefault stops the default focus shift,
     // the input keeps focus, and the save reads the value normally; after a
     // successful save closeSSHEdit closes the panel anyway.
-    const saveBtn = document.querySelector('#overlay-ssh-edit button.btn-primary');
-    if (saveBtn) {
+    // The button is a static page element and openSSHEdit runs on every open:
+    // bind the guard once (same marker discipline as the manager lists) or
+    // each open stacks another mousedown handler (legacy K3).
+    const saveBtn = document.getElementById('ssh-edit-save-btn');
+    if (saveBtn && !saveBtn._pwdBlurGuardBound) {
+        saveBtn._pwdBlurGuardBound = true;
         saveBtn.addEventListener('mousedown', (e) => {
             if (document.activeElement && document.activeElement.id === 'ssh-edit-password') {
                 e.preventDefault();
@@ -1267,11 +1280,14 @@ function openSSHEdit(isNew, profileId) {
         });
     }
     // The inline save/cancel buttons likewise block blur from racing ahead
+    // (same one-shot binding rule)
     const inlineSave = document.getElementById('ssh-pwd-inline-save');
     const inlineCancel = document.getElementById('ssh-pwd-inline-cancel');
     const inlineEye = document.getElementById('ssh-pwd-inline-eye');
     [inlineSave, inlineCancel, inlineEye].forEach(btn => {
-        if (btn) btn.addEventListener('mousedown', (e) => e.preventDefault());
+        if (!btn || btn._pwdBlurGuardBound) return;
+        btn._pwdBlurGuardBound = true;
+        btn.addEventListener('mousedown', (e) => e.preventDefault());
     });
 
     if (!isNew && profileId) {
@@ -1313,15 +1329,24 @@ function openSSHEdit(isNew, profileId) {
 }
 
 // ── Group combobox ──
+// openSSHEdit calls initGroupCombo on every dialog open, but the input and
+// menu are static page elements: the listeners are bound ONCE and each call
+// only refreshes the option data (groups) and resets the keyboard index.
+// Binding afresh per open stacked duplicate handlers and made typing in the
+// group field progressively slower over a long session (legacy K3).
+let _groupComboGroups = [];
+let _groupComboActiveIdx = -1;
+let _groupComboBound = false;
+
 function initGroupCombo() {
     const input = document.getElementById('ssh-edit-group');
     const menu = document.getElementById('group-menu');
-    const groups = [...new Set((TabManager.sshProfiles || []).map(p => p.group).filter(Boolean))];
-    let activeIdx = -1;
+    _groupComboGroups = [...new Set((TabManager.sshProfiles || []).map(p => p.group).filter(Boolean))];
+    _groupComboActiveIdx = -1;
 
     function renderOptions(filter) {
         const q = (filter || '').toLowerCase();
-        const matched = groups.filter(g => g.toLowerCase().includes(q));
+        const matched = _groupComboGroups.filter(g => g.toLowerCase().includes(q));
         menu.innerHTML = '';
         matched.forEach((g, i) => {
             const div = document.createElement('div');
@@ -1340,7 +1365,7 @@ function initGroupCombo() {
             menu.appendChild(div);
         });
         // "Create new" option when no exact match
-        if (q && !groups.some(g => g.toLowerCase() === q)) {
+        if (q && !_groupComboGroups.some(g => g.toLowerCase() === q)) {
             const div = document.createElement('div');
             div.className = 'dd-option create';
             // filter is user input: escape it now that the row is HTML, not plain text
@@ -1358,9 +1383,11 @@ function initGroupCombo() {
         } else {
             menu.classList.remove('open');
         }
-        activeIdx = -1;
+        _groupComboActiveIdx = -1;
     }
 
+    if (_groupComboBound) return;
+    _groupComboBound = true;
     input.addEventListener('focus', () => renderOptions(input.value));
     input.addEventListener('input', () => renderOptions(input.value));
     // mousedown re-triggers renderOptions: after the user closes the menu with
@@ -1372,15 +1399,15 @@ function initGroupCombo() {
         const items = [...menu.querySelectorAll('.dd-option')];
         if (e.key === 'ArrowDown') {
             e.preventDefault();
-            activeIdx = Math.min(activeIdx + 1, items.length - 1);
-            items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+            _groupComboActiveIdx = Math.min(_groupComboActiveIdx + 1, items.length - 1);
+            items.forEach((el, i) => el.classList.toggle('active', i === _groupComboActiveIdx));
         } else if (e.key === 'ArrowUp') {
             e.preventDefault();
-            activeIdx = Math.max(activeIdx - 1, 0);
-            items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
-        } else if (e.key === 'Enter' && activeIdx >= 0) {
+            _groupComboActiveIdx = Math.max(_groupComboActiveIdx - 1, 0);
+            items.forEach((el, i) => el.classList.toggle('active', i === _groupComboActiveIdx));
+        } else if (e.key === 'Enter' && _groupComboActiveIdx >= 0) {
             e.preventDefault();
-            items[activeIdx].click();
+            items[_groupComboActiveIdx].click();
         } else if (e.key === 'Escape') {
             e.stopPropagation();
             menu.classList.remove('open');
@@ -1448,9 +1475,13 @@ function addLoginScriptRow(expect, send, isRegex, optional) {
     if (!container) return;
     const row = document.createElement('div');
     row.className = 'login-script-row';
+    // The Expect/Send values sit in double-quoted attribute contexts: escAttr
+    // (unlike escHtml) also escapes quotes, so a value containing " survives
+    // the reopen round-trip instead of truncating the attribute and silently
+    // corrupting the profile on the next save.
     row.innerHTML =
-        '<input class="ls-expect" placeholder="Expect" value="' + escHtml(expect || '') + '">' +
-        '<input class="ls-send" placeholder="Send" value="' + escHtml(send || '') + '">' +
+        '<input class="ls-expect" placeholder="Expect" value="' + escAttr(expect || '') + '">' +
+        '<input class="ls-send" placeholder="Send" value="' + escAttr(send || '') + '">' +
         '<span class="ls-toggle' + (isRegex ? ' on' : '') + '" title="正则匹配" onclick="this.classList.toggle(\'on\')">正则</span>' +
         '<span class="ls-toggle' + (optional ? ' on' : '') + '" title="可选匹配" onclick="this.classList.toggle(\'on\')">可选</span>' +
         '<button class="ls-del" onclick="deleteLoginScriptRow(this)">' + Icons.iconSvg('x', 12) + '</button>';
