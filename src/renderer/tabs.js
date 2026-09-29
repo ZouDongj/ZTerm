@@ -398,6 +398,13 @@ const TabManager = {
         return this.tabs.filter(t => !this._closingTabs.has(t.id)).length;
     },
 
+    // The SFTP panel is bound to one backend session: any teardown of that
+    // session (tab close, pane close, reconnect) closes the panel first, so
+    // it never points at a destroyed session.
+    _closeSftpForSessions(ids) {
+        if (window.SFTP && SFTP._tabId && ids.indexOf(SFTP._tabId) >= 0) SFTP.close();
+    },
+
     closeTab(id) {
         // Idempotent: a rapid shortcut burst hits the same tab repeatedly
         // while its exit animation runs — re-closing would re-add the exit
@@ -428,10 +435,7 @@ const TabManager = {
         const tab = this.tabs[idx];
         const wasActive = this.activeId === id;
         // If the tab being closed has the SFTP panel open, close the panel too (so it never points at a destroyed session)
-        if (window.SFTP && SFTP._tabId) {
-            const ids = tab.splitRoot ? getAllPanes(tab).map(p => p.tabId) : [tab.tabId];
-            if (ids.includes(SFTP._tabId)) SFTP.close();
-        }
+        this._closeSftpForSessions(tab.splitRoot ? getAllPanes(tab).map(p => p.tabId) : [tab.tabId]);
         if (tab.type === 'settings') {
             document.getElementById('settings-pane')?.classList.remove('active');
         }
@@ -589,6 +593,9 @@ const TabManager = {
             return;
         }
 
+        // The old session is discarded below: the SFTP panel must not stay
+        // bound to it (it would show a dead session's listing).
+        this._closeSftpForSessions([tab.tabId]);
         // The old generation is discarded by this replacement: its attempt
         // (if still unsettled) is cancelled by identity and its queue slot
         // released, so a late event for the dead generation can neither
@@ -627,6 +634,9 @@ const TabManager = {
         tab._sshRetryToken = (tab._sshRetryToken || 0) + 1;
         const pane = findPane(tab, paneId);
         if (!pane) return;
+        // The old session is discarded below: the SFTP panel must not stay
+        // bound to it.
+        this._closeSftpForSessions([pane.tabId]);
         // Same identity-exact discard as reconnectTab: the pane's OWN attempt
         // (backend id once claimed, else the token alone — a pre-claim cancel
         // releases the queue slot the replacement is about to need), never a
@@ -1370,6 +1380,9 @@ const TabManager = {
         if (pane._closing) return;
         pane._closing = true;
         if (tab._maximizedPaneId === paneId) tab._maximizedPaneId = null;
+        // The pane's session is destroyed below: the SFTP panel must not stay
+        // bound to it (it would keep showing a dead session's listing).
+        this._closeSftpForSessions([pane.tabId]);
         // Destroy backend immediately but keep the DOM for exit animation.
         // The cancellation carries the pane's OWN attempt identity (backend
         // id once claimed, else the attempt token): the main process locates
