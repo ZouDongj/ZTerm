@@ -173,6 +173,64 @@ fn execute_unconditional(scripts: &mut Vec<LoginScript>) -> Vec<String> {
     result
 }
 
+/// Quiet deadline for login-script retirement: once this much time passes
+/// without a consumed step, whatever is still queued never matched its prompt
+/// and stops auto-answering. Generous enough for slow banners/PAM between
+/// prompts of a live login; every consumed step re-arms it.
+const LOGIN_SCRIPT_RETIRE_TIMEOUT_MS: u64 = 30_000;
+
+/// Feed one output chunk to the login-script queue through a cross-chunk tail
+/// window. A prompt split across two SSH Data blocks is invisible to a
+/// per-chunk match — neither chunk contains the whole expect string — so the
+/// window joins the trailing bytes of previous chunks with the new text and
+/// refeeds the joined tail to whatever is still queued. The chunk alone is fed
+/// first (unchanged single-chunk semantics, ^-anchored regexes included);
+/// only unmatched steps see the joined window. Afterwards the window shrinks
+/// to one byte less than the longest still-queued expect: no queued step can
+/// need more tail, and matched text cannot linger to re-trigger later steps.
+fn feed_login_scripts_windowed(
+    window: &mut String,
+    text: &str,
+    scripts: &mut Vec<LoginScript>,
+) -> Vec<String> {
+    let mut sends = feed_login_scripts(text, scripts);
+    window.push_str(text);
+    if !scripts.is_empty() {
+        sends.extend(feed_login_scripts(window, scripts));
+    }
+    let keep = scripts
+        .iter()
+        .map(|s| s.expect.len())
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(1);
+    if window.len() > keep {
+        let mut cut = window.len() - keep;
+        while !window.is_char_boundary(cut) {
+            cut += 1;
+        }
+        window.drain(..cut);
+    }
+    sends
+}
+
+/// Retire the login-script queue (login complete, unmatched steps stop
+/// auto-answering). Returns the expect strings of the still-required steps
+/// for the visible notice — empty when only optional steps were left (their
+/// miss is expected, nothing to report) — or None when nothing was queued.
+fn retire_login_scripts(scripts: &mut Vec<LoginScript>) -> Option<Vec<String>> {
+    if scripts.is_empty() {
+        return None;
+    }
+    let missed_required: Vec<String> = scripts
+        .iter()
+        .filter(|s| !s.optional)
+        .map(|s| s.expect.clone())
+        .collect();
+    scripts.clear();
+    Some(missed_required)
+}
+
 // ── Session types ──
 
 pub struct PtySession {
@@ -1381,8 +1439,98 @@ fn passwd_login_shell(passwd: &str, username: &str) -> Option<String> {
     passwd_entry_fields(passwd, username).and_then(|f| f.last().map(|s| s.trim().to_string()))
 }
 
-/// Clean residual injection artifacts from ~/.bash_history and ~/.zsh_history
-async fn clean_history_artifacts(sftp: &russh_sftp::client::SftpSession, username: &str) {
+/// The followCwd typed-injection script (fallback when the RC wrapper is
+/// unavailable). Single source for the reader's inject task and for history
+/// cleanup: every line is a marker the cleanup removes by exact match.
+const TYPED_CWD_INJECT_SCRIPT: &str = " setopt HIST_IGNORE_SPACE 2>/dev/null; set +o history 2>/dev/null\n\
+     stty -echo\n\
+     _zt_cwd() { printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }\n\
+     if [ -n \"$ZSH_VERSION\" ]; then precmd_functions+=(_zt_cwd); else PROMPT_COMMAND=\"_zt_cwd;${PROMPT_COMMAND}\"; fi\n\
+     echo ZTERM_INJECTED\n\
+     stty echo\n";
+
+/// Command lines of the legacy typed injection (pre-Rust backend variant):
+/// sessions from old versions may still have them recorded, so cleanup
+/// matches them too. The generic shell fragments of that block ("if [ -n
+/// \"$ZSH_VERSION\" ]; then", "else", "fi") are deliberately excluded — a
+/// user's own multi-line commands contain those too.
+const LEGACY_INJECT_MARKER_LINES: &[&str] = &[
+    "if [ -n \"$ZSH_VERSION\" ]; then _zt_hio=${options[hist_ignore_space]:-off}; setopt HIST_IGNORE_SPACE 2>/dev/null; else set +o history 2>/dev/null; fi",
+    "precmd_functions+=(_zt_cwd)",
+    "PROMPT_COMMAND=\"_zt_cwd;${PROMPT_COMMAND}\"",
+    "if [ -n \"$ZSH_VERSION\" ]; then [ \"$_zt_hio\" = off ] && unsetopt HIST_IGNORE_SPACE 2>/dev/null; unset _zt_hio; else set -o history 2>/dev/null; fi",
+];
+
+/// zsh EXTENDED_HISTORY records entries as ": <begin>:<elapsed>;<command>".
+/// Strip that prefix only when the full decoration is present, so a user
+/// command that merely starts with ": " keeps its text.
+fn strip_zsh_history_prefix(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix(": ") else {
+        return text;
+    };
+    let Some((begin, tail)) = rest.split_once(':') else {
+        return text;
+    };
+    let Some((elapsed, command)) = tail.split_once(';') else {
+        return text;
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if digits(begin) && digits(elapsed) {
+        command
+    } else {
+        text
+    }
+}
+
+/// True when a raw history-file line is exactly one of the command lines the
+/// followCwd injection types (current or legacy variant). Matching is full
+/// line equality after removing history-file decorations (zsh EXTENDED_HISTORY
+/// prefix, backslash newline escape, line terminator); the injection's leading
+/// space (the HIST_IGNORE_SPACE marker) is ignored on both sides. No substring
+/// matching: a user command that merely contains a marker keeps its line.
+fn history_line_is_injection(line: &[u8]) -> bool {
+    let owned = String::from_utf8_lossy(line);
+    let body = strip_zsh_history_prefix(&owned);
+    let body = body.trim_end_matches(['\r', '\n']);
+    let body = body.strip_suffix('\\').unwrap_or(body);
+    let body = body.trim_start_matches(' ');
+    TYPED_CWD_INJECT_SCRIPT
+        .lines()
+        .chain(LEGACY_INJECT_MARKER_LINES.iter().copied())
+        .any(|marker| marker.trim_start_matches(' ') == body)
+}
+
+/// Return the history content with the injected command lines removed, or
+/// None when no line matched (the caller leaves the file untouched).
+/// Operates on raw bytes: kept lines — including invalid UTF-8 — are copied
+/// verbatim.
+fn cleaned_history_bytes(content: &[u8]) -> Option<Vec<u8>> {
+    let mut changed = false;
+    let mut out: Vec<u8> = Vec::with_capacity(content.len());
+    for line in content.split_inclusive(|b| *b == b'\n') {
+        if history_line_is_injection(line) {
+            changed = true;
+        } else {
+            out.extend_from_slice(line);
+        }
+    }
+    if changed {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Clean residual injection artifacts from ~/.bash_history and ~/.zsh_history.
+/// Only the exact command lines the injection types are removed (current and
+/// legacy variants); every other byte of the file — including non-UTF-8
+/// content — is preserved as-is. The cleaned copy goes to a temp file and is
+/// swapped in via finalize_upload_rename, so a failed write leaves the
+/// original history file untouched instead of truncating it.
+async fn clean_history_artifacts(
+    sftp: &russh_sftp::client::SftpSession,
+    username: &str,
+) -> Result<(), String> {
     // Resolve home dir from /etc/passwd (SFTP doesn't expand ~)
     let home = {
         let content = sftp.read("/etc/passwd").await.ok();
@@ -1390,35 +1538,29 @@ async fn clean_history_artifacts(sftp: &russh_sftp::client::SftpSession, usernam
     };
     let home = match home {
         Some(h) if !h.is_empty() => h,
-        _ => return,
+        _ => return Ok(()),
     };
-    let patterns = [
-        "_zt_cwd",
-        "_zt_hio",
-        "ZTERM_INJECTED",
-        "hist_ignore_space",
-        "set +o history",
-        "setopt HIST_IGNORE_SPACE",
-    ];
+    let stamp = format!("{}-{}", std::process::id(), rand_suffix());
     for name in ["bash_history", "zsh_history"] {
         let path = format!("{}/.{}", home, name);
         let content = match sftp.read(&path).await {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let text = String::from_utf8_lossy(&content);
-        let filtered: Vec<&str> = text
-            .lines()
-            .filter(|l| !patterns.iter().any(|p| l.contains(p)))
-            .collect();
-        if filtered.len() != text.lines().count() {
-            let mut cleaned = filtered.join("\n");
-            if !cleaned.is_empty() {
-                cleaned.push('\n');
-            }
-            let _ = sftp_write_file(sftp, &path, cleaned.as_bytes()).await;
+        let Some(cleaned) = cleaned_history_bytes(&content) else {
+            continue; // nothing to remove: leave the file byte-identical
+        };
+        let tmp = format!("{}.zterm-clean-{}", path, stamp);
+        let backup = format!("{}.zterm-backup-{}", path, stamp);
+        if let Err(e) = sftp_write_file(sftp, &tmp, &cleaned).await {
+            let _ = sftp.remove_file(&tmp).await;
+            return Err(format!("clean {path}: {e}"));
+        }
+        if let Err(e) = finalize_upload_rename(sftp, &tmp, &path, &backup).await {
+            return Err(format!("clean {path}: {e}"));
         }
     }
+    Ok(())
 }
 
 /// Write file via SFTP, creating it if missing (sftp.write() requires existing file)
@@ -1478,14 +1620,30 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
         // forward all four in read order — .zshenv (always read first: nvm/
         // pyenv/cargo/homebrew PATH setup commonly lives there) and .zlogin
         // (read last for login shells) too, or they are silently skipped.
+        // Systems whose /etc/zshrc derives HISTFILE from ZDOTDIR (macOS:
+        // HISTFILE=$ZDOTDIR/.zsh_history) would point history into the temp
+        // dir, and the cleanup below would delete the whole session's history.
+        // After the user's own .zshrc has run: an HISTFILE still sitting
+        // inside the temp dir is the system-derived one and is redirected to
+        // the real home; one the user set elsewhere is left alone, and an
+        // unset HISTFILE stays unset (a user who disabled history keeps it
+        // disabled — nothing is lost by not saving).
         let zshrc = format!(
             "[ -f ~/.zshrc ] && . ~/.zshrc\n\
              _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }}\n\
-             precmd_functions+=(_zt_cwd)\n"
+             precmd_functions+=(_zt_cwd)\n\
+             if [ -n \"$HISTFILE\" ] && [ \"${{HISTFILE#{dir}/}}\" != \"$HISTFILE\" ]; then export HISTFILE=\"$HOME/.zsh_history\"; fi\n"
         );
         // The temp dir is removed by .zlogin, the LAST file zsh reads: removing
-        // it in .zshrc would delete .zlogin before zsh gets to it.
-        let zlogin = format!("[ -f ~/.zlogin ] && . ~/.zlogin\nrm -rf {}\n", dir);
+        // it in .zshrc would delete .zlogin before zsh gets to it. Cleanup
+        // removes exactly the four wrapper files by path and only removes the
+        // directory when empty, so a history file that still landed inside
+        // the temp dir survives instead of being deleted with it.
+        let zlogin = format!(
+            "[ -f ~/.zlogin ] && . ~/.zlogin\n\
+             rm -f {dir}/.zshenv {dir}/.zprofile {dir}/.zshrc {dir}/.zlogin\n\
+             rmdir {dir} 2>/dev/null\n"
+        );
         Some((
             vec![
                 (
@@ -1804,8 +1962,16 @@ pub async fn ssh_connect(
     let mut exec_cmd = None;
     if follow_cwd {
         if let Some(ref s) = sftp {
-            // Clean up residual injection artifacts from previous sessions
-            clean_history_artifacts(s, &username).await;
+            // Clean up residual injection artifacts from previous sessions.
+            // Best effort: a cleanup failure must not break the connection,
+            // but it is reported (log + event) so the state is diagnosable.
+            if let Err(e) = clean_history_artifacts(s, &username).await {
+                eprintln!("[zterm] followCwd history cleanup failed: {e}");
+                let _ = app.emit(
+                    "ssh-history-clean-failed",
+                    json!({ "tabId": tab_id, "rendererId": renderer_id, "error": e }),
+                );
+            }
             exec_cmd = prepare_cwd_wrapper(s, &username).await;
         }
     }
@@ -1875,13 +2041,7 @@ pub async fn ssh_connect(
             // Every line starts with a space: once zsh sets HIST_IGNORE_SPACE inline, these lines are never recorded — fully traceless
             // The marker is printed while stty -echo is active → printed once, with no echo
             filtering_inject.store(true, std::sync::atomic::Ordering::Relaxed);
-            let script = " setopt HIST_IGNORE_SPACE 2>/dev/null; set +o history 2>/dev/null\n\
-                           stty -echo\n\
-                           _zt_cwd() { printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }\n\
-                           if [ -n \"$ZSH_VERSION\" ]; then precmd_functions+=(_zt_cwd); else PROMPT_COMMAND=\"_zt_cwd;${PROMPT_COMMAND}\"; fi\n\
-                           echo ZTERM_INJECTED\n\
-                           stty echo\n";
-            let _ = wtx.send(script.as_bytes().to_vec()).await;
+            let _ = wtx.send(TYPED_CWD_INJECT_SCRIPT.as_bytes().to_vec()).await;
         });
     }
 
@@ -1916,8 +2076,41 @@ pub async fn ssh_connect(
         // seconds into every SSH session, burning a core per idle session
         // (issue #15). See examples/select_sleep_spin.rs.
         let mut inject_fired = false;
+        // Cross-chunk expect window: login-script prompts split across SSH
+        // data chunks still match (see feed_login_scripts_windowed)
+        let mut login_expect_window = String::new();
+        // Login-script retirement: unmatched steps (optional or queued
+        // required) stay armed for the whole session otherwise, and the same
+        // text printed after login gets auto-answered. This one-shot deadline
+        // retires whatever never matched: once the queue has been quiet past
+        // the deadline the login is over — every step either matched, or its
+        // prompt is gone. Same pinned-Sleep latch guard as inject_timeout
+        // above (a fired Sleep polls Ready forever; the guard prevents the
+        // permanent hot loop).
+        let login_retire_timeout = tokio::time::sleep(std::time::Duration::from_millis(
+            LOGIN_SCRIPT_RETIRE_TIMEOUT_MS,
+        ));
+        tokio::pin!(login_retire_timeout);
+        let mut login_retire_fired = false;
         loop {
             tokio::select! {
+                _ = &mut login_retire_timeout, if !login_retire_fired => {
+                    login_retire_fired = true;
+                    // Required steps that never matched mean the script did not
+                    // run as configured: report them; optional misses are expected.
+                    if let Some(missed_required) = retire_login_scripts(&mut scripts_reader.lock()) {
+                        if !missed_required.is_empty() {
+                            eprintln!(
+                                "[zterm] login script steps never matched, auto-answer retired: {}",
+                                missed_required.join(" | ")
+                            );
+                            let _ = app2.emit(
+                                "ssh-login-script-timeout",
+                                json!({ "tabId": tid, "rendererId": rid, "expects": missed_required }),
+                            );
+                        }
+                    }
+                }
                 _ = &mut inject_timeout, if !inject_fired => {
                     inject_fired = true;
                     // Timeout: force Normal state to avoid stuck filtering
@@ -1932,11 +2125,23 @@ pub async fn ssh_connect(
                     match msg {
                         Some(russh::ChannelMsg::Data { ref data }) => {
                             let text = drain_utf8(&mut utf8_carry, data);
-                            // Feed to login script processor (drop guard before await)
+                            // Feed to login script processor through the cross-chunk
+                            // expect window (drop guard before await)
                             let send_texts = {
                                 let mut s = scripts_reader.lock();
-                                feed_login_scripts(&text, &mut s)
+                                feed_login_scripts_windowed(&mut login_expect_window, &text, &mut s)
                             };
+                            if !send_texts.is_empty() {
+                                // Progress re-arms the retirement deadline: a
+                                // login may be slow between prompts while it
+                                // is still advancing.
+                                login_retire_timeout.as_mut().reset(
+                                    tokio::time::Instant::now()
+                                        + std::time::Duration::from_millis(
+                                            LOGIN_SCRIPT_RETIRE_TIMEOUT_MS,
+                                        ),
+                                );
+                            }
                             for t in send_texts {
                                 let _ = reader_writer.send(t.into_bytes()).await;
                             }
@@ -6342,6 +6547,115 @@ mod tests {
     }
 
     #[test]
+    fn windowed_feed_matches_prompt_split_across_chunks() {
+        // A prompt split across two SSH Data blocks never matches a per-chunk
+        // scan; the joined tail window must still answer it.
+        let mut scripts = vec![script("Password:", "secret")];
+        let mut window = String::new();
+        assert!(
+            feed_login_scripts_windowed(&mut window, "Welcome!\r\nPass", &mut scripts).is_empty()
+        );
+        let sends = feed_login_scripts_windowed(&mut window, "word: ", &mut scripts);
+        assert_eq!(sends, vec!["secret\n"]);
+        assert!(scripts.is_empty());
+    }
+
+    #[test]
+    fn windowed_feed_matches_split_across_three_chunks_despite_filler() {
+        // Long filler in between proves the window is trimmed yet retains
+        // enough tail: the split pattern still matches across three chunks.
+        let mut scripts = vec![script("END:", "ok")];
+        let mut window = String::new();
+        assert!(
+            feed_login_scripts_windowed(&mut window, &"x".repeat(500), &mut scripts).is_empty()
+        );
+        assert!(feed_login_scripts_windowed(&mut window, "EN", &mut scripts).is_empty());
+        let sends = feed_login_scripts_windowed(&mut window, "D:", &mut scripts);
+        assert_eq!(sends, vec!["ok\n"]);
+        assert!(scripts.is_empty());
+    }
+
+    #[test]
+    fn windowed_feed_consumes_matched_text_no_refire() {
+        // After a match the buffer is consumed: the same text arriving later
+        // must not fire again (the step is gone and the window was drained).
+        let mut scripts = vec![script("abc", "x")];
+        let mut window = String::new();
+        let sends = feed_login_scripts_windowed(&mut window, "zzabc", &mut scripts);
+        assert_eq!(sends, vec!["x\n"]);
+        let sends = feed_login_scripts_windowed(&mut window, "abc", &mut scripts);
+        assert!(sends.is_empty());
+        assert!(scripts.is_empty());
+    }
+
+    #[test]
+    fn windowed_feed_keeps_chunk_start_semantics_for_anchored_regex() {
+        // The chunk alone is still fed first: a ^-anchored regex keeps
+        // matching at the chunk start exactly as before windowing.
+        let mut scripts = vec![LoginScript {
+            expect: "^Password:".into(),
+            send: "pw".into(),
+            is_regex: true,
+            optional: false,
+        }];
+        let mut window = String::new();
+        let sends = feed_login_scripts_windowed(&mut window, "Password: ", &mut scripts);
+        assert_eq!(sends, vec!["pw\n"]);
+        assert!(scripts.is_empty());
+    }
+
+    #[test]
+    fn windowed_feed_multibyte_expect_split_across_chunks() {
+        // The window trim must never split a UTF-8 character: a multibyte
+        // prompt split across chunks still matches.
+        let mut scripts = vec![script("密码:", "x")];
+        let mut window = String::new();
+        assert!(feed_login_scripts_windowed(&mut window, "提示: 密", &mut scripts).is_empty());
+        let sends = feed_login_scripts_windowed(&mut window, "码: ", &mut scripts);
+        assert_eq!(sends, vec!["x\n"]);
+        assert!(scripts.is_empty());
+    }
+
+    #[test]
+    fn retire_login_scripts_reports_required_and_clears_all() {
+        let mut scripts = vec![
+            LoginScript {
+                expect: "maybe".into(),
+                send: "y".into(),
+                is_regex: false,
+                optional: true,
+            },
+            script("Password:", "secret"),
+        ];
+        let missed = retire_login_scripts(&mut scripts).expect("queue was not empty");
+        assert_eq!(
+            missed,
+            vec!["Password:"],
+            "only required steps are reported"
+        );
+        assert!(scripts.is_empty(), "optional leftovers are retired too");
+    }
+
+    #[test]
+    fn retire_login_scripts_optional_only_is_silent() {
+        let mut scripts = vec![LoginScript {
+            expect: "maybe".into(),
+            send: "y".into(),
+            is_regex: false,
+            optional: true,
+        }];
+        let missed = retire_login_scripts(&mut scripts).expect("queue was not empty");
+        assert!(missed.is_empty(), "no required step: nothing to report");
+        assert!(scripts.is_empty());
+    }
+
+    #[test]
+    fn retire_login_scripts_empty_queue_is_noop() {
+        let mut scripts: Vec<LoginScript> = vec![];
+        assert!(retire_login_scripts(&mut scripts).is_none());
+    }
+
+    #[test]
     fn ssh_port_validation_rejects_out_of_range_values() {
         // Regression: `as u16` silently truncated 70000 to 4464, connecting to
         // the wrong port and reporting errors against it.
@@ -6384,6 +6698,100 @@ mod tests {
             Some("/bin/zsh")
         );
         assert_eq!(passwd_login_shell(passwd, "nobody"), None);
+    }
+
+    #[test]
+    fn history_cleanup_keeps_file_without_markers() {
+        assert!(cleaned_history_bytes(b"ls -la\ngit status\n").is_none());
+        assert!(cleaned_history_bytes(b"").is_none());
+    }
+
+    #[test]
+    fn history_cleanup_removes_exact_injected_lines() {
+        // Byte-identical to what the typed injection sends, leading space
+        // included; everything else survives.
+        let mut content = String::new();
+        for l in TYPED_CWD_INJECT_SCRIPT.lines() {
+            content.push_str(l);
+            content.push('\n');
+        }
+        content.push_str("ls -la\n");
+        let cleaned = cleaned_history_bytes(content.as_bytes()).expect("markers must be removed");
+        assert_eq!(String::from_utf8_lossy(&cleaned), "ls -la\n");
+    }
+
+    #[test]
+    fn history_cleanup_no_substring_false_positives() {
+        // Substring lookalikes of every old pattern must survive: only exact
+        // full-line matches are removed.
+        let content = b"grep _zt_cwd file.txt\n\
+                        echo ZTERM_INJECTED extra-words\n\
+                        man set +o history\n\
+                        vim hist_ignore_space.conf\n\
+                        _zt_hio=1\n\
+                        setopt HIST_IGNORE_SPACE manually\n\
+                        fi\n\
+                        else\n";
+        assert!(cleaned_history_bytes(content).is_none());
+    }
+
+    #[test]
+    fn history_cleanup_preserves_non_utf8_bytes() {
+        // Invalid UTF-8 content must come back byte-identical (no lossy
+        // replacement), while the marker line next to it is removed.
+        let mut content = b"\xFF\xFE raw \xC3\x28 bytes\n".to_vec();
+        content.extend_from_slice(TYPED_CWD_INJECT_SCRIPT.lines().next().unwrap().as_bytes());
+        content.extend_from_slice(b"\n");
+        let cleaned = cleaned_history_bytes(&content).expect("marker removed");
+        assert_eq!(cleaned, b"\xFF\xFE raw \xC3\x28 bytes\n");
+    }
+
+    #[test]
+    fn history_cleanup_matches_decorated_history_lines() {
+        // zsh EXTENDED_HISTORY prefix and backslash newline escape are
+        // stripped before the comparison, so decorated entries are cleaned.
+        let marker = TYPED_CWD_INJECT_SCRIPT.lines().next().unwrap();
+        let prefixed = format!(": 1696000000:0;{marker}\n");
+        let continued = format!("{marker}\\\n");
+        let mut content = prefixed.into_bytes();
+        content.extend_from_slice(continued.as_bytes());
+        content.extend_from_slice(b"keep me\n");
+        let cleaned = cleaned_history_bytes(&content).expect("decorated markers removed");
+        assert_eq!(String::from_utf8_lossy(&cleaned), "keep me\n");
+    }
+
+    #[test]
+    fn history_cleanup_removes_legacy_injection_lines() {
+        // Residue from the pre-Rust backend injection variant still gets
+        // cleaned, by exact line.
+        let mut content = LEGACY_INJECT_MARKER_LINES.join("\n").into_bytes();
+        content.extend_from_slice(b"\ntrue\n");
+        let cleaned = cleaned_history_bytes(&content).expect("legacy markers removed");
+        assert_eq!(String::from_utf8_lossy(&cleaned), "true\n");
+    }
+
+    #[test]
+    fn history_cleanup_preserves_line_terminators_and_missing_final_newline() {
+        // CRLF lines and a final line without a newline survive as-is.
+        let marker = TYPED_CWD_INJECT_SCRIPT.lines().next().unwrap();
+        let content = format!("a\r\n{marker}\nb");
+        let cleaned = cleaned_history_bytes(content.as_bytes()).expect("marker removed");
+        assert_eq!(String::from_utf8_lossy(&cleaned), "a\r\nb");
+    }
+
+    #[test]
+    fn history_line_prefix_stripper_requires_full_zsh_decoration() {
+        // A user command that merely starts with ": " keeps its text.
+        assert_eq!(
+            strip_zsh_history_prefix(": not a timestamp; echo hi"),
+            ": not a timestamp; echo hi"
+        );
+        assert_eq!(strip_zsh_history_prefix("plain"), "plain");
+        assert_eq!(strip_zsh_history_prefix(": 1696000000:0;cmd"), "cmd");
+        assert_eq!(
+            strip_zsh_history_prefix(": 1696000000:;cmd"),
+            ": 1696000000:;cmd"
+        );
     }
 
     #[test]
@@ -6772,7 +7180,54 @@ mod tests {
         let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
         assert!(!String::from_utf8_lossy(&zshrc.1).contains("rm -rf"));
         let zlogin = files.iter().find(|(p, _)| p.ends_with("/.zlogin")).unwrap();
-        assert!(String::from_utf8_lossy(&zlogin.1).contains("rm -rf"));
+        assert!(String::from_utf8_lossy(&zlogin.1).contains("rmdir"));
+    }
+
+    #[test]
+    fn zsh_wrapper_redirects_tempdir_histfile_to_real_home() {
+        // macOS /etc/zshrc derives HISTFILE from ZDOTDIR, so with ZDOTDIR on
+        // the temp wrapper dir the whole session's history would be written
+        // there and deleted by the cleanup. The wrapper must re-point an
+        // HISTFILE still sitting inside the temp dir at the real home.
+        let (files, _) = cwd_wrapper_files("/bin/zsh", "t123").expect("zsh wrapper");
+        let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
+        let text = String::from_utf8_lossy(&zshrc.1);
+        assert!(
+            text.contains("[ -n \"$HISTFILE\" ] && [ \"${HISTFILE#/tmp/.zterm-zdot-t123/}\" != \"$HISTFILE\" ]"),
+            "redirection must fire only for an HISTFILE inside the temp dir: {text}"
+        );
+        assert!(
+            text.contains("export HISTFILE=\"$HOME/.zsh_history\""),
+            "must export the real-home history file: {text}"
+        );
+        // An HISTFILE the user set elsewhere keeps its value (guard only
+        // matches the temp-dir prefix); an unset HISTFILE stays unset.
+    }
+
+    #[test]
+    fn zsh_wrapper_zlogin_cleanup_spares_history_files() {
+        // .zlogin removes exactly the four wrapper files by path and only
+        // removes the directory when empty: a history file that still landed
+        // inside the temp dir survives the cleanup instead of being deleted
+        // with it.
+        let (files, _) = cwd_wrapper_files("/bin/zsh", "t123").expect("zsh wrapper");
+        let zlogin = files.iter().find(|(p, _)| p.ends_with("/.zlogin")).unwrap();
+        let text = String::from_utf8_lossy(&zlogin.1);
+        assert!(
+            !text.contains("rm -rf"),
+            "recursive delete must be gone: {text}"
+        );
+        assert!(text.contains("rm -f "), "cleanup must remove files: {text}");
+        for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
+            assert!(
+                text.contains(&format!("/tmp/.zterm-zdot-t123/{name}")),
+                "must remove {name} by exact path: {text}"
+            );
+        }
+        assert!(
+            text.contains("rmdir /tmp/.zterm-zdot-t123"),
+            "dir removal must require the dir to be empty: {text}"
+        );
     }
 
     #[test]
