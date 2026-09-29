@@ -81,7 +81,7 @@ const SFTP = {
         // the panel meanwhile; a stale response must not overwrite the current panel state
         const myTab = tabId;
         const seq = ++SFTP._reqSeq;
-        const req = { seq, epoch: this._viewEpoch };
+        const req = { seq, epoch: this._viewEpoch, user: true };
         this._viewReq = req;
         try {
             let result;
@@ -156,7 +156,10 @@ const SFTP = {
         // (any close route, including closeOverlay's class-only removal) owns nothing
         const myTab = this._tabId;
         const seq = ++SFTP._reqSeq;
-        const req = { seq, epoch: this._viewEpoch };
+        // user: a direct user navigation re-renders the breadcrumb on
+        // completion and so cannot preserve an in-progress path edit;
+        // background follows/refreshes render with nonUser and can.
+        const req = { seq, epoch: this._viewEpoch, user: !(opts && (opts.follow || opts.refresh)) };
         // The latest request takes over the loading state: an earlier request of
         // this same binding is now obsolete and must no longer suppress the
         // view's upload refreshes once it settles.
@@ -257,6 +260,11 @@ const SFTP = {
     _editPath() {
         const el = document.getElementById('sftp-breadcrumb');
         if (!el || el.querySelector('input')) return; // already in edit mode
+        // A user navigation/open in flight re-renders the breadcrumb on
+        // completion, which would destroy the half-typed editor; entry is
+        // refused instead. Background follow/refresh completions preserve an
+        // editor (_renderListing nonUser), so they do not block entry.
+        if (this._viewReq && this._viewReq.user) return;
         this._editingPath = true;
         const input = document.createElement('input');
         input.className = 'sftp-path-input inline-edit';

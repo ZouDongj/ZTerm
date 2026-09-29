@@ -155,3 +155,50 @@ test('mkdir completion with a quiet view refreshes the current directory (contro
     await vm.drain();
     assert.ok(vm.els.body.children.some(r => r.innerHTML.includes('newdir')), 'created directory visible after refresh');
 });
+
+test('breadcrumb path edit is refused while a user navigation or open is loading', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+
+    const nav = vm.SFTP.navigate('/srv/sub'); // user navigation in flight
+    await vm.drain();
+    vm.SFTP._editPath(); // double-click during the load
+    assert.equal(vm.SFTP._editingPath, false, 'editor entry refused while a user navigation owns the view');
+    assert.ok(!vm.els.breadcrumb.children.some(c => c.tagName === 'INPUT'), 'no editor input mounted');
+
+    vm.settle(vm.pending('sftp-readdir')[0], { files: [] });
+    await vm.drain();
+    await nav;
+
+    vm.SFTP._editPath(); // after the load the address bar is editable again
+    assert.equal(vm.SFTP._editingPath, true, 'editor opens once the navigation settled');
+    assert.ok(vm.els.breadcrumb.children.some(c => c.tagName === 'INPUT'), 'editor input mounted');
+    // End the edit. Fake-DOM modeling note: _renderBreadcrumb's innerHTML=''
+    // clears the input in a real DOM but not in the seam, so model the
+    // removal before the re-render (as existing tests do with slice marks).
+    vm.els.breadcrumb.children.length = 0;
+    vm.SFTP._renderBreadcrumb();
+
+    const p = vm.SFTP.open('sessB'); // panel rebound; open load in flight
+    await vm.drain();
+    vm.SFTP._editPath();
+    assert.equal(vm.SFTP._editingPath, false, 'editor entry refused during the open load');
+    vm.settle(vm.pending('sftp-open')[0], { path: '/home/b', files: [] });
+    await vm.drain();
+    await p;
+    vm.SFTP._editPath();
+    assert.equal(vm.SFTP._editingPath, true, 'editor opens after the open load settled');
+});
+
+test('breadcrumb path edit still opens during a background cwd follow (control)', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+    vm.emit('sftp-cwd-changed', { tabId: 'sessA', cwd: '/tmp' });
+    await vm.drain();
+    assert.equal(vm.pending('sftp-readdir').length, 1, 'follow in flight');
+    vm.SFTP._editPath();
+    assert.equal(vm.SFTP._editingPath, true, 'a background follow does not block the editor');
+    vm.settle(vm.pending('sftp-readdir')[0], { files: [] });
+    await vm.drain();
+    assert.equal(vm.SFTP._editingPath, true, 'follow completion preserves the editor');
+});
