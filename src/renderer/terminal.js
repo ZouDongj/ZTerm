@@ -746,7 +746,13 @@ function wireTerminalToPane(tab, pane) {
     pane._smoothCursor = _wireSmoothCursorWebgl(term, webglAddon);
 
     function applyFit(retries = 10) {
-        if (_spannerDrag || TabManager._maximizing) return;
+        // _windowResizing: suppress fit (and the immediate resize report)
+        // while the window is being drag-resized — this observer replaced the
+        // guarded one _renderSplit installed, so it must honor the same
+        // contract as setupWrapResizeObserver: per-frame full fits fire a
+        // pty-resize storm at the remote (nvim/htop resized every frame);
+        // split.js's resize settlement performs the final fit after the drag.
+        if (_spannerDrag || TabManager._maximizing || _windowResizing) return;
         if (retries <= 0) return;
         if (bodyEl.clientWidth === 0 || bodyEl.clientHeight === 0) {
             setTimeout(() => applyFit(retries - 1), 50);
