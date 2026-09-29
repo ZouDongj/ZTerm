@@ -83,6 +83,23 @@ function hslToHex(h, s, l) {
     return rgbToHex(Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255));
 }
 
+// Background '#rrggbb' → COLORFGBG value ('0;15' on a light background,
+// '15;0' on a dark one); invalid input returns null.
+// ConPTY/conhost does not forward the shell's OSC 10/11 color queries, so TUI
+// apps that probe the terminal fall back to reading the COLORFGBG env var
+// (rxvt convention: "fg;bg" palette indices). We seed it from the actually
+// rendered scheme background so those apps pick the right default colors.
+// Luminance test: WCAG 2.x relative luminance (W3C) — sRGB channels are
+// linearized (c/255 <= 0.04045 ? c/(255*12.92) : ((c/255+0.055)/1.055)^2.4)
+// and weighted 0.2126 R / 0.7152 G / 0.0722 B; > 0.5 counts as light.
+function colorFgbgForBackground(hex) {
+    const rgb = hexToRgb(hex);
+    if (!rgb) return null;
+    const lin = (c) => { const x = c / 255; return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); };
+    const luminance = 0.2126 * lin(rgb.r) + 0.7152 * lin(rgb.g) + 0.0722 * lin(rgb.b);
+    return luminance > 0.5 ? '0;15' : '15;0';
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { hexToRgb, rgbToHex, rgbToHsv, hsvToRgb, hexToHsl, hslToHex };
+    module.exports = { hexToRgb, rgbToHex, rgbToHsv, hsvToRgb, hexToHsl, hslToHex, colorFgbgForBackground };
 }

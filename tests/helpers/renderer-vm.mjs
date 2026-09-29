@@ -360,6 +360,11 @@ export function loadVm() {
         MutationObserver: class { observe() {} disconnect() {} },
         requestIdleCallback: undefined,
         getTerminalTheme: () => ({}),
+        // COLORFGBG derivation stub: the theme stub above has no background,
+        // so this models the unparsable-background degradation (null → the
+        // backend whitelist injects nothing). Payload tests that assert on
+        // colorFgbg use their own fixture (pty-create-colorfgbg.test.mjs).
+        colorFgbgForBackground: () => null,
         _normalizeFontFamily: (s) => s,
         _getAccentColor: () => 'rgb(97,175,239)',
         _getAccentColorAlpha: (a) => `rgba(97,175,239,${a})`,

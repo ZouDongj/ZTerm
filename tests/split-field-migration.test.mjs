@@ -43,6 +43,11 @@ function loadTabsVm() {
         window: {},
         ipcRenderer: { send: (cmd, payload) => sends.push({ cmd, payload }), on() {}, invoke: async () => ({}) },
         _settingsConfig: {},
+        // Cross-script globals _ptyCreatePayload reads; these tests assert on
+        // shell/args provenance only, so the COLORFGBG derivation is stubbed
+        // to its null degradation.
+        getTerminalTheme: () => ({}),
+        colorFgbgForBackground: () => null,
         ptyBuffers: {},
         GAP_PX: 8,
         Icons: { iconSvg: () => 'svg' },

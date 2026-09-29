@@ -17,6 +17,22 @@ function _clearOnConnect(tab, pane) {
     return !profile || profile.clearOnConnect !== false;
 }
 
+// Single source of every local pty-create payload. Adds colorFgbg: ConPTY
+// swallows the shell's OSC 10/11 color queries, so TUI apps fall back to the
+// COLORFGBG env var (rxvt convention) to detect light/dark backgrounds —
+// seed it from the rendered scheme so their default colors match the theme.
+// Both getTerminalTheme and colorFgbgForBackground are cross-script globals
+// (state.js / color-utils.js load before this file, same mechanism as
+// _settingsConfig below). A null colorFgbg (invalid background) is omitted by
+// the backend's strict whitelist, so an unparsable value degrades to today's
+// behavior instead of throwing.
+function _ptyCreatePayload(shell, args, cwd, requestId) {
+    return {
+        shell, args, cwd: cwd || undefined, requestId,
+        colorFgbg: colorFgbgForBackground(getTerminalTheme().background),
+    };
+}
+
 // SSH connect with credential fallback: after a main-process restart all
 // credentialId handles are dead, so re-register from the SSH profile when no
 // valid credential is at hand (plaintext never passes through the renderer).
@@ -325,7 +341,7 @@ const TabManager = {
                 _sshConnectWithCredentials(tab, null);
             }
         } else {
-            ipcRenderer.send('pty-create', { shell: tab.command, args: tab.args, cwd: _settingsConfig.startupDir || undefined, requestId: id });
+            ipcRenderer.send('pty-create', _ptyCreatePayload(tab.command, tab.args, _settingsConfig.startupDir, id));
         }
         return id;
     },
@@ -350,7 +366,7 @@ const TabManager = {
             // credential fallback) is created inside the connect helper.
             _sshConnectWithCredentials(tab, null);
         } else {
-            ipcRenderer.send('pty-create', { shell: tab.command, args: tab.args, cwd: _settingsConfig.startupDir || undefined, requestId: id });
+            ipcRenderer.send('pty-create', _ptyCreatePayload(tab.command, tab.args, _settingsConfig.startupDir, id));
         }
         return id;
     },
@@ -472,7 +488,7 @@ const TabManager = {
                 t.term = null; t.fitAddon = null; t.tabId = null;
                 const { wrap: w } = createTermWrap(t);
                 document.getElementById('main-area').appendChild(w);
-                ipcRenderer.send('pty-create', { shell: t.command, args: t.args || [], requestId: t.id });
+                ipcRenderer.send('pty-create', _ptyCreatePayload(t.command, t.args || [], undefined, t.id));
                 this.render();
             }
             return;
@@ -918,7 +934,7 @@ const TabManager = {
         if (pane.type === 'ssh' && (pane._sshHost || tab.host)) {
             _sshConnectWithCredentials(tab, pane);
         } else {
-            ipcRenderer.send('pty-create', { shell: pane._command || tab.command || 'powershell.exe', args: pane._args || tab.args || [], cwd: _settingsConfig.startupDir || undefined, requestId: pane.requestId });
+            ipcRenderer.send('pty-create', _ptyCreatePayload(pane._command || tab.command || 'powershell.exe', pane._args || tab.args || [], _settingsConfig.startupDir, pane.requestId));
         }
     },
 
@@ -2822,7 +2838,7 @@ const TabManager = {
             if (tabData.type === 'ssh' && tabData.host) {
                 _sshConnectWithCredentials(tab, null);
             } else {
-                ipcRenderer.send('pty-create', { shell: tab.command, args: tab.args || [], requestId: tab.id });
+                ipcRenderer.send('pty-create', _ptyCreatePayload(tab.command, tab.args || [], undefined, tab.id));
             }
             this._updateTabName(tab);
             return tab;

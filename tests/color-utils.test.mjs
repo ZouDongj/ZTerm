@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { hexToRgb, rgbToHex, rgbToHsv, hsvToRgb, hexToHsl, hslToHex } =
+const { hexToRgb, rgbToHex, rgbToHsv, hsvToRgb, hexToHsl, hslToHex, colorFgbgForBackground } =
     require('../src/renderer/color-utils.js');
 
 // ── hexToRgb ──
@@ -103,4 +103,27 @@ test('surface 派生值锁定（Snazzy 底座/浮层，防 UI 阶梯漂移）', 
     assert.equal(derive('#282a36', 0.065), '#0e0f13'); // Snazzy --surface-win
     assert.equal(derive('#282a36', 0.185), '#282a36'); // Snazzy --surface-float
     assert.equal(derive('#282c34', 0.065), '#0e1013'); // OneHalfDark --surface-win
+});
+
+// ── colorFgbgForBackground (COLORFGBG seeding for TUI fallbacks) ──
+
+test('colorFgbgForBackground: light scheme backgrounds report 0;15 (black-on-white)', () => {
+    // Actual backgrounds of the four light terminal schemes (WCAG relative
+    // luminance >= 0.923 on the current 25-scheme set, far above the 0.5 cut).
+    assert.equal(colorFgbgForBackground('#fafafa'), '0;15'); // oneHalfLight
+    assert.equal(colorFgbgForBackground('#fdf6e3'), '0;15'); // solarizedLight
+    assert.equal(colorFgbgForBackground('#ffffff'), '0;15'); // tango/vscodeLightModern white
+});
+
+test('colorFgbgForBackground: dark scheme backgrounds report 15;0 (white-on-black)', () => {
+    assert.equal(colorFgbgForBackground('#1e1e1e'), '15;0'); // vscodeDarkModern
+    assert.equal(colorFgbgForBackground('#282c34'), '15;0'); // onedark default
+    assert.equal(colorFgbgForBackground('#000000'), '15;0');
+});
+
+test('colorFgbgForBackground: invalid input returns null, never throws', () => {
+    assert.equal(colorFgbgForBackground('not-a-color'), null);
+    assert.equal(colorFgbgForBackground(''), null);
+    assert.equal(colorFgbgForBackground(null), null);
+    assert.equal(colorFgbgForBackground('#abc'), null); // short form unsupported (hexToRgb contract)
 });

@@ -1209,6 +1209,19 @@ fn injected_marker_end(buffer: &str) -> Option<usize> {
     None
 }
 
+/// Whitelist for the renderer-supplied COLORFGBG value ("15;0" dark /
+/// "0;15" light background, rxvt convention). The value lands in the child
+/// process environment, so only these exact strings are accepted; anything
+/// else (empty, extra segments, trailing newline, injection attempts) is
+/// rejected and no variable is set — degrading to the legacy behavior.
+/// Pure function for unit tests.
+fn sanitize_colorfgbg(v: &str) -> Option<&str> {
+    match v {
+        "15;0" | "0;15" => Some(v),
+        _ => None,
+    }
+}
+
 #[tauri::command]
 pub async fn pty_create(
     app: AppHandle,
@@ -1230,6 +1243,15 @@ pub async fn pty_create(
         })
         .unwrap_or_default();
     let cwd = params.get("cwd").and_then(|v| v.as_str()).map(String::from);
+    // COLORFGBG seeding: ConPTY/conhost does not forward OSC 10/11 color
+    // queries, so TUI apps read this env var to detect a light/dark
+    // background. Always overwrite (never "only if unset"): an inherited
+    // value (e.g. mintty's COLORFGBG picked up via Git Bash) describes a
+    // foreign terminal's theme, while ours mirrors the rendered scheme.
+    let colorfgbg = params
+        .get("colorFgbg")
+        .and_then(|v| v.as_str())
+        .and_then(sanitize_colorfgbg);
     let request_id = params
         .get("requestId")
         .and_then(|v| v.as_str())
@@ -1260,6 +1282,9 @@ pub async fn pty_create(
     }
     if let Some(ref cwd) = cwd {
         cmd.cwd(cwd);
+    }
+    if let Some(v) = colorfgbg {
+        cmd.env("COLORFGBG", v);
     }
 
     let child = pair
@@ -7011,6 +7036,21 @@ mod tests {
             parse_osc7_cwd(&noisy).as_deref(),
             Some("/home/user/project")
         );
+    }
+
+    #[test]
+    fn sanitize_colorfgbg_accepts_only_the_exact_whitelist() {
+        // The two values the renderer legitimately sends (rxvt convention:
+        // "fg;bg" palette indices for dark resp. light backgrounds).
+        assert_eq!(sanitize_colorfgbg("15;0"), Some("15;0"));
+        assert_eq!(sanitize_colorfgbg("0;15"), Some("0;15"));
+        // Everything else is rejected — the value lands in the child process
+        // environment, so partial matches, extra segments, empties and
+        // trailing newlines must never slip through.
+        assert_eq!(sanitize_colorfgbg("15;1"), None, "non-standard palette index");
+        assert_eq!(sanitize_colorfgbg(""), None, "empty value");
+        assert_eq!(sanitize_colorfgbg("15;0;2"), None, "three-segment variant");
+        assert_eq!(sanitize_colorfgbg("15;0\nfoo"), None, "trailing newline + payload");
     }
 
     #[test]

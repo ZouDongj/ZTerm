@@ -267,6 +267,7 @@ function loadVm() {
         MutationObserver: class { observe() {} disconnect() {} },
         requestIdleCallback: undefined,
         getTerminalTheme: () => ({}),
+        colorFgbgForBackground: () => null,
         _normalizeFontFamily: (s) => s,
         _getAccentColor: () => '#ffffff',
         _clampFontWeight: (v, d) => d,

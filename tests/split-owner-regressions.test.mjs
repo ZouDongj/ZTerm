@@ -298,6 +298,7 @@ function loadVm() {
         MutationObserver: class { observe() {} disconnect() {} },
         requestIdleCallback: undefined,
         getTerminalTheme: () => ({}),
+        colorFgbgForBackground: () => null,
         _normalizeFontFamily: (s) => s,
         _getAccentColor: () => '#ffffff',
         // utils.js global the search decoration options read (page always has it)
