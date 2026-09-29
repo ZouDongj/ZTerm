@@ -746,7 +746,13 @@ const TabManager = {
             try { pane.term.scrollToBottom(); } catch(e) {}
         }
         pane.tabId = null;
-        tab.connected = false;
+        // Aggregated connected state (same semantic as the ipc.js pane
+        // branches): reconnecting ONE pane must not mark the whole split tab
+        // disconnected while a sibling session stays alive. The pane itself is
+        // flagged disconnected for the reconnect window — findPane above only
+        // resolves inside a split, so this branch is always split.
+        _updatePaneDot(pane, false);
+        _aggregateSplitConnected(tab);
         this.render();
         this.updateStatus();
         setTimeout(() => {

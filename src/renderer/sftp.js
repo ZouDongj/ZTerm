@@ -954,11 +954,19 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) =>
     let dead = true;
     for (const tab of TabManager.tabs) {
         if (tab.splitRoot) {
-            if (!getAllPanes(tab).some(p => p.tabId === tabId)) continue;
+            const pane = getAllPanes(tab).find(p => p.tabId === tabId);
+            if (!pane) continue;
+            // Owner-level gate (same predicate as the terminal's reason line
+            // in ipc.js): a split tab aggregates connected across panes, so a
+            // live sibling would otherwise keep THIS dead session's panel
+            // looking alive. connected === false means the pane's own session
+            // is confirmed disconnected (undefined = the flip has not landed).
+            dead = pane.connected === false;
         } else if (tab.tabId !== tabId) {
             continue;
+        } else {
+            dead = !tab.connected;
         }
-        dead = !tab.connected;
         break;
     }
     if (dead) SFTP._markSessionDead();

@@ -685,6 +685,24 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason, at }) => 
     }
 });
 
+// ── IPC: login script retire (required steps never matched) ──
+// The login-script auto-answer window closed with required steps that never
+// matched: the script did not run as configured and auto-answer is retired.
+// stderr is invisible in release builds (windows_subsystem = "windows"), so
+// this toast is the only visible surface for the retirement.
+ipcRenderer.on('ssh-login-script-timeout', (event, { tabId, rendererId, expects } = {}) => {
+    const steps = Array.isArray(expects) ? expects.join(' | ') : '';
+    showToast('登录脚本步骤未匹配，自动应答已停用' + (steps ? `: ${steps}` : ''), true);
+});
+
+// ── IPC: followCwd history cleanup failed ──
+// Best-effort artifact cleanup failed; the connection proceeds. The temp-file
+// + rename swap leaves the original history file untouched — surface the
+// failure so the state stays diagnosable (stderr is invisible in release).
+ipcRenderer.on('ssh-history-clean-failed', (event, { tabId, rendererId, error } = {}) => {
+    showToast('历史记录清理失败（原文件未改动）' + (error ? `: ${error}` : ''), true);
+});
+
 // ── IPC: PTY exit ──
 ipcRenderer.on('pty-exit', (event, { tabId }) => {
     _resetCaretFilterById(tabId);

@@ -397,3 +397,52 @@ test('T40: a fresh open() after the death rebinds and clears the dead state', as
     assert.equal(vm.SFTP._tabId, 'sessB');
     assert.ok(vm.els.body.children.some(c => (c.innerHTML || '').includes('b.txt')), 'new session lists normally');
 });
+
+// ── T26 follow-up: owner-pane gating in split tabs ──────────────────────────
+// tab.connected is AGGREGATED across panes (a live sibling keeps it true), so
+// the old `dead = !tab.connected` gate stopped marking a dead split pane's
+// panel dead. The gate now reads the OWNING pane's flag, same predicate as
+// the terminal's reason line in ipc.js. Panes are hand-staged leaf shapes:
+// the listener only walks them via getAllPanes.
+
+function stageSplitOn(vm, ownerConnected) {
+    const tab = vm.ctx.TabManager.tabs.find(t => t.tabId === 'sessA');
+    tab.splitRoot = {
+        orientation: 'h',
+        children: [
+            { id: 'paneA1', tabId: 'sessA', connected: ownerConnected },
+            { id: 'paneA2', tabId: 'sessC', connected: true },
+        ],
+        ratios: [0.5, 0.5],
+    };
+    // Split ownership: backend ids live on the panes; the aggregated tab flag
+    // stays true while the sibling pane is alive.
+    tab.tabId = null;
+    tab.connected = true;
+    return tab;
+}
+
+test('T26: a dead owner pane marks the panel dead even with a live split sibling', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', [F('a.txt')]);
+    stageSplitOn(vm, false); // owner pane confirmed disconnected, sibling alive
+
+    deadReason(vm, 'sessA');
+    await vm.drain();
+
+    assert.equal(vm.SFTP._sessionDead, true, 'owner-pane death is detected through the pane gate');
+    assert.ok(vm.els.body.innerHTML.includes('会话已断开'), 'dead state shown');
+    assert.equal(vm.SFTP._files.length, 0, 'dead session listing cleared');
+});
+
+test('T26: a split pane whose disconnect flip has not landed yet does not go dead (race control)', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', [F('a.txt')]);
+    stageSplitOn(vm, undefined); // reason raced ahead of ssh-disconnected
+
+    deadReason(vm, 'sessA');
+    await vm.drain();
+
+    assert.equal(vm.SFTP._sessionDead, false, 'only connected === false confirms dead');
+    assert.equal(vm.SFTP._files.length, 1, 'listing intact');
+});

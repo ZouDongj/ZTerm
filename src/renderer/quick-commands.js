@@ -7,14 +7,18 @@ let _editingQCId = null;
 // Load quick commands on init
 function loadQuickCommands() {
     ipcRenderer.once('quick-commands', (event, commands) => {
-        _qcCommands = commands || [];
-        if (_qcCommands.length === 0) {
+        // null = the config has no quickCommands key yet (first run): seed the
+        // defaults and persist them. [] = the user explicitly cleared the list:
+        // keep it empty instead of re-seeding.
+        if (commands === null) {
             _qcCommands = [
                 { id: 'qc_1', name: '查看系统信息', command: 'htop', group: '常用' },
                 { id: 'qc_2', name: '查看磁盘使用', command: 'df -h', group: '常用' },
                 { id: 'qc_3', name: '查看内存使用', command: 'free -h', group: '常用' },
             ];
             saveQuickCommands();
+        } else {
+            _qcCommands = commands || [];
         }
     });
     ipcRenderer.send('get-quick-commands');

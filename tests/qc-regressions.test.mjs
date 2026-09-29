@@ -197,3 +197,37 @@ test('no refocus when another overlay opened inside the window', () => {
     ctx.__advance(50);
     assert.equal(refocus.calls, 0, 'the successor overlay keeps its focus');
 });
+
+// ── loadQuickCommands seeding ──
+// The backend distinguishes "no quickCommands key" (null payload) from
+// "explicitly cleared list" ([]): only null seeds the defaults. Re-seeding on
+// [] would resurrect commands the user just deleted on every app start.
+
+function loadOnce(ctx, payload) {
+    let handler = null;
+    ctx.ipcRenderer.once = (ch, fn) => { if (ch === 'quick-commands') handler = fn; };
+    ctx.loadQuickCommands();
+    assert.ok(handler, 'quick-commands once handler registered');
+    handler({}, payload);
+}
+
+test('a null payload (missing key) seeds the defaults and persists them', () => {
+    const ctx = loadQcVm();
+    loadOnce(ctx, null);
+    assert.equal(runIn(ctx, '_qcCommands.length'), 3, 'defaults seeded');
+    assert.equal(savesOf(ctx, 'save-quick-commands').length, 1, 'seeded defaults are persisted');
+});
+
+test('an empty array (explicitly cleared) stays empty and is not re-seeded', () => {
+    const ctx = loadQcVm();
+    loadOnce(ctx, []);
+    assert.equal(runIn(ctx, '_qcCommands.length'), 0, 'no re-seed after explicit clear');
+    assert.equal(savesOf(ctx, 'save-quick-commands').length, 0, 'nothing persisted');
+});
+
+test('a populated payload loads as-is without saving', () => {
+    const ctx = loadQcVm();
+    loadOnce(ctx, COMMANDS);
+    assert.equal(runIn(ctx, '_qcCommands.length'), 3, 'stored commands loaded');
+    assert.equal(savesOf(ctx, 'save-quick-commands').length, 0, 'nothing persisted');
+});

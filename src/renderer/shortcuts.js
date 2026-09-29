@@ -742,20 +742,34 @@ async function _doApplyUpdate() {
     }
 }
 
-async function changeDataDir() {
-    const result = await ipcRenderer.invoke('show-open-dialog', { properties: ['openDirectory', 'createDirectory'] });
-    if (result.canceled || !result.filePaths.length) return;
-    const r = await ipcRenderer.invoke('set-data-dir', { dir: result.filePaths[0] });
-    if (r && r.error) { showToast('更改失败: ' + r.error, true); return; }
-    showToast('数据目录已更改，配置已迁移');
+// Shared switch/reset flow for the data dir. The backend refuses with code
+// "target-config-exists" when the target dir already holds a non-empty
+// config.json (SSH profiles and stored passwords would be lost): confirm with
+// the user first, then retry with force. Any other error keeps the old dir.
+async function _applyDataDirChange(dir, okMsg, failMsg) {
+    const r = await ipcRenderer.invoke('set-data-dir', { dir });
+    if (r && r.code === 'target-config-exists') {
+        showConfirm('目标目录已有配置文件，切换将覆盖其中现有的配置（含 SSH 配置与已存密码）。确定继续？', async () => {
+            const retry = await ipcRenderer.invoke('set-data-dir', { dir, force: true });
+            if (retry && retry.error) { showToast(failMsg + retry.error, true); return; }
+            showToast(okMsg);
+            loadDataDirInfo();
+        }, '覆盖并切换');
+        return;
+    }
+    if (r && r.error) { showToast(failMsg + r.error, true); return; }
+    showToast(okMsg);
     loadDataDirInfo();
 }
 
+async function changeDataDir() {
+    const result = await ipcRenderer.invoke('show-open-dialog', { properties: ['openDirectory', 'createDirectory'] });
+    if (result.canceled || !result.filePaths.length) return;
+    _applyDataDirChange(result.filePaths[0], '数据目录已更改，配置已迁移', '更改失败: ');
+}
+
 async function resetDataDir() {
-    const r = await ipcRenderer.invoke('set-data-dir', { dir: '' });
-    if (r && r.error) { showToast('恢复失败: ' + r.error, true); return; }
-    showToast('已恢复默认数据目录');
-    loadDataDirInfo();
+    _applyDataDirChange('', '已恢复默认数据目录', '恢复失败: ');
 }
 
 // Browser-accelerator guard (WebView2 gap): see browserAcceleratorDenied in

@@ -943,7 +943,9 @@ test('D-fail: failed SSH source pane cancels the paste everywhere (sync input, r
     const done = startPaste(ctx, p1.term);
     // Deterministic failure: terminal preserved, backend id retained.
     ctx.__emit('ssh-error', { tabId: 'ssh_1', rendererId: p1.requestId, error: 'authentication failed' });
-    assert.equal(tab.connected, false, 'failure recorded');
+    // Aggregated connected state: the healthy sibling keeps the split tab
+    // connected, so the failure is asserted on the owning pane's marker.
+    assert.equal(p1._sessionFailed, true, 'failure recorded on the source pane');
     assert.equal(p1.tabId, 'ssh_1', 'old backend id retained (the hazard precondition)');
     assert.ok(p1.term && !p1.term.disposed, 'terminal preserved by the failure');
     tab.syncInput = true;
@@ -986,7 +988,9 @@ test('D-fail: local process exit cancels the pending paste (real pty-exit handle
     const done = startPaste(ctx, p1.term);
     // The local equivalent of a session death: process exited, id retained.
     ctx.__emit('pty-exit', { tabId: 'local_1' });
-    assert.equal(tab.connected, false);
+    // Aggregated connected state: the healthy sibling keeps the split tab
+    // connected, so the exit is asserted on the owning pane's marker.
+    assert.equal(p1._sessionFailed, true, 'exit recorded on the source pane');
     assert.equal(p1.tabId, 'local_1', 'backend id retained');
     await done('PASTE-EXIT');
     const pastes = ctx.__sends.filter(s => s.cmd === 'pty-input' && s.payload.data === 'PASTE-EXIT');

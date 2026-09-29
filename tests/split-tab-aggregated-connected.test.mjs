@@ -63,3 +63,20 @@ test('non-split tabs keep the exact single-session semantics', () => {
     ctx.__emit('pty-exit', { tabId: 'b4' });
     assert.equal(tab.connected, false, 'a lone tab with no splitRoot is unchanged by the aggregation');
 });
+
+test('a manual pane reconnect keeps a split tab with a live sibling connected', () => {
+    const ctx = loadVm();
+    const { tab, p1, p2 } = wiredSplitTab(ctx, 't5', 'b1', null, 'b2', null);
+
+    ctx.__emit('ssh-connected', { tabId: 'b1' });
+    ctx.__emit('ssh-connected', { tabId: 'b2' });
+    assert.equal(tab.connected, true, 'both sessions live');
+
+    // User-initiated force reconnect of ONE pane (tabs.js _reconnectPane):
+    // old write flipped the whole tab red for the 500ms window.
+    ctx.TabManager._reconnectPane(tab.id, p1.id);
+    assert.equal(p1.tabId, null, 'old backend id discarded');
+    assert.equal(p1.connected, false, 'the reconnecting pane is disconnected for the window');
+    assert.equal(p2.connected, true, 'sibling untouched');
+    assert.equal(tab.connected, true, 'the live sibling keeps the tab connected through the window');
+});

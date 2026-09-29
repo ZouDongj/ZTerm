@@ -2733,7 +2733,10 @@ pub fn window_close(app: AppHandle) {
 pub fn get_quick_commands(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
     let _ = args;
     let config = load_config();
-    let cmds = config.get("quickCommands").cloned().unwrap_or(json!([]));
+    // Emit null when the quickCommands key is absent (first run — the renderer
+    // seeds defaults) and the stored value otherwise, so an explicitly cleared
+    // list ([]) is distinguishable from a never-saved one.
+    let cmds = config.get("quickCommands").cloned().unwrap_or(Value::Null);
     let _ = app.emit("quick-commands", cmds);
     Ok(json!({ "ok": true }))
 }
