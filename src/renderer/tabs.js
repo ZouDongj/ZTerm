@@ -182,6 +182,9 @@ const TabManager = {
     },
     _consumeClosed(id) { return this._closedTabIds.delete(id); },
     _dragTab: null, // { sourceTabId, targetTabId, side: 'left'|'right' }
+    // Tab whose inline rename input is live: render() keeps that tab's DOM
+    // node so background lifecycle redraws never interrupt the typing.
+    _renamingTabId: null,
 
     init() {
         // Mount chrome once: addBtn / menuBtn (no longer rebuilt on every render)
@@ -770,12 +773,42 @@ const TabManager = {
 
     render() {
         const bar = document.getElementById('tabbar');
-        bar.querySelectorAll('.tab').forEach(el => el.remove());
+        // An in-flight rename must survive background redraws (lifecycle
+        // events render at any time): rebuilding this tab would remove the
+        // focused input, and Blink's synchronous blur-on-removal would
+        // commit the half-typed value as the locked custom name. Keep the
+        // hosting node instead and re-seat it at its order position below.
+        const renamingId = this._renamingTabId;
+        let renameKeep = (renamingId && this.tabs.some(t => t.id === renamingId))
+            ? bar.querySelector(`.tab[data-tab="${renamingId}"]`) : null;
+        if (renameKeep && !renameKeep.querySelector('.tab-rename-input')) renameKeep = null;
+        bar.querySelectorAll('.tab').forEach(el => {
+            if (el === renameKeep) return;
+            // The renamed tab is GONE (closed mid-edit): removing its input
+            // is an automatic collapse — defuse the blur handler so the
+            // half-typed value is never committed as a name.
+            if (renamingId && el.getAttribute('data-tab') === renamingId) {
+                const dying = el.querySelector('.tab-rename-input');
+                if (dying) dying.onblur = null;
+                this._renamingTabId = null;
+            }
+            el.remove();
+        });
 
         const addBtn = document.getElementById('btn-add-tab');
 
         const sortedTabs = this.orderedTabs();
         sortedTabs.forEach(t => {
+            if (renameKeep && t.id === renamingId) {
+                // Live input kept (title area shows the input; its value only
+                // becomes the name at commit). Refresh the cheap state a
+                // rebuild would have recomputed; the status dot / reconnect
+                // button stay stale until the rename finishes.
+                renameKeep.dataset.tip = this._tabDisplayName(t);
+                renameKeep.classList.toggle('tab-exit', this._closingTabs.has(t.id));
+                bar.insertBefore(renameKeep, addBtn);
+                return;
+            }
             const div = document.createElement('div');
             div.className = 'tab';
             div.setAttribute('data-tab', t.id);
@@ -1492,6 +1525,13 @@ const TabManager = {
             _cancelSshAttemptOf(pane, null);
         }
         if (pane.term) try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}
+        // Disconnect the dying pane's body observer NOW: every path the
+        // deferred removal fans into (survivors re-render, collapse via
+        // _exitSplit, whole-tab closeTab) iterates only SURVIVING panes, so
+        // this body's observer would never be disconnected — Blink keeps
+        // observed nodes (and their DOM subtrees) alive.
+        const paneBody = document.getElementById('pane-body_' + pane.id);
+        if (paneBody && paneBody._resizeObserver) paneBody._resizeObserver.disconnect();
         // Release the pane's own credential handle — but only when no other
         // wrapper still uses it: siblings split from the same session inherit
         // the same id (their reconnects need it), other tabs can hold it too
@@ -1767,7 +1807,11 @@ const TabManager = {
         this.updateStatus();
     },
 
-    _moveTerminalToTab(sourceTabId, targetTabId, side, targetPaneId) {
+    // anchorNode (optional): the zone-bar anchor of a tab drag — a leaf pane
+    // or a nested split CONTAINER (its edge / spanner bars name the container
+    // child directly; containers carry no pane id, so the id-only transport
+    // degraded those hits to whole-split root-edge inserts).
+    _moveTerminalToTab(sourceTabId, targetTabId, side, targetPaneId, anchorNode) {
         const sourceTab = this.tabs.find(t => t.id === sourceTabId);
         const targetTab = this.tabs.find(t => t.id === targetTabId);
         if (!sourceTab || !targetTab || sourceTab === targetTab) return;
@@ -1776,6 +1820,12 @@ const TabManager = {
         // during the drag). Detach the source pane only after validation — otherwise the failure path drops it
         const focusedPane = targetPaneId ? findPane(targetTab, targetPaneId) : null;
         if (targetPaneId && !focusedPane) return;
+        // A container anchor must still be attached to the target tree at
+        // drop time (the tree may have changed mid-drag) — same staleness
+        // rule as the pane id: a stale anchor drops the drop, never guesses.
+        const anchorIsContainer = !!(anchorNode && anchorNode.orientation);
+        if (anchorIsContainer && !getParentOf(targetTab, anchorNode)) return;
+        const dropAnchor = anchorIsContainer ? anchorNode : focusedPane;
         let mt = null, mf = null, mid = null, sc = null, msc = null, mconn = false, mfailed = false;
         let paneName = sourceTab.name, paneType = sourceTab.type || 'local';
         let toolName = sourceTab._toolName;
@@ -1977,7 +2027,7 @@ const TabManager = {
         // collapse keeps the SURVIVING pane's own binding untouched).
         sshAttempts.transferPendingAttempt(movedOwner, np);
         if (toolName !== undefined) np._toolName = toolName;
-        this.add(targetTab, np, focusedPane, side);
+        this.add(targetTab, np, dropAnchor, side);
         getAllPanes(targetTab).forEach(p => p.focused = false);
         np.focused = true;
         targetTab._maximizedPaneId = null;
@@ -2149,6 +2199,22 @@ const TabManager = {
         return null;
     },
 
+    // Pure mapping of a hit zone bar to the drag payload. A bar anchored on
+    // a pane keeps its pane id; a bar anchored on a nested split CONTAINER
+    // (its edge / spanner bars) names the container node itself — containers
+    // carry no pane id, and the id-only transport used to degrade those hits
+    // to whole-split root-edge inserts, landing the pane on the outermost
+    // edge instead of the container edge the bar promised.
+    _tabResolveZoneHit(zone) {
+        const rel = (zone && zone.relativeTo) || null;
+        const isContainer = !!(rel && rel.orientation);
+        return {
+            side: zone ? zone.side : null,
+            targetPaneId: rel && !isContainer ? rel.id : null,
+            anchor: rel,
+        };
+    },
+
     // ── Tab drag via pointer events ──
     // HTML5 draggable is intercepted by Tauri's window-level DnD handler in
     // WebView2 (dragover never fires, cursor shows the no-drop icon), so tab
@@ -2169,7 +2235,7 @@ const TabManager = {
             if (!dragging) {
                 if (Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) < 5) return;
                 dragging = true;
-                this._dragTab = { sourceTabId: tabId, targetTabId: null, side: null, targetPaneId: null };
+                this._dragTab = { sourceTabId: tabId, targetTabId: null, side: null, targetPaneId: null, targetAnchor: null };
                 el.classList.add('dragging');
                 const main = document.getElementById('main-area');
                 if (main) main.classList.add('drop-target');
@@ -2206,7 +2272,7 @@ const TabManager = {
                     // (wrap 30% edge / pane 28% edge) — the 8% zone bars are
                     // visuals only; a generous hit area matches user intuition
                     // ("drop anywhere near the edge").
-                    let side = null, targetPaneId = null;
+                    let side = null, targetPaneId = null, targetAnchor = null;
                     try {
                         if (targetTab.splitRoot) {
                         // 1) Zone-bar hit test first (Tabby's approach: the bars
@@ -2224,8 +2290,12 @@ const TabManager = {
                                 if (ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom) {
                                     const z = stBars.zones[parseInt(zEl.getAttribute('data-zone-idx'), 10)];
                                     if (z) {
-                                        side = z.side;
-                                        targetPaneId = z.relativeTo ? z.relativeTo.id : null;
+                                        // Container-anchored bars carry the
+                                        // container node (no pane id exists).
+                                        const hit = this._tabResolveZoneHit(z);
+                                        side = hit.side;
+                                        targetPaneId = hit.targetPaneId;
+                                        targetAnchor = hit.anchor;
                                     }
                                     break;
                                 }
@@ -2256,6 +2326,7 @@ const TabManager = {
                                         else if (ry > 0.72) side = 'b';
                                         else side = s;
                                         targetPaneId = p.id;
+                                        targetAnchor = p;
                                         break;
                                     }
                                 }
@@ -2272,6 +2343,7 @@ const TabManager = {
                                     const ry = Math.min(Math.max((ev.clientY - r.top) / r.height, 0), 1);
                                     side = this._pickDropSide(rx, ry, 0.30);
                                     targetPaneId = null;
+                                    targetAnchor = null;
                                 }
                             }
                         }
@@ -2282,6 +2354,7 @@ const TabManager = {
                                 const rx = (ev.clientX - r.left) / r.width;
                                 const ry = (ev.clientY - r.top) / r.height;
                                 side = this._pickDropSide(rx, ry, 0.30);
+                                targetAnchor = null;
                             }
                         }
                     } catch (err) {
@@ -2293,6 +2366,7 @@ const TabManager = {
                     this._dragTab.targetTabId = side ? targetTab.id : null;
                     this._dragTab.side = side;
                     this._dragTab.targetPaneId = targetPaneId;
+                    this._dragTab.targetAnchor = targetAnchor;
                     // Visual bars (same as pane reorder) — isolated: any failure
                     // here must not affect the split functionality.
                     try {
@@ -2303,8 +2377,11 @@ const TabManager = {
                         if (st && st.layer) {
                             st.layer.querySelectorAll('.pane-drop-zone.drag-over').forEach(el => el.classList.remove('drag-over'));
                             if (side) {
-                                let idx = st.zones.findIndex(z => z.side === side && z.relativeTo && z.relativeTo.id === targetPaneId);
-                                if (idx < 0) idx = st.zones.findIndex(z => z.side === side && !z.relativeTo);
+                                // Highlight by node identity: pane- and
+                                // container-anchored bars alike must light the
+                                // exact bar the drop will use (the id-only
+                                // lookup lit the ROOT bar for container hits).
+                                let idx = st.zones.findIndex(z => z.side === side && z.relativeTo === targetAnchor);
                                 if (idx >= 0) {
                                     const zEl = st.layer.querySelector('[data-zone-idx="' + idx + '"]');
                                     if (zEl) zEl.classList.add('drag-over');
@@ -2319,6 +2396,7 @@ const TabManager = {
                     this._dragTab.targetTabId = null;
                     this._dragTab.side = null;
                     this._dragTab.targetPaneId = null;
+                    this._dragTab.targetAnchor = null;
                 }
             } else {
                 this._tabHideSplitZones();
@@ -2355,9 +2433,10 @@ const TabManager = {
                 this._tabHideSplitZones();
                 if (this._dragTab && this._dragTab.targetTabId && this._dragTab.side) {
                     const src = this._dragTab.sourceTabId, tgt = this._dragTab.targetTabId, sd = this._dragTab.side, pid = this._dragTab.targetPaneId;
+                    const anchor = this._dragTab.targetAnchor || null;
                     this._dragTab = null;
                     try {
-                        this._moveTerminalToTab(src, tgt, sd, pid);
+                        this._moveTerminalToTab(src, tgt, sd, pid, anchor);
                     } catch (err) {
                         console.warn('[tabdrag] drop failed:', err);
                     }
@@ -2464,6 +2543,9 @@ const TabManager = {
         if (!tab) return;
         const el = document.querySelector('.tab[data-tab="' + tabId + '"] .tab-name');
         if (!el) return;
+        // Mark BEFORE the DOM swap: renders triggered from here on keep this
+        // tab's node (the input stays focused through background redraws).
+        this._renamingTabId = tabId;
         const oldName = tab.name;
         const input = document.createElement('input');
         input.type = 'text';
@@ -2480,6 +2562,9 @@ const TabManager = {
         const finish = (save) => {
             if (done) return;
             done = true;
+            // Release the render-preservation marker only when THIS rename
+            // still owns it (a rename on another tab may have taken over).
+            if (this._renamingTabId === tabId) this._renamingTabId = null;
             if (save && input.value.trim()) {
                 tab.name = input.value.trim();
                 tab._customName = true; // lock the custom name so pane changes no longer overwrite it
