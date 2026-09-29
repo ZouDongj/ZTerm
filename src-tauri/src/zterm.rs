@@ -99,35 +99,64 @@ fn unescape(s: &str) -> String {
     result
 }
 
-/// Process terminal output against login scripts. Returns Some(send_text) on match.
-fn feed_login_scripts(data: &str, scripts: &mut Vec<LoginScript>) -> Option<String> {
-    let mut result = None;
-    let mut i = 0;
-    while i < scripts.len() {
-        let script = &scripts[i];
-        if script.expect.is_empty() {
-            i += 1;
+/// Process terminal output against login scripts. Returns the texts to send
+/// (possibly several: a matched step may be followed by due unconditional steps).
+///
+/// Queue semantics:
+/// - A leading unconditional step (empty expect) fires immediately and is
+///   removed: every conditional step before it has already matched, so it is
+///   due regardless of the current output. (Previously these were skipped here
+///   and, unless leading at connect time, never sent at all.)
+/// - The first matching conditional step fires and is removed; any optional
+///   steps skipped before it are dropped with it — their prompt can no longer
+///   appear once a later prompt was answered.
+/// - An optional step that does not match STAYS queued: its prompt may still
+///   appear in a later chunk. (Previously a single miss discarded it, so
+///   banner/MOTD chunking decided whether an optional step ever answered.)
+/// - A required (non-optional) miss stops the scan: later steps wait for it.
+fn feed_login_scripts(data: &str, scripts: &mut Vec<LoginScript>) -> Vec<String> {
+    let mut sends = Vec::new();
+    loop {
+        if scripts.is_empty() {
+            break;
+        }
+        if scripts[0].expect.is_empty() {
+            sends.push(ensure_newline(&scripts[0].send));
+            scripts.remove(0);
             continue;
         }
-        let matched = if script.is_regex {
-            regex::Regex::new(&script.expect)
-                .map(|re| re.is_match(data))
-                .unwrap_or(false)
-        } else {
-            data.contains(&script.expect)
-        };
-        if matched {
-            let send = ensure_newline(&script.send);
-            scripts.remove(i);
-            result = Some(send);
-            break;
-        } else if script.optional {
-            scripts.remove(i);
-        } else {
-            break;
+        // First matching conditional step: scan past optional misses, stop at
+        // a required miss or an unconditional step (that one only fires at the head).
+        let mut matched = None;
+        for (i, s) in scripts.iter().enumerate() {
+            if s.expect.is_empty() {
+                break;
+            }
+            let is_match = if s.is_regex {
+                regex::Regex::new(&s.expect)
+                    .map(|re| re.is_match(data))
+                    .unwrap_or(false)
+            } else {
+                data.contains(&s.expect)
+            };
+            if is_match {
+                matched = Some(i);
+                break;
+            }
+            if !s.optional {
+                break;
+            }
+        }
+        match matched {
+            Some(i) => {
+                sends.push(ensure_newline(&scripts[i].send));
+                // Drop the matched step and the optionals skipped before it.
+                scripts.drain(0..=i);
+            }
+            None => break,
         }
     }
-    result
+    sends
 }
 
 /// Execute all unconditional scripts (empty expect field) and return their send texts.
@@ -1780,11 +1809,11 @@ pub async fn ssh_connect(
                         Some(russh::ChannelMsg::Data { ref data }) => {
                             let text = drain_utf8(&mut utf8_carry, data);
                             // Feed to login script processor (drop guard before await)
-                            let send_text = {
+                            let send_texts = {
                                 let mut s = scripts_reader.lock();
                                 feed_login_scripts(&text, &mut s)
                             };
-                            if let Some(t) = send_text {
+                            for t in send_texts {
                                 let _ = reader_writer.send(t.into_bytes()).await;
                             }
                             if filtering_reader.load(std::sync::atomic::Ordering::Relaxed) {
@@ -5623,8 +5652,8 @@ mod tests {
     #[test]
     fn feed_login_scripts_contains_match_consumes_script() {
         let mut scripts = vec![script("Password:", "secret")];
-        let send = feed_login_scripts("Password: ", &mut scripts);
-        assert_eq!(send.as_deref(), Some("secret\n"));
+        let sends = feed_login_scripts("Password: ", &mut scripts);
+        assert_eq!(sends, vec!["secret\n"]);
         assert!(scripts.is_empty(), "matched script must be consumed");
     }
 
@@ -5636,8 +5665,8 @@ mod tests {
             is_regex: true,
             optional: false,
         }];
-        let send = feed_login_scripts("[sudo] password for user:", &mut scripts);
-        assert_eq!(send.as_deref(), Some("pw\n"));
+        let sends = feed_login_scripts("[sudo] password for user:", &mut scripts);
+        assert_eq!(sends, vec!["pw\n"]);
         assert!(scripts.is_empty());
     }
 
@@ -5650,51 +5679,81 @@ mod tests {
             optional: false,
         }];
         // An invalid regex counts as no match: no panic; a non-optional script stays for later output
-        let send = feed_login_scripts("anything", &mut scripts);
-        assert_eq!(send, None);
+        let sends = feed_login_scripts("anything", &mut scripts);
+        assert!(sends.is_empty());
         assert_eq!(scripts.len(), 1);
     }
 
     #[test]
-    fn feed_login_scripts_optional_miss_is_consumed() {
+    fn feed_login_scripts_optional_miss_is_kept() {
+        // Optional = "answer only if the prompt appears": a single miss must
+        // NOT discard the step — SSH banner/MOTD chunking is arbitrary, so the
+        // prompt may arrive in any later chunk.
         let mut scripts = vec![LoginScript {
             expect: "NotPresent".into(),
             send: "x".into(),
             is_regex: false,
             optional: true,
         }];
-        let send = feed_login_scripts("Hello world", &mut scripts);
-        assert_eq!(send, None);
-        assert!(
-            scripts.is_empty(),
-            "optional script must be dropped on miss"
-        );
+        let sends = feed_login_scripts("Hello world", &mut scripts);
+        assert!(sends.is_empty());
+        assert_eq!(scripts.len(), 1, "optional script must survive a miss");
+        // When its prompt finally appears, the optional step answers it.
+        let sends = feed_login_scripts("NotPresent", &mut scripts);
+        assert_eq!(sends, vec!["x\n"]);
+        assert!(scripts.is_empty());
+    }
+
+    #[test]
+    fn feed_login_scripts_later_required_match_drops_earlier_optional() {
+        // The scan looks past an unmatched optional; when a later required step
+        // matches, the skipped optional is dropped with it (its prompt can no
+        // longer appear once a later prompt was answered).
+        let mut scripts = vec![
+            LoginScript {
+                expect: "yes/no".into(),
+                send: "yes".into(),
+                is_regex: false,
+                optional: true,
+            },
+            script("Password:", "secret"),
+        ];
+        let sends = feed_login_scripts("Password:", &mut scripts);
+        assert_eq!(sends, vec!["secret\n"]);
+        assert!(scripts.is_empty(), "matched step and skipped optional must both go");
     }
 
     #[test]
     fn feed_login_scripts_required_miss_kept_for_later_output() {
         let mut scripts = vec![script("Password:", "secret")];
-        let send = feed_login_scripts("Hello", &mut scripts);
-        assert_eq!(send, None);
+        let sends = feed_login_scripts("Hello", &mut scripts);
+        assert!(sends.is_empty());
         // Non-optional miss: keep the script and retry on the next output
         assert_eq!(scripts.len(), 1);
-        let send = feed_login_scripts("Password:", &mut scripts);
-        assert_eq!(send.as_deref(), Some("secret\n"));
+        let sends = feed_login_scripts("Password:", &mut scripts);
+        assert_eq!(sends, vec!["secret\n"]);
         assert!(scripts.is_empty());
     }
 
     #[test]
-    fn feed_login_scripts_skips_unconditional_entries() {
-        // Empty-expect entries are execute_unconditional's job; the feed stage skips them
-        let mut scripts = vec![script("", "first"), script("Password:", "secret")];
-        let send = feed_login_scripts("Password:", &mut scripts);
-        assert_eq!(send.as_deref(), Some("secret\n"));
-        assert_eq!(
-            scripts.len(),
-            1,
-            "unconditional entry must be skipped, not consumed"
-        );
-        assert_eq!(scripts[0].send, "first");
+    fn feed_login_scripts_fires_unconditional_step_once_due() {
+        // An empty-expect step behind a conditional one fires right after that
+        // conditional matched (e.g. "Password: -> password" then "-> df -h"):
+        // previously the feed stage skipped it and it was never sent at all.
+        let mut scripts = vec![script("Password:", "secret"), script("", "df -h")];
+        let sends = feed_login_scripts("Password:", &mut scripts);
+        assert_eq!(sends, vec!["secret\n", "df -h\n"]);
+        assert!(scripts.is_empty(), "due unconditional step must be consumed");
+    }
+
+    #[test]
+    fn feed_login_scripts_unconditional_waits_for_preceding_conditional() {
+        // While a preceding conditional step has not matched, the unconditional
+        // step behind it is not due yet and stays queued.
+        let mut scripts = vec![script("Password:", "secret"), script("", "df -h")];
+        let sends = feed_login_scripts("Hello", &mut scripts);
+        assert!(sends.is_empty());
+        assert_eq!(scripts.len(), 2);
     }
 
     #[test]
