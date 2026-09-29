@@ -568,6 +568,10 @@ function wireTerminal(tab, tabId) {
     // ── Select to copy (with smart wrap handling) ──
     term.onSelectionChange(() => {
         if (_settingsConfig.autoCopy === false) return;
+        // A search-placed selection is not a user selection: copying it would
+        // silently replace the clipboard with the latest match on every
+        // typed character.
+        if (_isSearchOwnedSelection(term)) return;
         const sel = term.getSelection();
         if (sel) {
             let text = sel;
@@ -798,6 +802,8 @@ function wireTerminalToPane(tab, pane) {
     // ── Select to copy (with smart wrap handling) ──
     term.onSelectionChange(() => {
         if (_settingsConfig.autoCopy === false) return;
+        // Search-owned selections never reach the clipboard (see wireTerminal).
+        if (_isSearchOwnedSelection(term)) return;
         const sel = term.getSelection();
         if (sel) {
             let text = sel;
@@ -925,6 +931,13 @@ function _wireSearchAddon(term, searchAddon) {
 // the user may have made a manual selection afterwards, and erasing that on
 // close would destroy their selection.
 let _searchSelection = null; // { term, start: {x,y}, end: {x,y} } | null
+// Set for exactly the synchronous window in which a find call places its
+// match selection: the vendored addon's findNext/findPrevious call
+// terminal.select(), which fires onSelectionChange BEFORE the addon's own
+// onDidChangeResults (where the snapshot below is refreshed) — at event time
+// the snapshot still describes the PREVIOUS match, so the snapshot alone
+// cannot recognize the selection being placed right now.
+let _searchPlacingSelection = false;
 function _captureSearchSelection(term) {
     let pos = null;
     try { pos = term.getSelectionPosition(); } catch(e) { pos = null; }
@@ -944,6 +957,21 @@ function _clearSearchOwnedSelection(term) {
         && pos.end.x === snapshot.end.x && pos.end.y === snapshot.end.y) {
         try { term.clearSelection(); } catch(e) {}
     }
+}
+// True while the terminal's current selection belongs to the search rather
+// than the user: either it is being placed synchronously inside a find call
+// (flag above), or it is still bit-for-bit the selection the last find left
+// behind (same start/end as the snapshot — a later manual selection at a
+// different range is the user's and must copy normally). Auto-copy skips
+// both: a search match must never overwrite the system clipboard.
+function _isSearchOwnedSelection(term) {
+    if (_searchPlacingSelection) return true;
+    const snapshot = _searchSelection && _searchSelection.term === term ? _searchSelection : null;
+    if (!snapshot) return false;
+    let pos = null;
+    try { pos = term.getSelectionPosition(); } catch(e) { return false; }
+    return !!pos && pos.start.x === snapshot.start.x && pos.start.y === snapshot.start.y
+        && pos.end.x === snapshot.end.x && pos.end.y === snapshot.end.y;
 }
 // The vendored addon only fires onDidChangeResults when the find options
 // carry a `decorations` object (its internal gate is
@@ -1053,7 +1081,16 @@ function doSearch() {
     // search's OWN selection is dropped — a manual selection is not ours.
     if (queryChanged) _clearSearchOwnedSelection(target.term);
     _searchLastQuery = query;
-    target.addon.findNext(query, _searchOptions());
+    // The find places its match selection synchronously; flag the window so
+    // the auto-copy handler recognizes it as search-owned (see
+    // _isSearchOwnedSelection). finally: a throwing addon must not leave the
+    // flag set and suppress user copies forever.
+    _searchPlacingSelection = true;
+    try {
+        target.addon.findNext(query, _searchOptions());
+    } finally {
+        _searchPlacingSelection = false;
+    }
     // The event handler captured the fresh selection; capture here too so the
     // snapshot exists even on the no-event paths (e.g. a fresh owner with no
     // decorations wiring ever firing).
@@ -1070,8 +1107,15 @@ function _navigateSearch(direction) {
     // has no cached term, and findPrevious from the viewport bottom would
     // land on the LAST match — findNext from the top matches every other
     // fresh start (openSearch → type → Enter).
-    if (ownerChanged || direction > 0) target.addon.findNext(query, _searchOptions());
-    else target.addon.findPrevious(query, _searchOptions());
+    // Same synchronous find window as doSearch: the placed match selection is
+    // search-owned and must not reach the clipboard.
+    _searchPlacingSelection = true;
+    try {
+        if (ownerChanged || direction > 0) target.addon.findNext(query, _searchOptions());
+        else target.addon.findPrevious(query, _searchOptions());
+    } finally {
+        _searchPlacingSelection = false;
+    }
     // Keep the search-owned-selection snapshot fresh on this path too (the
     // event handler already captures, this covers any no-event edge).
     _captureSearchSelection(target.term);
