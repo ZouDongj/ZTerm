@@ -4498,14 +4498,31 @@ pub fn open_in_explorer(args: Vec<Value>) -> Result<Value, String> {
 
 // ── Native file dialogs ──
 
+/// The renderer passes Electron-style dialog `properties`; only openDirectory
+/// changes the dialog kind (the folder picker sets FOS_PICKFOLDERS — plain
+/// pick_files can never select a directory). Split from show_open_dialog's
+/// dialog IO for unit testing.
+fn open_dialog_wants_directory(args: &[Value]) -> bool {
+    args.first()
+        .and_then(|v| v.get("properties"))
+        .and_then(|v| v.as_array())
+        .map(|props| props.iter().any(|p| p.as_str() == Some("openDirectory")))
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 pub async fn show_open_dialog(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
-    let _ = args;
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog().file().pick_files(move |paths| {
-        let _ = tx.send(paths);
-    });
+    if open_dialog_wants_directory(&args) {
+        app.dialog().file().pick_folders(move |paths| {
+            let _ = tx.send(paths);
+        });
+    } else {
+        app.dialog().file().pick_files(move |paths| {
+            let _ = tx.send(paths);
+        });
+    }
     let paths = rx.await.unwrap_or(None);
     match paths {
         Some(p) => {
@@ -5260,6 +5277,27 @@ mod tests {
         assert!(write_config_to_dir(&bad, &json!({})).is_err());
         assert!(!bad.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_dialog_properties_select_folder_mode() {
+        // Data-dir picker: openDirectory (anywhere in properties) → folder dialog.
+        assert!(open_dialog_wants_directory(&[
+            json!({ "properties": ["openDirectory", "createDirectory"] })
+        ]));
+        assert!(open_dialog_wants_directory(&[
+            json!({ "properties": ["openDirectory"] })
+        ]));
+        // SFTP upload / private-key pickers stay file pickers.
+        assert!(!open_dialog_wants_directory(&[
+            json!({ "properties": ["openFile", "multiSelections"] })
+        ]));
+        assert!(!open_dialog_wants_directory(&[json!({ "properties": ["openFile"] })]));
+        // Missing / malformed arguments default to files.
+        assert!(!open_dialog_wants_directory(&[]));
+        assert!(!open_dialog_wants_directory(&[json!({})]));
+        assert!(!open_dialog_wants_directory(&[json!({ "properties": "openDirectory" })]));
+        assert!(!open_dialog_wants_directory(&[json!({ "properties": [42] })]));
     }
 
     // open_url validation matrix (pure; no OS side effects).
