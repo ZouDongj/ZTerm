@@ -238,7 +238,13 @@ const TabManager = {
                         privateKeyPath: sshOpts.privateKey,
                     }).then(({ credId, error }) => {
                         const reTab = this.tabs.find(x => x.id === capturedId);
-                        if (!reTab || reTab.connected) return;
+                        if (!reTab || reTab.connected) {
+                            // The registration outlived its consumer (the tab
+                            // closed or connected another way): nobody will
+                            // hold this handle — release the plaintext now.
+                            if (credId) ipcRenderer.send('revoke-credential', { credId });
+                            return;
+                        }
                         if (error || !credId) {
                             reTab.connected = false;
                             this.render();
@@ -488,6 +494,21 @@ const TabManager = {
             this._closingTabs.delete(id);
             // Release the plaintext credential held in main-process memory (if any). Cloned tabs do not own the credential, so it is not revoked
             if (tab._credId && !tab._cloneCred) ipcRenderer.send('revoke-credential', { credId: tab._credId });
+            // Pane-level credential handles (a restored/registered SSH pane
+            // holds its own _sshCredId) are owned by this tab exactly like
+            // tab._credId: release them on the same contract — deduped,
+            // excluding the tab-level handle just revoked, and never for
+            // clones (the credential belongs to the source tab).
+            if (tab.splitRoot && !tab._cloneCred) {
+                const seen = new Set(tab._credId ? [tab._credId] : []);
+                for (const p of getAllPanes(tab)) {
+                    const cid = p._sshCredId;
+                    if (cid && !seen.has(cid)) {
+                        seen.add(cid);
+                        ipcRenderer.send('revoke-credential', { credId: cid });
+                    }
+                }
+            }
             if (tab.splitRoot) {
                 getAllPanes(tab).forEach((p, i) => {
                     // Claimed-session teardown at the deferred removal (the
@@ -1368,6 +1389,15 @@ const TabManager = {
             _cancelSshAttemptOf(pane, null);
         }
         if (pane.term) try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}
+        // Release the pane's own credential handle — but only when nobody
+        // else still uses it: siblings split from the same session inherit
+        // the same id (their reconnects need it), the tab-level handle is
+        // revoked by closeTab, and a clone tab's handles belong to the source.
+        const paneCredId = pane._sshCredId;
+        if (paneCredId && !tab._cloneCred && paneCredId !== tab._credId
+            && !getAllPanes(tab).some(q => q !== pane && q._sshCredId === paneCredId)) {
+            ipcRenderer.send('revoke-credential', { credId: paneCredId });
+        }
         // Closing is committed at initiation, not at the deferred removal:
         // drop the session slots immediately so the dying pane resolves to NO
         // owner during the exit animation (a pending right-click paste must
