@@ -88,6 +88,29 @@ function _cancelSshAttemptOf(owner, backendId, channel) {
     ipcRenderer.send(channel || 'pty-destroy', payload);
 }
 
+// Global credential-reference check for revocation: does any wrapper other
+// than excludePane still hold credId? Handles are minted fresh per
+// registration (the main process never dedupes), so one id is shared only
+// where the renderer copied it (clone tabs, pane-extraction adoption, split
+// inheritance, cross-tab pane moves). Revoking while another wrapper still
+// holds the id kills that wrapper's reconnect for good — the connect path
+// keeps sending the dead id and never falls back to the profile — so only
+// the LAST referencing wrapper's close may revoke. A pane committed to
+// close (_closing) is not a surviving reference: it can never reconnect.
+function _credIdStillReferenced(tabs, credId, excludePane) {
+    if (credId == null) return false;
+    for (const t of tabs) {
+        if (t._credId === credId) return true;
+        if (t.splitRoot) {
+            for (const p of getAllPanes(t)) {
+                if (p === excludePane || p._closing) continue;
+                if (p._sshCredId === credId) return true;
+            }
+        }
+    }
+    return false;
+}
+
 function _sshConnectWithCredentials(tab, pane) {
     const isPane = !!pane;
     // One NEW attempt per initiated connect: reconnect/retry callers cancel
@@ -517,20 +540,31 @@ const TabManager = {
             if (cur < 0) { this._closingTabs.delete(id); return; } // already closed by another path
             this.tabs.splice(cur, 1);
             this._closingTabs.delete(id);
-            // Release the plaintext credential held in main-process memory (if any). Cloned tabs do not own the credential, so it is not revoked
-            if (tab._credId && !tab._cloneCred) ipcRenderer.send('revoke-credential', { credId: tab._credId });
+            // Release the plaintext credential held in main-process memory
+            // (if any) — but only when no other wrapper still shares the
+            // handle (clone/extract/split inheritance copy one id across
+            // tabs and panes; see _credIdStillReferenced). The closing tab
+            // is already spliced out, so "still referenced" means exactly
+            // the other tabs' live references.
+            if (tab._credId && !_credIdStillReferenced(this.tabs, tab._credId)) {
+                ipcRenderer.send('revoke-credential', { credId: tab._credId });
+            }
             // Pane-level credential handles (a restored/registered SSH pane
             // holds its own _sshCredId) are owned by this tab exactly like
             // tab._credId: release them on the same contract — deduped,
-            // excluding the tab-level handle just revoked, and never for
-            // clones (the credential belongs to the source tab).
-            if (tab.splitRoot && !tab._cloneCred) {
+            // excluding the tab-level handle just decided above, never while
+            // another wrapper still holds the id, and never for panes whose
+            // own _closePane already decided their handle.
+            if (tab.splitRoot) {
                 const seen = new Set(tab._credId ? [tab._credId] : []);
                 for (const p of getAllPanes(tab)) {
+                    if (p._closing) continue;
                     const cid = p._sshCredId;
                     if (cid && !seen.has(cid)) {
                         seen.add(cid);
-                        ipcRenderer.send('revoke-credential', { credId: cid });
+                        if (!_credIdStillReferenced(this.tabs, cid)) {
+                            ipcRenderer.send('revoke-credential', { credId: cid });
+                        }
                     }
                 }
             }
@@ -614,6 +648,17 @@ const TabManager = {
             return;
         }
 
+        // In-flight reconnect dedupe (pre-attempt window): between initiation
+        // and the 500ms fire there is no attempt identity yet to cancel, so a
+        // second trigger (double click on the tab / reconnect button, the
+        // switchTo re-entry) would stack a second timer and start a second
+        // full connect — the loser's session gets orphaned. Merge: the
+        // pending reconnect carries on for both triggers. Once the timer
+        // fires, the created attempt owns supersede semantics again (a later
+        // trigger cancels it by identity below as before).
+        if (tab._reconnectPending) return;
+        tab._reconnectPending = true;
+
         // The old session is discarded below: the SFTP panel must not stay
         // bound to it (it would show a dead session's listing).
         this._closeSftpForSessions([tab.tabId]);
@@ -650,6 +695,7 @@ const TabManager = {
         // kept terminal at fire time follows every later migration too.
         const keptTerm = tab.term || null;
         setTimeout(() => {
+            tab._reconnectPending = false;
             if (!this.tabs.find(t => t.id === id)) return;
             if (!tab.splitRoot) {
                 // A reconnect creates a NEW attempt identity (the old one was
@@ -672,6 +718,11 @@ const TabManager = {
         tab._sshRetryToken = (tab._sshRetryToken || 0) + 1;
         const pane = findPane(tab, paneId);
         if (!pane) return;
+        // Same in-flight dedupe as reconnectTab, scoped to THIS pane: a
+        // second trigger inside the pre-attempt window has no attempt
+        // identity to supersede — merging keeps one connect per pane.
+        if (pane._reconnectPending) return;
+        pane._reconnectPending = true;
         // The old session is discarded below: the SFTP panel must not stay
         // bound to it.
         this._closeSftpForSessions([pane.tabId]);
@@ -696,6 +747,7 @@ const TabManager = {
         this.render();
         this.updateStatus();
         setTimeout(() => {
+            pane._reconnectPending = false;
             if (!this.tabs.find(t => t.id === tab.id)) return;
             _sshConnectWithCredentials(tab, pane);
         }, 500);
@@ -1440,13 +1492,14 @@ const TabManager = {
             _cancelSshAttemptOf(pane, null);
         }
         if (pane.term) try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}
-        // Release the pane's own credential handle — but only when nobody
-        // else still uses it: siblings split from the same session inherit
-        // the same id (their reconnects need it), the tab-level handle is
-        // revoked by closeTab, and a clone tab's handles belong to the source.
+        // Release the pane's own credential handle — but only when no other
+        // wrapper still uses it: siblings split from the same session inherit
+        // the same id (their reconnects need it), other tabs can hold it too
+        // (clone/extract adoption), and the tab-level handle is decided by
+        // closeTab. A pane committed to close can no longer reconnect, so
+        // dying siblings do not count as references.
         const paneCredId = pane._sshCredId;
-        if (paneCredId && !tab._cloneCred && paneCredId !== tab._credId
-            && !getAllPanes(tab).some(q => q !== pane && q._sshCredId === paneCredId)) {
+        if (paneCredId && !_credIdStillReferenced(this.tabs, paneCredId, pane)) {
             ipcRenderer.send('revoke-credential', { credId: paneCredId });
         }
         // Closing is committed at initiation, not at the deferred removal:
@@ -2509,10 +2562,10 @@ const TabManager = {
             options.command = src.command;
             options.args = src.args;
         }
-        const newId = this.createTab(options);
-        const newTab = this.tabs.find(t => t.id === newId);
-        if (newTab) newTab._cloneCred = true; // mark as a clone so closeTab does not revoke the credential
-        return newId;
+        // The clone shares the source's credential handle (_credId copied
+        // above); revocation is decided by the global reference check
+        // (_credIdStillReferenced), not by a clone marker.
+        return this.createTab(options);
     },
 
     _cloneSplitTab(src) {
@@ -2524,16 +2577,16 @@ const TabManager = {
             command: src.command,
             args: [...(src.args || [])],
             connected: false,
-            _cloneCred: true, // closeTab must not revoke; the credential belongs to the source tab
         };
         if (src.type === 'ssh') {
             Object.assign(tab, {
                 host: src.host, port: src.port, user: src.user,
                 privateKey: src.privateKey,
                 sshProfileId: src.sshProfileId,
-                // Note: _credId is NOT copied — each pane has its own _sshCredId.
-                // Copying it to the tab level would make closeTab send revoke-credential,
-                // disconnecting every pane sharing that credential
+                // Note: _credId is NOT copied — each cloned pane keeps the
+                // source pane's _sshCredId, so the shared handles stay
+                // tracked per pane (revocation goes through the global
+                // reference check either way).
             });
         }
         // Deep-clone the split tree; leaf nodes keep the source pane's own type/SSH parameters
