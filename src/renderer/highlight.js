@@ -134,10 +134,14 @@ function closeHighlightEdit() {
 function saveHighlightEdit() {
     const text = document.getElementById('hl-edit-text').value.trim();
     if (!text) { showToast('关键字不能为空', true); return; }
+    const isRegExp = document.getElementById('hl-edit-regexp').classList.contains('on');
+    const isCaseSensitive = document.getElementById('hl-edit-case').classList.contains('on');
+    // Compile now so an invalid regex is rejected with feedback instead of being saved and then silently skipped at apply time
+    if (isRegExp && !buildHighlightRegex(text, true, isCaseSensitive)) { showToast('正则表达式无效', true); return; }
     const rule = {
         text,
-        isRegExp: document.getElementById('hl-edit-regexp').classList.contains('on'),
-        isCaseSensitive: document.getElementById('hl-edit-case').classList.contains('on'),
+        isRegExp,
+        isCaseSensitive,
         foreground: document.getElementById('hl-edit-fg').classList.contains('on'),
         foregroundColor: document.getElementById('hl-edit-fgcolor').value.trim(),
         background: document.getElementById('hl-edit-bg').classList.contains('on'),
