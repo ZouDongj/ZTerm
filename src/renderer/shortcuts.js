@@ -556,8 +556,8 @@ function _renderUpdateReady(tag) {
 
 // Map the backend's stable error tag ([timeout]/[resolve]/[connect]/[http])
 // to friendly guidance; unknown errors pass through with their raw detail so
-// diagnosis stays possible. The tag is classified from typed ureq errors in
-// Rust, so it does not depend on ureq's display wording.
+// diagnosis stays possible. The tag is classified from WinHTTP error codes in
+// Rust (update_http.rs), independent of any error display wording.
 function _friendlyUpdateError(raw) {
     const s = (raw && raw !== '未知错误') ? String(raw) : '';
     if (s.includes('invalid update proxy')) return '更新代理地址无效（仅支持 http/https 代理），请在 设置 → 关于 中修正。详细信息：' + s;

@@ -986,7 +986,8 @@ fn parse_osc7_cwd(text: &str) -> Option<String> {
 /// reports — or None when unmatched.
 /// OSC 1337 CurrentDir report pattern (`ESC]1337;CurrentDir=<path>` with an
 /// optional `file://host` prefix, BEL/ST terminator).
-const CURRENTDIR_1337_PATTERN: &str = r"\x1b\]1337;CurrentDir=(?:file://[^/\x07\x1b\\]*)?(/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)";
+const CURRENTDIR_1337_PATTERN: &str =
+    r"\x1b\]1337;CurrentDir=(?:file://[^/\x07\x1b\\]*)?(/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)";
 
 fn parse_1337_currentdir(text: &str) -> Option<String> {
     // path segment: up to the terminator; an optional file://[host] prefix is allowed (take from the first /)
@@ -3042,7 +3043,10 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
         .to_string();
     // Explicit opt-in to overwriting a config.json that already lives in the
     // target dir; the renderer confirms with the user before setting it.
-    let force = params.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force = params
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let anchor_dir = PathBuf::from(
         std::env::var("APPDATA")
             .or_else(|_| std::env::var("HOME"))
@@ -3135,8 +3139,11 @@ fn data_dir_conflict_error(target_config: &std::path::Path) -> Option<Value> {
 fn write_config_to_dir(dir: &std::path::Path, config: &Value) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let path = dir.join("config.json");
-    atomic_write_config(&path, &serde_json::to_string_pretty(config).unwrap_or_default())
-        .map_err(|e| format!("write {}: {e}", path.display()))
+    atomic_write_config(
+        &path,
+        &serde_json::to_string_pretty(config).unwrap_or_default(),
+    )
+    .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// Reset-to-default data dir: carry the effective settings back, or everything
@@ -3219,32 +3226,32 @@ pub fn version_newer(current: &str, latest: &str) -> bool {
 pub async fn check_update(args: Vec<Value>) -> Result<Value, String> {
     let _ = args;
     tokio::task::spawn_blocking(|| {
-        let agent = update_http_agent(10).map_err(|e| format!("update: {e}"))?;
-        let resp = agent
-            .get(RELEASES_LATEST_URL)
-            .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
-            .header("Accept", "application/vnd.github+json")
-            .call();
-        let mut resp = match resp {
-            Ok(r) => r,
-            // 404: the repo has no published release yet — a state, not a failure.
-            Err(ureq::Error::StatusCode(404)) => {
-                return Ok(json!({
-                    "current": env!("CARGO_PKG_VERSION"),
-                    "latest": Value::Null,
-                    "none": true,
-                }));
-            }
-            Err(e) => {
-                return Err(format!(
-                    "update check failed [{}]: {e}",
-                    update_net_error_tag(&e)
-                ))
-            }
-        };
-        let body: Value = resp
-            .body_mut()
-            .read_json()
+        let proxy = update_proxy_choice().map_err(|e| format!("update: {e}"))?;
+        let resp = crate::update_http::http_get(
+            RELEASES_LATEST_URL,
+            &[
+                ("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION"))),
+                ("Accept", "application/vnd.github+json"),
+            ],
+            &proxy,
+            crate::update_http::Preset::Check,
+        )
+        .map_err(|e| update_http_fail("update check failed", e))?;
+        if resp.status == 404 {
+            // The repo has no published release yet — a state, not a failure.
+            return Ok(json!({
+                "current": env!("CARGO_PKG_VERSION"),
+                "latest": Value::Null,
+                "none": true,
+            }));
+        }
+        if resp.status != 200 {
+            return Err(format!(
+                "update check failed [http]: status {}",
+                resp.status
+            ));
+        }
+        let body: Value = serde_json::from_slice(&resp.body)
             .map_err(|e| format!("update check: bad response json: {e}"))?;
         let tag = body
             .get("tag_name")
@@ -3496,95 +3503,47 @@ fn configured_update_proxy(config: &Value) -> Option<String> {
     }
 }
 
-/// Redact any userinfo (user:pass@) before echoing a proxy URL in an error
-/// message — the config stores it plaintext, but error text travels further
-/// (UI, logs, bug reports).
-fn redact_proxy_userinfo(url: &str) -> String {
-    match url.find('@') {
-        Some(at) => {
-            let scheme_end = url.find("://").map(|i| i + 3).unwrap_or(0);
-            format!("{}***@{}", &url[..scheme_end], &url[at + 1..])
-        }
-        None => url.to_string(),
-    }
-}
-
-/// Validate a configured proxy URL: http(s) only (ureq parses socks4/5 URLs
-/// even without its socks-proxy feature and then PANICS at connect time) and
-/// parsable by ureq.
-fn validate_update_proxy(url: &str) -> Result<(), String> {
-    let lower = url.to_ascii_lowercase();
-    if let Some(scheme) = lower.split_once("://").map(|(s, _)| s) {
-        if scheme != "http" && scheme != "https" {
-            return Err(format!(
-                "invalid update proxy '{}': only http(s) proxies are supported",
-                redact_proxy_userinfo(url)
-            ));
-        }
-    }
-    ureq::Proxy::new(url)
-        .map(|_| ())
-        .map_err(|e| format!("invalid update proxy '{}': {e}", redact_proxy_userinfo(url)))
-}
-
-/// ureq agent for GitHub update traffic. Proxy resolution order: the
-/// explicit `updateProxy` setting (an invalid value is a hard error — a
-/// silent fallback would masquerade as the very network failure the user is
-/// trying to fix), then the proxy env vars (ALL_PROXY/HTTPS_PROXY/HTTP_PROXY,
-/// either case, NO_PROXY respected) and, via ureq's win-system-proxy feature,
-/// the Windows registry proxy (ProxyEnable/ProxyServer; PAC and per-protocol
-/// entries are not read and degrade to direct). Nothing configured → direct.
-fn update_http_agent(timeout_secs: u64) -> Result<ureq::Agent, String> {
-    let proxy = match configured_update_proxy(&load_config()) {
+/// Build the proxy source for one update-channel call. The explicit
+/// `updateProxy` setting wins (validated — an invalid value is a hard error,
+/// a silent fallback would masquerade as the very network failure the user
+/// is trying to fix); otherwise WinHTTP resolves env vars, the user's
+/// WinINET config (static registry proxy or PAC) and falls back to direct.
+fn update_proxy_choice() -> Result<crate::update_http::ProxyChoice, String> {
+    match configured_update_proxy(&load_config()) {
         Some(url) => {
-            validate_update_proxy(&url)?;
-            Some(ureq::Proxy::new(url.as_str()).expect("validated above"))
+            crate::update_http::validate_proxy_url(&url)?;
+            Ok(crate::update_http::ProxyChoice::Explicit(url))
         }
-        None => ureq::Proxy::try_from_env(),
-    };
-    Ok(ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
-        // Bound any single stalled body read: timeout_global does not cover
-        // manual into_reader() streaming, and a hang there would wedge the
-        // download state machine until an app restart.
-        .timeout_recv_body(Some(std::time::Duration::from_secs(30)))
-        .proxy(proxy)
-        .build()
-        .into())
+        None => Ok(crate::update_http::ProxyChoice::Auto),
+    }
 }
 
-/// Classify update-channel network errors into a stable tag the frontend maps
-/// to friendly guidance — raw ureq displays like "timeout: global" mean
-/// nothing to users on networks that cannot reach GitHub. The tag derives
-/// from the typed error, not the display string, so it survives ureq upgrades.
-fn update_net_error_tag(e: &ureq::Error) -> &'static str {
-    match e {
-        ureq::Error::Timeout(_) => "timeout",
-        ureq::Error::HostNotFound => "resolve",
-        ureq::Error::Io(io) if io.kind() == std::io::ErrorKind::TimedOut => "timeout",
-        ureq::Error::Io(_) => "connect",
-        ureq::Error::StatusCode(_) => "http",
-        _ => "other",
-    }
+/// Render a WinHTTP failure with the stable `[tag]` prefix the frontend maps
+/// to friendly guidance (timeout / resolve / connect / http / other).
+fn update_http_fail(prefix: &str, e: crate::update_http::HttpFail) -> String {
+    format!("{prefix} [{}]: {}", e.tag, e.detail)
 }
 
 /// Fetch the latest-release JSON from GitHub (shared by check/download).
 fn fetch_latest_release() -> Result<Value, String> {
-    let agent = update_http_agent(10).map_err(|e| format!("update: {e}"))?;
-    let resp = agent
-        .get(RELEASES_LATEST_URL)
-        .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
-        .header("Accept", "application/vnd.github+json")
-        .call();
-    let mut resp = resp.map_err(|e| {
-        format!(
-            "update: release query failed [{}]: {e}",
-            update_net_error_tag(&e)
-        )
-    })?;
-    resp.body_mut()
-        .read_json()
-        .map_err(|e| format!("update: bad release json: {e}"))
+    let proxy = update_proxy_choice().map_err(|e| format!("update: {e}"))?;
+    let resp = crate::update_http::http_get(
+        RELEASES_LATEST_URL,
+        &[
+            ("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION"))),
+            ("Accept", "application/vnd.github+json"),
+        ],
+        &proxy,
+        crate::update_http::Preset::Check,
+    )
+    .map_err(|e| update_http_fail("update: release query failed", e))?;
+    if resp.status != 200 {
+        return Err(format!(
+            "update: release query failed [http]: status {}",
+            resp.status
+        ));
+    }
+    serde_json::from_slice(&resp.body).map_err(|e| format!("update: bad release json: {e}"))
 }
 
 /// Stream the installer to <name>.part, verify sha256, rename to final.
@@ -3608,49 +3567,50 @@ fn download_setup_exe(url: &str, name: &str, size_hint: u64, sha256: &str) -> Re
     let _ = std::fs::remove_file(&part);
     let final_path = dir.join(name);
 
-    let agent = update_http_agent(300).map_err(|e| format!("update: {e}"))?;
-    let resp = agent
-        .get(url)
-        .header("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))
-        .call()
-        .map_err(|e| {
-            format!(
-                "update: download failed [{}]: {e}",
-                update_net_error_tag(&e)
-            )
-        })?;
-    let total = resp
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(size_hint);
+    let proxy = update_proxy_choice().map_err(|e| format!("update: {e}"))?;
+    let (status, content_length, mut stream) = crate::update_http::http_open_stream(
+        url,
+        &[("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION")))],
+        &proxy,
+        crate::update_http::Preset::Download,
+    )
+    .map_err(|e| update_http_fail("update: download failed", e))?;
+    if status != 200 {
+        return Err(format!("update: download failed [http]: status {status}"));
+    }
+    let total = content_length.unwrap_or(size_hint);
     {
         let mut st = UPDATE_DL.lock();
         st.total = total;
         st.downloaded = 0;
     }
-    let mut reader = resp.into_body().into_reader();
     let mut file =
         std::fs::File::create(&part).map_err(|e| format!("update: create temp file: {e}"))?;
     let mut buf = [0u8; 64 * 1024];
     let mut downloaded: u64 = 0;
-    let io_result: std::io::Result<()> = (|| {
-        use std::io::{Read, Write};
+    let dl_result: Result<(), String> = (|| {
+        use std::io::Write;
         loop {
-            let n = reader.read(&mut buf)?;
+            let n = match stream.read_chunk(&mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    return Err(update_http_fail("update: download interrupted", e));
+                }
+            };
             if n == 0 {
                 break;
             }
-            file.write_all(&buf[..n])?;
+            if let Err(e) = file.write_all(&buf[..n]) {
+                return Err(format!("update: download interrupted: {e}"));
+            }
             downloaded += n as u64;
             UPDATE_DL.lock().downloaded = downloaded;
         }
         Ok(())
     })();
-    if let Err(e) = io_result {
+    if let Err(e) = dl_result {
         let _ = std::fs::remove_file(&part);
-        return Err(format!("update: download interrupted: {e}"));
+        return Err(e);
     }
     drop(file);
 
@@ -5686,7 +5646,8 @@ mod tests {
     }
 
     fn config_test_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zterm-cfgtest-{}-{}", std::process::id(), name));
+        let dir =
+            std::env::temp_dir().join(format!("zterm-cfgtest-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -5732,8 +5693,16 @@ mod tests {
         let anchor = dir.join("anchor").join("config.json");
         std::fs::create_dir_all(data_dir_config.parent().unwrap()).unwrap();
         std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
-        std::fs::write(&data_dir_config, serde_json::to_string(&json!({ "appearance": { "fontSize": 12 } })).unwrap()).unwrap();
-        std::fs::write(&anchor, serde_json::to_string(&json!({ "appearance": { "fontSize": 18 } })).unwrap()).unwrap();
+        std::fs::write(
+            &data_dir_config,
+            serde_json::to_string(&json!({ "appearance": { "fontSize": 12 } })).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &anchor,
+            serde_json::to_string(&json!({ "appearance": { "fontSize": 18 } })).unwrap(),
+        )
+        .unwrap();
         let cfg = load_config_from(&data_dir_config, &anchor);
         assert_eq!(cfg["appearance"]["fontSize"], 12);
         let _ = std::fs::remove_dir_all(&dir);
@@ -5927,7 +5896,11 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .filter(|n| n.starts_with("config.json.corrupt-"))
             .collect();
-        assert_eq!(backups.len(), 1, "exactly one timestamped backup, got {backups:?}");
+        assert_eq!(
+            backups.len(),
+            1,
+            "exactly one timestamped backup, got {backups:?}"
+        );
         assert_eq!(
             std::fs::read_to_string(anchor_parent.join(&backups[0])).unwrap(),
             "{ not json"
@@ -5952,12 +5925,18 @@ mod tests {
         assert!(!open_dialog_wants_directory(&[
             json!({ "properties": ["openFile", "multiSelections"] })
         ]));
-        assert!(!open_dialog_wants_directory(&[json!({ "properties": ["openFile"] })]));
+        assert!(!open_dialog_wants_directory(&[
+            json!({ "properties": ["openFile"] })
+        ]));
         // Missing / malformed arguments default to files.
         assert!(!open_dialog_wants_directory(&[]));
         assert!(!open_dialog_wants_directory(&[json!({})]));
-        assert!(!open_dialog_wants_directory(&[json!({ "properties": "openDirectory" })]));
-        assert!(!open_dialog_wants_directory(&[json!({ "properties": [42] })]));
+        assert!(!open_dialog_wants_directory(&[
+            json!({ "properties": "openDirectory" })
+        ]));
+        assert!(!open_dialog_wants_directory(&[
+            json!({ "properties": [42] })
+        ]));
     }
 
     // ── In-process SFTP server for upload-finalize tests ──
@@ -6496,7 +6475,10 @@ mod tests {
         ];
         let sends = feed_login_scripts("Password:", &mut scripts);
         assert_eq!(sends, vec!["secret\n"]);
-        assert!(scripts.is_empty(), "matched step and skipped optional must both go");
+        assert!(
+            scripts.is_empty(),
+            "matched step and skipped optional must both go"
+        );
     }
 
     #[test]
@@ -6519,7 +6501,10 @@ mod tests {
         let mut scripts = vec![script("Password:", "secret"), script("", "df -h")];
         let sends = feed_login_scripts("Password:", &mut scripts);
         assert_eq!(sends, vec!["secret\n", "df -h\n"]);
-        assert!(scripts.is_empty(), "due unconditional step must be consumed");
+        assert!(
+            scripts.is_empty(),
+            "due unconditional step must be consumed"
+        );
     }
 
     #[test]
@@ -6675,9 +6660,15 @@ mod tests {
         );
         // Out of range: rejected, and the message names the user's own value.
         let err = parse_ssh_port(&json!({ "port": 70000 })).unwrap_err();
-        assert!(err.contains("70000"), "error must name the input port: {err}");
+        assert!(
+            err.contains("70000"),
+            "error must name the input port: {err}"
+        );
         let err = parse_ssh_port(&json!({ "port": 65536 })).unwrap_err();
-        assert!(err.contains("65536"), "error must name the input port: {err}");
+        assert!(
+            err.contains("65536"),
+            "error must name the input port: {err}"
+        );
     }
 
     #[test]
@@ -6960,7 +6951,11 @@ mod tests {
         // filter at the echo line and leak the real marker + stty echo output.
         let buffer = " set +o history\r\nstty -echo\r\necho ZTERM_INJECTED\r\nstty echo\r\nZTERM_INJECTED\r\n$ ";
         let end = injected_marker_end(buffer).expect("real marker line must match");
-        assert_eq!(&buffer[end..], "\r\n$ ", "cut must happen at the real marker line");
+        assert_eq!(
+            &buffer[end..],
+            "\r\n$ ",
+            "cut must happen at the real marker line"
+        );
         // Only the typed echo so far (the real marker has not been printed yet):
         // the filter must keep waiting instead of cutting early.
         let echo_only = "$ echo ZTERM_INJECTED\r\n$ ";
@@ -7122,10 +7117,17 @@ mod tests {
         // The login wrapper's OSC 7 plus fish's per-prompt 1337, several
         // reports retained: the NEWEST sequence by position must win no matter
         // which protocol it belongs to.
-        let w1 = "\u{1b}]1337;CurrentDir=/a\u{7}\u{1b}]7;file://h/b\u{7}\u{1b}]1337;CurrentDir=/c\u{7}";
-        assert_eq!(window_cwd_after(&mut String::new(), w1).as_deref(), Some("/c"));
+        let w1 =
+            "\u{1b}]1337;CurrentDir=/a\u{7}\u{1b}]7;file://h/b\u{7}\u{1b}]1337;CurrentDir=/c\u{7}";
+        assert_eq!(
+            window_cwd_after(&mut String::new(), w1).as_deref(),
+            Some("/c")
+        );
         let w2 = "\u{1b}]7;file://h/a\u{7}\u{1b}]1337;CurrentDir=/b\u{7}\u{1b}]7;file://h/c\u{7}";
-        assert_eq!(window_cwd_after(&mut String::new(), w2).as_deref(), Some("/c"));
+        assert_eq!(
+            window_cwd_after(&mut String::new(), w2).as_deref(),
+            Some("/c")
+        );
     }
 
     #[test]
@@ -7602,30 +7604,52 @@ mod tests {
         );
     }
 
+    /// End-to-end live probe of the production update path through WinHTTP:
+    /// release query, asset selection, streaming download (redirects, proxy
+    /// tunnel), sha256 verification. Manual only:
+    /// `cargo test -- --ignored update_download_live_probe`.
+    #[test]
+    #[ignore = "live network probe (downloads the real installer)"]
+    fn update_download_live_probe() {
+        let body = fetch_latest_release().expect("release query failed");
+        let assets = body
+            .get("assets")
+            .and_then(|a| a.as_array())
+            .expect("assets missing");
+        let (name, url, size, sha) = select_setup_asset(assets).expect("no usable asset");
+        println!("asset: {name} size={size}");
+        download_setup_exe(&url, &name, size, &sha).expect("download failed");
+        let p = update_download_dir().join(&name);
+        let got = file_sha256_hex(&p).expect("hash");
+        assert_eq!(got.to_lowercase(), sha.to_lowercase(), "sha mismatch");
+        println!(
+            "download live probe ok: {} bytes, sha256 verified",
+            std::fs::metadata(&p).unwrap().len()
+        );
+    }
+
     #[test]
     fn update_proxy_validation() {
-        assert!(validate_update_proxy("http://127.0.0.1:7890").is_ok());
-        assert!(validate_update_proxy("https://proxy.corp:8443").is_ok());
-        assert!(validate_update_proxy("localhost:7890").is_ok()); // schemeless defaults to http
-                                                                  // socks URLs parse in ureq but panic at connect time without the
-                                                                  // socks-proxy feature — they must be rejected here instead.
-        let err = validate_update_proxy("socks5://127.0.0.1:1080").unwrap_err();
+        let validate = crate::update_http::validate_proxy_url;
+        assert!(validate("http://127.0.0.1:7890").is_ok());
+        assert!(validate("https://proxy.corp:8443").is_ok());
+        assert!(validate("localhost:7890").is_ok()); // schemeless defaults to http
+        let err = validate("socks5://127.0.0.1:1080").unwrap_err();
         assert!(err.contains("only http(s)"), "{err}");
-        let err = validate_update_proxy("not a url").unwrap_err();
+        let err = validate("not a url").unwrap_err();
         assert!(err.contains("invalid update proxy"), "{err}");
     }
 
     #[test]
     fn update_proxy_error_redacts_userinfo() {
-        let err = validate_update_proxy("socks5://alice:s3cret@127.0.0.1:1080").unwrap_err();
+        let validate = crate::update_http::validate_proxy_url;
+        let err = validate("socks5://alice:s3cret@127.0.0.1:1080").unwrap_err();
         assert!(!err.contains("s3cret"), "{err}");
         assert!(err.contains("***@"), "{err}");
-        assert_eq!(
-            redact_proxy_userinfo("http://127.0.0.1:7890"),
-            "http://127.0.0.1:7890"
-        );
-        assert_eq!(redact_proxy_userinfo("http://u:p@h:1"), "http://***@h:1");
-        assert_eq!(redact_proxy_userinfo("u:p@h:1"), "***@h:1");
+        let redact = crate::update_http::redact_proxy_userinfo;
+        assert_eq!(redact("http://127.0.0.1:7890"), "http://127.0.0.1:7890");
+        assert_eq!(redact("http://u:p@h:1"), "http://***@h:1");
+        assert_eq!(redact("u:p@h:1"), "***@h:1");
     }
 
     #[test]
@@ -7776,16 +7800,22 @@ mod tests {
         assert_eq!(r["isDir"], json!(true));
         // A regular file reports isFile and not isDir.
         let file = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
-        let r = local_path_stat(vec![json!({ "path": file })]).await.unwrap();
+        let r = local_path_stat(vec![json!({ "path": file })])
+            .await
+            .unwrap();
         assert_eq!(r["isDir"], json!(false));
         assert_eq!(r["isFile"], json!(true));
         // A missing path reports a structured error (the frontend then falls
         // through to the upload init guard, the backstop).
         let missing = format!("{}/no-such-path-anywhere", env!("CARGO_MANIFEST_DIR"));
-        let r = local_path_stat(vec![json!({ "path": missing })]).await.unwrap();
+        let r = local_path_stat(vec![json!({ "path": missing })])
+            .await
+            .unwrap();
         assert!(r.get("error").is_some());
         // An empty path is rejected without touching the filesystem.
-        let r = local_path_stat(vec![json!({ "path": "  " })]).await.unwrap();
+        let r = local_path_stat(vec![json!({ "path": "  " })])
+            .await
+            .unwrap();
         assert_eq!(r["error"], json!("missing path"));
     }
 }

@@ -920,7 +920,9 @@ async fn handle_control_line(fixture: &Arc<Fixture>, line: &str, shutdown: &mut 
                 }
                 _ => false,
             };
-            fixture.log.emit(json!({"type": "control", "op": "holdauth", "ms": ms, "ok": ok }));
+            fixture
+                .log
+                .emit(json!({"type": "control", "op": "holdauth", "ms": ms, "ok": ok }));
             print_reply(&json!({ "type": "control-result", "op": "holdauth", "ok": ok, "ms": ms }));
         }
         "shutdown" => {

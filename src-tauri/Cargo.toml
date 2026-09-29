@@ -25,8 +25,11 @@ winapi = { version = "0.3", features = ["dpapi", "minwindef", "ntdef", "shellapi
 arboard = "3"
 # Electron safeStorage compatibility (OSCrypt AES-GCM decryption)
 aes-gcm = "0.10"
-# Update check: one small JSON GET via the sync client + spawn_blocking, avoiding reqwest/hyper
-ureq = { version = "3", features = ["json", "win-system-proxy"] }
+# Update channel runs on WinHTTP (windows crate) for corporate-proxy parity
+# with browsers: WinINET proxy config (static + PAC) and Negotiate/NTLM SSO.
+# The crate version is pinned by the lockfile to the same one wry 0.55 pulls
+# in, so no tree changes beyond enabling features.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp"] }
 # Update installer integrity check (sha256 of the downloaded setup exe).
 # Already in the lockfile as an indirect dep; declared here for direct use.
 sha2 = "0.10"

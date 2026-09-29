@@ -3,6 +3,7 @@
 // GUI subsystem: avoid starting as a console app, which would open in the system default terminal (Windows Terminal)
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod update_http;
 mod zterm;
 
 use serde_json::json;
