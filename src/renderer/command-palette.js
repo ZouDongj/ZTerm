@@ -22,6 +22,14 @@ function openPalette() {
 
 function closePalette() {
     document.getElementById('overlay-palette').classList.remove('open');
+    // Closing via the mask or the × button leaves focus on <body>; restore the
+    // active terminal like closeSearch does. Re-checked at fire time: when the
+    // close ran an action that opened another overlay (or the palette itself
+    // reopened), that overlay keeps its focus.
+    setTimeout(() => {
+        if (document.querySelector('.overlay.open')) return;
+        if (typeof _refocusActiveTerminal === 'function') _refocusActiveTerminal();
+    }, 50);
 }
 
 function renderPaletteList(filter = '') {
