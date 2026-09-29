@@ -71,6 +71,10 @@ const SHORTCUT_ACTIONS = {
         const tab = TabManager.getActive();
         if (!tab || tab.type === 'settings') return;
         if (tab.splitRoot) {
+            // An open overlay owns the keyboard: never destroy the focused
+            // pane behind a confirm dialog (the only pane action that lacked
+            // this guard).
+            if (document.querySelector('.overlay.open')) return;
             const focused = getAllPanes(tab).find(p => p.focused);
             if (focused) TabManager._closePane(tab.id, focused.id);
         } else if (!document.querySelector('.overlay.open') && TabManager.aliveCount() > 1) {
