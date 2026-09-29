@@ -2674,20 +2674,10 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
     let _ = std::fs::create_dir_all(&anchor_dir);
 
     if dir.is_empty() {
-        let mut anchor: Value = if anchor_config.exists() {
-            std::fs::read_to_string(&anchor_config)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or(json!({}))
-        } else {
-            json!({})
-        };
-        if let Value::Object(ref mut m) = anchor {
-            m.remove("dataDir");
-        }
-        let _ = std::fs::write(
+        restore_default_data_dir(
+            &default_data_dir().join("config.json"),
             &anchor_config,
-            serde_json::to_string_pretty(&anchor).unwrap_or_default(),
+            &load_config(),
         );
     } else {
         let current_config = load_config();
@@ -2719,6 +2709,42 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
         );
     }
     Ok(json!({ "ok": true }))
+}
+
+/// Reset-to-default data dir: carry the effective settings back, or everything
+/// changed while on the custom dir is silently abandoned (the forward branch
+/// copies the config into the new dir; the reset branch must be symmetric).
+/// The primary copy goes to the default data dir; the anchor keeps a full copy
+/// as the fallback mirror load_config reads when the default dir has no config
+/// (covers a default dir that is not writable either). Split from set_data_dir's
+/// env path resolution for unit testing.
+fn restore_default_data_dir(
+    default_config_path: &std::path::Path,
+    anchor_config: &std::path::Path,
+    current_config: &Value,
+) {
+    let mut clean = current_config.clone();
+    if let Value::Object(ref mut m) = clean {
+        m.remove("dataDir");
+    }
+    if let Some(parent) = default_config_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        default_config_path,
+        serde_json::to_string_pretty(&clean).unwrap_or_default(),
+    );
+    let existing = std::fs::read_to_string(anchor_config)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let mut anchor = anchor_fallback_content(existing, &clean);
+    if let Value::Object(ref mut m) = anchor {
+        m.remove("dataDir");
+    }
+    let _ = std::fs::write(
+        anchor_config,
+        serde_json::to_string_pretty(&anchor).unwrap_or_default(),
+    );
 }
 
 #[tauri::command]
@@ -5169,6 +5195,39 @@ mod tests {
         std::fs::write(&anchor, "[1,2,3]").unwrap();
         let cfg = load_config_from(&missing, &anchor);
         assert_eq!(cfg, default_config());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_default_data_dir_carries_settings_back() {
+        // Resetting to the default data dir must not abandon the settings from
+        // the custom-dir era: both the default config and the anchor mirror
+        // receive them, with the dataDir pointer gone.
+        let dir = config_test_dir("restore-default");
+        let default_config = dir.join("default").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        std::fs::write(
+            &anchor,
+            serde_json::to_string(&json!({ "dataDir": "D:/zterm-data", "legacyKey": 1 })).unwrap(),
+        )
+        .unwrap();
+        let current = json!({
+            "dataDir": "D:/zterm-data",
+            "appearance": { "fontSize": 20 },
+            "quickCommands": [{ "name": "uptime" }],
+        });
+        restore_default_data_dir(&default_config, &anchor, &current);
+        let written_default: Value =
+            serde_json::from_str(&std::fs::read_to_string(&default_config).unwrap()).unwrap();
+        assert_eq!(written_default["appearance"]["fontSize"], 20);
+        assert_eq!(written_default["quickCommands"][0]["name"], "uptime");
+        assert!(written_default.get("dataDir").is_none());
+        let written_anchor: Value =
+            serde_json::from_str(&std::fs::read_to_string(&anchor).unwrap()).unwrap();
+        assert_eq!(written_anchor["appearance"]["fontSize"], 20);
+        assert_eq!(written_anchor["legacyKey"], 1);
+        assert!(written_anchor.get("dataDir").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
