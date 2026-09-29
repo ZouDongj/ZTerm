@@ -97,6 +97,17 @@ function paletteKeyDown(e) {
     const q = inp ? inp.value.toLowerCase() : '';
     const bindings = typeof _getShortcutBindings === 'function' ? _getShortcutBindings() : {};
 
+    // The palette's own binding toggles it closed. The global dispatcher never
+    // sees the combo here (its input guard returns while this field holds
+    // focus), so the toggle branch in SHORTCUT_ACTIONS is unreachable without
+    // this check. Compared against the CURRENT binding, not a hardcoded Ctrl+P.
+    if (bindings.commandPalette && typeof comboFromEvent === 'function'
+        && comboFromEvent(e) === bindings.commandPalette) {
+        e.preventDefault();
+        closePalette();
+        return;
+    }
+
     const visibleIds = _paletteOrder.filter(id => {
         if (!q) return true;
         const label = (typeof SHORTCUT_LABELS !== 'undefined' ? SHORTCUT_LABELS[id] : '') || '';

@@ -32,6 +32,7 @@ function fixture() {
     let seq = 0;
     const timers = new Map();
     const refocus = { calls: 0 };
+    const bindings = { commandPalette: 'Ctrl+P' };
     const document = {
         getElementById: id => ({ 'overlay-palette': paletteEl, 'palette-input': inputEl }[id] || null),
         querySelector: sel => (sel === '.overlay.open' && (paletteEl.classList.contains('open') || otherOverlayOpen) ? { sentinel: true } : null),
@@ -41,14 +42,14 @@ function fixture() {
         setTimeout: (fn, ms) => { const id = ++seq; timers.set(id, { fn, at: now + ms }); return id; },
         clearTimeout: id => timers.delete(id),
         _refocusActiveTerminal: () => { refocus.calls++; },
-        _getShortcutBindings: () => ({ commandPalette: 'Ctrl+P' }),
+        _getShortcutBindings: () => bindings,
     };
     context.window = context;
     vm.createContext(context);
     vm.runInContext(utilsSrc, context);
     vm.runInContext(source, context);
     return {
-        context, paletteEl, inputEl, refocus,
+        context, paletteEl, inputEl, refocus, bindings,
         setOtherOverlay: v => { otherOverlayOpen = v; },
         advance(ms) {
             now += ms;
@@ -93,4 +94,48 @@ test('no refocus when the palette itself reopened inside the window', () => {
     f.context.openPalette();
     f.advance(50);
     assert.equal(f.refocus.calls, 0, 'the reopened palette keeps its input focus');
+});
+
+// ── Toggle: the palette's own binding closes it while its input holds focus ──
+// Regression: with the palette open, focus lives in palette-input, so the
+// global dispatcher's input guard returned before combo matching and the
+// commandPalette toggle branch was unreachable — Ctrl+P could not close it.
+
+const keyEvent = (init) => ({
+    ctrlKey: false, metaKey: false, altKey: false, shiftKey: false,
+    preventDefault() { this.defaultPrevented = true; },
+    ...init,
+});
+
+test('pressing the palette binding inside its input closes the palette', () => {
+    const f = fixture();
+    f.context.openPalette();
+    const ev = keyEvent({ key: 'p', ctrlKey: true });
+    f.context.paletteKeyDown(ev);
+    assert.equal(ev.defaultPrevented, true, 'the toggle combo is consumed');
+    assert.equal(f.paletteEl.classList.contains('open'), false, 'palette closed');
+
+    f.advance(50);
+    assert.equal(f.refocus.calls, 1, 'closing via the toggle also restores terminal focus');
+});
+
+test('the toggle follows the current binding instead of a hardcoded Ctrl+P', () => {
+    const f = fixture();
+    f.bindings.commandPalette = 'F4'; // user-rebound
+    f.context.openPalette();
+
+    f.context.paletteKeyDown(keyEvent({ key: 'p', ctrlKey: true }));
+    assert.equal(f.paletteEl.classList.contains('open'), true, 'Ctrl+P no longer toggles');
+
+    f.context.paletteKeyDown(keyEvent({ key: 'F4' }));
+    assert.equal(f.paletteEl.classList.contains('open'), false, 'the custom binding toggles');
+});
+
+test('(guard) unrelated keys still reach the input untouched', () => {
+    const f = fixture();
+    f.context.openPalette();
+    const ev = keyEvent({ key: 'x' });
+    f.context.paletteKeyDown(ev);
+    assert.equal(ev.defaultPrevented, undefined, 'typed text is not consumed');
+    assert.equal(f.paletteEl.classList.contains('open'), true, 'palette stays open');
 });
