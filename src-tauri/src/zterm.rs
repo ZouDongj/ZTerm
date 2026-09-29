@@ -680,6 +680,19 @@ fn merge_value(base: &mut Value, over: &Value) {
     }
 }
 
+/// Content for the anchor fallback write in save_config: the existing anchor's
+/// keys survive (above all the dataDir pointer — the anchor is its only store,
+/// and resolve_data_dir reads it from nowhere else), overlaid by the new config.
+/// Split from save_config's file IO for unit testing.
+fn anchor_fallback_content(existing: Option<Value>, new_config: &Value) -> Value {
+    let mut base = match existing {
+        Some(v) if v.is_object() => v,
+        _ => json!({}),
+    };
+    merge_value(&mut base, new_config);
+    base
+}
+
 /// Validate and merge user config: a non-object root counts as corrupt (returns Null +
 /// corrupt flag); an object merges over the defaults. Split from load_config's file IO / backup logic for unit testing.
 fn sanitize_config(raw: Value) -> (Value, bool) {
@@ -735,6 +748,8 @@ fn save_config(config: &Value) {
     let _ = std::fs::remove_file(&tmp);
     // Fallback: default data dir not writable (e.g. no permission in
     // Program Files) — persist to the anchor dir so data is not lost.
+    // The anchor also holds the custom dataDir pointer, so merge over its
+    // current content instead of overwriting it wholesale.
     eprintln!(
         "[zterm] write {} failed, falling back to anchor",
         path.display()
@@ -743,7 +758,14 @@ fn save_config(config: &Value) {
     if let Some(parent) = anchor.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&anchor, &content);
+    let existing = std::fs::read_to_string(&anchor)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let merged = anchor_fallback_content(existing, config);
+    let _ = std::fs::write(
+        &anchor,
+        serde_json::to_string_pretty(&merged).unwrap_or_default(),
+    );
 }
 
 // ── Command: get_profiles (emit profiles event) ──
@@ -5024,6 +5046,33 @@ mod tests {
         assert_eq!(ssh.len(), 1);
         assert_eq!(ssh[0]["host"], "example.com");
         assert_eq!(ssh[0]["port"], 22);
+    }
+
+    #[test]
+    fn anchor_fallback_content_preserves_data_dir_pointer() {
+        // The anchor is the only store of the custom dataDir pointer: the
+        // fallback write must keep it while applying the new config.
+        let existing = json!({ "dataDir": "D:/zterm-data", "lastTabs": ["stale"] });
+        let new_config = json!({ "lastTabs": ["t1"], "appearance": { "fontSize": 16 } });
+        let merged = anchor_fallback_content(Some(existing), &new_config);
+        assert_eq!(merged["dataDir"], "D:/zterm-data");
+        assert_eq!(merged["lastTabs"], json!(["t1"]));
+        assert_eq!(merged["appearance"]["fontSize"], 16);
+    }
+
+    #[test]
+    fn anchor_fallback_content_tolerates_missing_or_corrupt_anchor() {
+        let new_config = json!({ "lastTabs": ["t1"] });
+        // No anchor yet: the new config alone is written.
+        let merged = anchor_fallback_content(None, &new_config);
+        assert_eq!(merged["lastTabs"], json!(["t1"]));
+        assert!(merged.get("dataDir").is_none());
+        // A corrupt (non-object) anchor parses to nothing preservable.
+        for corrupt in [json!(null), json!([]), json!("junk"), json!(42)] {
+            let merged = anchor_fallback_content(Some(corrupt), &new_config);
+            assert_eq!(merged["lastTabs"], json!(["t1"]));
+            assert!(merged.get("dataDir").is_none());
+        }
     }
 
     // open_url validation matrix (pure; no OS side effects).
