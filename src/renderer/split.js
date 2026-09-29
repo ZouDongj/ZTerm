@@ -50,6 +50,13 @@ function _startSpannerDrag(e, tab, container, index) {
     rootEl.classList.add('resizing');
     document.addEventListener('mousemove', _onSpannerDrag);
     document.addEventListener('mouseup', _stopSpannerDrag);
+    // mouseup is not dispatched when the pointer leaves the window or it
+    // loses focus (same environment note as the pane drag in tabs.js):
+    // without this fallback the drag stays live and keeps rewriting the
+    // layout (and suppressing fit) after the pointer returns buttonless.
+    window.addEventListener('pointerup', _stopSpannerDrag);
+    window.addEventListener('pointercancel', _stopSpannerDrag);
+    window.addEventListener('blur', _stopSpannerDrag);
 }
 
 function _onSpannerDrag(e) {
@@ -74,6 +81,9 @@ function _stopSpannerDrag(e) {
     _spannerDrag = null;
     document.removeEventListener('mousemove', _onSpannerDrag);
     document.removeEventListener('mouseup', _stopSpannerDrag);
+    window.removeEventListener('pointerup', _stopSpannerDrag);
+    window.removeEventListener('pointercancel', _stopSpannerDrag);
+    window.removeEventListener('blur', _stopSpannerDrag);
 }
 
 function setToggle(id, on) {
