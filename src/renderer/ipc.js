@@ -570,13 +570,24 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, attemptId, error }) => 
         // closing the pane (not the tab) during the backoff must not spawn a
         // backend for a dead pane.
         const token = (tab._sshRetryToken = (tab._sshRetryToken || 0) + 1);
+        // A split collapse during the backoff adopts the failed pane back
+        // into the tab (_exitSplit: tab.term = pane.term, splitRoot = null) —
+        // the pane leaves the tree, yet its session is still owed this retry.
+        // Term identity detects the adoption (a destroyed pane's terminal
+        // never matches the adopted one); extract and cross-tab drag cannot
+        // race this — both require pane.tabId, which the retry branch above
+        // already cleared.
+        const paneAdopted = () => !!pane && !tab.splitRoot && !!retryTerm && tab.term === retryTerm;
         const stillWanted = () => tab._sshRetryToken === token && TabManager.tabs.includes(tab)
-            && (!pane || TabManager.tabs.some(t => t.id === tab.id && getAllPanes(t).some(p => p.id === pane.id)));
+            && (!pane || paneAdopted()
+                || TabManager.tabs.some(t => t.id === tab.id && getAllPanes(t).some(p => p.id === pane.id)));
         setTimeout(() => {
             if (!stillWanted()) return; // superseded / tab or pane closed
             // The retry is a NEW attempt identity (the old one was cancelled
-            // explicitly above — no implicit supersede).
-            _sshConnectWithCredentials(tab, pane);
+            // explicitly above — no implicit supersede). An adopted pane's
+            // wrapper is dead — its session fields moved onto the tab with the
+            // terminal, so the retry connects the tab instead.
+            _sshConnectWithCredentials(tab, paneAdopted() ? null : pane);
         }, backoffMs);
         return;
     }

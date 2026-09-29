@@ -1504,6 +1504,23 @@ fn rand_suffix() -> String {
     format!("{:08x}", nanos)
 }
 
+/// Parse and validate the SSH port from a profile: must be within 1-65535.
+/// Values above 65535 are rejected with the offending value in the message —
+/// a bare `as u16` would silently truncate them (70000 becomes 4464), pointing
+/// the connection and every error report at the wrong port.
+fn parse_ssh_port(profile: &Value) -> Result<u16, String> {
+    let raw = profile.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
+    if raw == 0 {
+        return Err("ssh-connect: missing or invalid port".into());
+    }
+    if raw > u16::MAX as u64 {
+        return Err(format!(
+            "ssh-connect: invalid port {raw} (expected 1-65535)"
+        ));
+    }
+    Ok(raw as u16)
+}
+
 #[tauri::command]
 pub async fn ssh_connect(
     app: AppHandle,
@@ -1531,10 +1548,7 @@ pub async fn ssh_connect(
     if host.is_empty() {
         return Err("ssh-connect: missing host".into());
     }
-    let port = profile.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-    if port == 0 {
-        return Err("ssh-connect: missing or invalid port".into());
-    }
+    let port = parse_ssh_port(profile)?;
     let username = profile
         .get("username")
         .and_then(|v| v.as_str())
@@ -5899,6 +5913,28 @@ mod tests {
         let sends = execute_unconditional(&mut scripts);
         assert!(sends.is_empty());
         assert_eq!(scripts.len(), 1);
+    }
+
+    #[test]
+    fn ssh_port_validation_rejects_out_of_range_values() {
+        // Regression: `as u16` silently truncated 70000 to 4464, connecting to
+        // the wrong port and reporting errors against it.
+        assert_eq!(parse_ssh_port(&json!({ "port": 22 })).unwrap(), 22);
+        assert_eq!(parse_ssh_port(&json!({ "port": 65535 })).unwrap(), 65535);
+        // Missing / zero keeps the original message.
+        assert_eq!(
+            parse_ssh_port(&json!({})).unwrap_err(),
+            "ssh-connect: missing or invalid port"
+        );
+        assert_eq!(
+            parse_ssh_port(&json!({ "port": 0 })).unwrap_err(),
+            "ssh-connect: missing or invalid port"
+        );
+        // Out of range: rejected, and the message names the user's own value.
+        let err = parse_ssh_port(&json!({ "port": 70000 })).unwrap_err();
+        assert!(err.contains("70000"), "error must name the input port: {err}");
+        let err = parse_ssh_port(&json!({ "port": 65536 })).unwrap_err();
+        assert!(err.contains("65536"), "error must name the input port: {err}");
     }
 
     #[test]
