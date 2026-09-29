@@ -1301,6 +1301,15 @@ const TabManager = {
         if (!state) return;
         const sourcePane = state.sourcePane;
         if (zone.relativeTo === sourcePane) { this._onPaneDragEnd(); return; }
+        // A zone that names a sub-container holding ONLY the dragged pane and
+        // one sibling collapses to that sibling when the pane detaches (the
+        // normalize below): re-anchor the drop to the sibling now. Inserting
+        // against the detached container computes a stale index and lands the
+        // pane on a root edge instead.
+        let rel = zone.relativeTo;
+        if (rel && rel.orientation && rel.children.length === 2 && rel.children.indexOf(sourcePane) >= 0) {
+            rel = rel.children[rel.children[0] === sourcePane ? 1 : 0];
+        }
         // 1. Detach from the original parent container (Tabby: removeTab before add)
         const parent = getParentOf(tab, sourcePane);
         if (!parent) { this._onPaneDragEnd(); return; }
@@ -1309,7 +1318,7 @@ const TabManager = {
         parent.ratios.splice(idx, 1);
         normalize(tab.splitRoot);
         // 2. Insert per the zone's side at the position relative to relativeTo (reuses the Tabby-semantics add)
-        this.add(tab, sourcePane, zone.relativeTo, zone.side);
+        this.add(tab, sourcePane, rel, zone.side);
         this._onPaneDragEnd();
         this._renderSplit(tab);
     },
