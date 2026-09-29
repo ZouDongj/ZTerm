@@ -477,12 +477,14 @@ const TransferManager = {
     // Session display name for a transfer owner (snapshotted at add/complete
     // time so closed sessions still group correctly afterwards).
     _sessionLabel(tabId) {
+        // A split tab's own tabId is structurally null (the session lives on
+        // its panes), so panes must be searched first — same lookup order as
+        // _findSessionOwner in ipc.js.
         for (const tab of (TabManager.tabs || [])) {
-            if (tab.tabId === tabId) {
-                if (tab.splitRoot) {
-                    const pane = getAllPanes(tab).find(p => p.tabId === tabId);
-                    if (pane) return pane.name || tab.name || tab.host || tabId;
-                }
+            if (tab.splitRoot) {
+                const pane = getAllPanes(tab).find(p => p.tabId === tabId);
+                if (pane) return pane.name || tab.name || tab.host || tabId;
+            } else if (tab.tabId === tabId) {
                 return tab.name || tab.host || tabId;
             }
         }
