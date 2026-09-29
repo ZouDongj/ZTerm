@@ -37,13 +37,45 @@ window.electronAPI = {
     close: () => { saveConfig(); ipcRenderer.send('window-close'); },
 };
 
-// Update the maximize/restore icon when the window state changes
-ipcRenderer.on('window-state-changed', (event, { maximized }) => {
+// Shared applier for the maximize/restore presentation (button glyph + window
+// class). Both the button-path event below and the native-state sync use it,
+// so the two paths can never disagree about the visible state.
+function _applyMaximizeState(maximized) {
     const btn = document.getElementById('win-maximize');
     if (btn) btn.textContent = maximized ? '\uE923' : '\uE922'; // Restore ↔ Maximize
     const winEl = document.querySelector('.window');
     if (winEl) winEl.classList.toggle('is-maximized', maximized);
+}
+
+// Update the maximize/restore icon when the window state changes
+ipcRenderer.on('window-state-changed', (event, { maximized }) => {
+    // The button path states the post-toggle fact: retire any in-flight
+    // native-state query so a stale pre-toggle answer cannot overwrite it.
+    _maxSyncSeq++;
+    _applyMaximizeState(maximized);
 });
+
+// Native maximize paths (titlebar double-click, Win+Up, edge snap, startup
+// restore) never reach the window_maximize command, so window-state-changed
+// stays silent and the glyph/class go stale — the button then acts opposite
+// to its icon. Re-read the authoritative window state on every viewport
+// resize (plus once at window-shown, covering a maximize that settles before
+// any renderer-visible resize) and apply it through the same applier. Only
+// presentation is synced here; window management behavior is untouched.
+let _maxSyncSeq = 0;
+function _syncMaximizeStateFromWindow() {
+    const tauriWindow = (window.__TAURI__ && window.__TAURI__.window) || null;
+    if (!tauriWindow || typeof tauriWindow.getCurrentWindow !== 'function') return;
+    let win = null;
+    try { win = tauriWindow.getCurrentWindow(); } catch (e) { return; }
+    if (!win || typeof win.isMaximized !== 'function') return;
+    const seq = ++_maxSyncSeq; // only the latest query may apply its answer
+    Promise.resolve(win.isMaximized())
+        .then(m => { if (seq === _maxSyncSeq) _applyMaximizeState(!!m); })
+        .catch(() => {});
+}
+window.addEventListener('resize', _syncMaximizeStateFromWindow);
+ipcRenderer.on('window-shown', () => _syncMaximizeStateFromWindow());
 
 // ── Globally disable form autofill / spellcheck suggestions ──
 // WebView2 autofill is already disabled in the main process (general_autofill_enabled(false));
