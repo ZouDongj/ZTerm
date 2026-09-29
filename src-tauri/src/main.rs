@@ -138,8 +138,13 @@ async fn main() {
             // On close, notify the renderer to save state; also save the window state (position/size/maximized)
             let handle = app.handle().clone();
             let win_for_state = window.clone();
+            // Set once a close was intercepted and the renderer was asked to
+            // save: later close requests (repeated Alt+F4) only re-prevent,
+            // without a duplicate save emit or a second force-exit timer.
+            let quit_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let quit_flag = Arc::clone(&quit_requested);
             window.on_window_event(move |event| {
-                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     if let (Ok(pos), Ok(size)) =
                         (win_for_state.outer_position(), win_for_state.outer_size())
                     {
@@ -151,7 +156,23 @@ async fn main() {
                             maximized: win_for_state.is_maximized().unwrap_or(false),
                         });
                     }
-                    let _ = handle.emit("app-before-quit", json!({}));
+                    // Hold the window open until the renderer's final save hits
+                    // disk: without prevent_close, tao destroys the window and
+                    // WebView as soon as this handler returns, so the renderer's
+                    // async saveConfig could never finish (quit_ready stayed
+                    // dead code) and the last <15s of tab state was lost on
+                    // Alt+F4/taskbar close. The renderer answers app-before-quit
+                    // with quit-ready (which exits the process); if the renderer
+                    // is hung or already gone, the timer force-exits so the
+                    // window can never become unclosable.
+                    api.prevent_close();
+                    if !quit_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        let _ = handle.emit("app-before-quit", json!({}));
+                        std::thread::spawn(|| {
+                            std::thread::sleep(std::time::Duration::from_secs(3));
+                            std::process::exit(0);
+                        });
+                    }
                 }
             });
             // Fallback: if renderer init fails or crashes, renderer-ready never fires and the
