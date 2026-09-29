@@ -707,9 +707,16 @@ fn sanitize_config(raw: Value) -> (Value, bool) {
 }
 
 fn load_config() -> Value {
-    let path = config_path();
+    load_config_from(&config_path(), &anchor_config_path())
+}
+
+/// Data-dir config first; when it is missing entirely, read the anchor's full
+/// config back — the anchor is save_config's fallback mirror, so settings
+/// survive a data dir that stays unwritable. Split from load_config's path
+/// resolution for unit testing (passes explicit paths).
+fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
     if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(content) = std::fs::read_to_string(path) {
             if let Ok(raw) = serde_json::from_str::<Value>(&content) {
                 let (merged, corrupt) = sanitize_config(raw);
                 if !corrupt {
@@ -725,16 +732,31 @@ fn load_config() -> Value {
                 .unwrap_or_default()
                 .as_secs();
             let backup = path.with_file_name(format!("config.json.corrupt-{}", ts));
-            let _ = std::fs::copy(&path, &backup);
+            let _ = std::fs::copy(path, &backup);
             if let Some(app) = APP_HANDLE.get() {
                 let _ = app.emit("config-corrupted", json!({}));
+            }
+        }
+    } else if anchor.exists() {
+        if let Ok(content) = std::fs::read_to_string(anchor) {
+            if let Ok(raw) = serde_json::from_str::<Value>(&content) {
+                let (mut merged, corrupt) = sanitize_config(raw);
+                if !corrupt {
+                    // The dataDir pointer lives only in the anchor; don't leak
+                    // it into the effective config (and from there into the
+                    // data-dir config on the next save).
+                    if let Value::Object(ref mut m) = merged {
+                        m.remove("dataDir");
+                    }
+                    return merged;
+                }
             }
         }
     }
     default_config()
 }
 
-fn save_config(config: &Value) {
+fn save_config(config: &Value) -> Result<(), String> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -743,7 +765,7 @@ fn save_config(config: &Value) {
     // Atomic write: tmp + rename, so a mid-write crash cannot leave a corrupt config
     let tmp = path.with_extension("json.tmp");
     if std::fs::write(&tmp, &content).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-        return;
+        return Ok(());
     }
     let _ = std::fs::remove_file(&tmp);
     // Fallback: default data dir not writable (e.g. no permission in
@@ -762,10 +784,16 @@ fn save_config(config: &Value) {
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok());
     let merged = anchor_fallback_content(existing, config);
-    let _ = std::fs::write(
+    std::fs::write(
         &anchor,
         serde_json::to_string_pretty(&merged).unwrap_or_default(),
-    );
+    )
+    .map_err(|e| {
+        format!(
+            "write config to {} failed and the anchor fallback also failed: {e}",
+            path.display()
+        )
+    })
 }
 
 // ── Command: get_profiles (emit profiles event) ──
@@ -2155,11 +2183,10 @@ pub async fn save_last_tabs(args: Vec<Value>) -> Result<(), String> {
         if let Value::Object(ref mut c) = config {
             c.insert("lastTabs".into(), tabs);
         }
-        save_config(&config);
+        save_config(&config)
     })
     .await
-    .map_err(|e| format!("save last tabs task: {e}"))?;
-    Ok(())
+    .map_err(|e| format!("save last tabs task: {e}"))?
 }
 
 #[tauri::command]
@@ -2170,8 +2197,7 @@ pub fn save_appearance(args: Vec<Value>) -> Result<(), String> {
     if let Value::Object(ref mut c) = config {
         c.insert("appearance".into(), appearance);
     }
-    save_config(&config);
-    Ok(())
+    save_config(&config)
 }
 
 // ── Window state persistence (Tabby-style: remember last position/size/maximized state) ──
@@ -2220,7 +2246,10 @@ pub fn save_window_state(state: &WindowState) {
     if let Value::Object(ref mut c) = config {
         c.insert("window".into(), window_state_to_config(state));
     }
-    save_config(&config);
+    // No calling command to report to (fired from window events): log only.
+    if let Err(e) = save_config(&config) {
+        eprintln!("[zterm] {e}");
+    }
 }
 
 // Called once the renderer has loaded (window-shown listener registered): restore window
@@ -2344,7 +2373,7 @@ pub fn save_quick_commands(args: Vec<Value>) -> Result<Value, String> {
         let _config_guard = CONFIG_WRITE_LOCK.lock();
         c.insert("quickCommands".into(), commands);
     }
-    save_config(&config);
+    save_config(&config)?;
     Ok(json!({ "ok": true }))
 }
 
@@ -2388,7 +2417,7 @@ pub fn save_highlight_rules(args: Vec<Value>) -> Result<Value, String> {
             }
         }
     }
-    save_config(&config);
+    save_config(&config)?;
     Ok(json!({ "ok": true }))
 }
 
@@ -2402,7 +2431,7 @@ pub fn save_terminal_settings(args: Vec<Value>) -> Result<Value, String> {
     if let Value::Object(ref mut c) = config {
         c.insert("terminal".into(), settings);
     }
-    save_config(&config);
+    save_config(&config)?;
     Ok(json!({ "ok": true }))
 }
 
@@ -2417,7 +2446,7 @@ pub fn save_ssh_profiles(app: AppHandle, args: Vec<Value>) -> Result<Value, Stri
     if let Value::Object(ref mut c) = config {
         c.insert("sshProfiles".into(), profiles);
     }
-    save_config(&config);
+    save_config(&config)?;
     // The renderer listens for the ssh-profiles-saved event to refresh its UI
     let _ = app.emit("ssh-profiles-saved", json!({}));
     Ok(json!({ "ok": true }))
@@ -2433,7 +2462,7 @@ pub fn save_shortcuts(args: Vec<Value>) -> Result<Value, String> {
     if let Value::Object(ref mut c) = config {
         c.insert("shortcuts".into(), shortcuts);
     }
-    save_config(&config);
+    save_config(&config)?;
     Ok(json!({ "ok": true }))
 }
 
@@ -5073,6 +5102,71 @@ mod tests {
             assert_eq!(merged["lastTabs"], json!(["t1"]));
             assert!(merged.get("dataDir").is_none());
         }
+    }
+
+    fn config_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("zterm-cfgtest-{}-{}", std::process::id(), name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn load_config_from_reads_back_anchor_when_data_dir_config_missing() {
+        // The data dir staying unwritable must not reset settings to factory:
+        // the anchor mirror (written by save_config's fallback) is read back.
+        let dir = config_test_dir("anchor-readback");
+        let data_dir_config = dir.join("data").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        std::fs::write(
+            &anchor,
+            serde_json::to_string(&json!({
+                "dataDir": "D:/zterm-data",
+                "appearance": { "fontSize": 18 },
+                "quickCommands": [{ "name": "uptime" }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let cfg = load_config_from(&data_dir_config, &anchor);
+        assert_eq!(cfg["appearance"]["fontSize"], 18);
+        assert_eq!(cfg["quickCommands"][0]["name"], "uptime");
+        // Defaults still fill the gaps, and the pointer does not leak into the
+        // effective config.
+        assert_eq!(cfg["appearance"]["theme"], "dark");
+        assert!(cfg.get("dataDir").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_config_from_prefers_data_dir_config_over_anchor() {
+        let dir = config_test_dir("data-dir-first");
+        let data_dir_config = dir.join("data").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(data_dir_config.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        std::fs::write(&data_dir_config, serde_json::to_string(&json!({ "appearance": { "fontSize": 12 } })).unwrap()).unwrap();
+        std::fs::write(&anchor, serde_json::to_string(&json!({ "appearance": { "fontSize": 18 } })).unwrap()).unwrap();
+        let cfg = load_config_from(&data_dir_config, &anchor);
+        assert_eq!(cfg["appearance"]["fontSize"], 12);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_config_from_defaults_when_nothing_readable() {
+        let dir = config_test_dir("nothing");
+        let missing = dir.join("missing").join("config.json");
+        // Both missing → factory defaults.
+        let cfg = load_config_from(&missing, &missing);
+        assert_eq!(cfg, default_config());
+        // Anchor present but not an object → defaults, no panic.
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        std::fs::write(&anchor, "[1,2,3]").unwrap();
+        let cfg = load_config_from(&missing, &anchor);
+        assert_eq!(cfg, default_config());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // open_url validation matrix (pure; no OS side effects).
