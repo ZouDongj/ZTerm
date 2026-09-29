@@ -334,7 +334,14 @@ function startRenameQCGroup(btn) {
     // the finish(true) commit path on the next click instead of re-entering rename
     const originalOnClick = btn.getAttribute('onclick');
 
+    // One-shot guard (same pattern as sftp.js _editPath): finish() removes the
+    // still-focused input from the document, which makes Blink dispatch blur
+    // SYNCHRONOUSLY — without the guard the nested blur re-enters finish(true)
+    // and an Esc cancel still saves the typed name.
+    let done = false;
     const finish = (save) => {
+        if (done) return;
+        done = true;
         const newName = save ? input.value.trim() : oldName;
         const span = document.createElement('span');
         span.className = 'group-name-text';

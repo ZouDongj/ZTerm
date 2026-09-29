@@ -215,6 +215,11 @@ function baseCtx(doc) {
     return ctx;
 }
 
+// Top-level `let` bindings (e.g. _qcCommands) are lexical to the VM's global
+// scope — they are NOT reachable as context-object properties from the test
+// side. Read or replace them by evaluating inside the context.
+export function runIn(ctx, code) { return vm.runInContext(code, ctx); }
+
 export function loadSshVm() {
     const ctx = baseCtx(mkDoc());
     vm.createContext(ctx);
