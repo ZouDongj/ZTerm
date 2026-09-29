@@ -12,6 +12,8 @@ const SFTP = {
     _refreshInFlight: null,  // identity {epoch} of the upload-refresh run that owns the coalescing slot; only that run's own finally may clear/drain it (a stale finally cannot touch a successor view)
     _refreshQueued: null,    // owner {tabId,path} owed one coalesced follow-up refresh once the current binding's in-flight refresh settles
     _editingPath: false, // breadcrumb path edit in progress (a cwd follow must not destroy it)
+    _mkdir: null,      // inline mkdir edit state {tabId, base, ready, moving, row} while its input row is open
+    _sessionDead: false, // the bound session died mid-panel: navigations are refused until a fresh open() rebinds
     _pinned: {},       // tabId -> boolean, per-tab pin state
     _pinnedPath: {},   // tabId -> path, per-tab pinned path
 
@@ -57,6 +59,8 @@ const SFTP = {
         this._path = '/';
         this._files = [];
         this._listed = false;
+        this._sessionDead = false;
+        this._mkdir = null;
         // A fresh binding starts a new request generation: in-flight requests of
         // the previous binding (even of this same backend after close/reopen) no
         // longer count as loads of this view and cannot re-arm its refreshes.
@@ -136,9 +140,22 @@ const SFTP = {
         if (tab) {
             if (tab.splitRoot) {
                 const focused = getAllPanes(tab).find(p => p.focused);
-                if (focused && focused.term) setTimeout(() => focused.term.focus(), 50);
+                if (focused && focused.term) setTimeout(() => {
+                    // Fire-time liveness check (openToken convention): a pane
+                    // close or reconnect inside the delay nulls or disposes
+                    // the terminal; focusing through the scheduling-time
+                    // guard would throw.
+                    const term = focused.term;
+                    if (!term) return;
+                    try { term.focus(); } catch (e) {}
+                }, 50);
             } else if (tab.term) {
-                setTimeout(() => tab.term.focus(), 50);
+                setTimeout(() => {
+                    // Same fire-time liveness check for the non-split tab.
+                    const term = tab.term;
+                    if (!term) return;
+                    try { term.focus(); } catch (e) {}
+                }, 50);
             }
         }
     },
@@ -149,9 +166,22 @@ const SFTP = {
 
     async navigate(path, opts) {
         if (!this._tabId) return;
+        // A dead binding can only fail: keep the explicit dead state on
+        // screen instead of churning error toasts and failure renders.
+        if (this._sessionDead) return;
         // validate the path before refreshing the view
         const body = document.getElementById('sftp-body');
+        // An in-progress mkdir edit follows the breadcrumb precedent: a user
+        // navigation ends it; a background follow/refresh must preserve the
+        // typed input across the loading swap and the re-render (hold/restore).
+        const nonUser = !!(opts && (opts.follow || opts.refresh));
+        let held = null;
+        if (this._mkdir) {
+            if (nonUser) held = this._holdMkdirRow();
+            else this._mkdir = null;
+        }
         body.innerHTML = '<div class="sftp-empty">加载中…</div>';
+        this._restoreMkdirRow(held, body);
         // Request sequence + ownership check (same as open); a closed panel
         // (any close route, including closeOverlay's class-only removal) owns nothing
         const myTab = this._tabId;
@@ -214,6 +244,14 @@ const SFTP = {
     // then-current path. Direct user navigations still end an in-progress edit.
     _renderListing(nonUser) {
         if (!(nonUser && this._editingPath)) this._renderBreadcrumb();
+        // The mkdir edit tracks the background view: a non-user listing
+        // landing keeps the input (restored by _renderFiles) and re-targets
+        // its pending commit at the directory now on screen; a user listing
+        // already ended the edit (navigate's loading swap retired it).
+        if (this._mkdir) {
+            if (nonUser) { this._mkdir.base = this._path; this._mkdir.ready = this._listed; }
+            else this._mkdir = null;
+        }
         this._renderFiles();
     },
 
@@ -229,6 +267,26 @@ const SFTP = {
         } else {
             this._renderListing(opts && (opts.follow || opts.refresh));
         }
+    },
+
+    // Enter the explicit dead-session state: the dead listing is cleared
+    // (its rows must not invite interactions that can only fail with
+    // "会话不可用"), in-flight requests of the dead binding are retired (the
+    // same reset close() performs, so their late responses/rejections can
+    // neither repaint nor toast over this state), and further navigations
+    // are refused until a fresh open() rebinds the panel. Reconnects close
+    // the panel (tab teardown contract in tabs.js), so recovery is the
+    // reopen's fresh load.
+    _markSessionDead() {
+        this._files = [];
+        this._listed = false;
+        this._sessionDead = true;
+        this._reqSeq++;
+        this._viewReq = null;
+        this._refreshQueued = null;
+        this._refreshInFlight = null;
+        this._mkdir = null;
+        document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">会话已断开，请重新连接后再使用 SFTP</div>';
     },
 
     _renderBreadcrumb() {
@@ -300,6 +358,9 @@ const SFTP = {
 
     _renderFiles() {
         const body = document.getElementById('sftp-body');
+        // Preserve an in-progress mkdir input across the rebuild: the row is
+        // held (detached, not destroyed) and restored at the top afterwards.
+        const held = this._holdMkdirRow();
         body.innerHTML = '';
         // ".." row
         if (this._path !== '/') {
@@ -328,6 +389,7 @@ const SFTP = {
             body.appendChild(el);
         });
         if (!body.children.length) body.innerHTML = '<div class="sftp-empty">空目录</div>';
+        this._restoreMkdirRow(held, body);
     },
 
     goUp() {
@@ -368,12 +430,17 @@ const SFTP = {
     },
 
     async download(remotePath, filename) {
+        // Snapshot the session BEFORE the save-dialog await: the panel may
+        // be closed or rebound to another session while the dialog is open —
+        // the transfer must go to the session the user clicked, not
+        // this._tabId's post-dialog value (same contract as upload()).
+        const owner = { tabId: this._tabId };
         const result = await ipcRenderer.invoke('show-save-dialog', { defaultPath: filename });
         if (result.canceled) return;
-        const tid = TransferManager.add(filename, 'download', this._tabId, result.filePath);
+        const tid = TransferManager.add(filename, 'download', owner.tabId, result.filePath);
         let transferResult;
         try {
-            transferResult = await ipcRenderer.invoke('sftp-download', { tabId: this._tabId, remotePath, localPath: result.filePath, transferId: tid });
+            transferResult = await ipcRenderer.invoke('sftp-download', { tabId: owner.tabId, remotePath, localPath: result.filePath, transferId: tid });
         } catch (e) {
             TransferManager.cancel(tid);
             showToast('下载失败: ' + (e?.message || '会话不可用'), true);
@@ -436,12 +503,44 @@ const SFTP = {
         }
     },
 
+    // Best-effort remote same-name detection for an upload batch, judged
+    // against the panel's CURRENT listing of the owner directory. When the
+    // panel no longer displays that directory (rebound, navigated away, or
+    // never listed) nothing can be judged and the batch proceeds unasked —
+    // the pre-fix behavior.
+    _uploadConflictCount(owner, localPaths) {
+        if (!this._listed || this._tabId !== owner.tabId || this._path !== owner.path) return 0;
+        const remote = new Set(this._files.map(f => f.name));
+        let count = 0;
+        for (const p of (localPaths || [])) {
+            const name = String(p).split(/[\\/]/).pop();
+            if (name && remote.has(name)) count++;
+        }
+        return count;
+    },
+
+    // Overwrite confirmation for an upload batch that would replace remote
+    // files (reuses the shared #overlay-confirm via showConfirm). Resolves
+    // true only on the dialog's OK; every other dismissal (cancel, backdrop,
+    // Escape via closeAllOverlays) leaves it unsettled so the batch is
+    // silently dropped — the same onOk-only semantics showConfirm gives its
+    // other consumers.
+    _confirmUploadOverwrite(count) {
+        return new Promise(resolve => {
+            showConfirm(`远程目录已有 ${count} 个同名文件，继续上传将覆盖远端文件。是否继续？`, () => resolve(true), '覆盖');
+        });
+    },
+
     async upload() {
         // Snapshot the operation target BEFORE the file-dialog await: the panel
         // may be closed or rebound to another session while the dialog is open.
         const owner = { tabId: this._tabId, path: this._path };
         const result = await ipcRenderer.invoke('show-open-dialog', { properties: ['openFile', 'multiSelections'] });
         if (result.canceled || !result.filePaths.length) return;
+        // Same-name overwrite gate: one confirmation for the whole batch,
+        // judged against the listing the user is looking at.
+        const conflicts = this._uploadConflictCount(owner, result.filePaths);
+        if (conflicts > 0 && !(await this._confirmUploadOverwrite(conflicts))) return;
         for (const localPath of result.filePaths) {
             await this.uploadLocal(localPath, owner);
         }
@@ -451,28 +550,55 @@ const SFTP = {
         // Electron does not support window.prompt() — use an inline input row at the top of the file list instead
         const body = document.getElementById('sftp-body');
         if (document.getElementById('sftp-mkdir-row')) return;
+        // Entry guard, same as the breadcrumb editor (_editPath): a user
+        // navigation/open in flight re-renders the view on completion, which
+        // would destroy the half-typed input; background follow/refresh
+        // completions preserve it (_renderListing nonUser), so they do not
+        // block entry.
+        if (this._viewReq && this._viewReq.user) return;
+        if (this._sessionDead) return; // a dead session accepts no mkdir
+        // Commit snapshot, taken when the input opens (upload-owner
+        // precedent): the commit never re-reads this._path/this._tabId — a
+        // cwd follow may have moved the view meanwhile — and a snapshot from
+        // a view whose listing never landed (a fresh open still shows the '/'
+        // placeholder) refuses to commit, so Enter during the initial load
+        // cannot create the directory at the filesystem root.
+        const snap = this._mkdir = { tabId: this._tabId, base: this._path, ready: this._listed, moving: false, row: null };
         const row = document.createElement('div');
         row.className = 'sftp-item';
         row.id = 'sftp-mkdir-row';
         row.innerHTML = '<span class="sftp-item-icon ic-amber">' + Icons.iconSvg('folder', 14) + '</span><input class="inline-edit" placeholder="新建目录名称，Enter 确认 / Esc 取消" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none">';
+        snap.row = row;
         body.insertBefore(row, body.firstChild);
         const input = row.querySelector('input');
         input.focus();
         var removed = false;
+        const close = () => {
+            if (!removed) { removed = true; row.remove(); }
+            if (SFTP._mkdir === snap) SFTP._mkdir = null;
+        };
         input.addEventListener('keydown', async (e) => {
             if (e.key === 'Escape') {
                 e.preventDefault(); e.stopPropagation();
-                if (!removed) { removed = true; row.remove(); }
+                close();
                 return;
             }
             if (e.key !== 'Enter') return;
             const name = input.value.trim();
-            if (!removed) { removed = true; row.remove(); }
-            if (!name) return;
-            const path = (this._path === '/' ? '' : this._path) + '/' + name;
+            if (!name) { close(); return; }
+            if (!snap.ready) {
+                // Listing not ready: the snapshot's base is a still-loading
+                // view's '/' placeholder — refuse and keep the row (a
+                // background listing landing while the row stays open
+                // re-arms the snapshot, so a retry works).
+                showToast('目录列表尚未加载，无法创建', true);
+                return;
+            }
+            close();
+            const path = (snap.base === '/' ? '' : snap.base) + '/' + name;
             let result;
             try {
-                result = await ipcRenderer.invoke('sftp-mkdir', { tabId: this._tabId, path });
+                result = await ipcRenderer.invoke('sftp-mkdir', { tabId: snap.tabId, path });
             } catch (e) {
                 showToast('创建失败: ' + (e?.message || '会话不可用'), true);
                 return;
@@ -488,7 +614,29 @@ const SFTP = {
                 await this.refresh();
             }
         });
-        input.addEventListener('blur', () => { if (!removed) { removed = true; row.remove(); } });
+        // `moving` gates this handler for programmatic hold/restore cycles
+        // (_holdMkdirRow detaches the row, which blurs the input).
+        input.addEventListener('blur', () => { if (!removed && !snap.moving) close(); });
+    },
+
+    // Hold/restore the in-progress mkdir input row across a body rebuild: the
+    // row is detached (not destroyed) so the typed value, caret and listeners
+    // survive; `moving` keeps the input's blur handler from consuming the
+    // row for a programmatic move it did not cause.
+    _holdMkdirRow() {
+        const snap = this._mkdir;
+        if (!snap || !snap.row || !snap.row.parentElement) return null;
+        snap.moving = true;
+        snap.row.remove();
+        return snap;
+    },
+
+    _restoreMkdirRow(snap, body) {
+        if (!snap) return;
+        body.insertBefore(snap.row, body.firstChild);
+        snap.moving = false;
+        const input = snap.row.querySelector('input');
+        if (input) input.focus();
     },
 
 };
@@ -790,6 +938,32 @@ ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd } = {}) => {
     }
 });
 
+// SFTP session death: a mid-session disconnect leaves the panel bound to a
+// dead backend id — every command would reject with "会话不可用" while the
+// listing still showed the dead session's files. When the disconnect reason
+// for the panel's own session lands (same gating as the terminal's reason
+// line in ipc.js: user-initiated closes are excluded) and that session is
+// already marked disconnected, the panel switches to the explicit dead
+// state instead of keeping the stale listing.
+ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) => {
+    if (kind === 'closed' || !reason) return;
+    if (!SFTP.isOpen || SFTP._tabId !== tabId) return;
+    // The reason event can race ahead of ssh-disconnected (which flips the
+    // connected flag): only an owner that is already in the disconnected
+    // state counts as dead; an id no tab owns anymore cannot be alive.
+    let dead = true;
+    for (const tab of TabManager.tabs) {
+        if (tab.splitRoot) {
+            if (!getAllPanes(tab).some(p => p.tabId === tabId)) continue;
+        } else if (tab.tabId !== tabId) {
+            continue;
+        }
+        dead = !tab.connected;
+        break;
+    }
+    if (dead) SFTP._markSessionDead();
+});
+
 // ── SFTP drag-and-drop upload (drop files onto the panel to upload into the current remote directory) ──
 (() => {
     const win = document.querySelector('#overlay-sftp .sftp-window');
@@ -804,6 +978,10 @@ ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd } = {}) => {
         // Same ownership contract as upload(): one snapshot for the whole batch,
         // taken synchronously at drop time (uploads still start concurrently).
         const owner = { tabId: SFTP._tabId, path: SFTP._path };
+        // Same-name overwrite gate as the toolbar upload(): one confirmation
+        // for the whole batch, judged against the listing being dropped onto.
+        const conflicts = SFTP._uploadConflictCount(owner, paths);
+        if (conflicts > 0 && !(await SFTP._confirmUploadOverwrite(conflicts))) return;
         for (const p of (paths || [])) {
             if (!p) continue;
             // The renderer fs shim's statSync is a stub whose isDirectory() is
