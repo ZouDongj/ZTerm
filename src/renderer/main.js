@@ -60,7 +60,10 @@ function saveConfig() {
         .filter(t => t.type !== 'settings')
         .map((t, i) => {
             let saveName = t.name;
-            const entry = { name: saveName, type: t.type, command: t.command || 'powershell.exe', args: t.args || [], content: t.splitRoot ? '' : (t._contentBuffer || '') };
+            // customName persists the manual-rename lock (tabs.js sets _customName
+            // so pane changes stop overwriting the name); without it a restart
+            // would recompute the name over the user's rename.
+            const entry = { name: saveName, type: t.type, command: t.command || 'powershell.exe', args: t.args || [], content: t.splitRoot ? '' : (t._contentBuffer || ''), customName: t._customName === true };
             if (t.splitRoot) {
                 entry.splitRoot = serializeSplitNode(t.splitRoot);
             }
