@@ -11,16 +11,28 @@ function _refocusActiveTerminal() {
     }
 }
 
+// Fire-time focus target for the active tab: the focused pane of a split tab,
+// else the tab terminal; null when there is nothing to refocus (settings tab,
+// pane without a terminal), so scheduled focus work no-ops instead.
+function _activeTerminalTerm() {
+    const tab = TabManager.getActive();
+    if (!tab || tab.type === 'settings') return null;
+    if (tab.splitRoot) {
+        const focused = getAllPanes(tab).find(p => p.focused);
+        return (focused && focused.term) || null;
+    }
+    return tab.term || null;
+}
+
 window.electronAPI = {
     minimize: () => ipcRenderer.send('window-minimize'),
     maximize: () => {
         ipcRenderer.send('window-maximize');
         // Toggle icon will update via window-state-changed event
-        setTimeout(() => {
-            requestAnimationFrame(() => requestAnimationFrame(() => {
-                _refocusActiveTerminal();
-            }));
-        }, 200);
+        // Passive scheduled focus, not a bare timer: the owner is re-resolved
+        // at fire time, and the intent guard yields to any form focus the user
+        // took within the window (search bar, rename input, ...).
+        _scheduleTerminalFocus(_activeTerminalTerm, 200, true);
     },
     close: () => { saveConfig(); ipcRenderer.send('window-close'); },
 };
