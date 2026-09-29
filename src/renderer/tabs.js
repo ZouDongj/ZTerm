@@ -1871,7 +1871,14 @@ const TabManager = {
         np.focused = true;
         targetTab._maximizedPaneId = null;
         const ss = document.getElementById('split_' + sourceTabId);
-        if (ss && sourceTabId !== targetTabId) ss.remove();
+        if (ss && sourceTabId !== targetTabId) {
+            // Blink keeps ResizeObserver-observed nodes (and their whole DOM
+            // subtrees) alive: disconnect every pane-body observer before
+            // dropping the source subtree — surviving panes are rebuilt with
+            // fresh bodies/observers below.
+            ss.querySelectorAll('.pane-body').forEach(b => { if (b._resizeObserver) b._resizeObserver.disconnect(); });
+            ss.remove();
+        }
         const sw = document.getElementById('wrap_' + sourceTabId);
         if (sw && sourceTabId !== targetTabId) sw.remove();
         if (sc) sc();
