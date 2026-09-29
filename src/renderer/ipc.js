@@ -15,6 +15,20 @@ function _updatePaneDot(pane, connected) {
     }
 }
 
+// A split tab's connected state is AGGREGATED across its panes: tab.connected
+// drives the tab dot / "(已断开)" label, and writing it from the latest pane
+// event let ONE dead pane mark a tab with live panes disconnected. Runs after
+// the triggering pane's state landed; uses the same per-pane predicate as the
+// pane dots (pane-fields.js). The inline fallback keeps partial harnesses
+// loading only this file working.
+function _aggregateSplitConnected(tab) {
+    if (!tab.splitRoot) return;
+    const alive = typeof paneConnectedState === 'function'
+        ? paneConnectedState
+        : (p) => !!p && p.connected === true;
+    tab.connected = getAllPanes(tab).some(alive);
+}
+
 // ConPTY rewrites the app's trailing `ESC[?25h` into `ESC[?25l` and paints its
 // own reverse-video caret cell, which permanently hides the real cursor and
 // kills smooth-cursor animations inside TUI apps (herdr etc.). The filter is
@@ -398,6 +412,9 @@ function _applySshConnected(attemptId, tabId) {
             tab.connected = true;
             pane._sessionFailed = false; // live again — pending input is valid
             _updatePaneDot(pane, true);
+            // Aggregated AFTER the pane state lands: this pane is live, so the
+            // tab reads connected (uniform with the disconnect paths).
+            _aggregateSplitConnected(tab);
         } else {
             tab._sshRetried = 0;
             tab.connected = true;
@@ -443,6 +460,8 @@ function _applySshFailed(attemptId, tabId, error) {
         // though the old id remains (sync input would relay it to siblings).
         pane._sessionFailed = true;
         _updatePaneDot(pane, false);
+        // The failed pane is dead, but live siblings keep the tab connected.
+        _aggregateSplitConnected(tab);
     } else {
         tab.connected = false;
         tab._sessionFailed = true; // same liveness marker as the pane branch
@@ -622,6 +641,8 @@ ipcRenderer.on('ssh-disconnected', (event, { tabId, reason, path }) => {
         // Known-disconnected source session: cancel pending input.
         pane._sessionFailed = true;
         _updatePaneDot(pane, false);
+        // This pane is dead, but live siblings keep the tab connected.
+        _aggregateSplitConnected(tab);
         if (pane.term) pane.term.write(line);
         TabManager.render();
         TabManager.updateStatus();
@@ -644,15 +665,19 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason, at }) => 
     console.debug('[ssh] disconnect reason:', { tabId, kind, reason, at: at ? new Date(at).toISOString() : null });
     if (kind === 'closed' || !reason) return;
     for (const tab of TabManager.tabs) {
-        let term = null;
+        let term = null, pane = null;
         if (tab.splitRoot) {
-            const pane = getAllPanes(tab).find(p => p.tabId === tabId);
+            pane = getAllPanes(tab).find(p => p.tabId === tabId);
             if (pane) term = pane.term;
             else continue;
         } else if (tab.tabId === tabId) {
             term = tab.term;
         } else continue;
-        if (term && !tab.connected) {
+        // Gate on the OWNING wrapper's state, not tab.connected: a split tab
+        // aggregates connected across panes (a live sibling keeps the tab
+        // green), but this reason line belongs to the ONE session that died —
+        // its own pane flag still reads disconnected.
+        if (term && (tab.splitRoot ? pane.connected === false : !tab.connected)) {
             const ts = at ? new Date(at).toLocaleTimeString() : '';
             term.write(`\x1b[2m[SSH] ${reason}${ts ? ' · ' + ts : ''}\x1b[0m\r\n`);
         }
@@ -677,6 +702,8 @@ ipcRenderer.on('pty-exit', (event, { tabId }) => {
                 // pending input for THIS pane is cancelled.
                 pane._sessionFailed = true;
                 _updatePaneDot(pane, false);
+                // The exited pane is dead, but live siblings keep the tab connected.
+                _aggregateSplitConnected(tab);
                 TabManager.render();
                 return;
             }
@@ -791,6 +818,10 @@ ipcRenderer.on('ssh-hostkey-mismatch', (event, { tabId, attemptId, host, oldAlgo
         cancelBtn.textContent = '取消';
         okBtn.textContent = '删除';
         decide(false, false);
+        // The modal releases the keyboard back to the terminal (utils.js owns
+        // the shared focus helpers; guarded like _activeConfirmCleanup above
+        // for partial harnesses).
+        if (typeof _restoreFocusAfterModal === 'function') _restoreFocusAfterModal();
     };
     const onReject = () => {
         cleanup();
@@ -804,5 +835,9 @@ ipcRenderer.on('ssh-hostkey-mismatch', (event, { tabId, attemptId, host, oldAlgo
     okBtn.addEventListener('click', onAccept);
     overlay.querySelector('.overlay-backdrop').addEventListener('click', onReject);
     overlay.classList.add('open');
+    // The modal owns the keyboard while open (T04): focus the SAFE default
+    // (拒绝) so a stray Enter refuses — never accepts — and keys cannot reach
+    // the terminal behind the backdrop.
+    if (typeof _focusConfirmSafeDefault === 'function') _focusConfirmSafeDefault(cancelBtn);
     _activeHostkeyCleanup = cleanup;
 });

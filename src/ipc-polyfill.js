@@ -51,7 +51,10 @@
     if (!getTauri()) return;
     flushed = true;
     console.log('[ipc-polyfill] __TAURI__ ready, flushing', eventQueue.size, 'channels');
-    for (var channel of eventQueue.keys()) {
+    // let (not var): each dispatch closure must bind ITS OWN channel — with
+    // var every closure read the last loop value and queued events crossed
+    // channels after the flush.
+    for (let channel of eventQueue.keys()) {
       var list = eventQueue.get(channel);
       doListen(channel, function(event) {
         var current = eventQueue.get(channel) || [];

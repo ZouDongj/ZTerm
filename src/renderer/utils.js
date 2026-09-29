@@ -86,6 +86,25 @@ function escJsString(s) { return (s || '').replace(/\\/g,'\\\\').replace(/'/g,"\
 // (deleting the wrong data). Unbind the old one before opening a new dialog.
 let _activeConfirmCleanup = null;
 
+// Modal keyboard ownership: while the shared confirm dialog is open its
+// controls own the keyboard. Focus the SAFE default button on open — a stray
+// Enter then lands on the non-destructive action (the hostkey variant reuses
+// this dialog and must never auto-accept), and the focused button keeps every
+// key away from the terminal behind the backdrop. Shared with ipc.js's hostkey
+// dialog (same DOM); guarded so partial harnesses loading only one file work.
+function _focusConfirmSafeDefault(cancelBtn) {
+    if (cancelBtn && typeof cancelBtn.focus === 'function') cancelBtn.focus();
+}
+
+// Dismissal returns the keyboard to the terminal — but only when no other
+// overlay stays open beneath (a confirm layered on the SSH manager etc. leaves
+// focus where the click put it, exactly as before). The Escape path already
+// refocuses through shortcuts.js's closeAllOverlays handler.
+function _restoreFocusAfterModal() {
+    if (document.querySelector('.overlay.open')) return;
+    if (typeof _refocusActiveTerminal === 'function') _refocusActiveTerminal();
+}
+
 function showConfirm(msg, onOk, okText) {
     if (_activeConfirmCleanup) _activeConfirmCleanup();
     // The hostkey dialog shares this DOM but keeps its own cleanup registry;
@@ -106,6 +125,7 @@ function showConfirm(msg, onOk, okText) {
         overlay.querySelector('.overlay-backdrop').removeEventListener('click', onCancel);
         // Restore the default label so delete flows are unaffected.
         okBtn.textContent = '删除';
+        _restoreFocusAfterModal();
     };
     const onCancel = () => cleanup();
     const onOkClick = () => { cleanup(); onOk(); };
@@ -114,6 +134,9 @@ function showConfirm(msg, onOk, okText) {
     okBtn.addEventListener('click', onOkClick);
     overlay.querySelector('.overlay-backdrop').addEventListener('click', onCancel);
     overlay.classList.add('open');
+    // The modal owns the keyboard from the moment it opens (T04): focus the
+    // safe default so terminal keys (incl. Enter) cannot reach behind it.
+    _focusConfirmSafeDefault(cancelBtn);
     _activeConfirmCleanup = cleanup;
 }
 
