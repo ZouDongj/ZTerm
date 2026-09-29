@@ -42,6 +42,10 @@ export async function loadSftpVm() {
     const mk = (id) => { const el = ctx.document.createElement('div'); el.id = id; ctx.document.body.appendChild(el); return el; };
     // INPUT elements the product code creates (breadcrumb path edit) call
     // setSelectionRange/select, which the seam's minimal elements lack.
+    // The seam's innerHTML is a plain string property, so markup-authored
+    // children never materialize; model just what the product code queries:
+    // an <input> inside an assigned innerHTML becomes a real child element
+    // and tag-name lookups find it (the mkdir row reaches its input this way).
     const origCreateElement = ctx.document.createElement;
     ctx.document.createElement = (tag) => {
         const el = origCreateElement.call(ctx.document, tag);
@@ -49,6 +53,23 @@ export async function loadSftpVm() {
             el.setSelectionRange = () => {};
             el.select = () => {};
         }
+        let html = '';
+        Object.defineProperty(el, 'innerHTML', {
+            get() { return html; },
+            set(v) {
+                html = String(v);
+                const m = /<input[^>]*class="([^"]*)"/.exec(html);
+                if (m && !el.children.some(c => c.tagName === 'INPUT')) {
+                    const input = ctx.document.createElement('input');
+                    input.className = m[1];
+                    el.appendChild(input);
+                }
+            },
+        });
+        const elQuerySelector = el.querySelector;
+        el.querySelector = (sel) => sel === 'input'
+            ? (el.children.find(c => c.tagName === 'INPUT') || null)
+            : elQuerySelector.call(el, sel);
         return el;
     };
     mk('sftp-conn');

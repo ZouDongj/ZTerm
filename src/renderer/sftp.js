@@ -472,7 +472,13 @@ const SFTP = {
             const { error } = result;
             if (error) { showToast('创建失败: ' + error, true); return; }
             showToast('目录已创建');
-            await this.refresh();
+            // Same ownership guard as the upload-completion refresh: a newer
+            // in-flight view request (user navigation, cwd follow) owns the
+            // view; the refresh's navigate would supersede it and its response
+            // would be dropped, snapping the view back to the old directory.
+            if (!this._viewReq) {
+                await this.refresh();
+            }
         });
         input.addEventListener('blur', () => { if (!removed) { removed = true; row.remove(); } });
     },

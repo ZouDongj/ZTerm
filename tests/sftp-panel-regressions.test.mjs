@@ -98,3 +98,60 @@ test('panel header falls back to the split tab name for a nameless pane', async 
     await openOn(vm, 'sessSolo', '/home/solo', []);
     assert.equal(connEl.textContent, 'Unnamed Panes Host');
 });
+
+// mkdir drives its inline row through markup-authored innerHTML; the helper
+// materializes that input, so this reaches the REAL keydown handler.
+function startMkdir(vm, name) {
+    vm.SFTP.mkdir();
+    const row = vm.ctx.document.getElementById('sftp-mkdir-row');
+    assert.ok(row, 'mkdir row mounted');
+    const input = row.children.find(c => c.tagName === 'INPUT');
+    assert.ok(input, 'mkdir input materialized');
+    input.value = name;
+    input.dispatch('keydown', { key: 'Enter', preventDefault() {}, stopPropagation() {} });
+}
+
+test('mkdir completion refresh does not supersede a newer in-flight navigation', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+
+    startMkdir(vm, 'newdir');
+    await vm.drain();
+    const mk = vm.pending('sftp-mkdir')[0];
+    assert.ok(mk && mk.args.tabId === 'sessA' && mk.args.path === '/srv/app/newdir',
+        `mkdir dispatched to the current directory: ${mk && JSON.stringify(mk.args)}`);
+
+    const nav = vm.SFTP.navigate('/srv/sub'); // user navigates while mkdir is in flight
+    await vm.drain();
+    vm.settle(mk, {}); // mkdir succeeds; its completion must NOT refresh over the navigation
+    await vm.drain();
+
+    assert.equal(vm.of('sftp-readdir').filter(r => r.args.path === '/srv/app').length, 0,
+        `no stale /srv/app refresh issued by the mkdir completion: ${JSON.stringify(vm.of('sftp-readdir').map(r => r.args))}`);
+    const navRd = vm.pending('sftp-readdir', k => k.args.path === '/srv/sub')[0];
+    assert.ok(navRd, 'user navigation still pending');
+    vm.settle(navRd, { files: [{ name: 'sub.txt', isDir: false, size: 1, mtime: 0 }] });
+    await vm.drain();
+    await nav;
+    assert.equal(vm.SFTP._path, '/srv/sub', 'newer user navigation wins');
+    assert.ok(vm.els.body.children.some(r => r.innerHTML.includes('sub.txt')), 'newer navigation rendered');
+    assert.ok(vm.toasts.some(t => t.msg === '目录已创建'), 'mkdir success still reported');
+});
+
+test('mkdir completion with a quiet view refreshes the current directory (control)', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+
+    startMkdir(vm, 'newdir');
+    await vm.drain();
+    const mk = vm.pending('sftp-mkdir')[0];
+    vm.settle(mk, {});
+    await vm.drain();
+
+    const rd = vm.pending('sftp-readdir')[0];
+    assert.ok(rd && rd.args.tabId === 'sessA' && rd.args.path === '/srv/app',
+        `mkdir completion re-lists the current directory: ${rd && JSON.stringify(rd.args)}`);
+    vm.settle(rd, { files: [{ name: 'newdir', isDir: true, size: 0, mtime: 0 }] });
+    await vm.drain();
+    assert.ok(vm.els.body.children.some(r => r.innerHTML.includes('newdir')), 'created directory visible after refresh');
+});
