@@ -571,8 +571,11 @@ const TabManager = {
         // The old generation is discarded by this replacement: its attempt
         // (if still unsettled) is cancelled by identity and its queue slot
         // released, so a late event for the dead generation can neither
-        // re-claim the pending reconnect window nor hold the queue.
-        if (tab.tabId) _cancelSshAttemptOf(tab, tab.tabId, 'ssh-disconnect');
+        // re-claim the pending reconnect window nor hold the queue. Pre-claim
+        // (no backend id yet) the token alone still identifies the attempt —
+        // cancelling it releases the queue slot at once instead of leaving
+        // the replacement queued behind the old invocation for up to 20s.
+        _cancelSshAttemptOf(tab, tab.tabId, 'ssh-disconnect');
         if (_clearOnConnect(tab, null)) {
             if (tab.term) { try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
             const wrap = document.getElementById('wrap_' + id);
@@ -603,11 +606,11 @@ const TabManager = {
         tab._sshRetryToken = (tab._sshRetryToken || 0) + 1;
         const pane = findPane(tab, paneId);
         if (!pane) return;
-        if (pane.tabId) {
-            // Same identity-exact discard as reconnectTab: the pane's OWN
-            // attempt (backend id + token), never a display address.
-            _cancelSshAttemptOf(pane, pane.tabId, 'ssh-disconnect');
-        }
+        // Same identity-exact discard as reconnectTab: the pane's OWN attempt
+        // (backend id once claimed, else the token alone — a pre-claim cancel
+        // releases the queue slot the replacement is about to need), never a
+        // display address.
+        _cancelSshAttemptOf(pane, pane.tabId, 'ssh-disconnect');
         if (_clearOnConnect(tab, pane)) {
             if (pane.term) { try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
             const body = document.getElementById('pane-body_' + pane.id);
