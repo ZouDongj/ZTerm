@@ -26,10 +26,11 @@ const key = (init) => ({
     ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: 'p', ...init,
 });
 
-// The default bindings: both combos stay withheld from the terminal.
+// Staged bindings (not necessarily the product defaults): both combos stay
+// withheld from the terminal.
 const DEFAULTS = { commandPalette: 'Ctrl+P', quickCommands: 'Ctrl+Shift+P' };
 
-test('default bindings: Ctrl+P and Ctrl+Shift+P are still handed to the dispatcher', () => {
+test('staged bindings: Ctrl+P and Ctrl+Shift+P are still handed to the dispatcher', () => {
     const ctx = loadVmWithBindings(DEFAULTS);
     const tab = wiredTab(ctx, 't1', 'local_1');
     assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true })), false,
