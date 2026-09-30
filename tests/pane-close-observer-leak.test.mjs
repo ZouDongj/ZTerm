@@ -4,7 +4,7 @@
 // so the closed pane's observer was never disconnected and Blink kept its
 // observed node (and the whole DOM subtree, canvases included) alive. Covers
 // all teardown funnels into _closePane: the pane-header × button, the
-// Ctrl+Shift+W close shortcut, and the merge/collapse absorption.
+// Alt+Shift+W close shortcut, and the merge/collapse absorption.
 // Driven through the REAL tabs.js _closePane in the shared renderer VM
 // (tests/helpers/renderer-vm.mjs) with a tracking ResizeObserver.
 import test from 'node:test';

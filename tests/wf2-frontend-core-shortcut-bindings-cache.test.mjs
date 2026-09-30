@@ -47,20 +47,22 @@ test('cache: repeated calls return the same object with a single merge', () => {
     assert.equal(merges.count, 1, 'ten lookups, one merge');
     // Merge semantics unchanged: the override wins, untouched defaults stay.
     assert.equal(first.commandPalette, 'Ctrl+Alt+P');
-    assert.equal(first.quickCommands, 'Ctrl+Shift+P');
-    assert.equal(first.closeTab, 'Ctrl+W');
+    assert.equal(first.quickCommands, 'Alt+Q');
+    assert.equal(first.closeTab, 'Ctrl+Shift+W');
 });
 
 test('default path unchanged: passthrough withholds the live panel combos and passes everything else', () => {
     const { ctx } = loadVmWithShortcuts();
     const bindings = ctx._getShortcutBindings();
-    assert.equal(bindings.commandPalette, 'Ctrl+P');
-    assert.equal(bindings.quickCommands, 'Ctrl+Shift+P');
+    assert.equal(bindings.commandPalette, 'Ctrl+Shift+P');
+    assert.equal(bindings.quickCommands, 'Alt+Q');
     const tab = wiredTab(ctx, 't1', 'local_1');
-    assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true })), false,
-        'live Ctrl+P is consumed (dispatcher owns it)');
     assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true, shiftKey: true })), false,
-        'live Ctrl+Shift+P is consumed');
+        'live Ctrl+Shift+P is consumed (dispatcher owns it)');
+    assert.equal(ctx._shortcutPassthrough(tab.term, key({ altKey: true, key: 'q' })), false,
+        'live Alt+Q is consumed');
+    assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true })), true,
+        'Ctrl+P is not a panel combo under the current defaults');
     assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true, key: 'c' })), true, 'unrelated combo passes');
     assert.equal(ctx._shortcutPassthrough(tab.term, key({})), true, 'plain key passes');
 });
@@ -84,8 +86,8 @@ test('saving a new binding through the REAL capture flow invalidates the cache; 
 
     // Conflict-check merge (#1) → invalidation → exactly one re-merge (#2)
     // serving both passthrough probes.
-    assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true })), true,
-        'freed Ctrl+P falls through to the terminal right after the save');
+    assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true, shiftKey: true })), true,
+        'the freed default Ctrl+Shift+P falls through to the terminal right after the save');
     assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true, key: 'k' })), false,
         'the NEW combo is the withheld one now');
     assert.equal(merges.count, 2, 'cache was dropped once and rebuilt once');
@@ -100,7 +102,7 @@ test('resetShortcut (in-place delete) invalidates the cache: defaults are live a
 
     const fresh = ctx._getShortcutBindings();
     assert.notEqual(fresh, warm, 'stale cache object was not served');
-    assert.equal(fresh.commandPalette, 'Ctrl+P', 'default binding restored');
+    assert.equal(fresh.commandPalette, 'Ctrl+Shift+P', 'default binding restored');
     assert.equal(merges.count, 2);
 });
 
@@ -114,8 +116,8 @@ test('config reload (whole _settingsConfig replacement, loadSettings shape) re-k
     ctx._settingsConfig = { ...ctx._settingsConfig, shortcuts: { commandPalette: 'Ctrl+Alt+P' } };
 
     assert.equal(ctx._getShortcutBindings().commandPalette, 'Ctrl+Alt+P', 'reload is reflected');
-    assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true })), true,
-        'freed Ctrl+P falls through after the reload');
+    assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true, shiftKey: true })), true,
+        'the freed default Ctrl+Shift+P falls through after the reload');
     assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true, altKey: true })), false,
         'the reloaded combo is the withheld one now');
     assert.equal(merges.count, 2, 're-merged exactly once for the new overrides');

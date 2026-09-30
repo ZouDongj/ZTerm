@@ -33,7 +33,7 @@ test('double close of the same pane inside the fade window is a no-op; the survi
     assert.equal(p2._closing, true, 'close initiation marks the pane dying');
     assert.equal(p1.focused, true, 'the focus marker moved to the sibling at initiation');
 
-    // The re-fire paths (focused close button + Enter, repeated Ctrl+Shift+W)
+    // The re-fire paths (focused close button + Enter, repeated Alt+Shift+W)
     // must not schedule a second removal.
     ctx.TabManager._closePane('t_sp', p2.id);
     assert.equal(ctx.__tq.createdAfter(mark).length, 1,

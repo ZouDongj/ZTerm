@@ -2,7 +2,7 @@
 // ── Keyboard shortcuts ──
 // Capture-phase handler for keys that terminal would otherwise eat
 // ── Keyboard shortcuts ──
-// Must intercept in the capture phase: xterm turns F2/Ctrl+W/Ctrl+Tab etc. into escape sequences
+// Must intercept in the capture phase: xterm turns F2/Ctrl+Shift+W/Ctrl+Tab etc. into escape sequences
 // and calls stopPropagation, so bubble-phase listeners never fire while the terminal is focused.
 function _comboFromEvent(e) {
     return comboFromEvent(e);
@@ -13,22 +13,22 @@ const DEFAULT_SHORTCUTS = {
     newTab: 'Ctrl+Shift+N',
     sshPanel: 'Ctrl+Shift+S',
     openSettings: 'Ctrl+,',
-    closeTab: 'Ctrl+W',
-    closePane: 'Ctrl+Shift+W',
+    closeTab: 'Ctrl+Shift+W',
+    closePane: 'Alt+Shift+W',
     nextTab: 'Ctrl+Tab',
     prevTab: 'Ctrl+Shift+Tab',
     renameTab: 'F2',
     splitH: 'Ctrl+Shift+H',
     splitV: 'Ctrl+Shift+V',
-    maximizePane: 'Ctrl+Shift+ArrowUp',
-    extractPane: 'Ctrl+Shift+X',
-    nextPane: 'Ctrl+Shift+ArrowRight',
-    prevPane: 'Ctrl+Shift+ArrowLeft',
+    maximizePane: 'Alt+Shift+Enter',
+    extractPane: 'Ctrl+Shift+ArrowUp',
+    nextPane: 'Ctrl+Alt+ArrowRight',
+    prevPane: 'Ctrl+Alt+ArrowLeft',
     syncInput: 'Ctrl+Shift+I',
     search: 'Ctrl+F',
     sftp: 'Ctrl+Shift+F',
-    quickCommands: 'Ctrl+Shift+P',
-    commandPalette: 'Ctrl+P',
+    quickCommands: 'Alt+Q',
+    commandPalette: 'Ctrl+Shift+P',
     cloneTab: 'Ctrl+Shift+T',
     'toggle-statusbar': 'Ctrl+Shift+B',
     perfCapture: 'Ctrl+Shift+D',
@@ -97,7 +97,7 @@ const SHORTCUT_ACTIONS = {
             if (focused) TabManager._closePane(tab.id, focused.id);
         } else if (!document.querySelector('.overlay.open') && TabManager.aliveCount() > 1) {
             // Not in a split (single terminal, or down to one pane after leaving a split): act like
-            // Ctrl+W and close the current tab — matches tabby (alive-count guard keeps the last tab)
+            // closeTab and close the current tab — matches tabby (alive-count guard keeps the last tab)
             TabManager.closeTab(tab.id);
         }
     },

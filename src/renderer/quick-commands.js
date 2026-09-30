@@ -247,7 +247,7 @@ function renderQCCommandsList() {
     const querying = _qcSettingsView.query.trim().length > 0;
     if (_qcCommands.length === 0) {
         container.innerHTML = `<div class="ssh-mgr-empty">暂无命令
-          <div class="ssh-mgr-empty-hint">通过 Ctrl+Shift+P 快速执行</div>
+          <div class="ssh-mgr-empty-hint">通过 Alt+Q 快速执行</div>
           <div class="ssh-mgr-empty-actions"><button class="btn-primary" onclick="openQCEdit(true)">+ 添加第一个命令</button></div></div>`;
         _qcUpdateCount(0, 0);
         _qcFocusRestore(container, snap);
