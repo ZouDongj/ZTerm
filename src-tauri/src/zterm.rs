@@ -236,7 +236,10 @@ fn retire_login_scripts(scripts: &mut Vec<LoginScript>) -> Option<Vec<String>> {
 pub struct PtySession {
     pub writer_tx: mpsc::Sender<LocalInput>,
     pub flush_ms: u64,
-    pub pair: portable_pty::PtyPair,
+    /// Master half behind its own cloneable handle: pty_resize copies the Arc
+    /// under a short session-map lock and runs the resize (a synchronous
+    /// ConPTY syscall) off both the map lock and the window's UI thread.
+    pub master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
     pub child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
@@ -827,26 +830,41 @@ fn load_config() -> Value {
     load_config_from(&config_path(), &anchor_config_path())
 }
 
-/// Data-dir config first; when it is missing entirely, read the anchor's full
-/// config back — the anchor is save_config's fallback mirror, so settings
-/// survive a data dir that stays unwritable. Split from load_config's path
-/// resolution for unit testing (passes explicit paths).
+/// Data-dir config first; when it is missing entirely or cannot be READ (an
+/// IO condition, not corruption), read the anchor's full config back — the
+/// anchor is save_config's fallback mirror, so settings survive a data dir
+/// that stays unwritable. Split from load_config's path resolution for unit
+/// testing (passes explicit paths).
 fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
     if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(raw) = serde_json::from_str::<Value>(&content) {
-                let (merged, corrupt) = sanitize_config(raw);
-                if !corrupt {
-                    return merged;
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                if let Ok(raw) = serde_json::from_str::<Value>(&content) {
+                    let (merged, corrupt) = sanitize_config(raw);
+                    if !corrupt {
+                        return merged;
+                    }
                 }
+                // Corrupt config: back up the original file and notify the renderer (once only),
+                // so later saves don't silently overwrite user data (SSH profiles / encrypted passwords) with defaults
+                if !CONFIG_CORRUPT_HANDLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    backup_corrupt_config(path);
+                }
+                return default_config();
+            }
+            Err(e) => {
+                // Read failure is an IO condition (AV exclusive lock, OneDrive
+                // placeholder, read-denying ACL, transient device error), not
+                // corruption: the same condition defeats backup_corrupt_config's
+                // copy too, so the backup+notify path would promise a backup
+                // that does not exist. Leave the file alone and try the anchor
+                // mirror below, so a later save persists mirrored settings
+                // instead of factory defaults over the unreadable config.
+                eprintln!("[zterm] read {} failed: {e}", path.display());
             }
         }
-        // Corrupt config: back up the original file and notify the renderer (once only),
-        // so later saves don't silently overwrite user data (SSH profiles / encrypted passwords) with defaults
-        if !CONFIG_CORRUPT_HANDLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            backup_corrupt_config(path);
-        }
-    } else if anchor.exists() {
+    }
+    if anchor.exists() {
         if let Ok(content) = std::fs::read_to_string(anchor) {
             if let Ok(raw) = serde_json::from_str::<Value>(&content) {
                 let (mut merged, corrupt) = sanitize_config(raw);
@@ -860,21 +878,24 @@ fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
                     return merged;
                 }
             }
-        }
-        // Corrupt anchor: keep a timestamped copy of the remnants, then
-        // rebuild the anchor with defaults so the next launch does not
-        // re-detect (and re-back-up) the same corruption and the fallback
-        // mirror keeps working. Same notify-once policy as the branch above.
-        if !CONFIG_CORRUPT_HANDLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            backup_corrupt_config(anchor);
-            if let Some(parent) = anchor.parent() {
-                let _ = std::fs::create_dir_all(parent);
+            // Corrupt anchor: keep a timestamped copy of the remnants, then
+            // rebuild the anchor with defaults so the next launch does not
+            // re-detect (and re-back-up) the same corruption and the fallback
+            // mirror keeps working. Same notify-once policy as the branch above.
+            if !CONFIG_CORRUPT_HANDLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                backup_corrupt_config(anchor);
+                if let Some(parent) = anchor.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = atomic_write_config(
+                    anchor,
+                    &serde_json::to_string_pretty(&default_config()).unwrap_or_default(),
+                );
             }
-            let _ = atomic_write_config(
-                anchor,
-                &serde_json::to_string_pretty(&default_config()).unwrap_or_default(),
-            );
         }
+        // An anchor read failure is an IO condition like the one above, not
+        // corruption: rebuilding would clobber a possibly intact mirror, so
+        // leave the file as is.
     }
     default_config()
 }
@@ -1316,7 +1337,7 @@ pub async fn pty_create(
             SessionType::Local(PtySession {
                 writer_tx,
                 flush_ms,
-                pair,
+                master: Arc::new(Mutex::new(pair.master)),
                 child,
             }),
         );
@@ -2274,6 +2295,28 @@ pub async fn ssh_connect(
 
 // ── Command: ssh_disconnect ──
 
+/// Take the SSH session for `tab_id` out of the map for an explicit
+/// disconnect. Non-SSH entries sharing the id space (a local PTY) stay
+/// registered: local teardown is pty_destroy's job, and dropping the entry
+/// here would orphan the child process. Split from ssh_disconnect's IPC
+/// layer for unit testing.
+fn take_ssh_for_disconnect(
+    map: &mut HashMap<String, SessionType>,
+    tab_id: &str,
+) -> Option<SshSession> {
+    match map.remove(tab_id) {
+        Some(SessionType::Ssh(session)) => Some(session),
+        other => {
+            // Put a non-SSH entry back under the same lock: to everyone else
+            // it was never gone.
+            if let Some(session) = other {
+                map.insert(tab_id.to_string(), session);
+            }
+            None
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn ssh_disconnect(
     app: AppHandle,
@@ -2327,16 +2370,13 @@ pub async fn ssh_disconnect(
     // Release the map lock right after taking the handle, then await the disconnect (no lock held across await)
     let close_handle = {
         let mut map = state.lock();
-        match map.remove(&tab_id) {
-            Some(SessionType::Ssh(session)) => {
-                // Pre-fill the reason slot so the handler's disconnected()
-                // labels this as a user-initiated close instead of reporting
-                // russh's information-free Error::Disconnect.
-                *session.disconnect_reason.lock() = Some("closed by user".to_string());
-                Some(session.handle.clone())
-            }
-            _ => None,
-        }
+        take_ssh_for_disconnect(&mut map, &tab_id).map(|session| {
+            // Pre-fill the reason slot so the handler's disconnected()
+            // labels this as a user-initiated close instead of reporting
+            // russh's information-free Error::Disconnect.
+            *session.disconnect_reason.lock() = Some("closed by user".to_string());
+            session.handle.clone()
+        })
     };
     if let Some(h) = close_handle {
         // Disconnect explicitly so the remote session ends at once (Drop refcounting alone is not enough)
@@ -2438,8 +2478,45 @@ pub async fn pty_input(state: State<'_, SessionMap>, args: Vec<Value>) -> Result
     Ok(())
 }
 
+/// What pty_resize acts on after leaving the session-map lock: a cloned local
+/// master handle or an SSH resize channel. Split from the command's IPC layer
+/// for unit testing.
+enum ResizeTarget {
+    Local(Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>),
+    Ssh(mpsc::Sender<(u16, u16)>),
+}
+
+/// Resolve the resize target for `tab_id` while holding the session-map lock
+/// only for the lookup/handle clone. ConPTY's resize is a synchronous
+/// ResizePseudoConsole syscall whose cost grows with the console buffer, so
+/// resizing under the map lock would stall pty_input (same lock) and block
+/// key echo for every session during a resize burst. Split from pty_resize's
+/// IPC layer for unit testing; returns None when the id belongs to an
+/// in-flight SSH attempt whose size was cached on the pending entry instead.
+fn session_resize_target(
+    map: &SessionMap,
+    pending: &PendingMap,
+    tab_id: &str,
+    size: (u16, u16),
+) -> Option<ResizeTarget> {
+    let map_guard = map.lock();
+    match map_guard.get(tab_id) {
+        Some(SessionType::Local(session)) => Some(ResizeTarget::Local(session.master.clone())),
+        Some(SessionType::Ssh(session)) => Some(ResizeTarget::Ssh(session.resize_tx.clone())),
+        None => {
+            // SSH handshake still in flight (the renderer fits and reports the
+            // size right after ssh-connecting, long before the session is
+            // registered): cache it on the pending attempt so ssh_connect can
+            // open the PTY at the real size instead of 80x24.
+            drop(map_guard);
+            cache_pending_size(&mut pending.lock(), tab_id, size);
+            None
+        }
+    }
+}
+
 #[tauri::command]
-pub fn pty_resize(
+pub async fn pty_resize(
     state: State<'_, SessionMap>,
     pending_state: State<'_, PendingMap>,
     args: Vec<Value>,
@@ -2452,31 +2529,28 @@ pub fn pty_resize(
         .to_string();
     let cols = params.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
     let rows = params.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
-    let map = state.lock();
-    match map.get(&tab_id) {
-        Some(SessionType::Local(session)) => {
-            session
-                .pair
-                .master
-                .resize(PtySize {
+    // Async command + spawn_blocking keep the syscall off the window's UI
+    // thread too: a resize burst (drag settle, maximize/restore, tab switches)
+    // fires once per pane, and N synchronous ConPTY calls on the UI thread
+    // would stall input delivery for their whole duration.
+    match session_resize_target(&state, &pending_state, &tab_id, (cols, rows)) {
+        Some(ResizeTarget::Local(master)) => {
+            tokio::task::spawn_blocking(move || {
+                master.lock().resize(PtySize {
                     rows,
                     cols,
                     pixel_width: 0,
                     pixel_height: 0,
                 })
-                .map_err(|e| format!("resize failed: {e}"))?;
+            })
+            .await
+            .map_err(|e| format!("resize task failed: {e}"))?
+            .map_err(|e| format!("resize failed: {e}"))?;
         }
-        Some(SessionType::Ssh(session)) => {
-            let _ = session.resize_tx.try_send((cols, rows));
+        Some(ResizeTarget::Ssh(resize_tx)) => {
+            let _ = resize_tx.try_send((cols, rows));
         }
-        None => {
-            // SSH handshake still in flight (the renderer fits and reports the
-            // size right after ssh-connecting, long before the session is
-            // registered): cache it on the pending attempt so ssh_connect can
-            // open the PTY at the real size instead of 80x24.
-            drop(map);
-            cache_pending_size(&mut pending_state.lock(), &tab_id, (cols, rows));
-        }
+        None => {}
     }
     Ok(())
 }
@@ -3091,7 +3165,11 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
                 return Ok(err);
             }
         }
-        restore_default_data_dir(&default_dir_config, &anchor_config, &load_config());
+        if let Err(e) =
+            restore_default_data_dir(&default_dir_config, &anchor_config, &load_config())
+        {
+            return Ok(json!({ "error": e }));
+        }
     } else {
         let current_config = load_config();
         let mut clean_config = current_config.clone();
@@ -3176,13 +3254,17 @@ fn write_config_to_dir(dir: &std::path::Path, config: &Value) -> Result<(), Stri
 /// copies the config into the new dir; the reset branch must be symmetric).
 /// The primary copy goes to the default data dir; the anchor keeps a full copy
 /// as the fallback mirror load_config reads when the default dir has no config
-/// (covers a default dir that is not writable either). Split from set_data_dir's
-/// env path resolution for unit testing.
+/// (covers a default dir that is not writable either). Both writes are
+/// verified and reported, symmetric with the forward branch's
+/// write_config_to_dir check: reporting an unwritable target as success would
+/// resurrect the stale pre-switch config on the next launch and silently drop
+/// the custom-dir era's settings. Split from set_data_dir's env path
+/// resolution for unit testing.
 fn restore_default_data_dir(
     default_config_path: &std::path::Path,
     anchor_config: &std::path::Path,
     current_config: &Value,
-) {
+) -> Result<(), String> {
     let mut clean = current_config.clone();
     if let Value::Object(ref mut m) = clean {
         m.remove("dataDir");
@@ -3190,10 +3272,13 @@ fn restore_default_data_dir(
     if let Some(parent) = default_config_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = atomic_write_config(
+    // Failing here leaves the anchor's dataDir pointer untouched, so the app
+    // keeps running on the (working) custom dir instead of a half-migrated one.
+    atomic_write_config(
         default_config_path,
         &serde_json::to_string_pretty(&clean).unwrap_or_default(),
-    );
+    )
+    .map_err(|e| format!("write {}: {e}", default_config_path.display()))?;
     let existing = std::fs::read_to_string(anchor_config)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok());
@@ -3201,10 +3286,11 @@ fn restore_default_data_dir(
     if let Value::Object(ref mut m) = anchor {
         m.remove("dataDir");
     }
-    let _ = atomic_write_config(
+    atomic_write_config(
         anchor_config,
         &serde_json::to_string_pretty(&anchor).unwrap_or_default(),
-    );
+    )
+    .map_err(|e| format!("write {}: {e}", anchor_config.display()))
 }
 
 #[tauri::command]
@@ -5753,6 +5839,114 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn load_config_from_io_read_failure_is_not_corruption() {
+        // A data-dir config that exists but cannot be READ (AV exclusive lock,
+        // OneDrive placeholder, read-denying ACL) is an IO condition, not
+        // corruption: no backup/toast may be promised (the same condition
+        // defeats the backup copy), and the anchor mirror is consulted so a
+        // later save does not overwrite the unreadable config with factory
+        // defaults.
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_CORRUPT_HANDLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let dir = config_test_dir("io-read-fail");
+        let data_dir_config = dir.join("data").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(data_dir_config.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        std::fs::write(
+            &data_dir_config,
+            serde_json::to_string(&json!({ "appearance": { "fontSize": 12 } })).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &anchor,
+            serde_json::to_string(&json!({
+                "appearance": { "fontSize": 18 },
+                "quickCommands": [{ "name": "uptime" }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // Hold the data-dir config open with no sharing allowed: read_to_string
+        // fails with a sharing violation, like an AV/backup exclusive lock.
+        let lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&data_dir_config)
+                .unwrap()
+        };
+        let cfg = load_config_from(&data_dir_config, &anchor);
+        drop(lock);
+        // The anchor mirror is read back (dataDir stays out of the effective
+        // config), not factory defaults.
+        assert_eq!(cfg["appearance"]["fontSize"], 18);
+        assert_eq!(cfg["quickCommands"][0]["name"], "uptime");
+        assert!(cfg.get("dataDir").is_none());
+        // No corrupt backup was taken and the corruption path never ran.
+        let data_parent = data_dir_config.parent().unwrap();
+        let backups: Vec<String> = std::fs::read_dir(data_parent)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("config.json.corrupt-"))
+            .collect();
+        assert!(
+            backups.is_empty(),
+            "no corrupt backup expected, got {backups:?}"
+        );
+        assert!(!CONFIG_CORRUPT_HANDLED.load(std::sync::atomic::Ordering::SeqCst));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn load_config_from_io_read_failure_on_anchor_leaves_mirror_intact() {
+        // Same IO-not-corruption rule for the anchor: an unreadable anchor must
+        // not be "rebuilt" with defaults — that would clobber the fallback
+        // mirror under exactly the read-blocked-but-writable conditions (ACL,
+        // released lock) the mirror exists for.
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_CORRUPT_HANDLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let dir = config_test_dir("anchor-io-read-fail");
+        let data_dir_config = dir.join("data").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        let anchor_content = serde_json::to_string(
+            &json!({ "dataDir": "D:/zterm-data", "appearance": { "fontSize": 18 } }),
+        )
+        .unwrap();
+        std::fs::write(&anchor, &anchor_content).unwrap();
+        let lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&anchor)
+                .unwrap()
+        };
+        let cfg = load_config_from(&data_dir_config, &anchor);
+        drop(lock);
+        // Nothing readable → factory defaults, but the mirror survives
+        // byte-identical: no backup copy, no rebuild, no notification flag.
+        assert_eq!(cfg, default_config());
+        assert_eq!(std::fs::read_to_string(&anchor).unwrap(), anchor_content);
+        let anchor_parent = anchor.parent().unwrap();
+        let backups: Vec<String> = std::fs::read_dir(anchor_parent)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("config.json.corrupt-"))
+            .collect();
+        assert!(
+            backups.is_empty(),
+            "no corrupt backup expected, got {backups:?}"
+        );
+        assert!(!CONFIG_CORRUPT_HANDLED.load(std::sync::atomic::Ordering::SeqCst));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn restore_default_data_dir_carries_settings_back() {
         // Resetting to the default data dir must not abandon the settings from
         // the custom-dir era: both the default config and the anchor mirror
@@ -5771,7 +5965,7 @@ mod tests {
             "appearance": { "fontSize": 20 },
             "quickCommands": [{ "name": "uptime" }],
         });
-        restore_default_data_dir(&default_config, &anchor, &current);
+        restore_default_data_dir(&default_config, &anchor, &current).unwrap();
         let written_default: Value =
             serde_json::from_str(&std::fs::read_to_string(&default_config).unwrap()).unwrap();
         assert_eq!(written_default["appearance"]["fontSize"], 20);
@@ -5782,6 +5976,71 @@ mod tests {
         assert_eq!(written_anchor["appearance"]["fontSize"], 20);
         assert_eq!(written_anchor["legacyKey"], 1);
         assert!(written_anchor.get("dataDir").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_default_data_dir_reports_unwritable_default_dir() {
+        // An unwritable default dir must surface as an error (set_data_dir
+        // turns it into the command's error payload) instead of a silent
+        // success that resurrectes the stale pre-switch config on the next
+        // launch and drops the custom-dir era's settings.
+        let dir = config_test_dir("restore-default-unwritable");
+        // A config path routed through a regular file can never be written.
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, "file").unwrap();
+        let default_config = blocker.join("sub").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        std::fs::write(
+            &anchor,
+            serde_json::to_string(&json!({ "dataDir": "D:/zterm-data" })).unwrap(),
+        )
+        .unwrap();
+        let err = restore_default_data_dir(
+            &default_config,
+            &anchor,
+            &json!({ "appearance": { "fontSize": 20 } }),
+        )
+        .err()
+        .expect("an unwritable default dir must error");
+        assert!(err.contains("write "), "unexpected error text: {err}");
+        // The anchor was not touched: its dataDir pointer keeps the app on the
+        // working custom dir rather than a half-migrated default one.
+        let anchor_value: Value =
+            serde_json::from_str(&std::fs::read_to_string(&anchor).unwrap()).unwrap();
+        assert_eq!(anchor_value["dataDir"], "D:/zterm-data");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_default_data_dir_reports_anchor_write_failure() {
+        // The anchor mirror write is verified too: with the default-dir copy
+        // in place but the anchor unwritable, reporting success would leave a
+        // stale dataDir pointer that wins over the restored config.
+        let dir = config_test_dir("restore-default-anchor-fail");
+        let default_config = dir.join("default").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        std::fs::write(&anchor, r#"{ "dataDir": "D:/zterm-data" }"#).unwrap();
+        // Block the anchor's temp slot with a directory so its atomic write fails.
+        std::fs::create_dir_all(anchor.with_extension("json.tmp")).unwrap();
+        let err = restore_default_data_dir(
+            &default_config,
+            &anchor,
+            &json!({ "appearance": { "fontSize": 20 } }),
+        )
+        .err()
+        .expect("an anchor write failure must error");
+        assert!(err.contains("write "), "unexpected error text: {err}");
+        // The default-dir copy did land, and the anchor kept its old content.
+        let written_default: Value =
+            serde_json::from_str(&std::fs::read_to_string(&default_config).unwrap()).unwrap();
+        assert_eq!(written_default["appearance"]["fontSize"], 20);
+        assert_eq!(
+            std::fs::read_to_string(&anchor).unwrap(),
+            r#"{ "dataDir": "D:/zterm-data" }"#
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5891,7 +6150,8 @@ mod tests {
             &default_config,
             &anchor,
             &json!({ "appearance": { "fontSize": 21 } }),
-        );
+        )
+        .unwrap();
         let written_default: Value =
             serde_json::from_str(&std::fs::read_to_string(&default_config).unwrap()).unwrap();
         assert_eq!(written_default["appearance"]["fontSize"], 21);
@@ -5935,6 +6195,127 @@ mod tests {
         assert!(rebuilt.is_object(), "anchor must be rebuilt as valid JSON");
         assert!(!anchor.with_extension("json.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stand-in for the spawned shell process: the resize path never touches
+    /// the child, so a no-op implementation lets tests build a real
+    /// ConPTY-backed PtySession without spawning one.
+    #[derive(Debug)]
+    struct MockChild;
+
+    impl portable_pty::ChildKiller for MockChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(MockChild)
+        }
+    }
+
+    impl portable_pty::Child for MockChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn session_resize_target_resizes_without_the_session_map_lock() {
+        // Regression guard for the resize-burst stall: pty_input takes the
+        // session-map lock on every keystroke, so the ConPTY resize must not
+        // run under it. The helper clones the master handle under a short
+        // lock, and the resize below completes while the map is locked by
+        // someone else — the pre-fix code resized while holding it.
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let (writer_tx, _writer_rx) = mpsc::channel(1);
+        let map: SessionMap = Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        map.lock().insert(
+            "local_1".to_string(),
+            SessionType::Local(PtySession {
+                writer_tx,
+                flush_ms: 0,
+                master: Arc::new(Mutex::new(pair.master)),
+                child: Box::new(MockChild),
+            }),
+        );
+        let target = session_resize_target(&map, &pending, "local_1", (30, 100))
+            .expect("a registered local session must resolve");
+        let master = match target {
+            ResizeTarget::Local(master) => master,
+            ResizeTarget::Ssh(_) => panic!("a local session must resolve to a master handle"),
+        };
+        // Hold the session-map lock across the whole resize: with the handle
+        // cloned out under a short lock this must not block.
+        let map_guard = map.lock();
+        master
+            .lock()
+            .resize(PtySize {
+                rows: 30,
+                cols: 100,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        assert_eq!(master.lock().get_size().unwrap().cols, 100);
+        assert_eq!(master.lock().get_size().unwrap().rows, 30);
+        drop(map_guard);
+        // An unknown id (SSH handshake still in flight) caches the size on the
+        // pending attempt instead of erroring.
+        pending.lock().insert("att_1".to_string(), entry("local_2"));
+        assert!(session_resize_target(&map, &pending, "local_2", (44, 120)).is_none());
+        assert_eq!(pending_size_for(&pending.lock(), "att_1"), Some((44, 120)));
+    }
+
+    #[test]
+    fn take_ssh_for_disconnect_leaves_local_sessions_registered() {
+        // ssh-1 backstop: an ssh_disconnect carrying a local PTY id must not
+        // unregister it — pty_destroy still has to kill the child, and the
+        // pre-fix unconditional remove dropped the entry without killing.
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let (writer_tx, _writer_rx) = mpsc::channel(1);
+        let mut map: HashMap<String, SessionType> = HashMap::new();
+        map.insert(
+            "local_1".to_string(),
+            SessionType::Local(PtySession {
+                writer_tx,
+                flush_ms: 0,
+                master: Arc::new(Mutex::new(pair.master)),
+                child: Box::new(MockChild),
+            }),
+        );
+        assert!(take_ssh_for_disconnect(&mut map, "local_1").is_none());
+        assert!(
+            matches!(map.get("local_1"), Some(SessionType::Local(_))),
+            "the local session must stay registered for pty_destroy"
+        );
+        // Unknown ids take nothing and register nothing.
+        assert!(take_ssh_for_disconnect(&mut map, "missing").is_none());
+        assert!(!map.contains_key("missing"));
     }
 
     #[test]
@@ -7047,10 +7428,18 @@ mod tests {
         // Everything else is rejected — the value lands in the child process
         // environment, so partial matches, extra segments, empties and
         // trailing newlines must never slip through.
-        assert_eq!(sanitize_colorfgbg("15;1"), None, "non-standard palette index");
+        assert_eq!(
+            sanitize_colorfgbg("15;1"),
+            None,
+            "non-standard palette index"
+        );
         assert_eq!(sanitize_colorfgbg(""), None, "empty value");
         assert_eq!(sanitize_colorfgbg("15;0;2"), None, "three-segment variant");
-        assert_eq!(sanitize_colorfgbg("15;0\nfoo"), None, "trailing newline + payload");
+        assert_eq!(
+            sanitize_colorfgbg("15;0\nfoo"),
+            None,
+            "trailing newline + payload"
+        );
     }
 
     #[test]
