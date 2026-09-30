@@ -34,8 +34,26 @@ const DEFAULT_SHORTCUTS = {
     perfCapture: 'Ctrl+Shift+D',
 };
 
+// Merged-bindings cache: _shortcutPassthrough consults these bindings on
+// EVERY terminal key event (xterm invokes customKeyEventHandler once per
+// keydown/keypress/keyup), so re-running the {...defaults, ...overrides}
+// spread just to hand out a fresh object is avoidable hot-path allocation.
+// The cache is keyed on the overrides object identity: every path that
+// replaces the whole _settingsConfig (loadSettings reload, saveAppearance/
+// saveTerminal spreads, resetAllShortcuts) either hands over a new reference
+// (re-keys implicitly) or keeps the old one (bindings unchanged), so no
+// cross-file invalidation hook is needed. In-place mutations keep the same
+// reference — persistShortcuts(), the single funnel every customization
+// write passes through, drops the cache for them. Callers only READ the
+// result (verified: none mutates it), so sharing one object is safe.
+let _shortcutBindingsCache = null;
+
 function _getShortcutBindings() {
-    return mergeShortcutBindings(DEFAULT_SHORTCUTS, _settingsConfig.shortcuts);
+    const overrides = _settingsConfig.shortcuts;
+    if (!_shortcutBindingsCache || _shortcutBindingsCache.overrides !== overrides) {
+        _shortcutBindingsCache = { overrides, merged: mergeShortcutBindings(DEFAULT_SHORTCUTS, overrides) };
+    }
+    return _shortcutBindingsCache.merged;
 }
 
 function _cycleTab(delta) {
@@ -463,6 +481,9 @@ function resetAllShortcuts() {
 }
 
 function persistShortcuts() {
+    // In-place writes (startShortcutCapture / resetShortcut) mutate the same
+    // overrides object, so the identity-keyed cache cannot see them — drop it.
+    _shortcutBindingsCache = null;
     ipcRenderer.send('save-shortcuts', _settingsConfig.shortcuts || {});
 }
 
