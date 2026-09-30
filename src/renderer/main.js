@@ -102,6 +102,11 @@ _disableFormEnhancements(document);
 function saveConfig() {
     const tabs = TabManager.tabs
         .filter(t => t.type !== 'settings')
+        // A tab inside its close window (backend already destroyed, DOM entry
+        // still fading) must never reach disk: the periodic 15s save or the
+        // quit-time save landing in that window would resurrect the tab — and
+        // its SSH panes' auto-reconnect — on the next start.
+        .filter(t => !TabManager._closingTabs?.has(t.id))
         .map((t, i) => {
             let saveName = t.name;
             // 'Restore terminal content' is opt-in (default off): the captured

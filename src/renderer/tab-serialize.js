@@ -7,12 +7,27 @@ const MAX_TREE_DEPTH = 50;
 function serializeSplitNode(node) {
     if (!node) return null;
     if (node.orientation) {
+        // Panes inside their close window (_closing) are being removed: their
+        // backend is already destroyed, so persisting them would resurrect a
+        // dead pane (and reconnect its SSH session) on the next start. A
+        // pruned child takes its ratio with it; a container left empty
+        // collapses to null and is pruned by its own parent the same way.
+        const children = [];
+        const ratios = [];
+        node.children.forEach((c, i) => {
+            const s = serializeSplitNode(c);
+            if (!s) return;
+            children.push(s);
+            ratios.push(node.ratios ? node.ratios[i] : undefined);
+        });
+        if (children.length === 0) return null;
         return {
             orientation: node.orientation,
-            children: node.children.map(serializeSplitNode),
-            ratios: node.ratios,
+            children,
+            ratios,
         };
     }
+    if (node._closing) return null;
     const isSSH = node.type === 'ssh' || !!node._sshHost;
     return {
         type: 'leaf',
