@@ -64,3 +64,15 @@ test('unrelated combos and plain keys always pass through', () => {
     assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true, altKey: true })), true,
         'Ctrl+Alt+P was never a panel combo');
 });
+
+test('cleared binding: the freed panel combo falls through to the terminal', () => {
+    // '' = explicit "no combo bound" override; it must never match a real
+    // combo, so the action's old combo reaches the shell while the sibling
+    // panel combo stays withheld.
+    const ctx = loadVmWithBindings(DEFAULTS, { commandPalette: '' });
+    const tab = wiredTab(ctx, 't1', 'local_1');
+    assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true })), true,
+        'the cleared commandPalette frees Ctrl+P for the shell');
+    assert.equal(ctx._shortcutPassthrough(tab.term, key({ ctrlKey: true, shiftKey: true })), false,
+        'the still-bound quickCommands combo is still withheld');
+});

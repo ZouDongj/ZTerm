@@ -87,7 +87,7 @@ test('clicking anywhere cancels an armed capture; a later Ctrl+C is neither swal
     f.dispatch('mousedown', {});
     assert.equal(f.captureState(), null, 'mousedown cancelled the capture');
     assert.match(f.table.innerHTML, /修改/, 'the re-rendered list restores the 修改 button label');
-    assert.doesNotMatch(f.table.innerHTML, /按下快捷键/, 'no row stays in the capturing state');
+    assert.doesNotMatch(f.table.innerHTML, /Esc 取消/, 'no row stays in the capturing state');
 
     // The leaked-listener repro: Ctrl+C in the terminal must pass through
     // untouched and must NOT become a persisted binding.
@@ -123,4 +123,83 @@ test('(guard) Escape still cancels an armed capture without recording', () => {
     assert.equal(f.captureState(), null);
     assert.equal(f.context._settingsConfig.shortcuts, undefined);
     assert.equal(f.sends.length, 0);
+});
+
+// ── Clear-binding capture (bare Backspace/Delete) ──
+// '' is an explicit "no combo bound" override, distinct from an absent key
+// (= default): it must persist through the save-shortcuts funnel, survive a
+// settings reload merge, render as an em dash with the ↺ reset available,
+// and free the combo for the terminal.
+
+test('bare Backspace during capture clears the binding and persists an empty override', () => {
+    const f = fixture();
+    f.arm('closeTab');
+    const ev = f.keydown({ key: 'Backspace', target: XTERM_TARGET });
+    assert.equal(ev.defaultPrevented, true, 'the clearing keydown is consumed');
+    assert.equal(f.captureState(), null, 'capture finished');
+    assert.deepEqual(JSON.parse(JSON.stringify(f.context._settingsConfig.shortcuts)), { closeTab: '' });
+    assert.equal(f.sends.length, 1);
+    assert.equal(f.sends[0].cmd, 'save-shortcuts');
+    assert.deepEqual(JSON.parse(JSON.stringify(f.sends[0].payload)), { closeTab: '' });
+    assert.match(f.table.innerHTML, /<kbd>—<\/kbd>/, 'the cleared row renders an em dash');
+    assert.match(f.table.innerHTML, /shortcut-reset-btn/, 'the ↺ reset button still appears (override present)');
+});
+
+test('bare Delete clears the binding the same way', () => {
+    const f = fixture();
+    f.arm('closeTab');
+    f.keydown({ key: 'Delete', target: XTERM_TARGET });
+    assert.deepEqual(JSON.parse(JSON.stringify(f.context._settingsConfig.shortcuts)), { closeTab: '' });
+    assert.equal(f.sends.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(f.sends[0].payload)), { closeTab: '' });
+});
+
+test('Backspace/Delete WITH modifiers record as normal combos instead of clearing', () => {
+    const f = fixture();
+    f.arm('closeTab');
+    f.keydown({ key: 'Backspace', ctrlKey: true, target: XTERM_TARGET });
+    assert.deepEqual(JSON.parse(JSON.stringify(f.context._settingsConfig.shortcuts)), { closeTab: 'Ctrl+Backspace' },
+        'Ctrl+Backspace is a valid recorded combo');
+    assert.equal(f.sends.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(f.sends[0].payload)), { closeTab: 'Ctrl+Backspace' });
+});
+
+test('a cleared binding survives a settings reload (persist → merge → still empty)', () => {
+    const f = fixture();
+    f.arm('closeTab');
+    f.keydown({ key: 'Backspace', target: XTERM_TARGET });
+
+    // What loadSettings does on restart: a brand-new config built from what
+    // was persisted. The merge spread must keep the '' override instead of
+    // falling back to the default.
+    f.context._settingsConfig = { shortcuts: JSON.parse(JSON.stringify(f.sends[0].payload)) };
+    const merged = f.context._getShortcutBindings();
+    assert.equal(merged.closeTab, '', 'the empty override survives the reload merge');
+    assert.equal(merged.newTab, 'Ctrl+Shift+N', 'untouched defaults stay');
+});
+
+test('after clearing, the dispatcher no longer consumes the freed default combo', () => {
+    const f = fixture();
+    f.arm('closeTab');
+    f.keydown({ key: 'Backspace', target: XTERM_TARGET });
+    assert.equal(f.captureState(), null);
+
+    // closeTab's default combo (Ctrl+Shift+W) is no longer bound: the capture
+    // dispatcher must let it reach the terminal instead of consuming it.
+    const ev = f.keydown({ key: 'W', ctrlKey: true, shiftKey: true, target: XTERM_TARGET });
+    assert.equal(ev.defaultPrevented, undefined, 'the freed combo is delivered to the terminal');
+    assert.equal(ev.propagationStopped, undefined);
+});
+
+test('resetShortcut after a clear restores the default binding', () => {
+    const f = fixture();
+    f.arm('closeTab');
+    f.keydown({ key: 'Backspace', target: XTERM_TARGET });
+    assert.equal(f.context._getShortcutBindings().closeTab, '');
+
+    f.context.resetShortcut('closeTab');
+    assert.deepEqual(JSON.parse(JSON.stringify(f.context._settingsConfig.shortcuts)), {},
+        'the empty override was removed');
+    assert.equal(f.context._getShortcutBindings().closeTab, 'Ctrl+Shift+W', 'default binding restored');
+    assert.match(f.table.innerHTML, /Ctrl\+Shift\+W/, 'the list shows the default combo again');
 });

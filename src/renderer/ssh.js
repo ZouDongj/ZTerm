@@ -7,6 +7,7 @@ function updateMenuShortcuts() {
     const bindings = _getShortcutBindings();
     document.querySelectorAll('.menu-shortcut[data-action]').forEach(el => {
         const actionId = el.getAttribute('data-action');
+        // '' (cleared binding) renders no hint: the action has no combo.
         const combo = bindings[actionId] || '';
         el.textContent = combo ? _comboDisplay(combo) : '';
     });

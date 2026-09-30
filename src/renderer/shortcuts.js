@@ -415,7 +415,9 @@ function renderShortcutsList() {
     Object.keys(SHORTCUT_LABELS).forEach(id => {
         const combo = bindings[id] || '';
         const overridden = overrides[id] !== undefined;
-        html += `<tr><td>${SHORTCUT_LABELS[id]}</td><td><kbd>${escHtml(_comboDisplay(combo))}</kbd></td>`
+        // '' = explicit cleared binding (distinct from "no override = default"): show an em dash
+        const kbd = combo ? escHtml(_comboDisplay(combo)) : '—';
+        html += `<tr><td>${SHORTCUT_LABELS[id]}</td><td><kbd>${kbd}</kbd></td>`
             + `<td style="white-space:nowrap;text-align:right">`
             + `<button class="btn-outline shortcut-edit-btn" onclick="startShortcutCapture('${id}',this)">修改</button>`
             + (overridden ? `<button class="btn-outline shortcut-reset-btn" title="恢复默认（${escHtml(_comboDisplay(DEFAULT_SHORTCUTS[id]))}）" onclick="resetShortcut('${id}')">${Icons.iconSvg('rotate-ccw', 11)}</button>` : '')
@@ -428,23 +430,37 @@ function renderShortcutsList() {
 function startShortcutCapture(actionId, btn) {
     if (_shortcutCapture) return;
     _shortcutCapture = { actionId };
-    btn.textContent = '按下快捷键…';
+    btn.textContent = '⌫ 清除 / Esc 取消';
     btn.classList.add('capturing');
     const onKey = (e) => {
         e.preventDefault(); e.stopPropagation();
         if (e.key === 'Escape') { finish(null); return; }
         if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return; // wait for a non-modifier key
+        // Bare Backspace/Delete (no modifiers) clears the binding. With any
+        // modifier they fall through and record as normal combos.
+        if ((e.key === 'Backspace' || e.key === 'Delete')
+            && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) { finish(''); return; }
         finish(_comboFromEvent(e));
     };
     // Clicking anywhere (tab bar, settings close, another control) cancels the
     // capture like Esc: otherwise the keydown listener stays armed after the
     // user moved on and silently binds the next combo pressed anywhere.
     const onMouseDown = () => finish(null);
-    const finish = (combo) => {
+    // result: null = cancelled (Esc / click), '' = cleared binding, string = recorded combo
+    const finish = (result) => {
         document.removeEventListener('keydown', onKey, true);
         document.removeEventListener('mousedown', onMouseDown, true);
         _shortcutCapture = null;
-        if (combo) {
+        if (result === '') {
+            // Explicit unbind: '' is an override that survives the
+            // mergeShortcutBindings spread (kept across reloads), distinct
+            // from an absent key (= default). Skips the conflict/validation
+            // checks — an empty binding is not a combo.
+            if (!_settingsConfig.shortcuts) _settingsConfig.shortcuts = {};
+            _settingsConfig.shortcuts[actionId] = '';
+            persistShortcuts();
+        } else if (result) {
+            const combo = result;
             const keyPart = combo.split('+').pop();
             const ok = combo.includes('Ctrl+') || combo.includes('Alt+') || /^F\d{1,2}$/.test(keyPart);
             const bindings = _getShortcutBindings();
@@ -869,6 +885,9 @@ document.addEventListener('keydown', e => {
 
     const combo = _comboFromEvent(e);
     const bindings = _getShortcutBindings();
+    // A cleared binding ('' override) never matches: comboFromEvent always
+    // yields at least the key part, so the freed combo falls through to the
+    // terminal instead of firing the action.
     const actionId = Object.keys(bindings).find(id => bindings[id] === combo);
     if (!actionId || !SHORTCUT_ACTIONS[actionId]) return;
     e.preventDefault(); e.stopPropagation();

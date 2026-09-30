@@ -247,6 +247,8 @@ function _shortcutPassthrough(term, e) {
     if (typeof _getShortcutBindings !== 'function' || typeof comboFromEvent !== 'function') return true;
     const bindings = _getShortcutBindings();
     const combo = comboFromEvent(e);
+    // '' (cleared binding) never equals a real combo, so a cleared panel
+    // action's keys always reach the terminal.
     return combo !== bindings.commandPalette && combo !== bindings.quickCommands;
 }
 
