@@ -605,9 +605,16 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, attemptId, error }) => 
         // race this — both require pane.tabId, which the retry branch above
         // already cleared.
         const paneAdopted = () => !!pane && !tab.splitRoot && !!retryTerm && tab.term === retryTerm;
+        // Committed-to-close is dead even while the object is still in the
+        // tree: closeTab/_closePane leave their target in place for the
+        // staggered doRemove fade, which can outlive the backoff. Firing for
+        // such a tab/pane would start an orphan SSH handshake the teardown
+        // must then dispose (same guard as the reconnectTab/_reconnectPane
+        // fire-time checks).
         const stillWanted = () => tab._sshRetryToken === token && TabManager.tabs.includes(tab)
-            && (!pane || paneAdopted()
-                || TabManager.tabs.some(t => t.id === tab.id && getAllPanes(t).some(p => p.id === pane.id)));
+            && !TabManager._closingTabs.has(tab.id)
+            && (!pane || (!pane._closing && (paneAdopted()
+                || TabManager.tabs.some(t => t.id === tab.id && getAllPanes(t).some(p => p.id === pane.id)))));
         setTimeout(() => {
             if (!stillWanted()) return; // superseded / tab or pane closed
             // The retry is a NEW attempt identity (the old one was cancelled

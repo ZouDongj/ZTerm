@@ -13,7 +13,7 @@
 // and the spent retry budget was never used.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadVm, wiredSplitTab } from './helpers/renderer-vm.mjs';
+import { loadVm, wiredSplitTab, wiredTab } from './helpers/renderer-vm.mjs';
 
 const flush = () => new Promise(r => setTimeout(r, 0));
 
@@ -107,4 +107,46 @@ test('an undisturbed pane retries with its own wrapper (existing path preserved)
     assert.equal(cs[0].payload.profile.host, 'h2', 'pane session fields drive the retry');
     assert.equal(ctx.sshAttempts.ownerOf(cs[0].payload.attemptId), p2,
         'the new attempt is owned by the live pane wrapper');
+});
+
+test('whole-tab close initiated late in the backoff suppresses the retry', async () => {
+    const ctx = loadVm();
+    const invokes = patchInvoke(ctx);
+    const { tab, p2 } = sshSplitTab(ctx);
+    failP2(ctx, tab, p2);
+    wiredTab(ctx, 't_by', 'local_9'); // bystander so the closing tab is not the last one
+
+    // Close the tab at T=1900 of the 2s backoff: the staggered doRemove
+    // (~200ms) lands AFTER the retry's fire time, so at T=2000 the tab is
+    // still in the array — tree membership alone would let the retry fire
+    // an orphan handshake for a tab already committed to close.
+    ctx.__tq.advance(1900);
+    ctx.TabManager.closeTab(tab.id);
+    assert.ok(ctx.TabManager._closingTabs.has(tab.id), 'close committed');
+    assert.ok(ctx.TabManager.tabs.includes(tab), 'still in the array during the fade');
+
+    ctx.__tq.advance(500); // past the backoff fire, past the fade
+    await flush();
+    assert.equal(connects(invokes).length, 0, 'no orphan handshake for a closing tab');
+    assert.ok(!ctx.TabManager.tabs.includes(tab), 'the close still completed');
+});
+
+test('pane close initiated late in the backoff suppresses the retry', async () => {
+    const ctx = loadVm();
+    const invokes = patchInvoke(ctx);
+    const { tab, p1, p2 } = sshSplitTab(ctx);
+    failP2(ctx, tab, p2);
+
+    // Same window at pane level: _closePane at T=1900 leaves the dying pane
+    // in the tree (_closing set) until its doRemove fires past the backoff.
+    ctx.__tq.advance(1900);
+    ctx.TabManager._closePane(tab.id, p2.id);
+    assert.ok(p2._closing, 'pane close committed');
+    assert.ok(ctx.TabManager.tabs.some(t => t.id === tab.id && ctx.getAllPanes(t).some(p => p.id === p2.id)),
+        'dying pane still in the tree at the retry fire time');
+
+    ctx.__tq.advance(500); // past the backoff fire, past the fade
+    await flush();
+    assert.equal(connects(invokes).length, 0, 'no backend spawned for a dying pane');
+    assert.ok(tab.term === p1.term, 'the collapse adopted the healthy sibling');
 });
