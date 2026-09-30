@@ -477,10 +477,11 @@ const TabManager = {
             // The last tab cannot be closed; if its split tree was already emptied (0 panes, error path),
             // or it was reduced to a terminal-less shell with nothing pending (all of its panes died in
             // the same close window), reset it to the default local terminal as a fallback so no
-            // unclosable empty dead tab remains. A tab with a live connect attempt or a pending local
-            // creation is NOT dead — closing is simply refused as before.
+            // unclosable empty dead tab remains. A tab with a live connect attempt, a pending local
+            // creation or a pending reconnect (the pre-attempt 500ms window holds no attempt identity
+            // yet) is NOT dead — closing is simply refused as before.
             const t = this.tabs[0];
-            const deadShell = t && t.type !== 'settings' && !t.splitRoot && !t.term && !t.tabId && !sshAttempts.ownerAttempt(t) && !t._ptyRequestId;
+            const deadShell = t && t.type !== 'settings' && !t.splitRoot && !t.term && !t.tabId && !sshAttempts.ownerAttempt(t) && !t._ptyRequestId && !t._reconnectPending;
             if (t && ((t.splitRoot && getAllPanes(t).length === 0) || deadShell)) {
                 t.splitRoot = null;
                 t.type = 'local';
@@ -662,8 +663,12 @@ const TabManager = {
         tab._sshRetryToken = (tab._sshRetryToken || 0) + 1;
 
         if (tab.splitRoot) {
+            // Only an SSH pane can be reconnected: a mixed split (a local pane
+            // dragged into an SSH tab) keeps the focused pane's own type, and
+            // reconnecting a local pane would clear its terminal and open a
+            // silent SSH session inside it (the pane header gates the same way).
             const focused = getAllPanes(tab).find(p => p.focused);
-            if (focused) this._reconnectPane(tab.id, focused.id);
+            if (focused && focused.type === 'ssh') this._reconnectPane(tab.id, focused.id);
             return;
         }
 
@@ -737,6 +742,11 @@ const TabManager = {
         tab._sshRetryToken = (tab._sshRetryToken || 0) + 1;
         const pane = findPane(tab, paneId);
         if (!pane) return;
+        // Type guard (mirrors the pane header's reconnect button): only SSH
+        // panes reconnect. A local pane here would be cleared and reconnected
+        // against the tab's SSH host, and its local backend id would be sent
+        // through ssh-disconnect — which silently unmanages the local session.
+        if (pane.type !== 'ssh') return;
         // Same in-flight dedupe as reconnectTab, scoped to THIS pane: a
         // second trigger inside the pre-attempt window has no attempt
         // identity to supersede — merging keeps one connect per pane.
@@ -771,9 +781,28 @@ const TabManager = {
         _aggregateSplitConnected(tab);
         this.render();
         this.updateStatus();
+        // Fire-time owner resolution (mirrors the ssh-error retry timer in
+        // ipc.js): inside the window the pane may close (its flag drops at
+        // close-initiation in _closePane), or the split may collapse around
+        // THIS pane — the survivorDead carve-out keeps it alive and _exitSplit
+        // adopts its identity onto the tab. Connecting the captured pane
+        // object in either case binds the attempt to a wrapper no owner
+        // resolution can find: the fresh session is unclaimed-disposed and
+        // the reconnect silently lost. Term identity cannot detect the
+        // adoption here (clearOnConnect may already have disposed the
+        // terminal), so the pending flag itself discriminates — a closed pane
+        // lost it, an adopted pane kept it until this timer runs.
         setTimeout(() => {
+            const collapsedOntoTab = pane._reconnectPending && !tab.splitRoot && tab.type === 'ssh';
             pane._reconnectPending = false;
             if (!this.tabs.find(t => t.id === tab.id)) return;
+            if (collapsedOntoTab) {
+                // The pane's session identity moved onto the tab with the
+                // collapse: the tab owns the reconnect now.
+                _sshConnectWithCredentials(tab, null);
+                return;
+            }
+            if (!tab.splitRoot || !getAllPanes(tab).some(p => p.id === pane.id)) return;
             _sshConnectWithCredentials(tab, pane);
         }, 500);
     },
@@ -1578,6 +1607,10 @@ const TabManager = {
         pane.tabId = null;
         pane.requestId = null;
         pane._pendingAttempt = null;
+        // A pane committed to close can never reconnect: drop the pending
+        // flag too, or a lone survivor check below would read this dying
+        // pane as "awaiting its reconnect" instead of dead.
+        pane._reconnectPending = false;
         // The dying pane must not stay the focus marker owner: a repeated
         // close shortcut inside the exit window resolves the focused pane and
         // would hit it again. Hand the marker to the next sibling in tree
@@ -1604,11 +1637,17 @@ const TabManager = {
             // pending) is dead: promoting it would leave a terminal-less shell
             // tab that still reads connected. Take the no-survivor path
             // instead; its own pending removal finishes the tree teardown.
-            const survivorDead = rem.length === 1 && !rem[0].term && !rem[0].tabId && !rem[0].requestId && !rem[0]._pendingAttempt;
+            // A survivor inside its own pre-attempt reconnect window (same
+            // reasoning as the deadShell check in closeTab) is NOT dead.
+            const survivorDead = rem.length === 1 && !rem[0].term && !rem[0].tabId && !rem[0].requestId && !rem[0]._pendingAttempt && !rem[0]._reconnectPending;
             if (rem.length === 0 || survivorDead) {
                 this.closeTab(tabId);
             } else if (rem.length === 1) {
-                tab.name = rem[0]?.name || tab.name;
+                // A manual rename (_customName) outranks the pane-inherited
+                // name: the survivor's name froze at split time, so adopting it
+                // here would resurrect the pre-rename name while the lock keeps
+                // _updateTabName from ever restoring the user's name.
+                if (!tab._customName) tab.name = rem[0]?.name || tab.name;
                 this._exitSplit(tab);
                 // The active terminal collapsed back onto the tab (terminal
                 // search follows the surviving terminal)
@@ -1777,7 +1816,9 @@ const TabManager = {
             st.term = rp.term;
             st.fitAddon = rp.fitAddon;
             st.tabId = rp.tabId;
-            st.name = rp.name || st.name;
+            // Same collapse rule as _closePane: the rename lock outranks the
+            // surviving pane's stale (split-time) name.
+            if (!st._customName) st.name = rp.name || st.name;
             // Session identity follows the surviving pane — the tab's old
             // host/user/credential may belong to the extracted session
             adoptPaneFieldsIntoTab(st, rp);
@@ -1919,7 +1960,9 @@ const TabManager = {
                         // Same collapse rule as _extractPaneToTab: sync input
                         // dies with the split tree.
                         sourceTab.syncInput = false;
-                        sourceTab.name = rp.name || sourceTab.name;
+                        // Same collapse rule as _closePane: the rename lock
+                        // outranks the surviving pane's stale (split-time) name.
+                        if (!sourceTab._customName) sourceTab.name = rp.name || sourceTab.name;
                         // Session identity follows the surviving pane — the
                         // tab's old host/credential/command may belong to the
                         // moved session

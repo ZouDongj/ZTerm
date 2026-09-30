@@ -67,6 +67,11 @@ test('non-split tabs keep the exact single-session semantics', () => {
 test('a manual pane reconnect keeps a split tab with a live sibling connected', () => {
     const ctx = loadVm();
     const { tab, p1, p2 } = wiredSplitTab(ctx, 't5', 'b1', null, 'b2', null);
+    // _reconnectPane is the SSH pane-header action (type-gated since the
+    // mixed-split fix): stage the panes as the SSH panes that button exists
+    // on — reconnecting a local pane is no longer a product path.
+    p1.type = 'ssh'; p1._sshHost = 'h';
+    p2.type = 'ssh'; p2._sshHost = 'h';
 
     ctx.__emit('ssh-connected', { tabId: 'b1' });
     ctx.__emit('ssh-connected', { tabId: 'b2' });
