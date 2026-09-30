@@ -1,5 +1,22 @@
 // ZTerm - SFTP panel + transfer manager + drag-and-drop upload
 
+// Canonicalize an absolute remote path for upload-conflict comparisons:
+// collapse duplicate slashes, drop '.' segments, resolve '..' lexically
+// (never above the root) and strip the trailing slash ('/' itself stays '/').
+// Case is preserved — remote filesystems may be case-sensitive. Non-absolute
+// or non-string input is returned unchanged so exotic pass-through values
+// keep their existing comparison semantics.
+function normalizeRemotePath(p) {
+    if (typeof p !== 'string' || p === '' || p[0] !== '/') return p;
+    const segs = [];
+    for (const seg of p.split('/')) {
+        if (seg === '' || seg === '.') continue;
+        if (seg === '..') { if (segs.length) segs.pop(); continue; }
+        segs.push(seg);
+    }
+    return segs.length ? '/' + segs.join('/') : '/';
+}
+
 // ── SFTP Panel ──
 const SFTP = {
     _tabId: null,      // main-process tabId of the current SSH connection (the pty/ssh tabId)
@@ -474,8 +491,10 @@ const SFTP = {
     // owner = { tabId, path } captured when the batch started: every file in the
     // batch targets that session/path even if the panel closes or rebinds to
     // another session mid-batch (transfers are background work by design).
+    // The joined path is normalized so a manually typed owner path ('/srv/app/',
+    // '/srv/./app') yields the same canonical target the gate compares with.
     _uploadRemotePath(owner, filename) {
-        return (owner.path === '/' ? '' : owner.path) + '/' + filename;
+        return normalizeRemotePath((owner.path === '/' ? '' : owner.path) + '/' + filename);
     },
     async uploadLocal(localPath, owner) {
         const filename = localPath.split(/[\\/]/).pop();
@@ -541,7 +560,11 @@ const SFTP = {
     // for nothing, but in-flight targets are known either way — the batch
     // proceeds unasked only when neither source reports a collision.
     _uploadConflictCount(owner, localPaths) {
-        const onOwnerDir = this._listed && this._tabId === owner.tabId && this._path === owner.path;
+        // The listing is judged only when the panel really shows the owner
+        // directory; textual aliases of the same directory (typed '/srv/app/'
+        // vs the canonical cwd follow '/srv/app') must count as equal.
+        const onOwnerDir = this._listed && this._tabId === owner.tabId
+            && normalizeRemotePath(this._path) === normalizeRemotePath(owner.path);
         const remote = onOwnerDir ? new Set(this._files.map(f => f.name)) : null;
         let count = 0;
         for (const p of (localPaths || [])) {
@@ -719,10 +742,12 @@ const TransferManager = {
     // panel listing cannot see it (the file only appears once the transfer
     // completes), so the upload conflict gate asks here — two concurrent
     // uploads to one target finalize independently and the later one silently
-    // replaces the earlier one's data.
+    // replaces the earlier one's data. Both sides are normalized so textual
+    // aliases of one target ('/srv/app//f', '/srv/./app/f') still collide.
     hasPendingUploadTo(tabId, remotePath) {
+        const target = normalizeRemotePath(remotePath);
         return this._transfers.some(t => t.type === 'upload' && !t.done && !t.cancelled
-            && t.tabId === tabId && t.remotePath === remotePath);
+            && t.tabId === tabId && normalizeRemotePath(t.remotePath) === target);
     },
 
     update(id, transferred, total) {
