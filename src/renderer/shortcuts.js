@@ -814,7 +814,11 @@ document.addEventListener('keydown', e => {
         }
         const menuPopup = document.getElementById('menu-popup');
         if (menuPopup && menuPopup.classList.contains('open')) {
-            menuPopup.classList.remove('open');
+            // Full close, same as the backdrop click path: clearing only the
+            // popup class would leave the fullscreen #menu-backdrop.open and
+            // body.menu-open behind — the invisible backdrop (z-index 299)
+            // would then swallow the next click.
+            closeMenuPopup();
             e.preventDefault(); e.stopPropagation();
             return;
         }
