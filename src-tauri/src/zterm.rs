@@ -860,6 +860,11 @@ fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
                 if !CONFIG_CORRUPT_HANDLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     backup_corrupt_config(path);
                 }
+                // Corruption is a known state (remnants backed up above), so
+                // saving defaults is safe — clear any stale suppression from
+                // an earlier unreadable load instead of refusing saves until
+                // the process restarts.
+                CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
                 return default_config();
             }
             Err(e) => {
@@ -6079,6 +6084,26 @@ mod tests {
         assert_eq!(written["appearance"]["fontSize"], 12);
         assert_eq!(written["quickCommands"][0]["name"], "uptime");
         CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_config_from_corrupt_data_config_clears_stale_suppression() {
+        // Corruption is a known state (remnants backed up, defaults safe to
+        // save), so the corrupt branch must reconcile the suppression flag:
+        // a stale suppression from an earlier unreadable load would otherwise
+        // refuse every save until the process restarts.
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_CORRUPT_HANDLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        CONFIG_PERSIST_SUPPRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let dir = config_test_dir("corrupt-clears-suppress");
+        let data_dir_config = dir.join("data").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(data_dir_config.parent().unwrap()).unwrap();
+        std::fs::write(&data_dir_config, "{ not json").unwrap();
+        let cfg = load_config_from(&data_dir_config, &anchor);
+        assert_eq!(cfg, default_config());
+        assert!(!CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
