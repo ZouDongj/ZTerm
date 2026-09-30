@@ -93,6 +93,10 @@ function paletteFilter() {
 }
 
 function paletteKeyDown(e) {
+    // IME composition: Enter confirms a candidate, not "run the highlighted
+    // action"; the arrows and Escape belong to the IME window as well.
+    // Same guard as the session selector (ssh.js).
+    if (e.isComposing || e.keyCode === 229) return;
     const inp = document.getElementById('palette-input');
     const q = inp ? inp.value.toLowerCase() : '';
     const bindings = typeof _getShortcutBindings === 'function' ? _getShortcutBindings() : {};

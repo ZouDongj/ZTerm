@@ -237,14 +237,17 @@ function _createClipboardAddon() {
     return new ClipboardAddon(undefined, provider);
 }
 
-// Shortcut passthrough handler (single entry point): Ctrl+P (command palette) and
-// Ctrl+Shift+P (quick commands) are handed to shortcuts.js for dispatch.
-// xterm semantics: returning false stops processing (true continues).
+// Shortcut passthrough handler (single entry point): the CURRENT command
+// palette / quick commands combos are handed to shortcuts.js for dispatch.
+// The check reads the live bindings: once the user rebinds those actions, the
+// freed combo must fall through to the terminal (bash history, vim completion)
+// instead of dying here. xterm semantics: returning false stops processing
+// (true continues).
 function _shortcutPassthrough(term, e) {
-    const isShortcut =
-        (e.ctrlKey && !e.altKey && !e.metaKey && e.key === 'p') ||
-        (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'P' || e.key === 'p'));
-    return !isShortcut;
+    if (typeof _getShortcutBindings !== 'function' || typeof comboFromEvent !== 'function') return true;
+    const bindings = _getShortcutBindings();
+    const combo = comboFromEvent(e);
+    return combo !== bindings.commandPalette && combo !== bindings.quickCommands;
 }
 
 // Ctrl+J over win32-input-mode (local ConPTY sessions only). The legacy byte
@@ -1089,6 +1092,7 @@ function openSearch() {
     // A fresh open drops the previous query's owner state entirely: input and
     // counter start blank, the old owner keeps no decorations, and no
     // background addon refresh can repopulate the counter for the dead query.
+    _cancelSearchInputDebounce();
     _resetActiveSearch();
     setTimeout(() => {
         if (bar.classList.contains('open')) document.getElementById('search-input').focus();
@@ -1096,6 +1100,7 @@ function openSearch() {
 }
 function closeSearch() {
     document.getElementById('search-bar').classList.remove('open');
+    _cancelSearchInputDebounce();
     _resetActiveSearch();
     // Focus is re-resolved AT FIRE time: the terminal captured at close can
     // be gone within the 50ms window (tab close disposes it, a switch moved
@@ -1133,9 +1138,41 @@ function doSearch() {
     // decorations wiring ever firing).
     _captureSearchSelection(target.term);
 }
+// Debounced wrapper for the TYPED search path (the input event). One scan is
+// a synchronous walk of the whole scrollback plus a rebuild of up to 1000
+// match decorations; typing a query letter by letter must not run that on
+// every keystroke — one scan after the typing pause is what the user sees.
+// doSearch itself stays synchronous for its programmatic callers (Enter
+// navigation, the active-terminal refresh, the e2e contract); the takeover
+// below rebinds only the DOM input path.
+let _searchInputDebounce = null;
+function _cancelSearchInputDebounce() {
+    if (_searchInputDebounce) { clearTimeout(_searchInputDebounce); _searchInputDebounce = null; }
+}
+function scheduleSearchInput() {
+    _cancelSearchInputDebounce();
+    _searchInputDebounce = setTimeout(() => {
+        _searchInputDebounce = null;
+        doSearch();
+    }, 200);
+}
+(() => {
+    // Take over the inline oninput wiring (renderer.html): the inline handler
+    // would keep calling doSearch per keystroke. The page always has the
+    // element; minimal load-time contexts (tests) run function declarations
+    // only and skip this.
+    if (typeof document === 'undefined') return;
+    const input = document.getElementById('search-input');
+    if (!input) return;
+    input.oninput = null;
+    input.addEventListener('input', scheduleSearchInput);
+})();
 function searchNext() { _navigateSearch(1); }
 function searchPrev() { _navigateSearch(-1); }
 function _navigateSearch(direction) {
+    // The navigation just ran the find with the fresh input value; a pending
+    // typed scan would only repeat it and bump the selection a second time.
+    _cancelSearchInputDebounce();
     const query = document.getElementById('search-input').value;
     const target = _getActiveSearchTarget();
     if (!target || !query) { _resetActiveSearch(); return; }
@@ -1158,6 +1195,10 @@ function _navigateSearch(direction) {
     _captureSearchSelection(target.term);
 }
 function onSearchKey(e) {
+    // IME composition: Enter confirms a candidate, not "jump to the next
+    // match"; Escape belongs to the IME window as well. Same guard as the
+    // session selector (ssh.js).
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter') { e.preventDefault(); e.shiftKey ? searchPrev() : searchNext(); }
     if (e.key === 'Escape') { closeSearch(); }
 }

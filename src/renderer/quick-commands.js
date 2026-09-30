@@ -102,6 +102,10 @@ function qcSelect(i) {
 }
 
 function qcKeydown(e) {
+    // IME composition: Enter confirms a candidate, not "run the command";
+    // the arrows and Escape belong to the IME window as well. Same guard as
+    // the session selector (ssh.js).
+    if (e.isComposing || e.keyCode === 229) return;
     const query = document.getElementById('qc-input').value.toLowerCase();
     const filtered = filterQuickCommands(_qcCommands, query);
     if (e.key === 'ArrowDown') { e.preventDefault(); qcSelect(Math.min(_qcSelected + 1, filtered.length - 1)); }

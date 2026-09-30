@@ -73,6 +73,18 @@ const SFTP = {
         document.getElementById('sftp-breadcrumb').innerHTML = '<span>/</span>';
         document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载中…</div>';
         document.getElementById('overlay-sftp').classList.add('open');
+        // A modal panel must hold the keyboard the moment it opens (same
+        // convention as openQC/openPalette/openSSHManager): without a focus
+        // move the xterm textarea stays focused and every keystroke keeps
+        // flowing into the terminal behind the panel. The panel has no input
+        // to focus, so the window container takes it as a neutral target
+        // (dialog convention — no default action on Enter; Esc still closes
+        // through the global overlay handler).
+        setTimeout(() => {
+            if (!SFTP.isOpen || SFTP._tabId !== tabId) return;
+            const win = document.querySelector('#overlay-sftp .sftp-window');
+            if (win) { win.setAttribute('tabindex', '-1'); win.focus(); }
+        }, 50);
         // restore this tab's pin state onto the button
         const pinBtn = document.getElementById('sftp-pin-btn');
         if (pinBtn) pinBtn.classList.toggle('pinned', this._isPinned(tabId));
@@ -462,10 +474,13 @@ const SFTP = {
     // owner = { tabId, path } captured when the batch started: every file in the
     // batch targets that session/path even if the panel closes or rebinds to
     // another session mid-batch (transfers are background work by design).
+    _uploadRemotePath(owner, filename) {
+        return (owner.path === '/' ? '' : owner.path) + '/' + filename;
+    },
     async uploadLocal(localPath, owner) {
         const filename = localPath.split(/[\\/]/).pop();
-        const remotePath = (owner.path === '/' ? '' : owner.path) + '/' + filename;
-        const tid = TransferManager.add(filename, 'upload', owner.tabId);
+        const remotePath = this._uploadRemotePath(owner, filename);
+        const tid = TransferManager.add(filename, 'upload', owner.tabId, undefined, remotePath);
         let transferResult;
         try {
             transferResult = await ipcRenderer.invoke('sftp-upload', { tabId: owner.tabId, localPath, remotePath, transferId: tid });
@@ -503,18 +518,37 @@ const SFTP = {
         }
     },
 
+    // Duplicate basenames inside ONE batch all map to the same remote path
+    // (different local folders, same file name): whichever transfer finalizes
+    // last silently replaces the other's data. That overwrite is never what
+    // the user meant, so the batch is refused up front instead of confirmed.
+    _duplicateBasenames(localPaths) {
+        const seen = new Set();
+        const dups = new Set();
+        for (const p of (localPaths || [])) {
+            const name = String(p).split(/[\\/]/).pop();
+            if (!name) continue;
+            if (seen.has(name)) dups.add(name); else seen.add(name);
+        }
+        return [...dups];
+    },
+
     // Best-effort remote same-name detection for an upload batch, judged
-    // against the panel's CURRENT listing of the owner directory. When the
-    // panel no longer displays that directory (rebound, navigated away, or
-    // never listed) nothing can be judged and the batch proceeds unasked —
-    // the pre-fix behavior.
+    // against the panel's CURRENT listing of the owner directory plus the
+    // uploads still in flight to that directory (invisible to the listing
+    // until they complete). When the panel no longer displays that directory
+    // (rebound, navigated away, or never listed) the listing can be judged
+    // for nothing, but in-flight targets are known either way — the batch
+    // proceeds unasked only when neither source reports a collision.
     _uploadConflictCount(owner, localPaths) {
-        if (!this._listed || this._tabId !== owner.tabId || this._path !== owner.path) return 0;
-        const remote = new Set(this._files.map(f => f.name));
+        const onOwnerDir = this._listed && this._tabId === owner.tabId && this._path === owner.path;
+        const remote = onOwnerDir ? new Set(this._files.map(f => f.name)) : null;
         let count = 0;
         for (const p of (localPaths || [])) {
             const name = String(p).split(/[\\/]/).pop();
-            if (name && remote.has(name)) count++;
+            if (!name) continue;
+            if (remote && remote.has(name)) { count++; continue; }
+            if (TransferManager.hasPendingUploadTo(owner.tabId, this._uploadRemotePath(owner, name))) count++;
         }
         return count;
     },
@@ -537,6 +571,13 @@ const SFTP = {
         const owner = { tabId: this._tabId, path: this._path };
         const result = await ipcRenderer.invoke('show-open-dialog', { properties: ['openFile', 'multiSelections'] });
         if (result.canceled || !result.filePaths.length) return;
+        // Same-basename refusal (same-basename files in one batch would
+        // silently overwrite each other — see _duplicateBasenames).
+        const dups = this._duplicateBasenames(result.filePaths);
+        if (dups.length) {
+            showToast('同批上传中存在同名文件: ' + dups.join('、') + '，将互相覆盖；请分批上传', true);
+            return;
+        }
         // Same-name overwrite gate: one confirmation for the whole batch,
         // judged against the listing the user is looking at.
         const conflicts = this._uploadConflictCount(owner, result.filePaths);
@@ -665,13 +706,23 @@ const TransferManager = {
         return '已关闭会话';
     },
 
-    add(name, type, tabId, localPath) {
+    add(name, type, tabId, localPath, remotePath) {
         const id = this._nextId++;
-        this._transfers.push({ id, name, type, tabId, localPath, sessionLabel: this._sessionLabel(tabId), transferred: 0, total: 0, done: false, cancelled: false, startTime: Date.now(), _lastUpdate: Date.now(), _lastBytes: 0, _speed: 0 });
+        this._transfers.push({ id, name, type, tabId, localPath, remotePath, sessionLabel: this._sessionLabel(tabId), transferred: 0, total: 0, done: false, cancelled: false, startTime: Date.now(), _lastUpdate: Date.now(), _lastBytes: 0, _speed: 0 });
         this._render();
         this._showButton();
         showToast(type === 'download' ? '开始下载: ' + name : '开始上传: ' + name);
         return id;
+    },
+
+    // Does an upload still in flight target exactly this remote path? The
+    // panel listing cannot see it (the file only appears once the transfer
+    // completes), so the upload conflict gate asks here — two concurrent
+    // uploads to one target finalize independently and the later one silently
+    // replaces the earlier one's data.
+    hasPendingUploadTo(tabId, remotePath) {
+        return this._transfers.some(t => t.type === 'upload' && !t.done && !t.cancelled
+            && t.tabId === tabId && t.remotePath === remotePath);
     },
 
     update(id, transferred, total) {
@@ -986,6 +1037,13 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) =>
         // Same ownership contract as upload(): one snapshot for the whole batch,
         // taken synchronously at drop time (uploads still start concurrently).
         const owner = { tabId: SFTP._tabId, path: SFTP._path };
+        // Same-basename refusal as the toolbar upload() (same-basename files
+        // in one batch would silently overwrite each other).
+        const dups = SFTP._duplicateBasenames(paths);
+        if (dups.length) {
+            showToast('同批上传中存在同名文件: ' + dups.join('、') + '，将互相覆盖；请分批上传', true);
+            return;
+        }
         // Same-name overwrite gate as the toolbar upload(): one confirmation
         // for the whole batch, judged against the listing being dropped onto.
         const conflicts = SFTP._uploadConflictCount(owner, paths);
