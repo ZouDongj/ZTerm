@@ -102,3 +102,52 @@ test('closing a pane cancels its own pending reconnect flag (a dying pane never 
 
     assert.equal(p1._reconnectPending, false, 'close initiation clears the pending reconnect');
 });
+
+// tabs-close-guard: the reconnect timer's fire guard only checked tree
+// membership. Burst closes stagger doRemove (200ms + 120ms per queued close),
+// so closing 4+ tabs leaves the last removal past the 500ms fire — the timer
+// fired on a tab already committed to close and started an orphan SSH
+// handshake (disposed by the orphan backstops, but a real extra connect).
+// The guard now also honors the closing commitment.
+test('the reconnect timer does not fire on a tab committed to close (doRemove still pending)', () => {
+    const ctx = loadVm();
+    const tab = mkSshTab(ctx, 't1', 'ssh_1');
+    // Burst fodder plus a bystander: closing 4 tabs queues t1's doRemove at
+    // 200 + 3*120 = 560ms, past the 500ms reconnect fire.
+    wiredTab(ctx, 't2', 'local_2');
+    wiredTab(ctx, 't3', 'local_3');
+    wiredTab(ctx, 't4', 'local_4');
+    wiredTab(ctx, 't0', 'local_0');
+
+    ctx.TabManager.reconnectTab('t1');
+    assert.equal(tab._reconnectPending, true, 'reconnect window entered');
+
+    ctx.TabManager.closeTab('t2');
+    ctx.TabManager.closeTab('t3');
+    ctx.TabManager.closeTab('t4');
+    ctx.TabManager.closeTab('t1'); // 4th queued close → doRemove at 560ms
+
+    ctx.__tq.advance(500); // the reconnect timer fires; t1's removal is still pending
+    assert.ok(ctx.TabManager.tabs.some(t => t.id === 't1'), 'control: t1 is still in the tree (removal pending)');
+    assert.equal(ctx.TabManager._closingTabs.has('t1'), true, 'control: t1 is committed to close');
+    assert.equal(ctx.sshAttempts.__tokensForTests().length, 0, 'no attempt was created for the closing tab');
+
+    ctx.__tq.advance(100); // the deferred removal lands
+    assert.equal(ctx.TabManager.tabs.some(t => t.id === 't1'), false, 't1 is gone');
+    assert.equal(ctx.sshAttempts.__tokensForTests().length, 0, 'still no attempt after the removal');
+});
+
+test('(control) the reconnect timer still fires amid a burst when this tab is not committed to close', () => {
+    const ctx = loadVm();
+    const tab = mkSshTab(ctx, 't1', 'ssh_1');
+    wiredTab(ctx, 't2', 'local_2');
+    wiredTab(ctx, 't3', 'local_3');
+    wiredTab(ctx, 't0', 'local_0');
+
+    ctx.TabManager.reconnectTab('t1');
+    ctx.TabManager.closeTab('t2');
+    ctx.TabManager.closeTab('t3');
+
+    ctx.__tq.advance(500);
+    assert.ok(ctx.sshAttempts.ownerAttempt(tab), 'the reconnect fired normally for the untouched tab');
+});

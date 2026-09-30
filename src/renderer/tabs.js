@@ -720,7 +720,12 @@ const TabManager = {
         const keptTerm = tab.term || null;
         setTimeout(() => {
             tab._reconnectPending = false;
-            if (!this.tabs.find(t => t.id === id)) return;
+            // In-tree is not "alive": burst closes stagger doRemove
+            // (200ms + 120ms per queued close), so a tab already committed
+            // to close can still be found in the array here — firing would
+            // start an orphan SSH handshake the teardown must then dispose.
+            // Objects committed to close never fire.
+            if (!this.tabs.find(t => t.id === id) || this._closingTabs.has(id)) return;
             if (!tab.splitRoot) {
                 // A reconnect creates a NEW attempt identity (the old one was
                 // cancelled explicitly above — no implicit supersede needed).
@@ -795,14 +800,21 @@ const TabManager = {
         setTimeout(() => {
             const collapsedOntoTab = pane._reconnectPending && !tab.splitRoot && tab.type === 'ssh';
             pane._reconnectPending = false;
-            if (!this.tabs.find(t => t.id === tab.id)) return;
+            // Same committed-to-close guard as the tab timer above: a close
+            // leaves the whole tab in the array inside this window (staggered
+            // doRemove), and every pane in it is doomed with it — firing
+            // would start an orphan SSH handshake the teardown must dispose.
+            if (!this.tabs.find(t => t.id === tab.id) || this._closingTabs.has(tab.id)) return;
             if (collapsedOntoTab) {
                 // The pane's session identity moved onto the tab with the
                 // collapse: the tab owns the reconnect now.
                 _sshConnectWithCredentials(tab, null);
                 return;
             }
-            if (!tab.splitRoot || !getAllPanes(tab).some(p => p.id === pane.id)) return;
+            // The pane's own close initiation keeps it in the tree for its
+            // ~200ms fade: the commitment (_closing), not tree membership,
+            // decides whether it may still fire.
+            if (!tab.splitRoot || pane._closing || !getAllPanes(tab).some(p => p.id === pane.id)) return;
             _sshConnectWithCredentials(tab, pane);
         }, 500);
     },

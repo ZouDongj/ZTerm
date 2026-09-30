@@ -93,3 +93,55 @@ test('(control) the pane reconnect is unchanged while the split stays alive', ()
     assert.equal(ctx.sshAttempts.ownerOf(token) === p2, false, 'not the sibling');
     assert.equal(p1._reconnectPending, false, 'the window closed');
 });
+
+// tabs-close-guard (pane): the fire-time ownership resolution only checked
+// tree membership. A close initiated inside the last ~200ms of the window
+// keeps the pane in the tree for its fade while _closing is already set —
+// the timer fired on the dying pane and started an orphan attempt. The same
+// hole existed for any pane of a tab whose whole-tab doRemove was still
+// pending (closeTab leaves pane flags untouched during the fade).
+test('the pane reconnect timer does not fire on a pane committed to close (fade still pending)', () => {
+    const ctx = loadVm();
+    const { tab, p1 } = sshSplit(ctx);
+
+    ctx.TabManager._reconnectPane(tab.id, p1.id);
+    assert.equal(p1._reconnectPending, true, 'pre-attempt window entered');
+    // Baseline: the split's own creation attempt (the second pane's spawn)
+    // predates the window; the orphan check is that the timer adds NOTHING.
+    const baseline = ctx.sshAttempts.__tokensForTests().length;
+
+    ctx.__tq.advance(310); // close initiated at T=310 → pane doRemove at 510
+    ctx.TabManager._closePane(tab.id, p1.id);
+    assert.equal(p1._closing, true, 'close commitment made');
+
+    ctx.__tq.advance(190); // T=500: the timer fires while the pane is still in the tree
+    assert.ok(ctx.getAllPanes(tab).some(p => p.id === p1.id), 'control: the dying pane is still in the tree');
+    assert.equal(ctx.sshAttempts.__tokensForTests().length, baseline, 'no attempt was created for the dying pane');
+
+    ctx.__tq.advance(200); // the pane removal + collapse land
+    assert.equal(tab.splitRoot, null, 'the split collapsed onto the sibling');
+    assert.equal(ctx.sshAttempts.__tokensForTests().length, baseline, 'still no attempt after the removal');
+});
+
+test('the pane reconnect timer does not fire when the whole tab is committed to close (doRemove still pending)', () => {
+    const ctx = loadVm();
+    const { tab, p1 } = sshSplit(ctx);
+
+    ctx.TabManager._reconnectPane(tab.id, p1.id);
+    assert.equal(p1._reconnectPending, true, 'pre-attempt window entered');
+    // Baseline: the split's own creation attempt (the second pane's spawn)
+    // predates the window; the orphan check is that the timer adds NOTHING.
+    const baseline = ctx.sshAttempts.__tokensForTests().length;
+
+    ctx.__tq.advance(310); // whole-tab close at T=310 → tab doRemove at 510
+    ctx.TabManager.closeTab(tab.id);
+
+    ctx.__tq.advance(190); // T=500: the timer fires with the tab still in the array
+    assert.ok(ctx.TabManager.tabs.some(t => t.id === tab.id), 'control: the tab is still in the array');
+    assert.equal(ctx.TabManager._closingTabs.has(tab.id), true, 'control: the tab is committed to close');
+    assert.equal(ctx.sshAttempts.__tokensForTests().length, baseline, 'no attempt was created for the doomed split');
+
+    ctx.__tq.advance(200); // the deferred tab removal lands
+    assert.equal(ctx.TabManager.tabs.some(t => t.id === tab.id), false, 'the tab is gone');
+    assert.equal(ctx.sshAttempts.__tokensForTests().length, baseline, 'still no attempt after the removal');
+});
