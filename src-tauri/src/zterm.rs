@@ -19,6 +19,12 @@ static APP_HANDLE: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
 // A corrupt config is backed up / reported only once, not re-handled on every load_config
 static CONFIG_CORRUPT_HANDLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+// Set while load_config_from returned defaults because an existing config file
+// could not be READ (IO failure): save_config refuses to write so factory
+// defaults never overwrite the unreadable file. Any later successful read
+// clears it, so saving resumes as soon as the real config is readable again.
+static CONFIG_PERSIST_SUPPRESSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 // Serial write lock for config/known_hosts: the load-modify-save cycle of the
 // save_* commands must be atomic, or concurrent saves overwrite each other with stale snapshots
 static CONFIG_WRITE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
@@ -836,12 +842,16 @@ fn load_config() -> Value {
 /// that stays unwritable. Split from load_config's path resolution for unit
 /// testing (passes explicit paths).
 fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
+    // True when an existing config file could not be read (IO failure): the
+    // defaults below are then not known to be safe to save over it.
+    let mut read_failed = false;
     if path.exists() {
         match std::fs::read_to_string(path) {
             Ok(content) => {
                 if let Ok(raw) = serde_json::from_str::<Value>(&content) {
                     let (merged, corrupt) = sanitize_config(raw);
                     if !corrupt {
+                        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
                         return merged;
                     }
                 }
@@ -861,42 +871,57 @@ fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
                 // mirror below, so a later save persists mirrored settings
                 // instead of factory defaults over the unreadable config.
                 eprintln!("[zterm] read {} failed: {e}", path.display());
+                read_failed = true;
             }
         }
     }
     if anchor.exists() {
-        if let Ok(content) = std::fs::read_to_string(anchor) {
-            if let Ok(raw) = serde_json::from_str::<Value>(&content) {
-                let (mut merged, corrupt) = sanitize_config(raw);
-                if !corrupt {
-                    // The dataDir pointer lives only in the anchor; don't leak
-                    // it into the effective config (and from there into the
-                    // data-dir config on the next save).
-                    if let Value::Object(ref mut m) = merged {
-                        m.remove("dataDir");
+        match std::fs::read_to_string(anchor) {
+            Ok(content) => {
+                if let Ok(raw) = serde_json::from_str::<Value>(&content) {
+                    let (mut merged, corrupt) = sanitize_config(raw);
+                    if !corrupt {
+                        // The dataDir pointer lives only in the anchor; don't leak
+                        // it into the effective config (and from there into the
+                        // data-dir config on the next save).
+                        if let Value::Object(ref mut m) = merged {
+                            m.remove("dataDir");
+                        }
+                        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+                        return merged;
                     }
-                    return merged;
+                }
+                // Corrupt anchor: keep a timestamped copy of the remnants, then
+                // rebuild the anchor with defaults so the next launch does not
+                // re-detect (and re-back-up) the same corruption and the fallback
+                // mirror keeps working. Same notify-once policy as the branch above.
+                if !CONFIG_CORRUPT_HANDLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    backup_corrupt_config(anchor);
+                    if let Some(parent) = anchor.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = atomic_write_config(
+                        anchor,
+                        &serde_json::to_string_pretty(&default_config()).unwrap_or_default(),
+                    );
                 }
             }
-            // Corrupt anchor: keep a timestamped copy of the remnants, then
-            // rebuild the anchor with defaults so the next launch does not
-            // re-detect (and re-back-up) the same corruption and the fallback
-            // mirror keeps working. Same notify-once policy as the branch above.
-            if !CONFIG_CORRUPT_HANDLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                backup_corrupt_config(anchor);
-                if let Some(parent) = anchor.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = atomic_write_config(
-                    anchor,
-                    &serde_json::to_string_pretty(&default_config()).unwrap_or_default(),
-                );
+            Err(e) => {
+                // An anchor read failure is an IO condition like the one above, not
+                // corruption: rebuilding would clobber a possibly intact mirror, so
+                // leave the file as is.
+                eprintln!("[zterm] read {} failed: {e}", anchor.display());
+                read_failed = true;
             }
         }
-        // An anchor read failure is an IO condition like the one above, not
-        // corruption: rebuilding would clobber a possibly intact mirror, so
-        // leave the file as is.
     }
+    // Defaults returned with an existing file unreadable: suppress saves until
+    // a successful read proves the on-disk state, so a later save cannot
+    // overwrite the unreadable config (SSH profiles / encrypted passwords)
+    // with factory defaults. With nothing unreadable (files simply absent, or
+    // corruption already backed up) the state is known — clear any stale
+    // suppression so first-run saving keeps working.
+    CONFIG_PERSIST_SUPPRESSED.store(read_failed, std::sync::atomic::Ordering::SeqCst);
     default_config()
 }
 
@@ -930,13 +955,36 @@ fn atomic_write_config(path: &std::path::Path, content: &str) -> std::io::Result
 }
 
 fn save_config(config: &Value) -> Result<(), String> {
-    let path = config_path();
+    save_config_to(&config_path(), &anchor_config_path(), config)
+}
+
+/// Save body split from save_config's path resolution for unit testing
+/// (passes explicit paths). Refuses to write while CONFIG_PERSIST_SUPPRESSED
+/// is set: the last load returned defaults without reading an existing
+/// (locked/unreadable) config, and writing now would replace its contents —
+/// SSH profiles, encrypted passwords — with factory defaults once the IO
+/// condition heals. The next successful load clears the flag and saving
+/// resumes automatically (every save_* command re-loads before saving).
+fn save_config_to(
+    path: &std::path::Path,
+    anchor: &std::path::Path,
+    config: &Value,
+) -> Result<(), String> {
+    if CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst) {
+        eprintln!(
+            "[zterm] config save suppressed: the config was unreadable at load, refusing to overwrite it with defaults"
+        );
+        return Err(
+            "config save suppressed: the on-disk config was unreadable, writing defaults would destroy it"
+                .to_string(),
+        );
+    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let content = serde_json::to_string_pretty(config).unwrap_or_default();
     // Atomic write: tmp + rename, so a mid-write crash cannot leave a corrupt config
-    if atomic_write_config(&path, &content).is_ok() {
+    if atomic_write_config(path, &content).is_ok() {
         return Ok(());
     }
     // Fallback: default data dir not writable (e.g. no permission in
@@ -947,16 +995,15 @@ fn save_config(config: &Value) -> Result<(), String> {
         "[zterm] write {} failed, falling back to anchor",
         path.display()
     );
-    let anchor = anchor_config_path();
     if let Some(parent) = anchor.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let existing = std::fs::read_to_string(&anchor)
+    let existing = std::fs::read_to_string(anchor)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok());
     let merged = anchor_fallback_content(existing, config);
     atomic_write_config(
-        &anchor,
+        anchor,
         &serde_json::to_string_pretty(&merged).unwrap_or_default(),
     )
     .map_err(|e| {
@@ -5943,6 +5990,204 @@ mod tests {
             "no corrupt backup expected, got {backups:?}"
         );
         assert!(!CONFIG_CORRUPT_HANDLED.load(std::sync::atomic::Ordering::SeqCst));
+        // The unreadable anchor also sets the save-suppression flag now; reset
+        // it so this test does not refuse writes in later save tests.
+        assert!(CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst));
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn load_config_from_double_read_failure_suppresses_save_until_read_succeeds() {
+        // Both config files exist but neither can be read (AV/backup exclusive
+        // locks): load returns defaults AND marks persistence suppressed —
+        // otherwise the next periodic save (15s save_last_tabs, settings
+        // saves) would overwrite the still-unreadable files with factory
+        // defaults the moment writability returns, losing SSH profiles and
+        // encrypted passwords.
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_CORRUPT_HANDLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let dir = config_test_dir("double-read-fail-suppress");
+        let data_dir_config = dir.join("data").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(data_dir_config.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        let data_content =
+            serde_json::to_string(&json!({ "appearance": { "fontSize": 12 } })).unwrap();
+        let anchor_content = serde_json::to_string(&json!({
+            "dataDir": "D:/zterm-data",
+            "appearance": { "fontSize": 18 },
+        }))
+        .unwrap();
+        std::fs::write(&data_dir_config, &data_content).unwrap();
+        std::fs::write(&anchor, &anchor_content).unwrap();
+        // Exclusive locks on both files: every read fails with a sharing violation.
+        let data_lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&data_dir_config)
+                .unwrap()
+        };
+        let anchor_lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&anchor)
+                .unwrap()
+        };
+        let cfg = load_config_from(&data_dir_config, &anchor);
+        // Double read failure → defaults, but flagged as unsafe to persist.
+        assert_eq!(cfg, default_config());
+        assert!(CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst));
+        // The suppressed save is refused outright, before any write attempt.
+        let err = save_config_to(
+            &data_dir_config,
+            &anchor,
+            &json!({ "appearance": { "fontSize": 99 } }),
+        )
+        .err()
+        .expect("a suppressed save must be refused");
+        assert!(err.contains("suppressed"), "unexpected error text: {err}");
+        drop(anchor_lock);
+        drop(data_lock);
+        // Both files survived byte-identical: no defaults overwrite, no temp
+        // leftovers from a rejected atomic write.
+        assert_eq!(
+            std::fs::read_to_string(&data_dir_config).unwrap(),
+            data_content
+        );
+        assert_eq!(std::fs::read_to_string(&anchor).unwrap(), anchor_content);
+        assert!(!data_dir_config.with_extension("json.tmp").exists());
+        assert!(!anchor.with_extension("json.tmp").exists());
+        // Recovery: with the locks gone, a successful read clears the
+        // suppression and saving resumes — persisting the real config, not
+        // the defaults that the failed load produced.
+        let mut recovered = load_config_from(&data_dir_config, &anchor);
+        assert_eq!(recovered["appearance"]["fontSize"], 12);
+        assert!(!CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst));
+        if let Value::Object(ref mut m) = recovered {
+            m.insert("quickCommands".into(), json!([{ "name": "uptime" }]));
+        }
+        save_config_to(&data_dir_config, &anchor, &recovered).unwrap();
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&data_dir_config).unwrap()).unwrap();
+        assert_eq!(written["appearance"]["fontSize"], 12);
+        assert_eq!(written["quickCommands"][0]["name"], "uptime");
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn load_config_from_single_read_failure_recovery_does_not_suppress_save() {
+        // Control for the suppression fix: a data-dir read failure that
+        // recovers through the anchor mirror is the long-standing path — the
+        // flag must NOT be set and the recovered settings must keep saving
+        // (old behavior, now guarded against regression).
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_CORRUPT_HANDLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let dir = config_test_dir("single-read-fail-recover");
+        let data_dir_config = dir.join("data").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(data_dir_config.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        std::fs::write(
+            &data_dir_config,
+            serde_json::to_string(&json!({ "appearance": { "fontSize": 12 } })).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &anchor,
+            serde_json::to_string(&json!({
+                "appearance": { "fontSize": 18 },
+                "quickCommands": [{ "name": "uptime" }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let data_lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&data_dir_config)
+                .unwrap()
+        };
+        let cfg = load_config_from(&data_dir_config, &anchor);
+        assert_eq!(cfg["appearance"]["fontSize"], 18);
+        // Single read failure with a successful mirror recovery: not suppressed.
+        assert!(!CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst));
+        drop(data_lock);
+        // Saving the recovered settings still works (writes them back to the
+        // data dir now that it is writable again).
+        save_config_to(&data_dir_config, &anchor, &cfg).unwrap();
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&data_dir_config).unwrap()).unwrap();
+        assert_eq!(written["appearance"]["fontSize"], 18);
+
+        // Contrast: data-dir config absent and the anchor unreadable — nothing
+        // is known about the stored settings, so persistence is suppressed.
+        let dir2 = config_test_dir("anchor-only-read-fail");
+        let data2 = dir2.join("data").join("config.json");
+        let anchor2 = dir2.join("anchor").join("config.json");
+        std::fs::create_dir_all(anchor2.parent().unwrap()).unwrap();
+        let anchor2_content =
+            serde_json::to_string(&json!({ "appearance": { "fontSize": 18 } })).unwrap();
+        std::fs::write(&anchor2, &anchor2_content).unwrap();
+        let anchor2_lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&anchor2)
+                .unwrap()
+        };
+        let cfg2 = load_config_from(&data2, &anchor2);
+        assert_eq!(cfg2, default_config());
+        assert!(CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst));
+        let err2 = save_config_to(&data2, &anchor2, &cfg2)
+            .err()
+            .expect("saving unreadable-mirror defaults must be refused");
+        assert!(err2.contains("suppressed"), "unexpected error text: {err2}");
+        drop(anchor2_lock);
+        // Nothing was written: no defaults file created, mirror untouched.
+        assert!(!data2.exists());
+        assert_eq!(std::fs::read_to_string(&anchor2).unwrap(), anchor2_content);
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn load_config_from_missing_configs_keep_first_run_save_working() {
+        // Fresh-install control: no config anywhere → defaults genuinely are
+        // the state, suppression must stay off so the very first save lands.
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let dir = config_test_dir("first-run-save");
+        let data_dir_config = dir.join("data").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        let cfg = load_config_from(&data_dir_config, &anchor);
+        assert_eq!(cfg, default_config());
+        assert!(!CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst));
+        save_config_to(&data_dir_config, &anchor, &cfg).unwrap();
+        assert!(data_dir_config.exists());
+        let reloaded = load_config_from(&data_dir_config, &anchor);
+        assert_eq!(reloaded, cfg);
+        // With every file absent the on-disk state is known, so a stale
+        // suppression (e.g. the user deleted the unreadable files while the
+        // app ran) must clear instead of wedging saves forever.
+        CONFIG_PERSIST_SUPPRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let gone = dir.join("gone").join("config.json");
+        let cfg2 = load_config_from(&gone, &gone);
+        assert_eq!(cfg2, default_config());
+        assert!(!CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
