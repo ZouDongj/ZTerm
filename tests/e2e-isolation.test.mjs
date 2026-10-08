@@ -14,8 +14,12 @@ const { createE2eSandbox, ownsProcess, ownsSandboxProfile, sandboxProfileVerdict
 
 // Scratch policy: every temp path this file creates lives under the repo's
 // E2E_TMP_ROOT and is registered for exit cleanup (root AGENTS rule; never
-// os.tmpdir, never %TEMP%).
-const freshScratch = (name) => isolation.registerExitCleanup(mkdtempSync(join(isolation.E2E_TMP_ROOT, name)));
+// os.tmpdir, never %TEMP%). The root is cleaned after each run, so recreate
+// it before mkdtemp — mkdtempSync does not create missing parents.
+const freshScratch = (name) => {
+  mkdirSync(isolation.E2E_TMP_ROOT, { recursive: true });
+  return isolation.registerExitCleanup(mkdtempSync(join(isolation.E2E_TMP_ROOT, name)));
+};
 
 // VM results come from another realm: normalize through JSON before comparing
 // with strict deepEqual (which would otherwise reject on prototype identity).
