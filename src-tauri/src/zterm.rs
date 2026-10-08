@@ -614,15 +614,10 @@ fn save_known_hosts(hosts: &Value) {
         let _ = std::fs::create_dir_all(parent);
     }
     // Atomic write: tmp + rename (parity with known-hosts.js)
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(
-        &tmp,
-        serde_json::to_string_pretty(hosts).unwrap_or_default(),
-    )
-    .is_ok()
-    {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    let _ = atomic_write_config(
+        &path,
+        &serde_json::to_string_pretty(hosts).unwrap_or_default(),
+    );
 }
 
 #[derive(Debug)]
@@ -952,11 +947,21 @@ fn backup_corrupt_config(path: &std::path::Path) {
 /// a step fails. Split from save_config for unit testing.
 fn atomic_write_config(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
-    let res = std::fs::write(&tmp, content).and_then(|()| std::fs::rename(&tmp, path));
+    let res = write_config_tmp(&tmp, content).and_then(|()| std::fs::rename(&tmp, path));
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     res
+}
+
+fn write_config_tmp(tmp: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut file = std::fs::File::create(tmp)?;
+    file.write_all(content.as_bytes())?;
+    // Flush the data pages before the rename: NTFS journals the rename itself
+    // but not cached file data, so without sync_all a sudden power loss can
+    // resurrect the target at full length with zeroed content.
+    file.sync_all()
 }
 
 fn save_config(config: &Value) -> Result<(), String> {
