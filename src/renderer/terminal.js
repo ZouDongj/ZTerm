@@ -61,7 +61,8 @@ function setupWrapResizeObserver(wrap, tab) {
             // _windowResizing: suppress fit while the window is being drag-resized;
             // after the drag stops, split.js's resize settlement fits everything
             // at once (avoids the jitter of a full-viewport repaint every frame)
-            if (!_spannerDrag && !TabManager._maximizing && !_windowResizing) _fitWithScroll(tab.term, tab.fitAddon, inner);
+            // _sftpAnimating: same suppression while the SFTP dock animates its width
+            if (!_spannerDrag && !TabManager._maximizing && !_windowResizing && !_sftpAnimating) _fitWithScroll(tab.term, tab.fitAddon, inner);
             rafPending = false;
         });
     });
@@ -757,7 +758,9 @@ function wireTerminalToPane(tab, pane) {
         // contract as setupWrapResizeObserver: per-frame full fits fire a
         // pty-resize storm at the remote (nvim/htop resized every frame);
         // split.js's resize settlement performs the final fit after the drag.
-        if (_spannerDrag || TabManager._maximizing || _windowResizing) return;
+        // _sftpAnimating: same suppression while the SFTP dock animates its
+        // width (open/close/drag); the dock settle pass performs the final fit.
+        if (_spannerDrag || TabManager._maximizing || _windowResizing || _sftpAnimating) return;
         if (retries <= 0) return;
         if (bodyEl.clientWidth === 0 || bodyEl.clientHeight === 0) {
             setTimeout(() => applyFit(retries - 1), 50);

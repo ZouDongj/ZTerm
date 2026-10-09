@@ -1,18 +1,15 @@
-// input-2: SFTP.open() never moved the keyboard focus, so a panel opened via
-// Ctrl+Shift+F (or the menu) showed a modal overlay while every keystroke —
-// including Enter — kept flowing into the xterm textarea BEHIND it (the
-// global dispatcher's input guard exempts xterm-helper-textarea). Every other
-// keyboard-openable overlay takes focus on open (openQC / openPalette /
-// openSSHManager / openSearch); the fix gives the SFTP window container the
-// focus on the same 50ms-delay convention (tabindex=-1 dialog target, no
-// default Enter action).
+// Dock-era focus contract (the panel is a non-modal side dock, no overlay):
+// opening the SFTP dock must NOT move the keyboard focus — the terminal keeps
+// it so typing and shortcuts keep flowing while the file panel is open (the
+// old modal panel grabbed focus 50ms after open; that grab is gone). Closing
+// the dock still hands focus back to the active tab's terminal (unchanged).
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadSftpVm } from './helpers/sftp-vm.mjs';
 
-test('SFTP.open takes the keyboard focus off the terminal behind the panel', async () => {
+test('SFTP.open leaves the terminal keyboard focus untouched', async () => {
     const vm = await loadSftpVm();
-    // Stage a focused terminal behind the panel (the exact leak scenario).
+    // Stage a focused terminal behind the dock (the old steal scenario).
     const termEl = vm.ctx.document.createElement('div');
     vm.ctx.document.body.appendChild(termEl);
     termEl.focus();
@@ -20,22 +17,35 @@ test('SFTP.open takes the keyboard focus off the terminal behind the panel', asy
 
     const p = vm.SFTP.open('sessA');
     await vm.drain();
-    vm.ctx.__tq.advance(50); // the focus timer (same delay convention as openQC)
+    // Long past the old 50ms focus-grab window: no timer may move focus now.
+    vm.ctx.__tq.advance(300);
 
-    assert.equal(vm.ctx.document.activeElement, vm.els.sftpWin,
-        'the panel window now owns the keyboard focus');
-    assert.equal(vm.els.sftpWin.getAttribute('tabindex'), '-1',
-        'focus target is the neutral dialog container, not an actionable control');
+    assert.equal(vm.ctx.document.activeElement, termEl,
+        'the terminal keeps the keyboard focus while the dock is open');
+    assert.equal(vm.els.sftpWin.getAttribute('tabindex'), null,
+        'the dock window never becomes a focus target');
     void p; // the sftp-open invoke stays pending; the focus path already ran
 });
 
-test('the focus hand-off is skipped when the panel closed/rebound inside the delay', async () => {
+test('SFTP.open does not schedule any focus-stealing timer', async () => {
     const vm = await loadSftpVm();
     const p = vm.SFTP.open('sessA');
-    vm.SFTP.close(); // user closes the panel inside the 50ms window
     await vm.drain();
-    vm.ctx.__tq.advance(50);
-    assert.notEqual(vm.ctx.document.activeElement, vm.els.sftpWin,
-        'a closed panel does not steal the focus at fire time');
+    // Direct observable: firing every pending open-time timer moves nothing.
+    vm.ctx.__tq.advance(400);
+    assert.equal(vm.ctx.document.activeElement, vm.ctx.document.body,
+        'firing all open-time timers leaves the focus where it was (body)');
     void p;
+});
+
+test('SFTP.close still refocuses the active tab terminal', async () => {
+    const vm = await loadSftpVm();
+    const tab = vm.ctx.TabManager.tabs.find(t => t.tabId === 'sessA');
+    let focused = 0;
+    tab.term = { focus() { focused++; } };
+    vm.SFTP.open('sessA');
+    await vm.drain();
+    vm.SFTP.close();
+    vm.ctx.__tq.advance(50);
+    assert.equal(focused, 1, 'close hands the keyboard back to the terminal');
 });

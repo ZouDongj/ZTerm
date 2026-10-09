@@ -18,6 +18,17 @@ function normalizeRemotePath(p) {
 }
 
 // ── SFTP Panel ──
+// Fit suppression while the dock's open/close width animation runs (180ms CSS
+// transition; the flag drops at ~220ms when one settle pass refits). Same
+// convention as split.js's _windowResizing: the ResizeObserver guards in
+// terminal.js/tabs.js read it to skip per-frame fits. Declared with var so
+// test harnesses that predeclare it (renderer-vm) can co-load this script.
+var _sftpAnimating = false;
+// True while the dock's width handle holds pointer capture: the drag owns the
+// suppression flag from pointerdown to pointerup, so a dock animation timer
+// firing mid-drag must not lift the suppression or run the settle.
+var _sftpResizing = false;
+
 const SFTP = {
     _tabId: null,      // main-process tabId of the current SSH connection (the pty/ssh tabId)
     _path: '/',        // current remote path
@@ -33,6 +44,9 @@ const SFTP = {
     _sessionDead: false, // the bound session died mid-panel: navigations are refused until a fresh open() rebinds
     _pinned: {},       // tabId -> boolean, per-tab pin state
     _pinnedPath: {},   // tabId -> path, per-tab pinned path
+    _userOpen: false,  // the user's dock toggle state; kept while the dock is suspended on a non-SSH focus and restored on return
+    _suspendedPath: null,      // {tabId, path} the suspended view was browsing; consumed by the next open() of the SAME session (a pinned path wins)
+    _pendingRestorePath: null, // destination of an in-flight restore navigation: a suspend landing before it settles must record this, not the '/' placeholder this._path still holds
 
     togglePin() {
         const tabId = this._tabId;
@@ -89,19 +103,11 @@ const SFTP = {
         this._refreshInFlight = null;
         document.getElementById('sftp-breadcrumb').innerHTML = '<span>/</span>';
         document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载中…</div>';
-        document.getElementById('overlay-sftp').classList.add('open');
-        // A modal panel must hold the keyboard the moment it opens (same
-        // convention as openQC/openPalette/openSSHManager): without a focus
-        // move the xterm textarea stays focused and every keystroke keeps
-        // flowing into the terminal behind the panel. The panel has no input
-        // to focus, so the window container takes it as a neutral target
-        // (dialog convention — no default action on Enter; Esc still closes
-        // through the global overlay handler).
-        setTimeout(() => {
-            if (!SFTP.isOpen || SFTP._tabId !== tabId) return;
-            const win = document.querySelector('#overlay-sftp .sftp-window');
-            if (win) { win.setAttribute('tabindex', '-1'); win.focus(); }
-        }, 50);
+        // Non-modal dock: the terminal keeps the keyboard focus while the
+        // panel is open (no focus move on open; close() still refocuses).
+        this._userOpen = true;
+        this._setDockVisible(true);
+        this._syncToggleBtn();
         // restore this tab's pin state onto the button
         const pinBtn = document.getElementById('sftp-pin-btn');
         if (pinBtn) pinBtn.classList.toggle('pinned', this._isPinned(tabId));
@@ -109,6 +115,27 @@ const SFTP = {
         if (this._isPinned(tabId) && this._pinnedPath[tabId]) {
             await this.navigate(this._pinnedPath[tabId]);
             return;
+        }
+        // Restore the suspended view's directory when the SAME session comes
+        // back; a record for any other binding is dropped — that view was
+        // superseded, not suspended. Consumed up front (not after the await)
+        // so a re-suspend mid-navigation cannot double-restore.
+        if (this._suspendedPath) {
+            const sp = this._suspendedPath;
+            this._suspendedPath = null;
+            if (sp.tabId === tabId && sp.path) {
+                // this._path still holds the '/' placeholder until the
+                // navigation settles: park the destination so a suspend
+                // inside the window records the real path, and drop it once
+                // the navigation is done (settled OR superseded OR failed).
+                this._pendingRestorePath = sp.path;
+                try {
+                    await this.navigate(sp.path);
+                } finally {
+                    this._pendingRestorePath = null;
+                }
+                return;
+            }
         }
         // Request sequence + ownership check: the user may switch tabs or close
         // the panel meanwhile; a stale response must not overwrite the current panel state
@@ -122,9 +149,10 @@ const SFTP = {
                 result = await ipcRenderer.invoke('sftp-open', { tabId });
             } catch (e) {
                 // Rust returns Err (invoke rejects) when the session is missing/disconnected; do not leave an unhandled rejection.
-                // The ownership check applies to failures and to hidden panels alike:
-                // closeOverlay (the Esc/backdrop route) only removes the .open class, so a
-                // request whose panel is no longer visible must not surface its obsolete error.
+                // The ownership check applies to failures and to hidden panels
+                // alike: the dock may have been closed or suspended while the
+                // request was in flight (isOpen gates both), so a request whose
+                // panel is no longer visible must not surface its obsolete error.
                 if (seq !== SFTP._reqSeq || this._tabId !== myTab || !SFTP.isOpen) return;
                 showToast('无法打开 SFTP: ' + (e?.message || '会话不可用'), true);
                 document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载失败</div>';
@@ -153,7 +181,8 @@ const SFTP = {
     },
 
     close() {
-        document.getElementById('overlay-sftp').classList.remove('open');
+        this._userOpen = false;
+        this._setDockVisible(false);
         this._tabId = null;
         // The binding is gone: retire its request generation so no in-flight
         // open/navigate of the old view can touch the loading identity or re-arm
@@ -164,6 +193,12 @@ const SFTP = {
         this._viewReq = null;
         this._refreshQueued = null;
         this._refreshInFlight = null;
+        // A closed dock restores nothing: drop any suspended-view record so a
+        // later open() (e.g. unpinned, after a pinned reopen skipped the
+        // consume block) can never resurrect a pre-close snapshot.
+        this._suspendedPath = null;
+        this._pendingRestorePath = null;
+        this._syncToggleBtn();
         // Refocus terminal after closing SFTP panel
         const tab = TabManager.getActive();
         if (tab) {
@@ -193,6 +228,113 @@ const SFTP = {
         return document.getElementById('overlay-sftp').classList.contains('open');
     },
 
+    // User toggle state vs visibility gating: the dock is shown only while the
+    // active tab's focused pane is a connected SSH session. Focusing a local
+    // pane or the settings tab suspends the dock but keeps _userOpen, so
+    // refocusing an SSH pane restores it (Flutter _sftpOpen/_sftpTarget parity).
+    currentTargetTabId() {
+        const tab = TabManager.getActive();
+        if (!tab || tab.type === 'settings') return null;
+        if (tab.splitRoot) {
+            const panes = getAllPanes(tab);
+            const target = panes.find(p => p.focused) || panes[0];
+            return (target && target.type === 'ssh' && target.tabId) ? target.tabId : null;
+        }
+        return (tab.type === 'ssh' && tab.tabId) ? tab.tabId : null;
+    },
+
+    toggleFromBar() {
+        const t = this.currentTargetTabId();
+        if (!t) return;
+        if (this.isOpen && this._tabId === t) this.close();
+        else this.open(t);
+    },
+
+    // Re-evaluate the bar-button visibility and the dock binding after focus /
+    // tab / connection changes. Cheap early-outs keep hot paths (pane drag
+    // rebuilds) free of rebinds.
+    updateTarget() {
+        const t = this.currentTargetTabId();
+        this._syncToggleBtn();
+        if (!this._userOpen) return;
+        if (!t) { if (this.isOpen) this._suspend(); return; }
+        if (this.isOpen && this._tabId === t) return;
+        this.open(t);
+    },
+
+    _syncToggleBtn() {
+        const btn = document.getElementById('sftp-toggle-btn');
+        if (!btn) return;
+        const t = this.currentTargetTabId();
+        btn.classList.toggle('visible', !!t);
+        btn.classList.toggle('on', this.isOpen && this._tabId === t);
+    },
+
+    // Hide without touching the user's toggle state: retire the view generation
+    // so in-flight responses of the hidden view are dropped, then rebind fresh on
+    // the next updateTarget with an SSH target. Deliberate contract: while the
+    // dock is suspended, a teardown of the bound session still routes through
+    // close() (_closeSftpForSessions), which resets _userOpen — a suspended
+    // view must never resurrect over a destroyed session.
+    _suspend() {
+        // Remember where the suspended view was browsing so restoring the
+        // SAME session returns to it (a pinned path still takes precedence).
+        // A restore navigation may still be IN FLIGHT (this._path is the '/'
+        // placeholder until it settles) — record its destination instead.
+        this._suspendedPath = { tabId: this._tabId, path: this._pendingRestorePath || this._path };
+        this._setDockVisible(false);
+        this._viewEpoch++;
+        this._viewReq = null;
+        this._refreshQueued = null;
+        this._refreshInFlight = null;
+        this._syncToggleBtn();
+    },
+
+    // Dock visibility = the element's legacy .open class (isOpen semantics and
+    // E2E probes keep working) plus the .main inset classes that shrink the
+    // terminal area. Animation bookkeeping suppresses observer fits for the
+    // 180ms reveal transition and settles once afterwards; the observers read
+    // _sftpAnimating directly — no borrowing of TabManager._layoutAnimating, so
+    // a dock timer can never lift a split render's own suppression. A missing
+    // #main-area (minimal test fixtures) still toggles the dock class alone.
+    _setDockVisible(v) {
+        const dock = document.getElementById('overlay-sftp');
+        if (!dock) return;
+        dock.setAttribute('aria-hidden', String(!v));
+        const main = document.getElementById('main-area');
+        // Repeated hide of a hidden dock (close after suspend, hot-path
+        // updateTarget calls): same state and no pending animation → done.
+        const animating = !!(main && (main.classList.contains('sftp-animating') || this._dockAnimTimer));
+        if (dock.classList.contains('open') === v && !animating) return;
+        dock.classList.toggle('open', v);
+        if (!main) return;
+        main.classList.toggle('sftp-open', v);
+        clearTimeout(this._dockAnimTimer);
+        main.classList.add('sftp-animating');
+        _sftpAnimating = true;
+        this._dockAnimTimer = setTimeout(() => {
+            this._dockAnimTimer = null;
+            main.classList.remove('sftp-animating');
+            // A width drag that started mid-animation owns the flag now: its
+            // pointerup performs the final clear + settle.
+            if (_sftpResizing) return;
+            _sftpAnimating = false;
+            const tab = (typeof TabManager !== 'undefined') ? TabManager.getActive() : null;
+            if (tab && typeof _scheduleSettleResize === 'function') _scheduleSettleResize(tab);
+        }, 220);
+    },
+
+    // Cancel a pending open/close animation (the width drag calls this on
+    // pointerdown: it must own the suppression flag alone, and a width
+    // transition must not lag behind the pointer).
+    _cancelDockAnim() {
+        clearTimeout(this._dockAnimTimer);
+        this._dockAnimTimer = null;
+        const main = document.getElementById('main-area');
+        if (main) main.classList.remove('sftp-animating');
+        _sftpAnimating = false;
+    },
+
     async navigate(path, opts) {
         if (!this._tabId) return;
         // A dead binding can only fail: keep the explicit dead state on
@@ -211,8 +353,8 @@ const SFTP = {
         }
         body.innerHTML = '<div class="sftp-empty">加载中…</div>';
         this._restoreMkdirRow(held, body);
-        // Request sequence + ownership check (same as open); a closed panel
-        // (any close route, including closeOverlay's class-only removal) owns nothing
+        // Request sequence + ownership check (same as open); a hidden panel
+        // (closed, or suspended with the binding retired) owns nothing
         const myTab = this._tabId;
         const seq = ++SFTP._reqSeq;
         // user: a direct user navigation re-renders the breadcrumb on
@@ -1135,5 +1277,77 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) =>
             _handleDroppedPaths(payload.paths);
         });
     }
+})();
+
+// ── SFTP dock width drag ──
+// Pointer capture on the handle, applied as a CSS var on #main-area so the
+// dock width and the terminal inset follow the same value. The clamp keeps
+// 220-480px AND never widens past the main area minus 240px of terminal (the
+// same bound the CSS min() enforces). Fits stay suppressed while dragging
+// (_sftpAnimating, same contract as the open/close animation) and one settle
+// pass refits after release. The handle is keyboard-operable too (Left/Right
+// move it by 16px).
+(() => {
+    const handle = document.getElementById('sftp-resize');
+    const main = document.getElementById('main-area');
+    if (!handle || !main) return;
+    const clamp = (w, rect) => Math.round(Math.min(480, Math.max(220, Math.min(w, rect.width - 240))));
+    handle.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        try { handle.setPointerCapture(e.pointerId); } catch (err) {}
+        handle.classList.add('dragging');
+        // A pending open/close animation must not fight the pointer (its
+        // width transition would lag behind the drag); from here to pointerup
+        // the drag alone owns the suppression flag.
+        SFTP._cancelDockAnim();
+        _sftpResizing = true;
+        _sftpAnimating = true;
+        // The window does not move while the handle is captured: cache the
+        // rect once instead of re-reading it on every pointermove.
+        const rect = main.getBoundingClientRect();
+        // rAF throttle: at most one --sftp-width write per frame, always at
+        // the latest pointer position (moves during a pending frame update
+        // the value the frame will write, never get dropped).
+        let rafPending = false;
+        let pendingWidth = null;
+        const onMove = (ev) => {
+            pendingWidth = clamp(rect.right - ev.clientX, rect);
+            if (rafPending) return;
+            rafPending = true;
+            requestAnimationFrame(() => {
+                rafPending = false;
+                main.style.setProperty('--sftp-width', pendingWidth + 'px');
+            });
+        };
+        const onUp = () => {
+            handle.classList.remove('dragging');
+            handle.removeEventListener('pointermove', onMove);
+            handle.removeEventListener('pointerup', onUp);
+            handle.removeEventListener('pointercancel', onUp);
+            _sftpResizing = false;
+            // A dock open/close animation scheduled DURING the drag still
+            // owns the flag — its timer performs the final clear + settle.
+            if (SFTP._dockAnimTimer) return;
+            _sftpAnimating = false;
+            const tab = (typeof TabManager !== 'undefined') ? TabManager.getActive() : null;
+            if (tab && typeof _scheduleSettleResize === 'function') _scheduleSettleResize(tab);
+        };
+        handle.addEventListener('pointermove', onMove);
+        handle.addEventListener('pointerup', onUp);
+        handle.addEventListener('pointercancel', onUp);
+    });
+    // Keyboard resize: Left moves the handle left (dock grows), Right shrinks
+    // it; same clamp as the drag. Each press is a discrete change — no drag
+    // suppression, the observers fit it once through the normal path.
+    handle.addEventListener('keydown', (e) => {
+        let delta = 0;
+        if (e.key === 'ArrowLeft') delta = 16;
+        else if (e.key === 'ArrowRight') delta = -16;
+        else return;
+        e.preventDefault();
+        const rect = main.getBoundingClientRect();
+        const cur = parseFloat(main.style.getPropertyValue('--sftp-width')) || 320;
+        main.style.setProperty('--sftp-width', clamp(cur + delta, rect) + 'px');
+    });
 })();
 

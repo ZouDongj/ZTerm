@@ -65,12 +65,6 @@ function formatDate(ts) {
     return months[d.getMonth()] + ' ' + d.getDate();
 }
 
-function sftpRefresh() { SFTP.refresh(); }
-function sftpGoUp() { SFTP.goUp(); }
-function sftpClose() { SFTP.close(); }
-function sftpUpload() { SFTP.upload(); }
-function sftpMkdir() { SFTP.mkdir(); }
-
 // Escape an HTML text node (only & < >; quotes have no special meaning in text nodes)
 function escHtml(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 

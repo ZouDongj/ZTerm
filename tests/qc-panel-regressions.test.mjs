@@ -154,7 +154,11 @@ function wireOverlayHelpers(ctx) {
     };
 }
 
-test('openQC closes an already-open overlay (SFTP panel) instead of stacking', () => {
+// Since the SFTP dock refactor #overlay-sftp is no longer a .overlay element
+// (openQC's sweep cannot meet it in the real page); this fixture stages the
+// legacy overlay shape on that id purely as a generic stand-in to prove the
+// closeAllOverlays sweep behind openQC still closes every open overlay.
+test('openQC closes an already-open overlay (staged on the SFTP id) instead of stacking', () => {
     const ctx = loadQcVm();
     wireOverlayHelpers(ctx);
     const sftp = ctx.document.getElementById('overlay-sftp');
@@ -163,7 +167,7 @@ test('openQC closes an already-open overlay (SFTP panel) instead of stacking', (
     ctx.openQC();
 
     assert.equal(ctx.document.getElementById('overlay-qc').classList.contains('open'), true, 'QC overlay opened');
-    assert.equal(sftp.classList.contains('open'), false, 'the SFTP panel was closed first — Esc can only close QC now');
+    assert.equal(sftp.classList.contains('open'), false, 'the staged overlay was closed first — Esc can only close QC now');
 });
 
 test('reopening QC while it is open leaves a single open overlay', () => {

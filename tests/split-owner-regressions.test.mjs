@@ -328,8 +328,9 @@ function loadVm() {
     ctx.globalThis = ctx;
     vm.createContext(ctx);
     // split.js owns these as script-level `let`s; the parts of it terminal.js
-    // reads at fit time are just the drag/window-resize suppression flags.
-    vm.runInContext('var _spannerDrag = false; var _windowResizing = false;', ctx);
+    // reads at fit time are just the drag/window-resize suppression flags
+    // (_sftpAnimating is sftp.js's dock-animation flag, same role).
+    vm.runInContext('var _spannerDrag = false; var _windowResizing = false; var _sftpAnimating = false;', ctx);
     for (const f of ['split-layout.js', 'pane-fields.js', 'ssh-attempts.js', 'tab-title-utils.js', 'terminal.js', 'tabs.js', 'ipc.js']) {
         vm.runInContext(src(f), ctx, { filename: f });
     }

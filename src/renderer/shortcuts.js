@@ -164,15 +164,8 @@ const SHORTCUT_ACTIONS = {
     },
     sftp: () => {
         if (document.querySelector('.overlay.open')) return;
-        const tab = TabManager.getActive();
-        if (tab && tab.type !== 'settings') {
-            const panes = tab.splitRoot ? getAllPanes(tab) : [];
-            const target = panes.find(p => p.focused) || panes[0] || tab;
-            if (target.type === 'ssh' && target.tabId) {
-                if (SFTP.isOpen && SFTP._tabId === target.tabId) SFTP.close();
-                else SFTP.open(target.tabId);
-            }
-        }
+        // Same target rule as the bar button: the focused SSH pane's session
+        SFTP.toggleFromBar();
     },
     commandPalette: () => {
         const palette = document.getElementById('overlay-palette');

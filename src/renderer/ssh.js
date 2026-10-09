@@ -36,12 +36,12 @@ function toggleMenuPopup() {
             popup.style.right = (window.innerWidth - rect.right) + 'px';
         }
     }
-    // Disable SFTP menu item when current tab is not SSH
+    // Disable SFTP menu item when no connected SSH session backs the dock
+    // (same focused-pane rule as the bar button's visibility)
     const sftpItem = popup.querySelector('[data-action="sftp"]');
     if (sftpItem) {
-        const tab = TabManager.getActive();
-        const isSSH = tab && (tab.type === 'ssh' || (tab.splitRoot && getAllPanes(tab).some(p => p.type === 'ssh' && p.tabId)));
-        sftpItem.classList.toggle('disabled', !isSSH);
+        const hasTarget = (typeof SFTP !== 'undefined' && SFTP.currentTargetTabId) ? !!SFTP.currentTargetTabId() : false;
+        sftpItem.classList.toggle('disabled', !hasTarget);
     }
     popup.classList.add('open');
     backdrop.classList.add('open');
@@ -53,18 +53,10 @@ function closeMenuPopup() {
     document.body.classList.remove('menu-open');
 }
 function openSFTPFromMenu() {
-    const tab = TabManager.getActive();
-    if (!tab) return;
-    if (tab.splitRoot) {
-        // Same bar as the menu item's enable check (toggleMenuPopup): any
-        // connected SSH pane serves — the focused one first.
-        const panes = getAllPanes(tab);
-        const target = panes.find(p => p.focused && p.tabId && p.type === 'ssh')
-            || panes.find(p => p.type === 'ssh' && p.tabId);
-        if (target) SFTP.open(target.tabId);
-    } else if (tab.tabId && tab.type === 'ssh') {
-        SFTP.open(tab.tabId);
-    }
+    // The dock follows the focused pane: opening it bound to a non-focused
+    // session would be suspended immediately by the next updateTarget, so the
+    // menu uses the same focused-SSH toggle as the bar button.
+    SFTP.toggleFromBar();
 }
 // Close menu popup on click outside — the transparent backdrop intercepts all mouse events
 // (clicks, hover) so buttons underneath (e.g. "+") are never triggered while menu is open

@@ -484,12 +484,38 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .panel-section-title{font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:0.5px;padding:12px 12px 6px}
 
-/* ── SFTP overlay window ── */
-.sftp-window{position:relative;background:var(--surface-float);border-radius:18px;box-shadow:var(--shadow-float);overflow:hidden;width:760px;height:500px;display:flex;flex-direction:column;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1)}
+/* ── SFTP side dock ── */
+.sftp-window{position:absolute;right:0;top:0;bottom:0;width:100%;background:var(--surface-float);border-radius:18px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);overflow:hidden;display:flex;flex-direction:column}
 .sftp-window.drag-over{outline:2px dashed rgba(var(--accent-rgb),0.5);outline-offset:-8px;background:rgba(var(--accent-rgb),0.04)}
+/* SFTP side dock: a fixed-width panel CLIPPED onto the right edge of .main —
+   the open/close animation moves only the clip (clip-path), so the panel
+   content lays out once at its final width instead of reflowing per frame.
+   The terminal inset (right) and the search bar animate together with the
+   reveal; fits are suppressed during the 180ms transition and settled once
+   afterwards (split-anim precedent). One min() bounds every width by the
+   main area minus 240px of terminal, so a narrow window shrinks the dock on
+   open and on window resize alike. */
+.sftp-dock{position:absolute;top:0;right:0;bottom:0;width:min(var(--sftp-width,320px), calc(100% - 240px));overflow:hidden;z-index:6;container-type:inline-size;clip-path:inset(0 0 0 100%)}
+.main.sftp-open .sftp-dock{clip-path:inset(0 0 0 0)}
+.main.sftp-open .term-wrap{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 8px)}
+.main.sftp-open .settings-pane{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 8px)}
+.main.sftp-open .split-root{width:calc(100% - min(var(--sftp-width,320px), calc(100% - 240px)) - 8px)}
+.main.sftp-open .search-bar{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 16px)}
+.main.sftp-animating .sftp-dock{transition:clip-path 0.18s ease}
+.main.sftp-animating .term-wrap{transition:right 0.18s ease,background 0.25s}
+.main.sftp-animating .split-root{transition:width 0.18s ease}
+.main.sftp-animating .search-bar{transition:right 0.18s ease}
+.sftp-resize{position:absolute;left:0;top:0;bottom:0;width:8px;cursor:ew-resize;z-index:7;display:flex;align-items:center;justify-content:center}
+.sftp-resize::after{content:"";width:2px;height:36px;border-radius:8px;background:rgba(255,255,255,0.12);transition:background-color 100ms ease}
+.sftp-resize:hover::after,.sftp-resize.dragging::after,.sftp-resize:focus-visible::after{background:rgb(var(--accent-rgb))}
+/* Narrow-dock degradation (container = the dock): the fixed size/date columns
+   stop fitting below ~300px/250px, so they drop out instead of forcing a
+   horizontal scrollbar inside the file list. */
+@container (max-width:300px){.sftp-item-date{display:none}}
+@container (max-width:250px){.sftp-item-size{display:none}}
 .sftp-header{display:flex;align-items:center;padding:14px 18px;gap:10px;flex-shrink:0}
 .sftp-header h2{font-size:15px;color:var(--text-1);font-weight:600;margin:0}
-.sftp-header .sftp-conn{font-size:11px;color:var(--text-3)}
+.sftp-header .sftp-conn{font-size:11px;color:var(--text-3);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sftp-breadcrumb-bar{padding:6px 18px 10px;flex-shrink:0}
 .sftp-breadcrumb{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-2);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .sftp-breadcrumb span{cursor:pointer;padding:2px 6px;border-radius:5px;transition:all 0.12s}
@@ -518,6 +544,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .transfer-btn{position:relative;width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;transition:all 0.12s;opacity:0;transform:scale(0.5);pointer-events:none;margin-left:2px;flex-shrink:0;-webkit-app-region:no-drag;user-select:none}
 .transfer-btn.visible{opacity:1;transform:scale(1);pointer-events:auto}
 .transfer-btn:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+.transfer-btn.on{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 .transfer-count{position:absolute;bottom:-2px;right:-2px;min-width:13px;height:13px;padding:0 3px;border-radius:7px;background:rgb(var(--accent-rgb));color:var(--accent-contrast);font-size:9px;font-weight:600;display:flex;align-items:center;justify-content:center}
 .transfer-count:empty{display:none}
 .transfer-count.pulse{animation:transferPulse 0.4s cubic-bezier(0.05,0.7,0.1,1)}

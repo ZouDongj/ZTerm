@@ -387,7 +387,10 @@ export function loadVm() {
     };
     ctx.globalThis = ctx;
     vm.createContext(ctx);
-    vm.runInContext('var _spannerDrag = false; var _windowResizing = false;', ctx);
+    // _sftpAnimating is an sftp.js global in the page; sftp.js is not loaded
+    // in this VM, so predeclare it (same convention as _windowResizing) —
+    // the observer guards in terminal.js/tabs.js read it on every resize.
+    vm.runInContext('var _spannerDrag = false; var _windowResizing = false; var _sftpAnimating = false;', ctx);
     // The REAL vendored search addon: its UMD tail assigns a NAMESPACE object
     // to globalThis.SearchAddon when no module/exports/define exists (true in
     // this VM, as in the page). In the real page utils.js then does

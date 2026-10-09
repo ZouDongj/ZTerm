@@ -1159,17 +1159,18 @@ async function main() {
       })`);
       check('SFTP 归属：固定（pin）后 cwd 跟随不再导航', sftpFollowPinned.pending === 0 && sftpFollowPinned.path === '/tmp', JSON.stringify(sftpFollowPinned));
 
-      // E) (batch 06 correction 1) A late open failure of a panel hidden through
-      //    the ORDINARY overlay-close route (real closeOverlay: class removal
-      //    only) must not surface its obsolete error; a visible panel's own
-      //    failure keeps its real feedback.
+      // E) (batch 06 correction 1) A late open failure of a panel hidden
+      //    through the ORDINARY close route (real SFTP.close(): hides the
+      //    dock and retires the view generation) must not surface its
+      //    obsolete error; a visible panel's own failure keeps its real
+      //    feedback.
       await cdp.eval(`SFTP.togglePin()`); // unpin A again for the later sections
       await sleep(200);
       await cdp.eval(`SFTP.close()`);
       await sleep(200);
       await cdp.eval(`window.__sftpGate.run('open-a5', () => SFTP.open(${JSON.stringify(A)}))`);
       await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
-      await cdp.eval(`closeOverlay('overlay-sftp')`); // the real Esc/backdrop close route
+      await cdp.eval(`SFTP.close()`); // the real dock-era close route
       await sleep(200);
       await cdp.eval(`window.__sftpGate.fail(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, 'connection lost')`);
       await sleep(300);
@@ -1178,7 +1179,7 @@ async function main() {
         toastMsg: document.getElementById('toast').textContent,
         toastShown: document.getElementById('toast').classList.contains('show'),
       })`);
-      check('SFTP 归属：overlay 普通关闭后迟到的 open 失败不再报错',
+      check('SFTP 归属：面板关闭后迟到的 open 失败不再报错',
         sftpOverlayClose.failed === false && !sftpOverlayClose.toastMsg.includes('无法打开 SFTP'),
         JSON.stringify(sftpOverlayClose));
       await cdp.eval(`window.__sftpGate.run('open-a6', () => SFTP.open(${JSON.stringify(A)}))`);

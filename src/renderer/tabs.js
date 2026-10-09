@@ -434,6 +434,8 @@ const TabManager = {
         this.updateStatus();
         // The active terminal changed (terminal search follows)
         if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
+        // SFTP dock follows the active tab's focused pane (hide on settings)
+        if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
     },
 
     // Tabs that are not currently closing (rapid-close safe count: the
@@ -642,6 +644,9 @@ const TabManager = {
                 this.activeId = null;
                 this.updateActiveClass();
             }
+            // Bar-button visibility after the removal settled (the binding
+            // itself was already closed by _closeSftpForSessions)
+            if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
         };
         if (tabEl) {
             // Stagger deferred removals: a rapid burst must not fire N
@@ -1136,12 +1141,10 @@ const TabManager = {
             const showDot = _settingsConfig.showStatusDot !== false;
             const hdr = document.createElement('div');
             hdr.className = 'pane-header';
-            // Only SSH panes show the SFTP and reconnect buttons
-            const sftpBtn = pane.type === 'ssh' ? '<button title="SFTP" onclick="event.stopPropagation();TabManager._openSFTP(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('folder', 13) + '</button>' : '';
+            // Only SSH panes show the reconnect button
             const reconnectPaneBtn = pane.type === 'ssh' ? '<button title="强制重连" onclick="event.stopPropagation();TabManager._reconnectPane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('rotate-cw', 12) + '</button>' : '';
             hdr.innerHTML = (showDot ? '<span class="dot ' + dc + '"></span>' : '') +
                 '<span class="label">' + escHtml(pane.name || tab.name) + '</span>' +
-                sftpBtn +
                 reconnectPaneBtn +
                 '<button title="extract" onclick="event.stopPropagation();TabManager._extractPaneToTab(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('external-link', 12) + '</button>' +
                 '<button title="maximize" onclick="event.stopPropagation();TabManager._maximizePane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('maximize', 13) + '</button>' +
@@ -1193,7 +1196,8 @@ const TabManager = {
                     requestAnimationFrame(() => {
                         // _windowResizing: suppress fit during window-drag resize (per-frame full repaints + pty-resize
                         // storm); after the drag stops, split.js's resize settle performs one unified fit
-                        if (!_spannerDrag && !TabManager._maximizing && !_windowResizing) _fitWithScroll(p.term, p.fitAddon, body);
+                        // _sftpAnimating: same suppression while the SFTP dock's width animation runs
+                        if (!_spannerDrag && !TabManager._maximizing && !_windowResizing && !_sftpAnimating) _fitWithScroll(p.term, p.fitAddon, body);
                         raf = false;
                     });
                 });
@@ -1230,6 +1234,9 @@ const TabManager = {
         // (fire-time validated: a tree change inside the window can close the pane or switch the tab)
         const fp = allPanes.find(p => p.focused);
         if (fp && fp.term) _scheduleTerminalFocus(() => fp.term, 200, passiveFocus);
+        // Tree rebuilds (split/extract/collapse) can move the focused pane;
+        // updateTarget's early-outs keep pane-drag rebuilds free of rebinds
+        if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
     },
 
     _layoutSplit(tab) {
@@ -1718,6 +1725,8 @@ const TabManager = {
         }
         // The active terminal changed (terminal search follows)
         if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
+        // SFTP dock follows the focused pane
+        if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
     },
 
     _maximizePane(tabId, paneId) {
@@ -1729,6 +1738,9 @@ const TabManager = {
             tab._maximizedPaneId = paneId;
             const pane = findPane(tab, paneId);
             if (pane) getAllPanes(tab).forEach(p => p.focused = (p.id === paneId));
+            // The focused pane may have moved with the maximize: the SFTP
+            // dock follows it
+            if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
             // The active terminal changed (terminal search follows)
             if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
         }
@@ -2212,6 +2224,9 @@ const TabManager = {
         // window disposes the term and nulls tab.term; the old
         // captured-slot deref threw).
         if (this.activeId === tab.id && tab.term) _scheduleTerminalFocus(() => tab.term, 100, true);
+        // The split tree collapsed onto a single tab-owned session: the dock's
+        // focused-pane resolution changed shape — re-evaluate the binding
+        if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
     },
 
     // ── Tab → split drop zones (unified with pane reorder visuals) ──
@@ -3021,14 +3036,6 @@ const TabManager = {
         const src = this._dragTab.sourceTabId, tgt = this._dragTab.targetTabId, sd = this._dragTab.side, pid = this._dragTab.targetPaneId;
         this._dragTab = null;
         this._moveTerminalToTab(src, tgt, sd, pid);
-    },
-
-    _openSFTP(tabId, paneId) {
-        const tab = this.tabs.find(t => t.id === tabId);
-        if (!tab || !tab.splitRoot) return;
-        const pane = findPane(tab, paneId);
-        if (!pane || !pane.tabId) return;
-        SFTP.open(pane.tabId);
     },
 
 };

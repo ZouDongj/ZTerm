@@ -496,6 +496,8 @@ function _sshDisplayName(tab, pane) {
 
 ipcRenderer.on('ssh-connected', (event, { tabId, rendererId, attemptId } = {}) => {
     if (!_applySshConnected(attemptId, tabId)) _disposeUnclaimedSsh(tabId, attemptId);
+    // The dock's bar button becomes eligible the moment its session connects
+    if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
 });
 
 // The own invocation result may arrive before, between or after the
@@ -590,6 +592,9 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, attemptId, error }) => 
             tab.tabId = null;
             tab._sessionFailed = true; // same liveness marker as the pane branch
         }
+        // The discarded session no longer backs an SSH target: drop the dock
+        // binding and the bar button until the retry reconnects
+        if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
         // A manual reconnect (reconnectTab / clicking a down tab) supersedes
         // this scheduled retry: both would start a new attempt and the
         // loser's session gets orphaned. reconnectTab bumps the token, making

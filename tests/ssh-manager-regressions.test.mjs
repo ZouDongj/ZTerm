@@ -243,72 +243,48 @@ test('(guard) a profile with a saved password keeps the status-row flow', () => 
 });
 
 // ── SFTP menu action ──
-// The menu item is enabled when ANY pane of the tab is a connected SSH
-// session (toggleMenuPopup), but the action required the FOCUSED pane to be
-// one — with the focus on a local pane the enabled item silently did
-// nothing. The action now falls back to any connected SSH pane (focused
-// first), matching the enable check.
+// The dock follows the focused pane: the menu action delegates to
+// SFTP.toggleFromBar() (the same target rule as the bar button), and the
+// item's enable predicate consults SFTP.currentTargetTabId(). Opening a
+// NON-focused session is gone on purpose — the next updateTarget would
+// suspend that binding immediately.
 
-function stageSftp(ctx, tab) {
-    const opens = [];
-    ctx.TabManager.getActive = () => tab;
-    ctx.getAllPanes = (t) => t._panes || [];
-    ctx.SFTP = { open: (tabId) => opens.push(tabId) };
-    return opens;
+function stageSftp(ctx) {
+    const toggles = [];
+    ctx.SFTP = { toggleFromBar: () => toggles.push(1) };
+    return toggles;
 }
 
-test('SFTP opens from a connected SSH pane when the focus is on a local pane', () => {
+test('the menu action delegates to the dock toggle', () => {
     const ctx = loadSshVm();
-    const tab = {
-        type: 'local', splitRoot: {},
-        _panes: [
-            { focused: true, type: 'local', tabId: 'local_1' },
-            { type: 'ssh', tabId: 'ssh_9' },
-        ],
-    };
-    const opens = stageSftp(ctx, tab);
-
+    const toggles = stageSftp(ctx);
     ctx.openSFTPFromMenu();
-
-    assert.deepEqual(opens, ['ssh_9'], 'falls back to the connected SSH pane');
+    assert.equal(toggles.length, 1, 'one dock toggle per menu activation');
 });
 
-test('the focused SSH pane still wins in a split', () => {
+test('the menu enable check follows the dock target rule (real toggleMenuPopup)', () => {
     const ctx = loadSshVm();
-    const tab = {
-        type: 'ssh', splitRoot: {},
-        _panes: [
-            { focused: true, type: 'ssh', tabId: 'ssh_1' },
-            { type: 'ssh', tabId: 'ssh_2' },
-        ],
-    };
-    const opens = stageSftp(ctx, tab);
+    // Real #menu-popup shape: the item carrying data-action="sftp" lives in
+    // the popup. The harness selector engine resolves class chains and bare
+    // tags only, so that ONE attribute lookup is special-cased here on the
+    // staged element (same convention as sftp-vm's '.sftp-window' shim); the
+    // product code is untouched.
+    const popup = ctx.document.getElementById('menu-popup');
+    const item = ctx.document.createElement('div');
+    item.setAttribute('data-action', 'sftp');
+    popup.appendChild(item);
+    const origQuerySelector = popup.querySelector;
+    popup.querySelector = (sel) =>
+        sel === '[data-action="sftp"]' ? item : origQuerySelector.call(popup, sel);
 
-    ctx.openSFTPFromMenu();
+    ctx.SFTP = { currentTargetTabId: () => null };
+    ctx.toggleMenuPopup();
+    assert.equal(item.classList.contains('disabled'), true,
+        'no SSH target: the menu item is disabled');
 
-    assert.deepEqual(opens, ['ssh_1']);
-});
-
-test('no connected SSH pane means no SFTP session', () => {
-    const ctx = loadSshVm();
-    const splitOpens = stageSftp(ctx, {
-        type: 'local', splitRoot: {},
-        _panes: [
-            { focused: true, type: 'local', tabId: 'local_1' },
-            { type: 'ssh' }, // connecting, no backend tabId yet
-        ],
-    });
-    ctx.openSFTPFromMenu();
-    assert.deepEqual(splitOpens, []);
-
-    const localOpens = stageSftp(ctx, { type: 'local', tabId: 'local_1' });
-    ctx.openSFTPFromMenu();
-    assert.deepEqual(localOpens, []);
-});
-
-test('(guard) a non-split SSH tab opens SFTP on itself', () => {
-    const ctx = loadSshVm();
-    const opens = stageSftp(ctx, { type: 'ssh', tabId: 'ssh_3' });
-    ctx.openSFTPFromMenu();
-    assert.deepEqual(opens, ['ssh_3']);
+    ctx.closeMenuPopup();
+    ctx.SFTP = { currentTargetTabId: () => 'ssh_1' };
+    ctx.toggleMenuPopup();
+    assert.equal(item.classList.contains('disabled'), false,
+        'a focused SSH session enables the menu item');
 });
