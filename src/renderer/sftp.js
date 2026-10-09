@@ -875,7 +875,7 @@ const TransferManager = {
         const id = this._nextId++;
         this._transfers.push({ id, name, type, tabId, localPath, remotePath, sessionLabel: this._sessionLabel(tabId), transferred: 0, total: 0, done: false, cancelled: false, startTime: Date.now(), _lastUpdate: Date.now(), _lastBytes: 0, _speed: 0 });
         this._render();
-        this._showButton();
+        this._syncButtonVisibility();
         showToast(type === 'download' ? '开始下载: ' + name : '开始上传: ' + name);
         return id;
     },
@@ -932,7 +932,7 @@ const TransferManager = {
     remove(id) {
         this._transfers = this._transfers.filter(x => x.id !== id);
         this._render();
-        if (this._transfers.length === 0 && this._history.length === 0) this._hideButton();
+        this._syncButtonVisibility();
     },
 
     _render() {
@@ -959,15 +959,17 @@ const TransferManager = {
         }
     },
 
-    _showButton() {
+    // Bar-button visibility (accepted-prototype semantics): records OR an
+    // open flyout keep the button mounted; with both gone it hides. Clearing
+    // the last record while the flyout is open therefore keeps the button
+    // (and the flyout) — only the user closing the flyout with nothing left
+    // hides it again (closePanel re-runs this).
+    _syncButtonVisibility() {
         const btn = document.getElementById('transfer-btn');
-        if (btn) btn.classList.add('visible');
-    },
-
-    _hideButton() {
-        const btn = document.getElementById('transfer-btn');
-        if (btn) btn.classList.remove('visible');
-        this.closePanel();
+        if (!btn) return;
+        const empty = this._transfers.length === 0 && this._history.length === 0;
+        const panelOpen = !!document.getElementById('transfer-panel')?.classList.contains('open');
+        btn.classList.toggle('visible', !empty || panelOpen);
     },
 
     openPanel() {
@@ -984,11 +986,19 @@ const TransferManager = {
             win.style.right = 'auto';
         }
         btn?.classList.remove('has-active'); // dot hides while the flyout is open
+        this._syncButtonVisibility(); // an open flyout always keeps the button
+    },
+
+    // The titlebar button is a toggle (prototype open-transfers semantics).
+    togglePanel() {
+        if (document.getElementById('transfer-panel')?.classList.contains('open')) this.closePanel();
+        else this.openPanel();
     },
 
     closePanel() {
         document.getElementById('transfer-panel').classList.remove('open');
         this._render(); // re-evaluate the activity dot now that the flyout closed
+        this._syncButtonVisibility(); // empty + closed → the button may hide now
     },
 
     toggleGroup(tabId) {
@@ -998,6 +1008,21 @@ const TransferManager = {
 
     expandAll() { this._collapsedGroups.clear(); this._renderPanel(); },
     collapseAll() { this._groups().forEach(g => this._collapsedGroups.add(g.tabId)); this._renderPanel(); },
+
+    // Bulk-clear the finished records (accepted prototype's「清除已完成」):
+    // done/cancelled in-flight entries and the whole history go, active
+    // transfers stay.
+    clearDone() {
+        this._transfers = this._transfers.filter(t => !t.done && !t.cancelled);
+        this._history = [];
+        // Drop collapse state of groups that no longer have any record
+        // (only active entries remain as group owners after the wipe).
+        const live = new Set(this._transfers.map(t => t.tabId));
+        this._collapsedGroups.forEach(id => { if (!live.has(id)) this._collapsedGroups.delete(id); });
+        this._render();
+        this._syncButtonVisibility();
+        showToast('已清除已完成的传输记录');
+    },
 
     // Group transfers by owning session, first-seen order (active entries
     // establish group order; history-only groups follow). Order never jumps
@@ -1037,10 +1062,23 @@ const TransferManager = {
             countEl.classList.toggle('live', activeTotal > 0);
         }
         if (actionsEl) {
-            actionsEl.innerHTML = groups.length > 1
-                ? '<button class="transfer-group-btn" onclick="TransferManager.expandAll()">全部展开</button>' +
-                  '<button class="transfer-group-btn" onclick="TransferManager.collapseAll()">全部折叠</button>'
-                : '';
+            // The clear-done affordance appears only when something finished
+            // is actually listed (done/cancelled entries or history); the
+            // expand/collapse pair only when more than one group exists.
+            // Assign innerHTML only when the markup CHANGED: _render runs on
+            // the 300ms progress throttle, and rebuilding the action row each
+            // tick swallows clicks mid-press and kills hover feedback.
+            const hasDone = this._transfers.some(t => t.done || t.cancelled) || this._history.length > 0;
+            const html =
+                (hasDone ? '<button class="transfer-group-btn" onmousedown="event.preventDefault()" onclick="TransferManager.clearDone()">清除已完成</button>' : '') +
+                (groups.length > 1
+                    ? '<button class="transfer-group-btn" onmousedown="event.preventDefault()" onclick="TransferManager.expandAll()">全部展开</button>' +
+                      '<button class="transfer-group-btn" onmousedown="event.preventDefault()" onclick="TransferManager.collapseAll()">全部折叠</button>'
+                    : '');
+            if (actionsEl._lastActionsHtml !== html) {
+                actionsEl._lastActionsHtml = html;
+                actionsEl.innerHTML = html;
+            }
         }
         let html = '';
         for (const g of groups) {
@@ -1074,9 +1112,11 @@ const TransferManager = {
             ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
             : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
         const barClass = t.cancelled ? 'cancelled' : t.done ? 'done' : '';
+        // mousedown is swallowed (preventDefault) so the click acts without
+        // pulling the keyboard focus off the terminal (dock-button contract).
         const btn = t.done
-            ? '<button class="transfer-item-btn" onclick="TransferManager.remove(' + t.id + ')">' + Icons.iconSvg('check', 12) + '</button>'
-            : '<button class="transfer-item-btn" onclick="TransferManager.cancel(' + t.id + ')">' + Icons.iconSvg('x', 12) + '</button>';
+            ? '<button class="transfer-item-btn" onmousedown="event.preventDefault()" onclick="TransferManager.remove(' + t.id + ')">' + Icons.iconSvg('check', 12) + '</button>'
+            : '<button class="transfer-item-btn" onmousedown="event.preventDefault()" onclick="TransferManager.cancel(' + t.id + ')">' + Icons.iconSvg('x', 12) + '</button>';
         // Speed is smoothed with an EMA (instantaneous rate over the recent window) instead of
         // a whole-transfer average, which drifts monotonically and jumps on bursts — a main source of text jitter
         const now = Date.now();
@@ -1122,15 +1162,15 @@ const TransferManager = {
                     '<span class="speed">' + formatDate(h.completedAt) + '</span>' +
                 '</div>' +
             '</div>' +
-            (canOpen ? '<button class="transfer-item-btn" onclick="event.stopPropagation();TransferManager.openInExplorer(' + globalIdx + ')" title="打开所在文件夹">' + Icons.iconSvg('folder-open', 13) + '</button>' : '') +
-            '<button class="transfer-item-btn" onclick="event.stopPropagation();TransferManager.removeHistory(' + globalIdx + ')" title="删除记录">' + Icons.iconSvg('x', 12) + '</button>' +
+            (canOpen ? '<button class="transfer-item-btn" onmousedown="event.preventDefault()" onclick="event.stopPropagation();TransferManager.openInExplorer(' + globalIdx + ')" title="打开所在文件夹">' + Icons.iconSvg('folder-open', 13) + '</button>' : '') +
+            '<button class="transfer-item-btn" onmousedown="event.preventDefault()" onclick="event.stopPropagation();TransferManager.removeHistory(' + globalIdx + ')" title="删除记录">' + Icons.iconSvg('x', 12) + '</button>' +
         '</div>';
     },
 
     removeHistory(index) {
         this._history.splice(index, 1);
         this._render();
-        if (this._transfers.length === 0 && this._history.length === 0) this._hideButton();
+        this._syncButtonVisibility();
     },
 
     openInExplorer(index) {
@@ -1139,7 +1179,26 @@ const TransferManager = {
             ipcRenderer.send('open-in-explorer', { path: h.localPath });
         }
     },
+
+    // Non-modal flyout: a click anywhere outside the window (and outside the
+    // titlebar button that opens it) closes the flyout while the click keeps
+    // falling through to whatever was underneath — no preventDefault, no
+    // stopPropagation, so a click on a pane still focuses it.
+    _onDocClick(e) {
+        const panel = document.getElementById('transfer-panel');
+        if (!panel || !panel.classList.contains('open')) return;
+        if (!e || !e.target) return;
+        const win = document.getElementById('transfer-window');
+        const btn = document.getElementById('transfer-btn');
+        if (win && win.contains(e.target)) return;
+        if (btn && btn.contains(e.target)) return;
+        this.closePanel();
+    },
 };
+
+// The click-outside closer itself (bubble phase; the flyout's own clicks are
+// filtered by _onDocClick's contains checks, not by stopping propagation).
+document.addEventListener('click', (e) => TransferManager._onDocClick(e));
 
 // SFTP transfer progress
 ipcRenderer.on('sftp-progress', (event, { tabId, transferred, total, transferId }) => {

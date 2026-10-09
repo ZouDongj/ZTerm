@@ -40,6 +40,10 @@ function closeOverlay(id) {
 
 function openOverlay(id) {
     closeAllOverlays();
+    // The transfer flyout is not an .overlay (non-modal), so the sweep above
+    // never meets it — close it explicitly: opening a real modal dismisses
+    // the flyout (prototype showTransfers mutual exclusion, mirrored).
+    if (typeof TransferManager !== 'undefined' && TransferManager.closePanel) TransferManager.closePanel();
     // A hover tip survives keyboard-driven overlay opens (no mousemove → no
     // leave event); its z-index sits above overlays, so hide it explicitly.
     if (typeof LinkOpen !== 'undefined' && LinkOpen.hideLinkTip) LinkOpen.hideLinkTip();

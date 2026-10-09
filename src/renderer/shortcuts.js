@@ -860,6 +860,25 @@ document.addEventListener('keydown', e => {
             e.preventDefault(); e.stopPropagation();
             return;
         }
+        // The transfer flyout is non-modal: Esc closes it without reaching
+        // the terminal below — but only once no real modal overlay is open
+        // (those keep their priority above).
+        const transferPanel = document.getElementById('transfer-panel');
+        if (transferPanel && transferPanel.classList.contains('open')
+            && typeof TransferManager !== 'undefined' && TransferManager.closePanel) {
+            // Whether the flyout subtree HELD the keyboard is captured before
+            // closing: hiding the panel can hand activeElement to <body>
+            // first, and a flyout button that had focus owes the terminal a
+            // refocus (same 50ms convention as the overlay branch above).
+            const win = document.getElementById('transfer-window');
+            const flyoutHadFocus = !!(win && document.activeElement && win.contains(document.activeElement));
+            TransferManager.closePanel();
+            if (flyoutHadFocus && typeof _refocusActiveTerminal === 'function') {
+                setTimeout(() => _refocusActiveTerminal(), 50);
+            }
+            e.preventDefault(); e.stopPropagation();
+            return;
+        }
         // Maximize state lives on the tab (per-tab source of truth): only the
         // ACTIVE tab's field may drive Esc — a manager-level copy could be set
         // by a background tab and wedge Esc for every other tab

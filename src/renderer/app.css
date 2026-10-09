@@ -540,7 +540,11 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 /* Top-bar transfer entry (Flutter flyout port): circular icon button in the
    titlebar, count badge, and an 8px activity dot shown only while transfers
    run with the flyout closed. */
-#transfer-panel{background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;align-items:flex-start;justify-content:flex-start}
+/* Transfer flyout container: non-modal — a full-viewport, click-transparent
+   layer only used to stack the flyout above the app (same z-index the old
+   .overlay used); the window itself re-enables pointer events. */
+#transfer-panel{position:fixed;inset:0;z-index:30;pointer-events:none;background:transparent;display:none}
+#transfer-panel.open{display:block}
 .transfer-btn{position:relative;width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;transition:all 0.12s;opacity:0;transform:scale(0.5);pointer-events:none;margin-left:2px;flex-shrink:0;-webkit-app-region:no-drag;user-select:none}
 .transfer-btn.visible{opacity:1;transform:scale(1);pointer-events:auto}
 .transfer-btn:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
@@ -553,8 +557,9 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 @keyframes transferPulse{0%{transform:scale(1)}50%{transform:scale(1.4)}100%{transform:scale(1)}}
 
 /* Transfer flyout: anchored below the top-bar button (position set inline),
-   grouped-by-session collapsible list. */
-.transfer-window{position:absolute;top:42px;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);overflow:hidden;width:360px;max-height:440px;display:flex;flex-direction:column;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1)}
+   grouped-by-session collapsible list. pointer-events:auto re-enables hits
+   on the flyout over the click-transparent #transfer-panel layer. */
+.transfer-window{position:absolute;top:42px;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);overflow:hidden;width:360px;max-height:min(440px, calc(100vh - 60px));display:flex;flex-direction:column;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1);pointer-events:auto}
 .transfer-header{display:flex;align-items:center;gap:6px;padding:10px 10px 6px 14px;flex-shrink:0}
 .transfer-header h2{font-size:10.5px;color:var(--text-3);font-weight:600;letter-spacing:0.8px;margin:0}
 .transfer-header-count{min-width:16px;padding:1px 7px;border-radius:7px;background:rgba(255,255,255,0.08);color:var(--text-3);font-size:10px;text-align:center;font-variant-numeric:tabular-nums}

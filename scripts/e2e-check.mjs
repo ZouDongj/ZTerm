@@ -1324,6 +1324,9 @@ async function main() {
           SFTP._editingPath = false; SFTP._viewReq = null; SFTP._refreshInFlight = null; SFTP._refreshQueued = null;
           TransferManager._transfers = []; TransferManager._history = [];
           try { TransferManager._render(); } catch (e) { r.renderError = String(e && e.message || e); }
+          // The state reset must also resync the bar button (fixture state,
+          // not a user action — clearDone() would keep active transfers).
+          try { TransferManager._syncButtonVisibility(); } catch (e) { r.syncError = String(e && e.message || e); }
           r.stateReset = true;
         } catch (e) { r.stateError = String(e && e.message || e); }
         delete window.__sftpGate; delete window.__sftpOrigInvoke;

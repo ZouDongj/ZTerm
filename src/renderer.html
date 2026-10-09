@@ -39,7 +39,7 @@
     <!-- Global transfer flyout entry: shown only while records exist; the
          badge dot appears while transfers are active and the flyout is
          closed (ported from the ZTerm Flutter workspace top bar). -->
-    <div class="transfer-btn" id="transfer-btn" onclick="TransferManager.openPanel()" title="传输任务">
+    <div class="transfer-btn" id="transfer-btn" onclick="TransferManager.togglePanel()" title="传输任务">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></svg>
       <span class="transfer-count"></span>
       <span class="transfer-badge-dot"></span>
@@ -65,14 +65,15 @@
     <div class="menu-item" id="ssh-add-blank" role="menuitem" tabindex="-1" onclick="sshAddMenuPick('blank')"><span class="menu-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span><span class="menu-label">完全新建</span></div>
   </div>
 
-  <!-- Transfer Panel Overlay -->
-  <div class="overlay" id="transfer-panel" onclick="TransferManager.closePanel()">
-    <div class="transfer-window" id="transfer-window" onclick="event.stopPropagation()">
+  <!-- Transfer flyout: non-modal (clicks outside fall through and close it,
+       Esc closes it; terminal input and shortcuts stay live while it is open) -->
+  <div id="transfer-panel">
+    <div class="transfer-window" id="transfer-window">
       <div class="transfer-header">
         <h2>全部传输</h2>
         <span class="transfer-header-count" id="transfer-header-count"></span>
         <div class="transfer-header-actions" id="transfer-header-actions"></div>
-        <button class="transfer-close" onclick="TransferManager.closePanel()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+        <button class="transfer-close" onmousedown="event.preventDefault()" onclick="TransferManager.closePanel()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
       <div class="transfer-panel-body" id="transfer-panel-body"></div>
     </div>

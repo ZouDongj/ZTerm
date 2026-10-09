@@ -302,6 +302,10 @@ export function loadVm() {
     const sends = [];
     const ipcHandlers = new Map();
     const clip = { text: '', readText: () => clip.text, readTextAsync: () => Promise.resolve(clip.text) };
+    // Document-level listeners are RECORDED (never auto-dispatched) so tests
+    // can fire the real registered handlers by hand (the click-outside closer
+    // in sftp.js etc.); same convention as the recorded ResizeObservers.
+    const docListeners = new Map();
 
     // Static page elements the product code reaches by id
     const root = mkEl({ _cw: 1200, _ch: 900 });
@@ -333,7 +337,15 @@ export function loadVm() {
             body,
             // Real pages always resolve this; the harness tracks focus() calls.
             activeElement: body,
-            addEventListener() {},
+            addEventListener(type, fn) {
+                if (!docListeners.has(type)) docListeners.set(type, []);
+                docListeners.get(type).push(fn);
+            },
+            removeEventListener(type, fn) {
+                const l = docListeners.get(type) || [];
+                const i = l.indexOf(fn);
+                if (i >= 0) l.splice(i, 1);
+            },
         },
         window: {
             __imeCaretAnchor: { patchTerminal: () => true },
@@ -379,7 +391,7 @@ export function loadVm() {
         _createWebLinksAddon: () => ({}),
         saveConfig() {},
         clearAlternateScreen() {},
-        __tq: tq, __sends: sends, __searchInput: searchInput, __searchCount: searchCount, __mainArea: mainArea, __body: body,
+        __tq: tq, __sends: sends, __searchInput: searchInput, __searchCount: searchCount, __mainArea: mainArea, __body: body, __docListeners: docListeners,
         // Dispatch synthetic backend events through the REAL ipc.js handlers.
         __emit: (ch, payload) => {
             (ipcHandlers.get(ch) || []).slice().forEach(fn => fn({}, payload));
