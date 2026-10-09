@@ -127,7 +127,7 @@ body.tab-dragging{user-select:none}
 #btn-add-tab:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 
 /* Window control buttons (Segoe MDL2 Assets native icons) */
-.win-controls{display:flex;align-items:stretch;flex-shrink:0;height:100%;-webkit-app-region:no-drag}
+.win-controls{display:flex;align-items:stretch;flex-shrink:0;height:100%;-webkit-app-region:no-drag;margin-left:6px}
 .win-ctrl{width:46px;height:100%;border:none;background:transparent;color:var(--text-2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.12s;padding:0;font-family:'Segoe MDL2 Assets','Segoe Fluent Icons',sans-serif;font-size:10px}
 .win-ctrl:hover{background:rgba(var(--accent-rgb),0.12);color:var(--text-1)}
 .win-close:hover{background:#c42b1c;color:#fff}
@@ -485,17 +485,19 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .panel-section-title{font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:0.5px;padding:12px 12px 6px}
 
 /* ── SFTP side dock ── */
-.sftp-window{position:absolute;right:0;top:0;bottom:0;width:100%;background:var(--surface-float);border-radius:18px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);overflow:hidden;display:flex;flex-direction:column}
+.sftp-window{position:absolute;right:0;top:0;bottom:0;width:calc(100% - 8px);background:var(--surface-float);border-radius:18px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);overflow:hidden;display:flex;flex-direction:column}
 .sftp-window.drag-over{outline:2px dashed rgba(var(--accent-rgb),0.5);outline-offset:-8px;background:rgba(var(--accent-rgb),0.04)}
 /* SFTP side dock: a fixed-width panel CLIPPED onto the right edge of .main —
    the open/close animation moves only the clip (clip-path), so the panel
    content lays out once at its final width instead of reflowing per frame.
-   The terminal inset (right) and the search bar animate together with the
-   reveal; fits are suppressed during the 180ms transition and settled once
-   afterwards (split-anim precedent). One min() bounds every width by the
-   main area minus 240px of terminal, so a narrow window shrinks the dock on
-   open and on window resize alike. */
-.sftp-dock{position:absolute;top:0;right:0;bottom:0;width:min(var(--sftp-width,320px), calc(100% - 240px));overflow:hidden;z-index:6;container-type:inline-size;clip-path:inset(0 0 0 100%)}
+   The dock spans the panel plus the 8px gutter on its left; the gutter hosts
+   the drag handle so it sits in the terminal/panel gap instead of covering
+   the panel edge. The terminal inset (right) and the search bar animate
+   together with the reveal; fits are suppressed during the 180ms transition
+   and settled once afterwards (split-anim precedent). One min() bounds every
+   width by the main area minus 240px of terminal, so a narrow window shrinks
+   the dock on open and on window resize alike. */
+.sftp-dock{position:absolute;top:0;right:0;bottom:0;width:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 8px);overflow:hidden;z-index:6;container-type:inline-size;clip-path:inset(0 0 0 100%)}
 .main.sftp-open .sftp-dock{clip-path:inset(0 0 0 0)}
 .main.sftp-open .term-wrap{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 8px)}
 .main.sftp-open .settings-pane{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 8px)}
@@ -508,10 +510,10 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .sftp-resize{position:absolute;left:0;top:0;bottom:0;width:8px;cursor:ew-resize;z-index:7;display:flex;align-items:center;justify-content:center}
 .sftp-resize::after{content:"";width:2px;height:36px;border-radius:8px;background:rgba(255,255,255,0.12);transition:background-color 100ms ease}
 .sftp-resize:hover::after,.sftp-resize.dragging::after,.sftp-resize:focus-visible::after{background:rgb(var(--accent-rgb))}
-/* Narrow-dock degradation (container = the dock): the fixed size/date columns
-   stop fitting below ~300px/250px, so they drop out instead of forcing a
-   horizontal scrollbar inside the file list. */
-@container (max-width:300px){.sftp-item-date{display:none}}
+/* Narrow-dock degradation (container = the dock): below ~250px the size
+   column drops out instead of forcing a horizontal scrollbar inside the
+   file list. The date column is always hidden in the dock (the full
+   name/size/date stays on the row tooltip); it only fits a wide modal. */
 @container (max-width:250px){.sftp-item-size{display:none}}
 .sftp-header{display:flex;align-items:center;padding:14px 18px;gap:10px;flex-shrink:0}
 .sftp-header h2{font-size:15px;color:var(--text-1);font-weight:600;margin:0}
@@ -533,19 +535,19 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .sftp-item.selected{background:rgba(var(--accent-rgb),0.12)}
 .sftp-item-icon{width:20px;text-align:center;flex-shrink:0;font-size:14px}
 .sftp-item-name{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.sftp-item-size{width:80px;text-align:right;flex-shrink:0;color:var(--text-3);font-size:11px}
-.sftp-item-date{width:120px;text-align:right;flex-shrink:0;color:var(--text-3);font-size:11px}
+.sftp-item-size{width:auto;min-width:44px;text-align:right;flex-shrink:0;color:var(--text-3);font-size:11px}
+.sftp-item-date{display:none;width:120px;text-align:right;flex-shrink:0;color:var(--text-3);font-size:11px}
 .sftp-empty{padding:40px;text-align:center;color:var(--text-3);font-size:13px}
 /* Transfer button in statusbar */
-/* Top-bar transfer entry (Flutter flyout port): circular icon button in the
-   titlebar, count badge, and an 8px activity dot shown only while transfers
-   run with the flyout closed. */
+/* Top-bar transfer entry (Flutter flyout port): rounded-square icon button
+   in the titlebar, count badge, and an 8px activity dot shown only while
+   transfers run with the flyout closed. Shared by the SFTP dock toggle. */
 /* Transfer flyout container: non-modal — a full-viewport, click-transparent
    layer only used to stack the flyout above the app (same z-index the old
    .overlay used); the window itself re-enables pointer events. */
 #transfer-panel{position:fixed;inset:0;z-index:30;pointer-events:none;background:transparent;display:none}
 #transfer-panel.open{display:block}
-.transfer-btn{position:relative;width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;transition:all 0.12s;opacity:0;transform:scale(0.5);pointer-events:none;margin-left:2px;flex-shrink:0;-webkit-app-region:no-drag;user-select:none}
+.transfer-btn{position:relative;width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;transition:all 0.12s;opacity:0;transform:scale(0.5);pointer-events:none;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;user-select:none}
 .transfer-btn.visible{opacity:1;transform:scale(1);pointer-events:auto}
 .transfer-btn:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 .transfer-btn.on{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}

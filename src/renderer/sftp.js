@@ -552,6 +552,9 @@ const SFTP = {
                 '<span class="sftp-item-name">' + escHtml(f.name) + '</span>' +
                 '<span class="sftp-item-size">' + size + '</span>' +
                 '<span class="sftp-item-date">' + date + '</span>';
+            // The dock hides the date column and truncates long names; the
+            // tooltip keeps the full name/size/date reachable.
+            el.title = f.name + (size ? '  ·  ' + size : '') + (date ? '  ·  ' + date : '');
             // no inline onclick with concatenated paths — a malicious server filename could inject HTML attributes
             el.addEventListener('click', () => {
                 if (f.isDir) this.navigate(fullPath);
@@ -1370,7 +1373,9 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) =>
         let rafPending = false;
         let pendingWidth = null;
         const onMove = (ev) => {
-            pendingWidth = clamp(rect.right - ev.clientX, rect);
+            // The handle lives in the 8px gutter left of the panel; subtract
+            // half the gutter so the handle midpoint tracks the cursor.
+            pendingWidth = clamp(rect.right - ev.clientX - 4, rect);
             if (rafPending) return;
             rafPending = true;
             requestAnimationFrame(() => {
