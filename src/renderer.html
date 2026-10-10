@@ -593,28 +593,38 @@
          area; binding and visibility follow the focused SSH pane (sftp.js). -->
     <aside class="sftp-dock" id="overlay-sftp" aria-hidden="true">
       <div class="sftp-resize" id="sftp-resize" role="separator" aria-orientation="vertical" tabindex="0" title="拖拽或左右方向键调整宽度"></div>
-      <!-- Header/footer buttons swallow mousedown (preventDefault): the click
+      <!-- Header/toolbar buttons swallow mousedown (preventDefault): the click
            still fires but the keyboard focus never leaves the terminal. -->
       <div class="sftp-window">
         <div class="sftp-header">
-          <h2>SFTP</h2>
-          <span class="sftp-conn" id="sftp-conn"></span>
+          <span class="sftp-header-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg></span>
+          <h2>文件</h2>
           <div style="flex:1"></div>
+          <span class="sftp-conn" id="sftp-conn"></span>
           <div class="sftp-actions">
-            <button id="sftp-pin-btn" onmousedown="event.preventDefault()" onclick="SFTP.togglePin()" title="锁定当前目录"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6a3 3 0 0 0-6 0v4.76z"/></svg></button>
-            <button onmousedown="event.preventDefault()" onclick="SFTP.refresh()" title="刷新"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></button>
-            <button onmousedown="event.preventDefault()" onclick="SFTP.goUp()" title="上级目录"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
             <button onmousedown="event.preventDefault()" onclick="SFTP.close()" title="关闭"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
           </div>
         </div>
-        <div class="sftp-breadcrumb-bar">
+        <!-- Address field: breadcrumb + double-click path edit (sftp.js
+             _renderBreadcrumb/_editPath) live inside the same field
+             container, so the editor swaps in place. -->
+        <div class="sftp-pathbar">
+          <span class="sftp-pathbar-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>
           <div class="sftp-breadcrumb" id="sftp-breadcrumb"></div>
         </div>
-        <div class="sftp-body" id="sftp-body"></div>
-        <div class="sftp-footer">
-          <button onmousedown="event.preventDefault()" onclick="SFTP.upload()"><span class="ic-accent"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span> 上传文件</button>
-          <button onmousedown="event.preventDefault()" onclick="SFTP.mkdir()"><span class="ic-amber"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span> 新建目录</button>
+        <div class="sftp-toolbar">
+          <div class="sftp-toolbar-group">
+            <button onmousedown="event.preventDefault()" onclick="SFTP.goUp()" title="上级目录"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
+            <button onmousedown="event.preventDefault()" onclick="SFTP.refresh()" title="刷新"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></button>
+            <button id="sftp-pin-btn" onmousedown="event.preventDefault()" onclick="SFTP.togglePin()" title="锁定当前目录"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6a3 3 0 0 0-6 0v4.76z"/></svg></button>
+          </div>
+          <div style="flex:1"></div>
+          <div class="sftp-toolbar-group">
+            <button onmousedown="event.preventDefault()" onclick="SFTP.mkdir()" title="新建目录"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></button>
+            <button onmousedown="event.preventDefault()" onclick="SFTP.upload()" title="上传"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></button>
+          </div>
         </div>
+        <div class="sftp-body" id="sftp-body"></div>
       </div>
     </aside>
   </div>

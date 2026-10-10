@@ -64,10 +64,9 @@ body.no-animations .startup-splash .cell{transition:none}
    .tab-name; inline svg + raw text in one node baseline-aligns too high */
 .tab-lead-icon{display:inline-flex;align-items:center;flex-shrink:0}
 
-/* Semantic icon tints: folders share the file-system amber family with the
-   SSH bolt; transfer directions use accent (up) / success green (down) */
+/* Semantic icon tints: accent for folders and upload direction, success
+   green for download */
 .ic-accent{color:rgb(var(--accent-rgb))}
-.ic-amber{color:#ffb74d}
 .ic-green{color:#7dd58a}
 .tab-icon.connected{background:#7dd58a}
 .tab-icon.disconnected{background:rgba(255,255,255,0.25)}
@@ -516,28 +515,47 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
    file list. The date column is always hidden in the dock (the full
    name/size/date stays on the row tooltip); it only fits a wide modal. */
 @container (max-width:250px){.sftp-item-size{display:none}}
-.sftp-header{display:flex;align-items:center;padding:14px 18px;gap:10px;flex-shrink:0}
-.sftp-header h2{font-size:15px;color:var(--text-1);font-weight:600;margin:0}
-.sftp-header .sftp-conn{font-size:11px;color:var(--text-3);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sftp-breadcrumb-bar{padding:6px 18px 10px;flex-shrink:0}
-.sftp-breadcrumb{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-2);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.sftp-header{display:flex;align-items:center;padding:14px 18px;gap:8px;flex-shrink:0}
+.sftp-header-icon{display:flex;align-items:center;color:var(--text-2);flex-shrink:0}
+.sftp-header h2{font-size:13px;color:var(--text-1);font-weight:600;margin:0}
+/* Host chip (Flutter parity): field-tinted pill, mono host text; hidden
+   while empty (no session label yet). */
+.sftp-header .sftp-conn{flex-shrink:0;max-width:45%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:"Cascadia Code",Consolas,monospace;font-size:10.5px;color:var(--text-3);background:rgba(255,255,255,0.045);border-radius:7px;padding:3px 8px}
+.sftp-header .sftp-conn:empty{display:none}
+/* Address field: one container for the breadcrumb AND the double-click path
+   editor (the input replaces the crumbs in place, seamlessly). */
+.sftp-pathbar{display:flex;align-items:center;gap:6px;height:28px;margin:0 18px 10px;padding:0 9px;background:rgba(255,255,255,0.045);border-radius:8px;flex-shrink:0;transition:box-shadow 0.12s}
+.sftp-pathbar:focus-within{box-shadow:inset 0 0 0 1.5px rgba(var(--accent-rgb),0.4)}
+.sftp-pathbar-icon{display:flex;align-items:center;color:var(--text-3);flex-shrink:0}
+.sftp-breadcrumb{display:flex;align-items:center;gap:2px;flex:1;min-width:0;font-family:"Cascadia Code",Consolas,monospace;font-size:11.5px;color:var(--text-2);overflow:hidden;white-space:nowrap}
 .sftp-breadcrumb span{cursor:pointer;padding:2px 6px;border-radius:5px;transition:all 0.12s}
 .sftp-breadcrumb span:hover{background:rgba(var(--accent-rgb),0.12);color:var(--text-1)}
 .sftp-breadcrumb .sep{color:var(--text-3);cursor:default;opacity:0.6}
 .sftp-breadcrumb .sep:hover{background:none;color:var(--text-3)}
-.sftp-path-input{flex:1;width:100%;background:rgba(255,255,255,0.045);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:9px;padding:4px 10px;color:var(--text-1);font-size:12px;font-family:inherit;outline:none}
+.sftp-path-input{flex:1;min-width:0;width:100%;background:transparent;border:none;padding:0;color:var(--text-1);font-size:11.5px;font-family:inherit;outline:none}
 .sftp-actions{display:flex;gap:2px;flex-shrink:0;align-items:center;margin-left:auto}
 .sftp-actions button{width:28px;height:28px;border-radius:8px;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all 0.12s;line-height:1;padding:0}
 .sftp-actions button:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
-.sftp-actions button.pinned{color:#8fc1ee;background:rgba(var(--accent-rgb),0.2)}
+/* Toolbar row under the address field (Flutter parity): navigation on the
+   left, create/upload on the right; the pin keeps its blue active state. */
+.sftp-toolbar{display:flex;align-items:center;gap:2px;padding:0 14px 10px;flex-shrink:0}
+.sftp-toolbar-group{display:flex;align-items:center;gap:2px}
+.sftp-toolbar button{width:30px;height:30px;border-radius:8px;border:none;background:transparent;color:var(--text-3);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.12s;line-height:1;padding:0}
+.sftp-toolbar button:hover{background:rgba(255,255,255,0.06);color:var(--text-1)}
+.sftp-toolbar button.pinned{color:#8fc1ee;background:rgba(var(--accent-rgb),0.2)}
 .sftp-body{flex:1;overflow-y:auto;padding:2px 10px 10px;min-height:200px}
-.sftp-item{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:9px;cursor:pointer;transition:background 0.12s;font-size:12px;color:var(--text-2)}
+.sftp-item{display:flex;align-items:center;gap:9px;height:38px;padding:0 10px;border-radius:10px;cursor:pointer;transition:background 0.12s;font-size:12.5px;color:var(--text-2)}
 .sftp-item:hover{background:rgba(255,255,255,0.04)}
 .sftp-item.selected{background:rgba(var(--accent-rgb),0.12)}
-.sftp-item-icon{width:20px;text-align:center;flex-shrink:0;font-size:14px}
+.sftp-item-icon{width:20px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .sftp-item-name{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.sftp-item-size{width:auto;min-width:44px;text-align:right;flex-shrink:0;color:var(--text-3);font-size:11px}
+.sftp-item-size{width:auto;min-width:44px;text-align:right;flex-shrink:0;color:var(--text-3);font-size:10.5px;font-family:"Cascadia Code",Consolas,monospace}
 .sftp-item-date{display:none;width:120px;text-align:right;flex-shrink:0;color:var(--text-3);font-size:11px}
+/* Row-trailing download action: fade in on row hover (file rows only,
+   rendered by sftp.js); a click stops propagation so the row stays inert. */
+.sftp-item-dl{width:24px;height:24px;border-radius:6px;border:none;background:transparent;color:var(--text-3);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0;opacity:0;transition:opacity 0.2s ease,background 0.12s,color 0.12s}
+.sftp-item:hover .sftp-item-dl,.sftp-item-dl:focus-visible{opacity:1}
+.sftp-item-dl:hover{background:rgba(255,255,255,0.06);color:var(--text-1)}
 .sftp-empty{padding:40px;text-align:center;color:var(--text-3);font-size:13px}
 /* Transfer button in statusbar */
 /* Top-bar transfer entry (Flutter flyout port): rounded-square icon button
@@ -598,9 +616,6 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .transfer-item-meta .speed{margin-left:auto}
 .transfer-item-btn{width:22px;height:22px;border-radius:6px;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center;transition:all 0.12s;flex-shrink:0}
 .transfer-item-btn:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
-.sftp-footer{display:flex;align-items:center;padding:10px 18px;gap:8px;flex-shrink:0}
-.sftp-footer button{font-size:11.5px;padding:5px 13px;border-radius:14px;border:none;cursor:pointer;background:rgba(var(--accent-rgb),0.12);color:#9cc8ee;transition:all 0.12s;font-family:inherit}
-.sftp-footer button:hover{background:rgba(var(--accent-rgb),0.2);color:var(--text-1)}
 
 /* ── SSH Manager ── */
 .ssh-group{margin-bottom:4px}

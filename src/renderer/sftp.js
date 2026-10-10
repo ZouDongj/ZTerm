@@ -537,13 +537,15 @@ const SFTP = {
         if (this._path !== '/') {
             const up = document.createElement('div');
             up.className = 'sftp-item';
-            up.innerHTML = '<span class="sftp-item-icon ic-accent">' + Icons.iconSvg('folder-filled', 14) + '</span><span class="sftp-item-name">..</span>';
+            up.innerHTML = '<span class="sftp-item-icon ic-accent">' + Icons.iconSvg('folder-filled', 16) + '</span><span class="sftp-item-name">..</span>';
             up.addEventListener('click', () => this.goUp());
             body.appendChild(up);
         }
         this._files.forEach(f => {
-            const icon = f.isDir ? '<span class="ic-accent">' + Icons.iconSvg('folder-filled', 14) + '</span>' : Icons.iconSvg('file-filled', 14);
-            const size = f.isDir ? '' : formatSize(f.size);
+            const icon = f.isDir ? '<span class="ic-accent">' + Icons.iconSvg('folder-filled', 16) + '</span>' : Icons.iconSvg('file-filled', 16);
+            // Directories carry no size: the column shows an em dash so the
+            // right edge stays visually aligned across mixed listings.
+            const size = f.isDir ? '—' : formatSize(f.size);
             const date = formatDate(f.mtime);
             const fullPath = (this._path === '/' ? '' : this._path) + '/' + f.name;
             const el = document.createElement('div');
@@ -554,12 +556,23 @@ const SFTP = {
                 '<span class="sftp-item-date">' + date + '</span>';
             // The dock hides the date column and truncates long names; the
             // tooltip keeps the full name/size/date reachable.
-            el.title = f.name + (size ? '  ·  ' + size : '') + (date ? '  ·  ' + date : '');
+            el.title = f.name + (f.isDir ? '' : '  ·  ' + formatSize(f.size)) + (date ? '  ·  ' + date : '');
             // no inline onclick with concatenated paths — a malicious server filename could inject HTML attributes
             el.addEventListener('click', () => {
                 if (f.isDir) this.navigate(fullPath);
                 else this.download(fullPath, f.name);
             });
+            // Hover-revealed download action (file rows only): same target as
+            // the row click, but stopPropagation keeps the row itself inert.
+            if (!f.isDir) {
+                const dl = document.createElement('button');
+                dl.className = 'sftp-item-dl';
+                dl.title = '下载';
+                dl.innerHTML = Icons.iconSvg('download', 12);
+                dl.addEventListener('mousedown', (e) => e.preventDefault());
+                dl.addEventListener('click', (e) => { e.stopPropagation(); this.download(fullPath, f.name); });
+                el.appendChild(dl);
+            }
             body.appendChild(el);
         });
         if (!body.children.length) body.innerHTML = '<div class="sftp-empty">空目录</div>';
@@ -776,7 +789,7 @@ const SFTP = {
         const row = document.createElement('div');
         row.className = 'sftp-item';
         row.id = 'sftp-mkdir-row';
-        row.innerHTML = '<span class="sftp-item-icon ic-accent">' + Icons.iconSvg('folder-filled', 14) + '</span><input class="inline-edit" placeholder="新建目录名称，Enter 确认 / Esc 取消" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none">';
+        row.innerHTML = '<span class="sftp-item-icon ic-accent">' + Icons.iconSvg('folder-filled', 16) + '</span><input class="inline-edit" placeholder="新建目录名称，Enter 确认 / Esc 取消" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none">';
         snap.row = row;
         body.insertBefore(row, body.firstChild);
         const input = row.querySelector('input');
