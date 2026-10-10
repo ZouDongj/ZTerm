@@ -34,7 +34,7 @@
     <!-- SFTP dock toggle: visible only while the active tab's focused pane is
          a connected SSH session; show/hide mirrors the transfer button. -->
     <div class="transfer-btn" id="sftp-toggle-btn" onclick="SFTP.toggleFromBar()" title="SFTP 文件面板">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
     </div>
     <!-- Global transfer flyout entry: shown only while records exist; the
          badge dot appears while transfers are active and the flyout is
@@ -87,7 +87,7 @@
         <button class="ss-close" onclick="closeQC()" aria-label="关闭快捷命令" title="关闭"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
       <div class="ss-search">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input type="search" id="qc-input" placeholder="输入命令名称或分组…" aria-label="搜索命令名称或分组" autocomplete="off" spellcheck="false" oninput="qcFilter()" onkeydown="qcKeydown(event)">
       </div>
       <div class="qc-list ss-results" id="qc-list" role="listbox" aria-label="可用命令"></div>
@@ -106,7 +106,7 @@
         <button class="ss-close" onclick="closePalette()" aria-label="关闭命令面板" title="关闭"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
       <div class="ss-search">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input type="search" id="palette-input" placeholder="搜索操作…" aria-label="搜索操作" autocomplete="off" spellcheck="false" oninput="paletteFilter()" onkeydown="paletteKeyDown(event)">
       </div>
       <div class="palette-list ss-results" id="palette-list" role="listbox" aria-label="可用操作"></div>
@@ -120,11 +120,11 @@
   <div class="main" id="main-area">
     <!-- Search bar -->
   <div class="search-bar" id="search-bar">
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(171,178,191,0.35)" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
     <input type="text" id="search-input" placeholder="搜索…" onkeydown="onSearchKey(event)">
     <span class="count" id="search-count"></span>
-    <button onclick="searchPrev()" title="上一个 (Shift+Enter)">↑</button>
-    <button onclick="searchNext()" title="下一个 (Enter)">↓</button>
+    <button onclick="searchPrev()" title="上一个 (Shift+Enter)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
+    <button onclick="searchNext()" title="下一个 (Enter)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg></button>
     <button onclick="closeSearch()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
   </div>
 
@@ -132,7 +132,7 @@
     <div class="settings-pane" id="settings-pane">
       <div class="settings-header">
         <button class="back-btn" onclick="closeSettingsTab()" title="返回终端">
-          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10 12L6 8L10 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
         </button>
         <h1>设置</h1>
       </div>
@@ -452,7 +452,7 @@
             </div>
             <div class="ssh-mgr-searchrow settings-toolbar">
               <label class="ssh-mgr-search">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                 <input type="search" data-ssh-search="settings-ssh-list" aria-label="搜索连接名称、地址、用户或端口" placeholder="搜索名称、地址、用户或端口" autocomplete="off" oninput="filterSSHManager('settings-ssh-list', this.value)">
               </label>
               <span class="ssh-mgr-count" data-ssh-count="settings-ssh-list"></span>
@@ -510,7 +510,7 @@
             </div>
             <div class="ssh-mgr-searchrow settings-toolbar">
               <label class="ssh-mgr-search">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                 <input type="search" data-qc-search aria-label="搜索命令名称、分组或命令内容" placeholder="搜索名称、分组或命令内容" autocomplete="off" oninput="filterQCCommands(this.value)">
               </label>
               <span class="ssh-mgr-count" data-qc-count></span>
@@ -602,7 +602,7 @@
           <div style="flex:1"></div>
           <div class="sftp-actions">
             <button id="sftp-pin-btn" onmousedown="event.preventDefault()" onclick="SFTP.togglePin()" title="锁定当前目录"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6a3 3 0 0 0-6 0v4.76z"/></svg></button>
-            <button onmousedown="event.preventDefault()" onclick="SFTP.refresh()" title="刷新"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+            <button onmousedown="event.preventDefault()" onclick="SFTP.refresh()" title="刷新"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></button>
             <button onmousedown="event.preventDefault()" onclick="SFTP.goUp()" title="上级目录"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
             <button onmousedown="event.preventDefault()" onclick="SFTP.close()" title="关闭"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
           </div>
@@ -633,7 +633,7 @@
       <button class="ss-close" aria-label="关闭新建会话" title="关闭" onclick="_closeSessionSelector(true)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div class="ss-search">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <input id="sessions-search" type="search" role="combobox" aria-expanded="true" aria-controls="sessions-list" aria-autocomplete="list" aria-label="搜索会话名称、地址或分组" placeholder="搜索名称、地址或分组" autocomplete="off" spellcheck="false" oninput="filterSessions(this.value)">
       <button id="sessions-clear" class="ss-clear" aria-label="清空搜索" title="清空搜索" hidden onclick="clearSessionSearch()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
@@ -657,7 +657,7 @@
     </div>
     <div class="ssh-mgr-searchrow">
       <label class="ssh-mgr-search">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         <input id="ssh-manager-search" type="search" data-ssh-search="ssh-manager-list" aria-label="搜索连接名称、地址或用户" placeholder="搜索名称、地址、用户或端口" autocomplete="off" oninput="filterSSHManager('ssh-manager-list', this.value)">
       </label>
       <span class="ssh-mgr-count" data-ssh-count="ssh-manager-list"></span>
@@ -685,7 +685,7 @@
       <button class="ss-close" aria-label="关闭模板选择" title="关闭" onclick="_closeSSHTemplatePicker(true)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div class="ss-search">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <input id="ssh-template-search" type="search" role="combobox" aria-expanded="true" aria-controls="ssh-template-list" aria-autocomplete="list" aria-label="搜索模板名称、地址或分组" placeholder="搜索名称、地址或分组" autocomplete="off" spellcheck="false" oninput="filterSSHTemplates(this.value)">
       <button id="ssh-template-clear" class="ss-clear" aria-label="清空搜索" title="清空搜索" hidden onclick="clearSSHTemplateSearch()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
@@ -760,13 +760,13 @@
             <div style="position:relative;display:inline-block;width:100%">
             <input id="ssh-edit-password" class="inline-edit" type="password" placeholder="输入密码" style="padding-right:64px;width:100%;box-sizing:border-box">
             <button type="button" id="ssh-pwd-inline-eye" class="ssh-pwd-inline-act" style="position:absolute;top:50%;transform:translateY(-50%);right:44px" onclick="_togglePasswordVisibility()" title="显示/隐藏密码">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
             </button>
             <button type="button" id="ssh-pwd-inline-save" class="ssh-pwd-inline-act" style="position:absolute;top:50%;transform:translateY(-50%);right:24px" onclick="_savePasswordInline()" title="保存密码">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
             </button>
             <button type="button" id="ssh-pwd-inline-cancel" class="ssh-pwd-inline-act" style="position:absolute;top:50%;transform:translateY(-50%);right:4px" onclick="_cancelPasswordEdit()" title="取消修改">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
             </div>
           </div>

@@ -537,12 +537,12 @@ const SFTP = {
         if (this._path !== '/') {
             const up = document.createElement('div');
             up.className = 'sftp-item';
-            up.innerHTML = '<span class="sftp-item-icon ic-amber">' + Icons.iconSvg('folder', 14) + '</span><span class="sftp-item-name">..</span>';
+            up.innerHTML = '<span class="sftp-item-icon ic-accent">' + Icons.iconSvg('folder-filled', 14) + '</span><span class="sftp-item-name">..</span>';
             up.addEventListener('click', () => this.goUp());
             body.appendChild(up);
         }
         this._files.forEach(f => {
-            const icon = f.isDir ? '<span class="ic-amber">' + Icons.iconSvg('folder', 14) + '</span>' : Icons.iconSvg('file', 14);
+            const icon = f.isDir ? '<span class="ic-accent">' + Icons.iconSvg('folder-filled', 14) + '</span>' : Icons.iconSvg('file-filled', 14);
             const size = f.isDir ? '' : formatSize(f.size);
             const date = formatDate(f.mtime);
             const fullPath = (this._path === '/' ? '' : this._path) + '/' + f.name;
@@ -776,7 +776,7 @@ const SFTP = {
         const row = document.createElement('div');
         row.className = 'sftp-item';
         row.id = 'sftp-mkdir-row';
-        row.innerHTML = '<span class="sftp-item-icon ic-amber">' + Icons.iconSvg('folder', 14) + '</span><input class="inline-edit" placeholder="新建目录名称，Enter 确认 / Esc 取消" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none">';
+        row.innerHTML = '<span class="sftp-item-icon ic-accent">' + Icons.iconSvg('folder-filled', 14) + '</span><input class="inline-edit" placeholder="新建目录名称，Enter 确认 / Esc 取消" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none">';
         snap.row = row;
         body.insertBefore(row, body.firstChild);
         const input = row.querySelector('input');
@@ -1111,9 +1111,7 @@ const TransferManager = {
 
     _activeItemHtml(t) {
         const pct = t.total > 0 ? Math.min(100, (t.transferred / t.total) * 100) : 0;
-        const icon = t.type === 'download'
-            ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
-            : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
+        const icon = t.type === 'download' ? Icons.iconSvg('download', 14) : Icons.iconSvg('upload', 14);
         const barClass = t.cancelled ? 'cancelled' : t.done ? 'done' : '';
         // mousedown is swallowed (preventDefault) so the click acts without
         // pulling the keyboard focus off the terminal (dock-button contract).
@@ -1152,9 +1150,7 @@ const TransferManager = {
     },
 
     _historyItemHtml(h, globalIdx) {
-        const icon = h.type === 'download'
-            ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
-            : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>';
+        const icon = h.type === 'download' ? Icons.iconSvg('download', 14) : Icons.iconSvg('upload', 14);
         const canOpen = h.type === 'download' && h.localPath;
         return '<div class="transfer-item"' + (canOpen ? ' style="cursor:pointer" onclick="TransferManager.openInExplorer(' + globalIdx + ')"' : '') + '>' +
             '<span class="transfer-item-icon">' + icon + '</span>' +

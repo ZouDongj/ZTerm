@@ -4,13 +4,15 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { iconSvg, ICONS } = require('../src/renderer/icons.js');
+const { iconSvg, ICONS, FILLED_ICONS } = require('../src/renderer/icons.js');
 
 // Names the UI depends on (see src/renderer/icons.js and its call sites)
 const REQUIRED = [
     'terminal', 'zap', 'settings', 'folder', 'folder-plus', 'upload',
     'arrow-up', 'arrow-down', 'arrow-up-down', 'key', 'lock', 'plus',
     'bell', 'rotate-ccw', 'eye', 'check', 'x',
+    // collected from the hand-written inline SVGs (icon normalization batch)
+    'chevron-left', 'pin', 'info', 'copy', 'download', 'search',
 ];
 
 test('ICONS 包含全部所需图标名', () => {
@@ -39,4 +41,22 @@ test('iconSvg 输出与既有内联 SVG 同格式', () => {
 test('iconSvg 默认尺寸 14，未知图标返回空串', () => {
     assert.ok(iconSvg('folder').includes('width="14"'));
     assert.equal(iconSvg('no-such-icon', 14), '');
+});
+
+test('填充条目以 fill="currentColor" 渲染且不带描边属性', () => {
+    ['folder-filled', 'file-filled'].forEach(name => {
+        assert.ok(FILLED_ICONS[name] !== undefined, `missing filled icon: ${name}`);
+        assert.ok(FILLED_ICONS[name].length > 0 && /[/>]/.test(FILLED_ICONS[name]), `no path markup: ${name}`);
+        const svg = iconSvg(name, 12);
+        assert.ok(svg.includes('width="12"') && svg.includes('height="12"'), `size applied: ${name}`);
+        assert.ok(svg.includes('fill="currentColor"'), `must fill with currentColor: ${name}`);
+        assert.ok(svg.includes('stroke="none"'), `must disable stroke: ${name}`);
+        assert.ok(!svg.includes('stroke-width'), `filled icons carry no stroke-width: ${name}`);
+    });
+});
+
+test('描边条目仍走 fill="none" + stroke 渲染', () => {
+    const svg = iconSvg('search', 15);
+    assert.ok(svg.includes('fill="none"') && svg.includes('stroke="currentColor"'));
+    assert.ok(!svg.includes('stroke="none"'));
 });

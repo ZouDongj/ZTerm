@@ -527,7 +527,7 @@ function _sshGroupHtml(gname, matched, expanded) {
     return `<section class="ssh-mgr-group" aria-label="${escAttr(gname)}">
       <div class="ssh-mgr-group-title${expanded ? '' : ' collapsed'}" role="button" tabindex="0" aria-expanded="${expanded}"
            data-group="${escAttr(gname)}" onclick="toggleSSHGroup(this)" onkeydown="sshGroupHeaderKey(event)">
-        <svg class="group-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
+        <span class="group-chevron">${Icons.iconSvg('chevron-down', 12)}</span>
         <span class="group-name-text">${escHtml(gname)}</span>
         <button class="group-rename" title="重命名分组" aria-label="重命名分组 ${escAttr(gname)}" onclick="event.stopPropagation();startRenameGroup(this)">${Icons.iconSvg('pencil', 11)}</button>
         <span class="ssh-group-count">${matched.length}</span>
@@ -643,7 +643,7 @@ function startRenameGroup(btn, oldName) {
     input.className = 'group-name-input inline-edit';
     input.value = oldName;
     nameSpan.replaceWith(input);
-    btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#66bb6a" stroke-width="2.5"><path d="M5 13l4 4L19 7"/></svg>';
+    btn.innerHTML = '<span class="ic-green">' + Icons.iconSvg('check', 12) + '</span>';
     btn.style.color = '';
     input.focus();
     input.select();
@@ -666,7 +666,7 @@ function startRenameGroup(btn, oldName) {
         span.className = 'group-name-text';
         span.textContent = newName || oldName;
         input.replaceWith(span);
-        btn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+        btn.innerHTML = Icons.iconSvg('pencil', 11);
         btn.style.color = '';
         // Restore the original onclick (the HTML attribute overridden by
         // startRenameGroup), otherwise the leftover finish closure would take

@@ -127,7 +127,7 @@ body.tab-dragging{user-select:none}
 #btn-add-tab:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 
 /* Window control buttons (Segoe MDL2 Assets native icons) */
-.win-controls{display:flex;align-items:stretch;flex-shrink:0;height:100%;-webkit-app-region:no-drag;margin-left:6px}
+.win-controls{display:flex;align-items:stretch;flex-shrink:0;height:100%;-webkit-app-region:no-drag;margin-left:2px}
 .win-ctrl{width:46px;height:100%;border:none;background:transparent;color:var(--text-2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.12s;padding:0;font-family:'Segoe MDL2 Assets','Segoe Fluent Icons',sans-serif;font-size:10px}
 .win-ctrl:hover{background:rgba(var(--accent-rgb),0.12);color:var(--text-1)}
 .win-close:hover{background:#c42b1c;color:#fff}
@@ -216,6 +216,7 @@ body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 .search-bar.open{opacity:1;pointer-events:auto;transform:translateY(0)}
 .search-bar input{background:transparent;border:none;color:var(--text-1);font-size:12px;font-family:inherit;outline:none;width:170px}
 .search-bar input::placeholder{color:var(--text-3)}
+.search-bar>svg{color:rgba(171,178,191,0.35);flex-shrink:0}
 .search-bar .count{font-size:12px;color:var(--text-2);min-width:28px}
 .search-bar button{background:none;border:none;color:var(--text-3);cursor:pointer;font-size:13px;padding:2px 7px;border-radius:6px;transition:all 0.12s}
 .search-bar button:hover{color:var(--text-1);background:rgba(var(--accent-rgb),0.14)}

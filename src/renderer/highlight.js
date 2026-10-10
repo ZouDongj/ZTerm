@@ -89,7 +89,7 @@ function renderHighlightRulesList() {
                 <div class="ssh-item-detail">${r.isRegExp ? '正则' : '关键字'}${r.bold ? ' · 粗体' : ''}${r.italic ? ' · 斜体' : ''}${r.underline ? ' · 下划线' : ''}</div>
             </div>
             <div class="toggle-switch small ${r.enabled ? 'on' : ''}" style="flex-shrink:0" onclick="toggleHighlightRule('${r.id}')"></div>
-            <button class="ssh-item-btn" title="编辑" onclick="openHighlightEdit(false,'${r.id}')"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+            <button class="ssh-item-btn" title="编辑" onclick="openHighlightEdit(false,'${r.id}')">${Icons.iconSvg('pencil', 11)}</button>
             <button class="ssh-item-btn danger" title="删除" onclick="deleteHighlightRule('${r.id}')">×</button>
         </div>`;
     }).join('');
