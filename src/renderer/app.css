@@ -563,14 +563,19 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 /* Transfer button in statusbar */
 /* Top-bar transfer entry (Flutter flyout port): rounded-square icon button
    in the titlebar, count badge, and an 8px activity dot shown only while
-   transfers run with the flyout closed. Shared by the SFTP dock toggle. */
+   transfers run with the flyout closed. Shared by the SFTP dock toggle.
+   Hidden buttons leave NO layout box (display:none, not opacity:0) — an
+   invisible-but-present button used to push its visible neighbor ~30px
+   away from the window controls. The pop-in runs as a keyframe animation
+   so it still plays on the display:none -> flex swap. */
 /* Transfer flyout container: non-modal — a full-viewport, click-transparent
    layer only used to stack the flyout above the app (same z-index the old
    .overlay used); the window itself re-enables pointer events. */
 #transfer-panel{position:fixed;inset:0;z-index:30;pointer-events:none;background:transparent;display:none}
 #transfer-panel.open{display:block}
-.transfer-btn{position:relative;width:26px;height:26px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;transition:all 0.12s;opacity:0;transform:scale(0.5);pointer-events:none;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;user-select:none}
-.transfer-btn.visible{opacity:1;transform:scale(1);pointer-events:auto}
+.transfer-btn{position:relative;width:26px;height:26px;border-radius:8px;display:none;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;user-select:none}
+.transfer-btn.visible{display:flex;animation:transferBtnIn 0.16s ease}
+@keyframes transferBtnIn{from{opacity:0;transform:scale(0.5)}to{opacity:1;transform:scale(1)}}
 .transfer-btn:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 .transfer-btn.on{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 .transfer-count{position:absolute;bottom:-2px;right:-2px;min-width:13px;height:13px;padding:0 3px;border-radius:7px;background:rgb(var(--accent-rgb));color:var(--accent-contrast);font-size:9px;font-weight:600;display:flex;align-items:center;justify-content:center}
