@@ -54,8 +54,10 @@
     // Top-right menu button (three dots), collected from tabs.js
     'more-vertical': '<circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>',
     // Window controls (minus/square + the existing x; restore reuses copy's
-    // overlapping rectangles)
-    minus: '<path d="M5 12h14"/>',
+    // overlapping rectangles). The minus dash is longer than stock Lucide
+    // (M4..20 vs M5..19): window-control glyphs need the optical weight of
+    // the native caption buttons, not icon-grid proportions.
+    minus: '<path d="M4 12h16"/>',
     square: '<rect width="18" height="18" x="3" y="3" rx="2"/>',
   };
 

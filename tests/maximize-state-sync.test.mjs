@@ -19,8 +19,8 @@ import { createRequire } from 'node:module';
 // assertions below compare against exactly what the app renders.
 const require = createRequire(import.meta.url);
 const { iconSvg } = require('../src/renderer/icons.js');
-const RESTORE_ICON = iconSvg('copy', 11);   // maximized state: overlapping rectangles
-const MAXIMIZE_ICON = iconSvg('square', 11); // restored state: single square
+const RESTORE_ICON = iconSvg('copy', 12);   // maximized state: overlapping rectangles
+const MAXIMIZE_ICON = iconSvg('square', 12); // restored state: single square
 
 const mainSrc = fs.readFileSync(new URL('../src/renderer/main.js', import.meta.url), 'utf8');
 

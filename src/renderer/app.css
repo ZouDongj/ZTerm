@@ -125,7 +125,7 @@ body.tab-dragging{user-select:none}
 #btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;font-size:16px;transition:all 0.12s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
 #btn-add-tab:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 
-/* Window control buttons (registry SVG icons, 11px — Segoe MDL2 font glyphs
+/* Window control buttons (registry SVG icons, 12px — Segoe MDL2 font glyphs
    were dropped: thin hinted font strokes rendered fuzzy next to the SVG set) */
 .win-controls{display:flex;align-items:stretch;flex-shrink:0;height:100%;-webkit-app-region:no-drag;margin-left:2px}
 .win-ctrl{width:46px;height:100%;border:none;background:transparent;color:var(--text-2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.12s;padding:0}

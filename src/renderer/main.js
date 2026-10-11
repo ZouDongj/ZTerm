@@ -43,7 +43,7 @@ window.electronAPI = {
 function _applyMaximizeState(maximized) {
     const btn = document.getElementById('win-maximize');
     // Restore = overlapping rectangles (copy glyph), Maximize = square
-    if (btn) btn.innerHTML = Icons.iconSvg(maximized ? 'copy' : 'square', 11);
+    if (btn) btn.innerHTML = Icons.iconSvg(maximized ? 'copy' : 'square', 12);
     const winEl = document.querySelector('.window');
     if (winEl) winEl.classList.toggle('is-maximized', maximized);
 }
