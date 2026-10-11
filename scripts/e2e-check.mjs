@@ -3322,8 +3322,14 @@ async function main() {
     let proxyPersisted = null, updProxyDead = 'skipped', updProxyInvalid = 'skipped', updProxyRoundTrip = 'skipped';
     if (updProxySetup && updProxySetup.hasInput === true) {
       // Never touch the real network unless the dead-proxy setup landed.
-      await sleep(500);
-      try { proxyPersisted = JSON.parse(readFileSync(DATA_CONFIG, 'utf8')).terminal?.updateProxy === 'http://127.0.0.1:1'; } catch {}
+      // persistSettings() fires save-appearance via fire-and-forget
+      // ipcRenderer.send, so the disk write lands asynchronously — poll the
+      // config file instead of racing a fixed sleep (the 500ms one-shot read
+      // flaked false on a loaded machine while every later step passed).
+      for (let i = 0; i < 25 && proxyPersisted !== true; i++) {
+        await sleep(200);
+        try { proxyPersisted = JSON.parse(readFileSync(DATA_CONFIG, 'utf8')).terminal?.updateProxy === 'http://127.0.0.1:1'; } catch {}
+      }
       updProxyDead = await cdp.eval(`(async () => {
         try { await ipcRenderer.invoke('check-update'); return ''; }
         catch (e) { return String((e && e.message) || e); }
