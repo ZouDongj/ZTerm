@@ -13,6 +13,9 @@ const REQUIRED = [
     'bell', 'rotate-ccw', 'eye', 'check', 'x',
     // collected from the hand-written inline SVGs (icon normalization batch)
     'chevron-left', 'pin', 'info', 'copy', 'download', 'search', 'more-vertical',
+    // window-control buttons in the titlebar (minus/square + x; the restore
+    // state reuses copy's overlapping rectangles)
+    'minus', 'square',
 ];
 
 test('ICONS 包含全部所需图标名', () => {

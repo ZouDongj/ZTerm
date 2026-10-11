@@ -42,7 +42,8 @@ window.electronAPI = {
 // so the two paths can never disagree about the visible state.
 function _applyMaximizeState(maximized) {
     const btn = document.getElementById('win-maximize');
-    if (btn) btn.textContent = maximized ? '\uE923' : '\uE922'; // Restore ↔ Maximize
+    // Restore = overlapping rectangles (copy glyph), Maximize = square
+    if (btn) btn.innerHTML = Icons.iconSvg(maximized ? 'copy' : 'square', 11);
     const winEl = document.querySelector('.window');
     if (winEl) winEl.classList.toggle('is-maximized', maximized);
 }

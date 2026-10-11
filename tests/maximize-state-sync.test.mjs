@@ -12,6 +12,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { createRequire } from 'node:module';
+
+// The button presentation now comes from the real icon registry (registry SVG
+// instead of MDL2 font glyphs), so inject the REAL icons.js into the VM — the
+// assertions below compare against exactly what the app renders.
+const require = createRequire(import.meta.url);
+const { iconSvg } = require('../src/renderer/icons.js');
+const RESTORE_ICON = iconSvg('copy', 11);   // maximized state: overlapping rectangles
+const MAXIMIZE_ICON = iconSvg('square', 11); // restored state: single square
 
 const mainSrc = fs.readFileSync(new URL('../src/renderer/main.js', import.meta.url), 'utf8');
 
@@ -39,7 +48,7 @@ function deferred() {
 
 // Fake presentation surface: exactly what _applyMaximizeState touches.
 function mkEl() {
-    const el = { textContent: '' };
+    const el = { innerHTML: '' };
     const classes = new Set();
     el.classList = {
         toggle(c, force) {
@@ -60,6 +69,7 @@ function fixture(respond) {
     const resizeHandlers = [];
     const ipcHandlers = new Map();
     const ctx = {
+        Icons: { iconSvg },
         document: {
             getElementById: (id) => (id === 'win-maximize' ? btn : null),
             querySelector: (sel) => (sel === '.window' ? winEl : null),
@@ -93,19 +103,19 @@ function fixture(respond) {
 
 const flush = () => new Promise((r) => setImmediate(r));
 
-test('native maximize (Win+Up / titlebar double-click) syncs glyph and class via resize', async () => {
+test('native maximize (Win+Up / titlebar double-click) syncs icon and class via resize', async () => {
     const { btn, winEl, fireResize } = fixture(() => Promise.resolve(true));
     fireResize();
     await flush();
-    assert.equal(btn.textContent, '\uE923', 'restore glyph after native maximize');
+    assert.equal(btn.innerHTML, RESTORE_ICON, 'restore icon after native maximize');
     assert.ok(winEl.classList.contains('is-maximized'), 'window carries is-maximized');
 });
 
-test('native unmaximize restores the maximize glyph and clears the class', async () => {
+test('native unmaximize restores the maximize icon and clears the class', async () => {
     const { btn, winEl, fireResize } = fixture(() => Promise.resolve(false));
     fireResize();
     await flush();
-    assert.equal(btn.textContent, '\uE922', 'maximize glyph after native unmaximize');
+    assert.equal(btn.innerHTML, MAXIMIZE_ICON, 'maximize icon after native unmaximize');
     assert.ok(!winEl.classList.contains('is-maximized'), 'is-maximized cleared');
 });
 
@@ -113,7 +123,7 @@ test('startup window-shown syncs a restored-maximized window without any resize'
     const { btn, winEl, emit } = fixture(() => Promise.resolve(true));
     emit('window-shown', {});
     await flush();
-    assert.equal(btn.textContent, '\uE923', 'restore glyph after startup maximize restore');
+    assert.equal(btn.innerHTML, RESTORE_ICON, 'restore icon after startup maximize restore');
     assert.ok(winEl.classList.contains('is-maximized'), 'window carries is-maximized');
 });
 
@@ -125,10 +135,10 @@ test('a stale in-flight answer cannot overwrite a newer query result', async () 
     mode = 'settled';
     fireResize();               // query 2 answers maximized immediately
     await flush();
-    assert.equal(btn.textContent, '\uE923', 'latest answer applied');
+    assert.equal(btn.innerHTML, RESTORE_ICON, 'latest answer applied');
     held.resolve(false);        // stale pre-toggle answer lands late
     await flush();
-    assert.equal(btn.textContent, '\uE923', 'stale answer discarded');
+    assert.equal(btn.innerHTML, RESTORE_ICON, 'stale answer discarded');
 });
 
 test('button-path event retires an in-flight native query', async () => {
@@ -136,19 +146,19 @@ test('button-path event retires an in-flight native query', async () => {
     const { btn, fireResize, emit } = fixture(() => held.promise);
     fireResize();               // native query in flight (would answer false)
     emit('window-state-changed', { maximized: true });
-    assert.equal(btn.textContent, '\uE923', 'button-path state applied synchronously');
+    assert.equal(btn.innerHTML, RESTORE_ICON, 'button-path state applied synchronously');
     held.resolve(false);        // pre-toggle answer arrives after the toggle
     await flush();
-    assert.equal(btn.textContent, '\uE923', 'in-flight native answer retired by the button path');
+    assert.equal(btn.innerHTML, RESTORE_ICON, 'in-flight native answer retired by the button path');
 });
 
 test('button-path event still applies state unchanged (existing behavior)', async () => {
     const { btn, winEl, emit } = fixture(() => Promise.resolve(false));
     emit('window-state-changed', { maximized: true });
-    assert.equal(btn.textContent, '\uE923');
+    assert.equal(btn.innerHTML, RESTORE_ICON);
     assert.ok(winEl.classList.contains('is-maximized'));
     emit('window-state-changed', { maximized: false });
-    assert.equal(btn.textContent, '\uE922');
+    assert.equal(btn.innerHTML, MAXIMIZE_ICON);
     assert.ok(!winEl.classList.contains('is-maximized'));
 });
 
@@ -163,6 +173,7 @@ test('missing or broken Tauri API: sync is a silent no-op, presentation untouche
         const winEl = mkEl();
         const resizeHandlers = [];
         const ctx = {
+            Icons: { iconSvg },
             document: {
                 getElementById: (id) => (id === 'win-maximize' ? btn : null),
                 querySelector: (sel) => (sel === '.window' ? winEl : null),
@@ -176,18 +187,18 @@ test('missing or broken Tauri API: sync is a silent no-op, presentation untouche
         ctx.globalThis = ctx;
         vm.createContext(ctx);
         for (const s of [seqDecl[0], applySrc[0], syncSrc[0]]) vm.runInContext(s, ctx);
-        btn.textContent = 'untouched';
+        btn.innerHTML = 'untouched';
         assert.doesNotThrow(() => resizeHandlers.forEach(fn => fn()));
         await flush();
-        assert.equal(btn.textContent, 'untouched', `presentation untouched (${getCurrentWindow.name || 'case'})`);
+        assert.equal(btn.innerHTML, 'untouched', `presentation untouched (${getCurrentWindow.name || 'case'})`);
     }
     // __TAURI__ entirely absent (pre-Tauri-injection window): same no-op.
     const plain = fixture(() => { throw new Error('must not be called'); });
     plain.ctx.window.__TAURI__ = undefined;
-    plain.btn.textContent = 'untouched';
+    plain.btn.innerHTML = 'untouched';
     assert.doesNotThrow(() => plain.fireResize());
     await flush();
-    assert.equal(plain.btn.textContent, 'untouched');
+    assert.equal(plain.btn.innerHTML, 'untouched');
 });
 
 test('rejected isMaximized keeps the last applied state (no crash)', async () => {
@@ -195,5 +206,5 @@ test('rejected isMaximized keeps the last applied state (no crash)', async () =>
     emit('window-state-changed', { maximized: true });
     fireResize();
     await flush();
-    assert.equal(btn.textContent, '\uE923', 'rejection leaves the last state in place');
+    assert.equal(btn.innerHTML, RESTORE_ICON, 'rejection leaves the last state in place');
 });

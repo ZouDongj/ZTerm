@@ -53,6 +53,10 @@
     search: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
     // Top-right menu button (three dots), collected from tabs.js
     'more-vertical': '<circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>',
+    // Window controls (minus/square + the existing x; restore reuses copy's
+    // overlapping rectangles)
+    minus: '<path d="M5 12h14"/>',
+    square: '<rect width="18" height="18" x="3" y="3" rx="2"/>',
   };
 
   // Solid (filled) variants on the same 24x24 grid: Material-style paths for
