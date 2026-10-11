@@ -528,7 +528,10 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .sftp-pathbar:focus-within{box-shadow:inset 0 0 0 1.5px rgba(var(--accent-rgb),0.4)}
 .sftp-pathbar-icon{display:flex;align-items:center;color:var(--text-3);flex-shrink:0}
 .sftp-breadcrumb{display:flex;align-items:center;gap:2px;flex:1;min-width:0;font-family:"Cascadia Code",Consolas,monospace;font-size:11.5px;color:var(--text-2);overflow:hidden;white-space:nowrap}
-.sftp-breadcrumb span{cursor:pointer;padding:2px 6px;border-radius:5px;transition:all 0.12s}
+.sftp-breadcrumb span{cursor:pointer;padding:2px 6px;border-radius:5px;transition:all 0.12s;flex-shrink:0}
+/* Overlong paths: only the trailing segment absorbs the shrink and ends in
+   an ellipsis instead of the field clipping mid-glyph. */
+.sftp-breadcrumb span:last-child{flex-shrink:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .sftp-breadcrumb span:hover{background:rgba(var(--accent-rgb),0.12);color:var(--text-1)}
 .sftp-breadcrumb .sep{color:var(--text-3);cursor:default;opacity:0.6}
 .sftp-breadcrumb .sep:hover{background:none;color:var(--text-3)}

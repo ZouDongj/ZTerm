@@ -12,7 +12,7 @@ const REQUIRED = [
     'arrow-up', 'arrow-down', 'arrow-up-down', 'key', 'lock', 'plus',
     'bell', 'rotate-ccw', 'eye', 'check', 'x',
     // collected from the hand-written inline SVGs (icon normalization batch)
-    'chevron-left', 'pin', 'info', 'copy', 'download', 'search',
+    'chevron-left', 'pin', 'info', 'copy', 'download', 'search', 'more-vertical',
 ];
 
 test('ICONS 包含全部所需图标名', () => {

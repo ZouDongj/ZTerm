@@ -40,6 +40,7 @@ const SFTP = {
     _refreshInFlight: null,  // identity {epoch} of the upload-refresh run that owns the coalescing slot; only that run's own finally may clear/drain it (a stale finally cannot touch a successor view)
     _refreshQueued: null,    // owner {tabId,path} owed one coalesced follow-up refresh once the current binding's in-flight refresh settles
     _editingPath: false, // breadcrumb path edit in progress (a cwd follow must not destroy it)
+    _saveDialogOpen: false, // a save dialog is up: re-entrant download() calls return early
     _mkdir: null,      // inline mkdir edit state {tabId, base, ready, moving, row} while its input row is open
     _sessionDead: false, // the bound session died mid-panel: navigations are refused until a fresh open() rebinds
     _pinned: {},       // tabId -> boolean, per-tab pin state
@@ -622,7 +623,17 @@ const SFTP = {
         // the transfer must go to the session the user clicked, not
         // this._tabId's post-dialog value (same contract as upload()).
         const owner = { tabId: this._tabId };
-        const result = await ipcRenderer.invoke('show-save-dialog', { defaultPath: filename });
+        // Re-entrancy guard: a double-click on a row (or its download button)
+        // fires download() twice; the second call must not stack a second
+        // save dialog on top of the first.
+        if (this._saveDialogOpen) return;
+        this._saveDialogOpen = true;
+        let result;
+        try {
+            result = await ipcRenderer.invoke('show-save-dialog', { defaultPath: filename });
+        } finally {
+            this._saveDialogOpen = false;
+        }
         if (result.canceled) return;
         const tid = TransferManager.add(filename, 'download', owner.tabId, result.filePath);
         let transferResult;

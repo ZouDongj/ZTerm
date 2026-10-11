@@ -210,7 +210,7 @@ const TabManager = {
                 const addBtn = document.createElement('div');
                 addBtn.id = 'btn-add-tab';
                 addBtn.dataset.tip = '新建标签页（默认终端），Ctrl+Shift+N 选择会话';
-                addBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
+                addBtn.innerHTML = Icons.iconSvg('plus', 16);
                 addBtn.onclick = () => {
                     const p = getDefaultLocalProfile();
                     TabManager.createTab({ name: p.name, type: 'local', command: p.command, args: p.args });
@@ -221,7 +221,7 @@ const TabManager = {
                 const menuBtn = document.createElement('div');
                 menuBtn.id = 'btn-menu';
                 menuBtn.dataset.tip = '菜单';
-                menuBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>';
+                menuBtn.innerHTML = Icons.iconSvg('more-vertical', 16);
                 menuBtn.onclick = (e) => { e.stopPropagation(); toggleMenuPopup(); };
                 bar.appendChild(menuBtn);
             }
