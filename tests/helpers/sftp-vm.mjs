@@ -78,6 +78,8 @@ export async function loadSftpVm() {
     const breadcrumb = mk('sftp-breadcrumb');
     const body = mk('sftp-body');
     mk('sftp-pin-btn');
+    // The width-drag IIFE resolves #sftp-resize against #main-area at load.
+    mk('sftp-resize');
     const overlay = mk('overlay-sftp');
     const transferBtn = mk('transfer-btn');
     const count = ctx.document.createElement('span'); count.className = 'transfer-count'; transferBtn.appendChild(count);

@@ -373,7 +373,13 @@ const SFTP = {
                 // it absorbs only its proportional share of the dock delta.
                 const paneDelta = rootW > 0 && paneW > 0 ? paneW * delta / rootW : delta;
                 const cols = Math.max(2, term.cols + sign * Math.round(paneDelta / cellW));
-                if (cols !== term.cols) term.resize(cols, term.rows);
+                // Repaint in the same frame: resize clears the canvas bitmap
+                // synchronously while the debounced paint lands a frame later
+                // — without the flush the animation starts on a blank frame.
+                if (cols !== term.cols) {
+                    term.resize(cols, term.rows);
+                    if (typeof _flushTermRender === 'function') _flushTermRender(term);
+                }
             };
             if (tab.splitRoot) {
                 const rootEl = document.getElementById('split_' + tab.id);
@@ -1428,10 +1434,15 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) =>
 // Pointer capture on the handle, applied as a CSS var on #main-area so the
 // dock width and the terminal inset follow the same value. The clamp keeps
 // 220-480px AND never widens past the main area minus 240px of terminal (the
-// same bound the CSS min() enforces). Fits stay suppressed while dragging
-// (_sftpAnimating, same contract as the open/close animation) and one settle
-// pass refits after release. The handle is keyboard-operable too (Left/Right
-// move it by 16px).
+// same bound the CSS min() enforces). Each rAF writes the var and live-fits
+// the active tab's terminals with a same-frame repaint (_fitActiveTabSync):
+// the grid follows the pointer in single-column steps with clear+repaint kept
+// atomic per frame, instead of one re-grid jump ~320ms after release (whose
+// cleared-canvas frame read as a flash). Observer fits stay suppressed while
+// dragging (_sftpAnimating, same contract as the open/close animation) so the
+// drag path is the only resizer; a final settle pass remains as the
+// authoritative net. The handle is keyboard-operable too (Left/Right move it
+// by 16px).
 (() => {
     const handle = document.getElementById('sftp-resize');
     const main = document.getElementById('main-area');
@@ -1464,6 +1475,7 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) =>
             requestAnimationFrame(() => {
                 rafPending = false;
                 main.style.setProperty('--sftp-width', pendingWidth + 'px');
+                if (typeof _fitActiveTabSync === 'function') _fitActiveTabSync();
             });
         };
         const onUp = () => {
@@ -1476,6 +1488,9 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) =>
             // owns the flag — its timer performs the final clear + settle.
             if (SFTP._dockAnimTimer) return;
             _sftpAnimating = false;
+            // Land the written position immediately; a move rAF still queued
+            // past this point fits once more with the latest pendingWidth.
+            if (typeof _fitActiveTabSync === 'function') _fitActiveTabSync();
             const tab = (typeof TabManager !== 'undefined') ? TabManager.getActive() : null;
             if (tab && typeof _scheduleSettleResize === 'function') _scheduleSettleResize(tab);
         };
@@ -1484,8 +1499,9 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) =>
         handle.addEventListener('pointercancel', onUp);
     });
     // Keyboard resize: Left moves the handle left (dock grows), Right shrinks
-    // it; same clamp as the drag. Each press is a discrete change — no drag
-    // suppression, the observers fit it once through the normal path.
+    // it; same clamp and live-fit as the drag. The observers still fire for
+    // the same change (no drag suppression here) — their fit no-ops on the
+    // already-matching dimensions.
     handle.addEventListener('keydown', (e) => {
         let delta = 0;
         if (e.key === 'ArrowLeft') delta = 16;
@@ -1495,6 +1511,7 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) =>
         const rect = main.getBoundingClientRect();
         const cur = parseFloat(main.style.getPropertyValue('--sftp-width')) || 320;
         main.style.setProperty('--sftp-width', clamp(cur + delta, rect) + 'px');
+        if (typeof _fitActiveTabSync === 'function') _fitActiveTabSync();
     });
 })();
 

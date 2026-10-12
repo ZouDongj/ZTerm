@@ -19,11 +19,77 @@ function _fitWithScroll(term, fitAddon, parentEl) {
     }
 }
 
+// Same-frame repaint after a grid resize. fit()/term.resize() clears the
+// WebGL canvas bitmap synchronously but repaints through the render
+// debouncer's rAF, so without this flush the cleared (background-colored)
+// canvas composites for one frame — the flash at the end of an SFTP width
+// drag. Flushing the debouncer inside the same frame callback keeps
+// clear+repaint atomic. Best-effort: the internals are shape-checked, so an
+// xterm upgrade degrades to the debounced (previous) behavior.
+function _flushTermRender(term) {
+    let rd = null;
+    try {
+        rd = term && term._core && term._core._renderService && term._core._renderService._renderDebouncer;
+        if (!rd || typeof rd._innerRefresh !== 'function') return;
+        if (rd._animationFrame) {
+            try {
+                const win = (rd._coreBrowserService && rd._coreBrowserService.window) || window;
+                win.cancelAnimationFrame(rd._animationFrame);
+            } catch (e) {}
+            rd._animationFrame = undefined;
+        }
+        rd._innerRefresh();
+    } catch (e) {
+        // The flush consumed the debouncer's pending frame before throwing —
+        // re-schedule through the normal path or the cleared canvas would
+        // stay blank until the next unrelated refresh.
+        try { if (rd && typeof rd.refresh === 'function') rd.refresh(0, term.rows - 1, term.rows); } catch (e2) {}
+    }
+}
+
+// Fit with a same-frame repaint when the grid actually changed (fit() no-ops
+// on unchanged dimensions, so per-frame calls during a width drag cost only
+// a proposeDimensions pass then).
+function _fitTermSync(term, fitAddon, parentEl) {
+    if (!term || !fitAddon) return;
+    const cols = term.cols, rows = term.rows;
+    try {
+        _fitWithScroll(term, fitAddon, parentEl);
+    } catch (e) { return; /* a disposed terminal mid-drag simply stops fitting */ }
+    if (term.cols !== cols || term.rows !== rows) _flushTermRender(term);
+}
+
+// Live-fit the active tab's terminal(s) during the SFTP width drag: the grid
+// follows the pointer in single-column steps instead of jumping once ~320ms
+// after release. Observer fits stay suppressed (_sftpAnimating) — this direct
+// path is the only resizer while dragging. The other layout suppressions
+// (split-spanner drag, maximize animation, whole-window drag) still apply:
+// those widths are transient too. The backend size notice rides the existing
+// onResize → 150ms trailing debounce, collapsing a continuous drag into one
+// SIGWINCH per pause or release.
+function _fitActiveTabSync() {
+    if (typeof TabManager === 'undefined') return;
+    if (_spannerDrag || TabManager._maximizing || _windowResizing) return;
+    const tab = TabManager.getActive();
+    if (!tab || tab.type === 'settings') return;
+    if (tab.splitRoot) {
+        getAllPanes(tab).forEach(p => {
+            if (!p.term || !p.fitAddon) return;
+            const body = document.getElementById('pane-body_' + p.id);
+            if (!body || body.clientWidth === 0 || body.clientHeight === 0) return;
+            _fitTermSync(p.term, p.fitAddon, body);
+        });
+    } else if (tab.term && tab.fitAddon) {
+        _fitTermSync(tab.term, tab.fitAddon, tab.term.element ? tab.term.element.parentElement : null);
+    }
+}
+
 // Size settlement after the layout animation (200ms) ends:
 // onResize is suppressed for 300ms after _layoutTime (two places in terminal.js), so the
 // animation's final size falls inside the suppression window and is dropped, leaving the
 // backend stuck at the old size (nvim UI garbled after splitting). Re-fit and explicitly
-// report the size once after 320ms.
+// report the size once after 320ms. The fit goes through _fitTermSync so a settle that
+// still corrects the grid (dock open/close ±1 column) repaints in the same frame too.
 function _scheduleSettleResize(tab) {
     clearTimeout(tab._resizeSettleTimer);
     tab._resizeSettleTimer = setTimeout(() => {
@@ -33,14 +99,14 @@ function _scheduleSettleResize(tab) {
                     const body = document.getElementById('pane-body_' + p.id);
                     // Zero size (pane of a hidden tab): neither fit nor send — otherwise the initial 80x24 would be wrongly pushed to the backend
                     if (!body || body.clientWidth === 0 || body.clientHeight === 0) return;
-                    _fitWithScroll(p.term, p.fitAddon, body);
+                    _fitTermSync(p.term, p.fitAddon, body);
                     if (p.tabId && p.term.cols && p.term.rows) {
                         ipcRenderer.send('pty-resize', { tabId: p.tabId, cols: p.term.cols, rows: p.term.rows });
                     }
                 }
             });
         } else if (tab.term && tab.fitAddon) {
-            _fitWithScroll(tab.term, tab.fitAddon, tab.term.element ? tab.term.element.parentElement : null);
+            _fitTermSync(tab.term, tab.fitAddon, tab.term.element ? tab.term.element.parentElement : null);
             if (tab.tabId && tab.term.cols && tab.term.rows) {
                 ipcRenderer.send('pty-resize', { tabId: tab.tabId, cols: tab.term.cols, rows: tab.term.rows });
             }
