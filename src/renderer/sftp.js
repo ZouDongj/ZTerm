@@ -309,9 +309,21 @@ const SFTP = {
         if (dock.classList.contains('open') === v && !animating) return;
         dock.classList.toggle('open', v);
         if (!main) return;
-        main.classList.toggle('sftp-open', v);
-        clearTimeout(this._dockAnimTimer);
+        // The transition-enabling class must land BEFORE the property change:
+        // _predictiveTermResize below forces a synchronous layout (element
+        // rects), and if sftp-open is already applied at that point the wrap
+        // right/split-root width snap to their final values with no
+        // transition defined yet — the reveal animation dies.
         main.classList.add('sftp-animating');
+        main.classList.toggle('sftp-open', v);
+        // Move the terminal re-grid to the START of the reveal animation:
+        // the 180ms width transition keeps observer fits suppressed, so
+        // without this the refit lands only in the post-animation settle
+        // (~540ms after the click) — a full canvas re-grid + reflow +
+        // backend redraw arriving half a second after the panel settled
+        // reads as a flicker.
+        this._predictiveTermResize(main, v);
+        clearTimeout(this._dockAnimTimer);
         _sftpAnimating = true;
         this._dockAnimTimer = setTimeout(() => {
             this._dockAnimTimer = null;
@@ -323,6 +335,57 @@ const SFTP = {
             const tab = (typeof TabManager !== 'undefined') ? TabManager.getActive() : null;
             if (tab && typeof _scheduleSettleResize === 'function') _scheduleSettleResize(tab);
         }, 220);
+    },
+
+    // Predictive terminal re-grid at the START of the dock open/close
+    // animation. The wrap/split-root width transition (180ms) keeps the
+    // ResizeObserver fits suppressed (_sftpAnimating), so the exact fit
+    // would otherwise only happen in the settle pass ~540ms after the click
+    // (the flicker this avoids). Resizing the xterm grid straight to its
+    // predicted final column count up front moves that one-time rewrap into
+    // the click itself: the canvas takes its final width immediately while
+    // the wrap's CSS transition clips/pads the difference (both wraps and
+    // panes are overflow:hidden, and the sliding dock covers the reveal),
+    // and the backend learns the final geometry within the animation window
+    // (onResize → 150ms debounce → pty-resize). The post-animation settle
+    // fit still runs as the authoritative ±1-column correction.
+    _predictiveTermResize(main, opening) {
+        try {
+            if (typeof TabManager === 'undefined') return;
+            const tab = TabManager.getActive();
+            if (!tab || tab.type === 'settings') return;
+            // Dock total width = panel + its 8px gutter, mirroring the
+            // .sftp-dock / .main.sftp-open rules in app.css:
+            // min(--sftp-width, mainW - 240px) + 8px.
+            const mainW = main.getBoundingClientRect().width;
+            if (!(mainW > 0)) return;
+            const cssW = parseFloat(main.style.getPropertyValue('--sftp-width')) || 320;
+            const delta = Math.max(0, Math.min(cssW, mainW - 240) + 8);
+            if (delta <= 0) return;
+            const sign = opening ? -1 : 1;
+            const resizeOne = (term, paneW, rootW) => {
+                if (!term || !term.cols || term.cols <= 2 || !term.rows) return;
+                const canvas = term.element && term.element.querySelector('canvas');
+                if (!canvas) return;
+                const cellW = canvas.getBoundingClientRect().width / term.cols;
+                if (!(cellW > 0)) return;
+                // A split pane scales with its root (percentage layout), so
+                // it absorbs only its proportional share of the dock delta.
+                const paneDelta = rootW > 0 && paneW > 0 ? paneW * delta / rootW : delta;
+                const cols = Math.max(2, term.cols + sign * Math.round(paneDelta / cellW));
+                if (cols !== term.cols) term.resize(cols, term.rows);
+            };
+            if (tab.splitRoot) {
+                const rootEl = document.getElementById('split_' + tab.id);
+                const rootW = rootEl ? rootEl.getBoundingClientRect().width : 0;
+                getAllPanes(tab).forEach(p => {
+                    const el = rootEl ? rootEl.querySelector('.split-pane[data-pane="' + p.id + '"]') : null;
+                    resizeOne(p.term, el ? el.getBoundingClientRect().width : 0, rootW);
+                });
+            } else {
+                resizeOne(tab.term, 0, 0);
+            }
+        } catch (e) { /* prediction is best-effort; the settle fit stays authoritative */ }
     },
 
     // Cancel a pending open/close animation (the width drag calls this on

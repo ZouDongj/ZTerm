@@ -424,6 +424,14 @@ const TabManager = {
             if (el) {
                 el.classList.add('active');
                 if (tab && tab.fitAddon) setTimeout(() => {
+                    // A running dock open/close animation owns the wrap width
+                    // (and the terminal already took its predicted final
+                    // grid): fitting against the mid-transition width here
+                    // would bounce the grid there and back. The dock's settle
+                    // pass performs the authoritative fit afterwards. (typeof
+                    // guard: _sftpAnimating lives in sftp.js, which some test
+                    // harnesses never load.)
+                    if (typeof _sftpAnimating !== 'undefined' && _sftpAnimating) return;
                     _fitWithScroll(tab.term, tab.fitAddon, tab.term?.element?.parentElement);
                 }, 10);
                 // Re-check at fire time: a reconnect/close inside the 100ms
