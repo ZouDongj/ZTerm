@@ -341,7 +341,7 @@ const SHORTCUT_ACTIONS = {
                     countersDelta: before ? {
                         cursorDrawPasses: after.counters.cursorDrawPasses - before.cursorDrawPasses,
                         baseDrawPasses: after.counters.baseDrawPasses - before.baseDrawPasses,
-                        burstSnaps: after.counters.burstSnaps - before.burstSnaps,
+                        echoSlides: after.counters.echoSlides - before.echoSlides,
                     } : null,
                     recentDrawGapMs: after.recentDrawGapMs,
                     // only retargets INSIDE the sample window (clock values >= t0)

@@ -692,13 +692,17 @@ function wireTerminal(tab, tabId) {
     }
 }
 
-// Split-pane sync input: when syncInput is on, input is broadcast to every pane of the tab
+// Split-pane sync input: when syncInput is on, input is broadcast to every pane of the tab.
+// Every receiving pane's caret adapter sees the input for echo classification
+// (typing slides draw plain, navigation slides invert), not just the focused one.
 function _sendPaneInput(tab, pane, data) {
     if (tab.syncInput && tab.splitRoot) {
         getAllPanes(tab).forEach(p => {
+            p._smoothCursor?._adapter?.noteInput?.(data);
             if (p.tabId) ipcRenderer.send('pty-input', { tabId: p.tabId, data });
         });
     } else if (pane.tabId) {
+        pane._smoothCursor?._adapter?.noteInput?.(data);
         ipcRenderer.send('pty-input', { tabId: pane.tabId, data });
     }
 }

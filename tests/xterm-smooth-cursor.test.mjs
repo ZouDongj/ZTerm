@@ -425,44 +425,83 @@ test('cursor-scope continuation re-renders the full two-row caret span during a 
   }
 });
 
-test('block caret snaps during typing bursts and slides again on slow advances', () => {
+test('block caret slides as a plain block over just-typed text and inverts on settle', () => {
   const f = fixture();
   f.adapter.setCursorStyle('block');
-  f.renderer.renderRows(0, 2); // settle at x=1
-  f.active.cursorX = 2;
-  f.renderer.renderRows(0, 2); // first advance slides
-  assert.equal(f.adapter.motion.animating, true);
+  f.renderer.renderRows(0, 2); // settle at x=1: one inverted glyph
+  assert.equal(f.glyphDraws.length, 1);
 
-  f.setTime(50);
+  f.adapter.noteInput('a'); // typing at t=0
   f.active.cursorX = 3;
-  f.renderer.renderRows(0, 2); // burst cadence: snap, no trailing over text
-  assert.equal(f.adapter.motion.animating, false);
-  assert.equal(f.adapter.snapshot().visual.x, 3);
+  f.renderer.renderRows(0, 2);
+  f.setTime(45);
+  f.renderer.renderRows(0, 2);
 
-  f.setTime(100);
-  f.active.cursorX = 4;
-  f.renderer.renderRows(0, 2); // still inside the cadence window: snap
-  assert.equal(f.adapter.snapshot().visual.x, 4);
-  assert.equal(f.adapter.snapshot().counters.burstSnaps, 2);
-
-  f.setTime(250); // 150ms gap exceeds the 90ms window
-  f.active.cursorX = 5;
-  f.renderer.renderRows(0, 2); // slow advance slides again
+  // Mid echo slide: the rectangle glides, but no inverted glyph pass — the
+  // block simply covers the typed characters.
+  assert.equal(f.adapter.snapshot().visual.x, 2.75);
   assert.equal(f.adapter.motion.animating, true);
-  assert.equal(f.adapter.motion.from.x, 4);
+  assert.equal(f.glyphDraws.length, 1);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1);
+
+  f.setTime(200);
+  f.renderer.renderRows(0, 2); // settled: inversion resumes at the target
+  assert.equal(f.adapter.snapshot().animationActive, false);
+  assert.equal(f.glyphDraws.length, 2);
+  assert.ok(Math.abs(f.glyphDraws.at(-1)[9] - 0.3) < 1e-6);
 });
 
-test('bar caret keeps sliding through typing bursts', () => {
-  const f = fixture(); // bar is the fixture default
-  f.renderer.renderRows(0, 2);
+test('a slide started inside the echo window stays plain to completion', () => {
+  const f = fixture();
+  f.adapter.setCursorStyle('block');
+  f.renderer.renderRows(0, 2); // settle: one inverted glyph
+  assert.equal(f.glyphDraws.length, 1);
+  f.adapter.noteInput('a'); // t=0
   f.active.cursorX = 2;
+  f.renderer.renderRows(0, 2); // plain slide starts (latch on)
+  f.setTime(150);
+  f.active.cursorX = 4; // app retarget with no new input
   f.renderer.renderRows(0, 2);
-  f.setTime(50);
-  f.active.cursorX = 3;
+  f.setTime(210); // outside the 200ms window, still animating
   f.renderer.renderRows(0, 2);
   assert.equal(f.adapter.motion.animating, true);
-  assert.ok(f.adapter.snapshot().visual.x < 3);
-  assert.equal(f.adapter.snapshot().counters.burstSnaps, 0);
+  assert.equal(f.glyphDraws.length, 1, 'latched plain: no mid-slide inversion flip');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1);
+  f.setTime(300); // slide completes
+  f.renderer.renderRows(0, 2);
+  assert.equal(f.adapter.snapshot().animationActive, false);
+  assert.equal(f.glyphDraws.length, 2, 'inversion resumes on settle');
+});
+
+test('navigation slides keep the in-place inversion (echo window passed, escape input, IME)', () => {
+  const f = fixture();
+  f.adapter.setCursorStyle('block');
+  f.adapter.noteInput('\x1b[C'); // right arrow: not typing
+  f.renderer.renderRows(0, 2);
+  f.active.cursorX = 3;
+  f.renderer.renderRows(0, 2);
+  f.setTime(45);
+  f.renderer.renderRows(0, 2);
+  assert.ok(f.scissorCalls.length > 0, 'scissored inversion active mid-slide');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+
+  const g = fixture();
+  g.adapter.setCursorStyle('block');
+  g.adapter.noteInput('中'); // IME commit counts as typing
+  g.renderer.renderRows(0, 2);
+  g.active.cursorX = 3;
+  g.renderer.renderRows(0, 2);
+  assert.equal(g.adapter.snapshot().counters.echoSlides, 1);
+
+  const h = fixture();
+  h.adapter.setCursorStyle('block');
+  h.adapter.noteInput('a');
+  h.setTime(300); // echo window expired before the move
+  h.renderer.renderRows(0, 2);
+  h.active.cursorX = 3;
+  h.renderer.renderRows(0, 2);
+  assert.equal(h.adapter.snapshot().counters.echoSlides, 0);
+  assert.ok(h.scissorCalls.length > 0);
 });
 
 test('finite diagnostic capture holds only requested animation frames and excludes hold time', async () => {

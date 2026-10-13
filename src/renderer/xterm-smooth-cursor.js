@@ -3,6 +3,10 @@
 
   const DEFAULT_DURATION = 90;
   const DEFAULT_JUMP_DISTANCE = 8;
+  // A block-caret slide starting within this window after a printable local
+  // keystroke is typing echo: draw it as a plain block (no in-place glyph
+  // inversion), so just-typed characters are covered, never flashed.
+  const ECHO_PLAIN_WINDOW_MS = 200;
   const MAX_TIMESTAMPS = 128;
   const MAX_CAPTURE_FRAMES = 12;
   const RGB_COLOR_MODE = 0x03000000;
@@ -57,7 +61,7 @@
       visual: null,
       lastRectangle: null,
       lastGlyph: null,
-      burstSnaps: 0,
+      echoSlides: 0,
       retargets: [],
       drawTimestamps: [],
       drawPassStatus: 'idle',
@@ -79,7 +83,15 @@
     let lastDrawnRow = null;
     let snapBeforeNextDraw = true;
     let lastTarget = null;
-    let lastTargetAt = -Infinity;
+    // Timestamp of the last printable local keystroke, set via noteInput().
+    // A block-caret slide starting inside the echo window is typing echo:
+    // the caret may cover the just-typed characters but must not flash them
+    // inverted, so the glyph pass is skipped for the slide's duration.
+    let lastPrintableInputAt = -Infinity;
+    // Once a slide starts inside the echo window it stays plain for the whole
+    // animation run, even when app retargets or blink freezes stretch it past
+    // the window — no mid-slide plain/inversion flip.
+    let echoSlideLatched = false;
     // Hidden-freeze state: elapsed time of the in-flight animation at the
     // last drawable (painted) frame, latched while the cursor is not drawable
     // so the hidden period never ages the animation anchor.
@@ -311,27 +323,13 @@
         motion.reposition(cursorBeforeBase.x, cursorBeforeBase.y, at);
         snapBeforeNextDraw = false;
       } else if (targetChanged) {
-        // Typing-burst rule: echoed input retargets the caret one cell at a
-        // time, faster than the slide duration, so a sliding BLOCK caret
-        // never catches up and trails across just-typed text. When the
-        // cadence is typing-like (small step inside one duration window),
-        // snap instead of slide. Bar/underline are thin enough that trailing
-        // reads as smoothness, so they always slide.
-        const dx = cursorBeforeBase.x - lastTarget.x;
-        const dy = cursorBeforeBase.y - lastTarget.y;
-        if (cursorStyle === 'block' && Math.hypot(dx, dy) <= 2 && at - lastTargetAt < duration) {
-          motion.reposition(cursorBeforeBase.x, cursorBeforeBase.y, at);
-          instrumentation.burstSnaps += 1;
-        } else {
-          motion.setTarget(cursorBeforeBase.x, cursorBeforeBase.y, at);
-          instrumentation.retargets.push({
-            at,
-            from: { ...motion.from },
-            target: { x: cursorBeforeBase.x, y: cursorBeforeBase.y },
-          });
-          trim(instrumentation.retargets, MAX_TIMESTAMPS);
-        }
-        lastTargetAt = at;
+        motion.setTarget(cursorBeforeBase.x, cursorBeforeBase.y, at);
+        instrumentation.retargets.push({
+          at,
+          from: { ...motion.from },
+          target: { x: cursorBeforeBase.x, y: cursorBeforeBase.y },
+        });
+        trim(instrumentation.retargets, MAX_TIMESTAMPS);
       }
       lastTarget = { x: cursorBeforeBase.x, y: cursorBeforeBase.y };
       const visual = motion.tick(at);
@@ -374,7 +372,7 @@
       instrumentation.visual = { ...visual };
       instrumentation.cursorDrawPasses += 1;
       instrumentation.customDrawSource = cursorBeforeBase.software ? 'software' : 'protocol';
-      instrumentation.drawPassStatus = cursorStyle === 'block' ? 'base+rectangle+glyph' : 'base+rectangle';
+      // drawPassStatus is set inside drawCursor (it knows the echo mode).
 
       if (diagnostic.remaining > 0 && motion.animating && !diagnostic.held) {
         diagnostic.remaining -= 1;
@@ -605,7 +603,26 @@
       } finally {
         rectangle._verticesCursor = previousVertices;
       }
-      if (cursorStyle === 'block') drawBlockGlyph(cursor, visual, glyph);
+      // Typing-echo slides draw as a plain block: the trailing caret may
+      // cover just-typed characters, but it must not flash them inverted.
+      // Navigation slides (arrows, clicks, TUI redraws) keep the scissored
+      // in-place inversion. Settled frames always invert as usual. (Printable
+      // keys used as TUI navigation — j/k in ink TUIs — classify as typing;
+      // an accepted heuristic boundary.)
+      const echoNow = cursorStyle === 'block'
+        && motion.animating
+        && clock() - lastPrintableInputAt < ECHO_PLAIN_WINDOW_MS;
+      if (echoNow && !echoSlideLatched) {
+        echoSlideLatched = true;
+        instrumentation.echoSlides += 1;
+      }
+      if (!motion.animating) echoSlideLatched = false;
+      const echoSlide = cursorStyle === 'block' && echoSlideLatched;
+      if (cursorStyle === 'block' && !echoSlide) {
+        drawBlockGlyph(cursor, visual, glyph);
+      }
+      instrumentation.drawPassStatus = cursorStyle === 'block' && !echoSlide
+        ? 'base+rectangle+glyph' : 'base+rectangle';
     }
 
     // Block caret glyph pass. The sliding rectangle is the only moving part:
@@ -799,6 +816,17 @@
       // Software-caret port: the raw-stream observer (wired in ipc.js) reports
       // candidates, unit completions and xterm parse watermarks here.
       softwareCaretPort,
+      // Echo classification for typing slides. Only printable text counts
+      // (IME commits included); arrows and function keys arrive as ESC
+      // sequences, control combos as C0 bytes — their cursor echoes are
+      // navigation and keep the inversion slide. Wired from the PTY input
+      // path, so this sees local keystrokes even when the echo is remote.
+      noteInput(data) {
+        if (disposed || typeof data !== 'string') return;
+        if (data.includes('\x1b') || data.includes('\x7f')) return;
+        if (!/[\x20-\x7e\u00a0-\uffff]/.test(data)) return;
+        lastPrintableInputAt = clock();
+      },
       setEnabled(value) {
         enabled = value !== false;
         snapBeforeNextDraw = true;
@@ -892,7 +920,7 @@
             glyphDrawPasses: instrumentation.glyphDrawPasses,
             stockSuppressedPasses: instrumentation.stockSuppressedPasses,
             continuationRequests: instrumentation.continuationRequests,
-            burstSnaps: instrumentation.burstSnaps,
+            echoSlides: instrumentation.echoSlides,
           },
           lastRectangle: instrumentation.lastRectangle,
           lastGlyph: instrumentation.lastGlyph,

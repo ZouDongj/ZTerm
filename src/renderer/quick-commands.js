@@ -133,10 +133,12 @@ function executeQuickCommand(cmd) {
     if (tab.splitRoot) {
         const focused = getAllPanes(tab).find(p => p.focused);
         if (focused && focused.tabId) {
+            focused._smoothCursor?._adapter?.noteInput?.(text);
             ipcRenderer.send('pty-input', { tabId: focused.tabId, data: text });
             setTimeout(() => focused.term && focused.term.focus(), 50);
         }
     } else if (tab.tabId) {
+        tab._smoothCursor?._adapter?.noteInput?.(text);
         ipcRenderer.send('pty-input', { tabId: tab.tabId, data: text });
         setTimeout(() => tab.term && tab.term.focus(), 50);
     }
