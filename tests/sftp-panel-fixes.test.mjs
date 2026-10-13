@@ -1,6 +1,7 @@
 // SFTP panel fixes: mkdir edit protection + commit snapshot (T12), download
-// session snapshot (T13), upload overwrite confirmation (T14), close-time
-// focus liveness check (T38) and the dead-session panel state (T40). All
+// session snapshot and save-dialog rename display name (T13), upload
+// overwrite confirmation (T14), close-time focus liveness check (T38) and
+// the dead-session panel state (T40). All
 // driven through the REAL src/renderer/sftp.js in the shared VM seam — only
 // the environment is faked (synthetic sessions, deferred invoke bus, manual
 // timer firing). No real SSH, files, dialogs or clipboard.
@@ -164,6 +165,26 @@ test('T13: download targets the session snapshotted before the save dialog', asy
     vm.settle(vm.pending('sftp-open', k => k.args.tabId === 'sessB')[0], { path: '/home/b', files: [] });
     await vm.drain();
     await p;
+});
+
+test('T13: a save-dialog rename is reflected in the transfer name and history', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', [F('a.txt')]);
+
+    const dl = vm.SFTP.download('/srv/app/a.txt', 'a.txt');
+    await vm.drain();
+    // User renamed the file in the save dialog; Windows separators on purpose.
+    vm.settle(vm.pending('show-save-dialog')[0], { canceled: false, filePath: 'D:\\out\\renamed.txt' });
+    await vm.drain();
+
+    assert.equal(vm.TransferManager._transfers[0].name, 'renamed.txt',
+        `transfer shows the saved name, not the remote original: ${JSON.stringify(vm.TransferManager._transfers[0])}`);
+    assert.equal(vm.TransferManager._transfers[0].localPath, 'D:\\out\\renamed.txt', 'local path untouched');
+
+    vm.settle(vm.pending('sftp-download')[0], { total: 1 });
+    await vm.drain();
+    await dl;
+    assert.equal(vm.TransferManager._history[0].name, 'renamed.txt', 'history keeps the saved-name snapshot');
 });
 
 // ── T14: upload overwrite confirmation ──────────────────────────────────────

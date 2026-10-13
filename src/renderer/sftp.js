@@ -704,7 +704,11 @@ const SFTP = {
             this._saveDialogOpen = false;
         }
         if (result.canceled) return;
-        const tid = TransferManager.add(filename, 'download', owner.tabId, result.filePath);
+        // Display name follows the local file actually written: the user may
+        // have renamed it in the save dialog, so the transfer list and history
+        // must show the chosen name, not the remote original.
+        const saveName = result.filePath.split(/[\\/]/).pop();
+        const tid = TransferManager.add(saveName, 'download', owner.tabId, result.filePath);
         let transferResult;
         try {
             transferResult = await ipcRenderer.invoke('sftp-download', { tabId: owner.tabId, remotePath, localPath: result.filePath, transferId: tid });
