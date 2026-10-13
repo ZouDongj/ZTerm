@@ -57,6 +57,7 @@
       visual: null,
       lastRectangle: null,
       lastGlyph: null,
+      burstSnaps: 0,
       retargets: [],
       drawTimestamps: [],
       drawPassStatus: 'idle',
@@ -78,6 +79,7 @@
     let lastDrawnRow = null;
     let snapBeforeNextDraw = true;
     let lastTarget = null;
+    let lastTargetAt = -Infinity;
     // Hidden-freeze state: elapsed time of the in-flight animation at the
     // last drawable (painted) frame, latched while the cursor is not drawable
     // so the hidden period never ages the animation anchor.
@@ -309,13 +311,27 @@
         motion.reposition(cursorBeforeBase.x, cursorBeforeBase.y, at);
         snapBeforeNextDraw = false;
       } else if (targetChanged) {
-        motion.setTarget(cursorBeforeBase.x, cursorBeforeBase.y, at);
-        instrumentation.retargets.push({
-          at,
-          from: { ...motion.from },
-          target: { x: cursorBeforeBase.x, y: cursorBeforeBase.y },
-        });
-        trim(instrumentation.retargets, MAX_TIMESTAMPS);
+        // Typing-burst rule: echoed input retargets the caret one cell at a
+        // time, faster than the slide duration, so a sliding BLOCK caret
+        // never catches up and trails across just-typed text. When the
+        // cadence is typing-like (small step inside one duration window),
+        // snap instead of slide. Bar/underline are thin enough that trailing
+        // reads as smoothness, so they always slide.
+        const dx = cursorBeforeBase.x - lastTarget.x;
+        const dy = cursorBeforeBase.y - lastTarget.y;
+        if (cursorStyle === 'block' && Math.hypot(dx, dy) <= 2 && at - lastTargetAt < duration) {
+          motion.reposition(cursorBeforeBase.x, cursorBeforeBase.y, at);
+          instrumentation.burstSnaps += 1;
+        } else {
+          motion.setTarget(cursorBeforeBase.x, cursorBeforeBase.y, at);
+          instrumentation.retargets.push({
+            at,
+            from: { ...motion.from },
+            target: { x: cursorBeforeBase.x, y: cursorBeforeBase.y },
+          });
+          trim(instrumentation.retargets, MAX_TIMESTAMPS);
+        }
+        lastTargetAt = at;
       }
       lastTarget = { x: cursorBeforeBase.x, y: cursorBeforeBase.y };
       const visual = motion.tick(at);
@@ -876,6 +892,7 @@
             glyphDrawPasses: instrumentation.glyphDrawPasses,
             stockSuppressedPasses: instrumentation.stockSuppressedPasses,
             continuationRequests: instrumentation.continuationRequests,
+            burstSnaps: instrumentation.burstSnaps,
           },
           lastRectangle: instrumentation.lastRectangle,
           lastGlyph: instrumentation.lastGlyph,

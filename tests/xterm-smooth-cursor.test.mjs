@@ -425,6 +425,46 @@ test('cursor-scope continuation re-renders the full two-row caret span during a 
   }
 });
 
+test('block caret snaps during typing bursts and slides again on slow advances', () => {
+  const f = fixture();
+  f.adapter.setCursorStyle('block');
+  f.renderer.renderRows(0, 2); // settle at x=1
+  f.active.cursorX = 2;
+  f.renderer.renderRows(0, 2); // first advance slides
+  assert.equal(f.adapter.motion.animating, true);
+
+  f.setTime(50);
+  f.active.cursorX = 3;
+  f.renderer.renderRows(0, 2); // burst cadence: snap, no trailing over text
+  assert.equal(f.adapter.motion.animating, false);
+  assert.equal(f.adapter.snapshot().visual.x, 3);
+
+  f.setTime(100);
+  f.active.cursorX = 4;
+  f.renderer.renderRows(0, 2); // still inside the cadence window: snap
+  assert.equal(f.adapter.snapshot().visual.x, 4);
+  assert.equal(f.adapter.snapshot().counters.burstSnaps, 2);
+
+  f.setTime(250); // 150ms gap exceeds the 90ms window
+  f.active.cursorX = 5;
+  f.renderer.renderRows(0, 2); // slow advance slides again
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.motion.from.x, 4);
+});
+
+test('bar caret keeps sliding through typing bursts', () => {
+  const f = fixture(); // bar is the fixture default
+  f.renderer.renderRows(0, 2);
+  f.active.cursorX = 2;
+  f.renderer.renderRows(0, 2);
+  f.setTime(50);
+  f.active.cursorX = 3;
+  f.renderer.renderRows(0, 2);
+  assert.equal(f.adapter.motion.animating, true);
+  assert.ok(f.adapter.snapshot().visual.x < 3);
+  assert.equal(f.adapter.snapshot().counters.burstSnaps, 0);
+});
+
 test('finite diagnostic capture holds only requested animation frames and excludes hold time', async () => {
   const f = fixture();
   f.renderer.renderRows(0, 2);
