@@ -34,11 +34,11 @@
 
     const duration = Math.max(0, finite(options?.duration, DEFAULT_DURATION));
     const jumpDistance = Math.max(0, finite(options?.jumpDistance, DEFAULT_JUMP_DISTANCE));
-    // Only bar/block have an adapter-drawn caret. Any other terminal style
-    // (underline) must stay with the stock renderer, so refuse to bind here —
-    // the caller catches this and keeps the native caret.
+    // All three xterm caret styles (bar/block/underline) have an adapter-drawn
+    // form; refuse to bind on anything unexpected so the caller keeps the
+    // native caret.
     const terminalCursorStyle = terminal.options.cursorStyle;
-    if (terminalCursorStyle !== 'bar' && terminalCursorStyle !== 'block') {
+    if (terminalCursorStyle !== 'bar' && terminalCursorStyle !== 'block' && terminalCursorStyle !== 'underline') {
       throw new Error(`Smooth cursor cannot draw the '${terminalCursorStyle}' cursor style`);
     }
     const motion = new Motion({ duration, jumpDistance, now: clock });
@@ -68,7 +68,8 @@
     let disposed = false;
     let enabled = options?.enabled !== false;
     let smoothEnabled = options?.smooth !== false;
-    let cursorStyle = options?.cursorStyle === 'block' ? 'block' : 'bar';
+    let cursorStyle = options?.cursorStyle === 'block' ? 'block'
+      : options?.cursorStyle === 'underline' ? 'underline' : 'bar';
     let continuationQueued = false;
     // Continuation render scope. 'full' re-renders the whole viewport on
     // every animation frame; 'cursor' re-renders only the rows the caret
@@ -321,15 +322,19 @@
       lastDrawElapsedMs = motion.animating ? Math.max(0, at - motion.startedAt) : null;
       // Narrow scope: the caret may have been painted on a row that xterm did
       // not mark dirty this frame, so clear that row first — otherwise a ghost
-      // caret is left behind whenever the caret changes row. The software-
-      // caret restore overlay needs the same treatment for its previous row.
+      // caret is left behind whenever the caret changes row. The painted span
+      // is floor(y)..floor(y)+1 because the caret rectangle crosses into the
+      // next row mid-slide. The software-caret restore overlay needs the same
+      // treatment for its previous row.
       if (renderScope === 'cursor' && lastDrawnRow !== null) {
-        const stale = Math.floor(lastDrawnRow);
-        if (stale !== Math.floor(finite(visual?.y, stale))) {
-          try {
-            originalRenderRows.call(renderer, stale, stale);
-          } catch (error) {
-            /* mid-dispose: nothing to clear */
+        const currentRow = Math.floor(finite(visual?.y, lastDrawnRow));
+        for (const stale of [Math.floor(lastDrawnRow), Math.floor(lastDrawnRow) + 1]) {
+          if (stale !== currentRow && stale !== currentRow + 1) {
+            try {
+              originalRenderRows.call(renderer, stale, stale);
+            } catch (error) {
+              /* mid-dispose: nothing to clear */
+            }
           }
         }
       }
@@ -423,10 +428,16 @@
         if (typeof root.requestAnimationFrame === 'function') {
           try {
             if (renderScope === 'cursor') {
-              const current = Math.floor(finite(motion.position?.y, 0));
-              const previous = lastDrawnRow === null ? current : Math.floor(lastDrawnRow);
-              const from = Math.max(0, Math.min(previous, current));
-              const to = Math.min(terminal.rows - 1, Math.max(previous, current));
+              // The painted caret spans floor(y)..floor(y)+1 (the rectangle
+              // crosses into the next row mid vertical slide); re-render the
+              // union of the previous and current spans.
+              const posY = finite(motion.position?.y, 0);
+              const currentFrom = Math.floor(posY);
+              const currentTo = Math.min(terminal.rows - 1, Math.ceil(posY + 1) - 1);
+              const previousFrom = lastDrawnRow === null ? currentFrom : Math.floor(lastDrawnRow);
+              const previousTo = lastDrawnRow === null ? currentTo : Math.min(terminal.rows - 1, previousFrom + 1);
+              const from = Math.max(0, Math.min(previousFrom, currentFrom));
+              const to = Math.min(terminal.rows - 1, Math.max(previousTo, currentTo));
               renderer.renderRows(from, to);
             } else {
               renderer.renderRows(0, terminal.rows - 1);
@@ -533,10 +544,26 @@
         throw new Error('Cursor renderer lost the shared WebGL context');
       }
       const dimensions = renderer.dimensions.device;
-      const widthCells = cursorStyle === 'block' ? cursor.width : 1;
-      const widthPx = cursorStyle === 'block'
-        ? widthCells * dimensions.cell.width
-        : renderer._devicePixelRatio * terminal.options.cursorWidth;
+      const cellWidth = dimensions.cell.width;
+      const cellHeight = dimensions.cell.height;
+      const widthCells = cursorStyle === 'bar' ? 1 : cursor.width;
+      // Geometry mirrors the stock WebGL caret (addon-webgl cursor pass): bar
+      // is cursorWidth device px at the cell's left edge, underline is 1 dpr
+      // high at the cell bottom, block fills the cursor cells. Only the
+      // rectangle interpolates; block glyphs are redrawn on their own cells.
+      let x = visual.x * cellWidth;
+      let y = visual.y * cellHeight;
+      let widthPx;
+      let heightPx = cellHeight;
+      if (cursorStyle === 'block') {
+        widthPx = widthCells * cellWidth;
+      } else if (cursorStyle === 'underline') {
+        widthPx = cursor.width * cellWidth;
+        heightPx = renderer._devicePixelRatio;
+        y = (visual.y + 1) * cellHeight - renderer._devicePixelRatio;
+      } else {
+        widthPx = renderer._devicePixelRatio * terminal.options.cursorWidth;
+      }
       const temporaryVertices = { attributes: new Float32Array(32), count: 1 };
       const previousVertices = rectangle._verticesCursor;
       rectangle._verticesCursor = temporaryVertices;
@@ -544,10 +571,10 @@
         rectangle._addRectangleFloat(
           temporaryVertices.attributes,
           0,
-          visual.x * dimensions.cell.width,
-          visual.y * dimensions.cell.height,
+          x,
+          y,
           widthPx,
-          dimensions.cell.height,
+          heightPx,
           rectangle._cursorFloat,
         );
         rectangle.renderCursor();
@@ -565,58 +592,97 @@
       if (cursorStyle === 'block') drawBlockGlyph(cursor, visual, glyph);
     }
 
+    // Block caret glyph pass. The sliding rectangle is the only moving part:
+    // every glyph under the caret is repainted in reverse colors AT ITS OWN
+    // CELL, clipped by a scissor rectangle to the caret's current pixel
+    // coverage. Characters never travel with the caret — the inverted region
+    // slides underneath them, so a passing caret inverts the left character's
+    // right half and the right character's left half in lockstep.
     function drawBlockGlyph(cursor, visual, glyph) {
-      const line = terminal._core?.buffer?.lines?.get(cursor.absoluteY);
+      const lines = terminal._core?.buffer?.lines;
       const cell = renderer._workCell;
-      if (!line || !cell || typeof line.loadCell !== 'function') return;
-      line.loadCell(cursor.x, cell);
-      const code = cell.getCode();
-      const chars = cell.getChars();
-      if (!code || !chars) {
-        instrumentation.lastGlyph = { drawn: false, x: visual.x, y: visual.y, chars: '' };
-        return;
-      }
-
+      if (!lines || typeof lines.get !== 'function' || !cell || typeof cell.getWidth !== 'function') return;
+      const dimensions = renderer.dimensions.device;
+      const cellWidth = dimensions.cell.width;
+      const cellHeight = dimensions.cell.height;
+      const gl = renderer._gl;
       const colors = renderer._themeService.colors;
       const cursorBackground = RGB_COLOR_MODE | (colors.cursor.rgba >>> 8 & 0x00ffffff);
       const cursorForeground = RGB_COLOR_MODE | (colors.cursorAccent.rgba >>> 8 & 0x00ffffff);
-      const ext = cell.bg & EXTENDED_ATTR_FLAG ? cell.extended.ext : 0;
-      const previousVertices = glyph._vertices;
-      const previousActiveBuffer = glyph._activeBuffer;
+
+      const firstCol = Math.max(0, Math.floor(visual.x));
+      const lastCol = Math.min(terminal.cols - 1, Math.ceil(visual.x + cursor.width) - 1);
+      const firstRow = Math.max(0, Math.floor(visual.y));
+      const lastRow = Math.min(terminal.rows - 1, Math.ceil(visual.y + 1) - 1);
+      // Clip rect in device pixels, expanded outward so rounding never cuts a
+      // covered cell short. WebGL scissor counts y upward from the bottom.
+      const px0 = Math.floor(visual.x * cellWidth);
+      const px1 = Math.ceil((visual.x + cursor.width) * cellWidth);
+      const py0 = Math.floor(visual.y * cellHeight);
+      const py1 = Math.ceil((visual.y + 1) * cellHeight);
+      const scissor = [px0, renderer._canvas.height - py1, px1 - px0, py1 - py0];
+
       const temporaryVertices = {
         count: 11,
         attributes: new Float32Array(11),
         attributesBuffers: [new Float32Array(11), new Float32Array(11)],
       };
+      const previousVertices = glyph._vertices;
+      const previousActiveBuffer = glyph._activeBuffer;
       glyph._vertices = temporaryVertices;
+      const drawnChars = [];
       try {
-        glyph._updateCell(
-          temporaryVertices.attributes,
-          0,
-          0,
-          code,
-          cursorBackground,
-          cursorForeground,
-          ext,
-          chars,
-          cell.bg,
-        );
-        temporaryVertices.attributes[9] = visual.x / terminal.cols;
-        temporaryVertices.attributes[10] = visual.y / terminal.rows;
-        glyph.render({ lineLengths: [1] });
-        instrumentation.glyphDrawPasses += 1;
-        instrumentation.lastGlyph = {
-          drawn: true,
-          x: visual.x,
-          y: visual.y,
-          chars,
-          code,
-          attributes: Array.from(temporaryVertices.attributes),
-        };
+        gl.enable(gl.SCISSOR_TEST);
+        gl.scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
+        for (let row = firstRow; row <= lastRow; row += 1) {
+          const line = lines.get(cursor.absoluteY + (row - cursor.y));
+          if (!line || typeof line.loadCell !== 'function') continue;
+          // When the caret covers only the tail of a wide glyph, that glyph's
+          // lead cell sits one column left of the covered range; the scissor
+          // clips whatever falls outside the caret.
+          let col = firstCol;
+          if (col > 0) {
+            line.loadCell(col, cell);
+            if (cell.getWidth() === 0) col -= 1;
+          }
+          for (; col <= lastCol; col += 1) {
+            line.loadCell(col, cell);
+            if (cell.getWidth() === 0) continue; // wide-glyph tail: drawn by its lead
+            const code = cell.getCode();
+            const chars = cell.getChars();
+            if (!code || !chars) continue;
+            const ext = cell.bg & EXTENDED_ATTR_FLAG ? cell.extended.ext : 0;
+            glyph._updateCell(
+              temporaryVertices.attributes,
+              0,
+              0,
+              code,
+              cursorBackground,
+              cursorForeground,
+              ext,
+              chars,
+              cell.bg,
+            );
+            temporaryVertices.attributes[9] = col / terminal.cols;
+            temporaryVertices.attributes[10] = row / terminal.rows;
+            glyph.render({ lineLengths: [1] });
+            instrumentation.glyphDrawPasses += 1;
+            drawnChars.push(chars);
+          }
+        }
       } finally {
+        gl.disable(gl.SCISSOR_TEST);
         glyph._vertices = previousVertices;
         glyph._activeBuffer = previousActiveBuffer;
       }
+      instrumentation.lastGlyph = {
+        drawn: drawnChars.length > 0,
+        x: visual.x,
+        y: visual.y,
+        chars: drawnChars.join(''),
+        cells: drawnChars.length,
+        scissor,
+      };
     }
 
     // Paint the software-caret cell's non-caret appearance: the app's own
@@ -734,7 +800,9 @@
         scheduleContinuation();
       },
       setCursorStyle(value) {
-        if (value !== 'bar' && value !== 'block') throw new TypeError("cursor style must be 'bar' or 'block'");
+        if (value !== 'bar' && value !== 'block' && value !== 'underline') {
+          throw new TypeError("cursor style must be 'bar', 'block' or 'underline'");
+        }
         cursorStyle = value;
         terminal.options.cursorStyle = value;
         snapBeforeNextDraw = true;
@@ -846,7 +914,7 @@
         renderer.renderRows = originalRenderRows;
         // terminal.options.cursorStyle is always the user's current style —
         // written by setCursorStyle or by the caller before retiring the
-        // adapter (underline fallback) — so disposal must not roll it back.
+        // adapter (context loss) — so disposal must not roll it back.
         for (const subscription of subscriptions.splice(0)) subscription.dispose();
         motion.dispose();
         renderer._requestRedrawViewport();

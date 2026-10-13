@@ -144,13 +144,14 @@ function setupWrapResizeObserver(wrap, tab) {
 function _wireSmoothCursorWebgl(term, webglAddon) {
     if (!webglAddon) return null;
     let adapter = null;
-    let retired = false; // disposed on purpose (underline fallback / context loss)
+    let retired = false; // disposed on purpose (context loss)
     const create = () => createXtermWebglSmoothCursor({
         terminal: term,
         addon: webglAddon,
         duration: 90,
         jumpDistance: 8,
-        cursorStyle: term.options.cursorStyle === 'block' ? 'block' : 'bar',
+        cursorStyle: ['bar', 'block', 'underline'].includes(term.options.cursorStyle)
+            ? term.options.cursorStyle : 'bar',
         // Narrow scope: continuation frames re-render only the rows the caret
         // spans (1-2) instead of the whole viewport. 'full' multiplied every
         // animation frame by a full-viewport WebGL pass — on content-heavy
@@ -186,18 +187,10 @@ function _wireSmoothCursorWebgl(term, webglAddon) {
             if ('cursorStyle' in opts) {
                 const style = opts.cursorStyle || 'bar';
                 term.options.cursorStyle = style;
-                if (style === 'underline') {
-                    // The adapter can only draw bar/block; the native caret
-                    // must render underline, so retire the adapter.
-                    if (adapter) {
-                        retired = true;
-                        try { adapter.dispose(); } catch (e) {}
-                        adapter = null;
-                    }
-                } else if (adapter) {
+                if (adapter) {
                     try { adapter.setCursorStyle(style); } catch (e) {}
                 } else if (retired) {
-                    // Switching back from underline: rebuild the adapter.
+                    // Only context loss retires the adapter now; rebuild it.
                     try {
                         adapter = create();
                         retired = false;
