@@ -13,6 +13,18 @@
   // xterm AttributeData/FgFlags.INVERSE, verified against the bundled parser.
   const INVERSE_ATTR_FLAG = 0x04000000;
   const EXTENDED_ATTR_FLAG = 0x10000000;
+  // Style bits carried from the cell onto the redraw color words, so a
+  // redrawn glyph is pixel-identical to the base pass. Bit values verified
+  // against the vendored AttributeData predicates in addon-webgl.js
+  // (isBold/isItalic/isUnderline/isInvisible/isStrikethrough/isOverline/
+  // hasExtendedAttrs): fg carries BOLD, legacy UNDERLINE, INVISIBLE and
+  // STRIKETHROUGH; bg carries ITALIC, EXTENDED (gates the ext underline
+  // style) and OVERLINE. INVERSE (fg) is deliberately excluded — the
+  // inversion IS the cursor — while DIM/BLINK only modulate color/alpha and
+  // blink timing, and the redraw replaces the colors with the cursor pair
+  // anyway.
+  const FG_STYLE_MASK = 0x08000000 | 0x10000000 | 0x40000000 | 0x80000000;
+  const BG_STYLE_MASK = 0x04000000 | EXTENDED_ATTR_FLAG | 0x40000000;
 
   function finite(value, fallback = 0) {
     return Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -606,11 +618,17 @@
       // Typing-echo slides draw as a plain block: the trailing caret may
       // cover just-typed characters, but it must not flash them inverted.
       // Navigation slides (arrows, clicks, TUI redraws) keep the scissored
-      // in-place inversion. Settled frames always invert as usual. (Printable
-      // keys used as TUI navigation — j/k in ink TUIs — classify as typing;
-      // an accepted heuristic boundary.)
+      // in-place inversion. Settled frames always invert as usual.
+      // The classification is a shell-typing affordance and only applies on
+      // the NORMAL buffer: full-screen apps (nvim, less, tmux) run on the
+      // alternate buffer, where printable keys (hjkl) are navigation over
+      // real content — a covering plain block would hide the text under the
+      // caret and flip between cover/invert as keys repeat. Inline TUIs on
+      // the normal buffer still classify printable navigation keys as
+      // typing; an accepted heuristic boundary.
       const echoNow = cursorStyle === 'block'
         && motion.animating
+        && terminal.buffer.active.type !== 'alternate'
         && clock() - lastPrintableInputAt < ECHO_PLAIN_WINDOW_MS;
       if (echoNow && !echoSlideLatched) {
         echoSlideLatched = true;
@@ -685,16 +703,24 @@
             const chars = cell.getChars();
             if (!code || !chars) continue;
             const ext = cell.bg & EXTENDED_ATTR_FLAG ? cell.extended.ext : 0;
+            // The redraw must be pixel-identical to the base pass, or glyphs
+            // visibly morph as the caret slides across them: keep the cell's
+            // style bits (shape and decorations) on the inverted colors, and
+            // pass our own bg word as lastBg so _updateCell's differential
+            // left-clip (bg !== lastBg) stays off — the scissor already clips
+            // the redraw to the caret's pixel coverage.
+            const invertedBg = cursorBackground | (cell.bg & BG_STYLE_MASK);
+            const invertedFg = cursorForeground | (cell.fg & FG_STYLE_MASK);
             glyph._updateCell(
               temporaryVertices.attributes,
               0,
               0,
               code,
-              cursorBackground,
-              cursorForeground,
+              invertedBg,
+              invertedFg,
               ext,
               chars,
-              cell.bg,
+              invertedBg,
             );
             temporaryVertices.attributes[9] = col / terminal.cols;
             temporaryVertices.attributes[10] = row / terminal.rows;
@@ -762,6 +788,10 @@
         rectangle._cursorFloat = previousColor;
       }
       if (!code || !chars) return;
+      // Same pixel-identity rule as drawBlockGlyph: keep the cell's style
+      // bits on the restore colors and neutralize the differential clip.
+      const restoreBgWord = restoreBg | (cell.bg & BG_STYLE_MASK);
+      const restoreFgWord = restoreFg | (cell.fg & FG_STYLE_MASK);
       const prevGlyphVertices = glyph._vertices;
       const prevGlyphBuffer = glyph._activeBuffer;
       const glyphVertices = {
@@ -776,11 +806,11 @@
           0,
           0,
           code,
-          restoreBg,
-          restoreFg,
+          restoreBgWord,
+          restoreFgWord,
           ext,
           chars,
-          cell.bg,
+          restoreBgWord,
         );
         glyphVertices.attributes[9] = cursor.x / terminal.cols;
         glyphVertices.attributes[10] = cursor.y / terminal.rows;

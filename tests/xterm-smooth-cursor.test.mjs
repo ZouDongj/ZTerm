@@ -43,11 +43,15 @@ function fixture({ reduced = false, cursorStyle = 'bar', renderScope } = {}) {
     },
     renderCursor() { rectangleDraws.push(Array.from(this._verticesCursor.attributes.slice(0, 8))); },
   };
+  const glyphCellCalls = [];
   const glyph = {
     _gl: gl,
     _activeBuffer: 0,
     _vertices: originalGlyphVertices,
-    _updateCell(attributes, x, y, code) { attributes.set([code, 2, 0.1, 0.2, 0, 0.2, 0.3, 0.1, 0.2], 0); },
+    _updateCell(attributes, x, y, code, bg, fg, ext, chars, lastBg) {
+      glyphCellCalls.push({ code, bg, fg, ext, chars, lastBg });
+      attributes.set([code, 2, 0.1, 0.2, 0, 0.2, 0.3, 0.1, 0.2], 0);
+    },
     render() {
       this._activeBuffer = (this._activeBuffer + 1) % 2;
       glyphDraws.push(Array.from(this._vertices.attributes));
@@ -73,6 +77,7 @@ function fixture({ reduced = false, cursorStyle = 'bar', renderScope } = {}) {
   };
   const listeners = [];
   const active = {
+    type: 'normal',
     baseY: 0,
     cursorY: 0,
     cursorX: 1,
@@ -134,6 +139,7 @@ function fixture({ reduced = false, cursorStyle = 'bar', renderScope } = {}) {
     originalGlyphVertices,
     media,
     rawCell,
+    glyphCellCalls,
     setTime(value) { time = value; },
     setWidths(entries) { widthByColumn = new Map(entries); },
     counts() { return { redraws, stockRecolors }; },
@@ -502,6 +508,59 @@ test('navigation slides keep the in-place inversion (echo window passed, escape 
   h.renderer.renderRows(0, 2);
   assert.equal(h.adapter.snapshot().counters.echoSlides, 0);
   assert.ok(h.scissorCalls.length > 0);
+});
+
+test('inverted block redraw keeps the cell style bits and skips the differential clip', () => {
+  const f = fixture();
+  f.adapter.setCursorStyle('block');
+  // Fully styled cell: the atlas picks rasterized variants from these bits
+  // (vendored AttributeData: bg 0x04000000 italic / 0x10000000 extended /
+  // 0x40000000 overline; fg 0x08000000 bold / 0x10000000 underline /
+  // 0x40000000 invisible / 0x80000000 strikethrough), so the inverted redraw
+  // must carry them or the covered glyph visibly morphs. fg also gets the
+  // INVERSE bit (0x04000000), which must NOT survive: the inversion is the
+  // cursor itself, carrying it would double-invert the atlas colors.
+  f.rawCell.bg = 0x04000000 | 0x10000000 | 0x40000000;
+  f.rawCell.fg = 0x08000000 | 0x10000000 | 0x40000000 | 0x80000000 | 0x04000000;
+  f.renderer.renderRows(0, 2);
+
+  assert.equal(f.glyphCellCalls.length, 1);
+  const call = f.glyphCellCalls[0];
+  // cursor rgba 0xffffffff -> 0x03ffffff; accent 0x1e1e1eff -> 0x031e1e1e.
+  assert.equal(call.bg >>> 0, (0x03ffffff | 0x04000000 | 0x10000000 | 0x40000000) >>> 0);
+  assert.equal(call.fg >>> 0, (0x031e1e1e | 0x08000000 | 0x10000000 | 0x40000000 | 0x80000000) >>> 0,
+    'shape/decoration bits kept, INVERSE stripped');
+  // lastBg === bg keeps _updateCell's differential left-clip off; the scissor
+  // alone bounds the redraw to the caret's coverage.
+  assert.equal(call.lastBg, call.bg);
+});
+
+test('echo classification is suspended on the alternate buffer (TUI navigation inverts)', () => {
+  const f = fixture();
+  f.active.type = 'alternate';
+  f.adapter.setCursorStyle('block');
+  f.renderer.renderRows(0, 2); // settle at x=1
+  f.adapter.noteInput('j'); // printable key: typing in a shell, navigation in nvim
+  f.active.cursorX = 3;
+  f.renderer.renderRows(0, 2);
+  f.setTime(45);
+  f.renderer.renderRows(0, 2);
+
+  // A full-screen TUI never gets the covering plain block: the slide keeps
+  // the scissored inversion so the text under the caret stays readable.
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph');
+
+  // The same keystroke on the normal buffer still classifies as typing.
+  const g = fixture();
+  g.adapter.setCursorStyle('block');
+  g.renderer.renderRows(0, 2);
+  g.adapter.noteInput('j');
+  g.active.cursorX = 3;
+  g.renderer.renderRows(0, 2);
+  assert.equal(g.adapter.snapshot().counters.echoSlides, 1);
+  assert.equal(g.adapter.snapshot().drawPassStatus, 'base+rectangle');
 });
 
 test('finite diagnostic capture holds only requested animation frames and excludes hold time', async () => {

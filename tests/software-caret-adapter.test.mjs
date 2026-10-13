@@ -284,6 +284,7 @@ function fixture({ reduced = true } = {}) {
   const gl = { canvas };
   const rectangleDraws = [];
   const glyphDraws = [];
+  const glyphCellCalls = [];
   const baseRenders = [];
   const rectangle = {
     _gl: gl,
@@ -299,7 +300,10 @@ function fixture({ reduced = true } = {}) {
     _gl: gl,
     _activeBuffer: 0,
     _vertices: { attributes: new Float32Array(11), attributesBuffers: [new Float32Array(11), new Float32Array(11)], count: 11 },
-    _updateCell(attributes, x, y, code) { attributes[0] = code; },
+    _updateCell(attributes, x, y, code, bg, fg, ext, chars, lastBg) {
+      glyphCellCalls.push({ code, bg, fg, ext, chars, lastBg });
+      attributes[0] = code;
+    },
     render(opts) { this._activeBuffer = (this._activeBuffer + 1) % 2; glyphDraws.push(opts); },
   };
   const coreService = { isCursorInitialized: true, isCursorHidden: true };
@@ -342,7 +346,7 @@ function fixture({ reduced = true } = {}) {
     now: () => time, root: { performance: { now: () => time }, queueMicrotask },
   });
   return {
-    adapter, terminal, renderer, cellState, rectangleDraws, glyphDraws, baseRenders,
+    adapter, terminal, renderer, cellState, rectangleDraws, glyphDraws, glyphCellCalls, baseRenders,
     coreService, coreBrowserService,
     cand: (over) => ({ x: 4, y: 1, char: 'd', width: 1, style: 'truecolor', fg: '40;44;52', bg: '220;223;228', unitSeq: 1, chunkSeq: 1, ...over }),
     setTime(t) { time = t; },
@@ -464,6 +468,15 @@ test('B1 regression: the restore overlay draws the covering GLYPH (bar style)', 
   assert.equal(f.glyphDraws.length, glyphsBefore + 1,
     'restore must repaint the covering character (bg rect alone would blank it)');
   assert.equal(f.adapter.instrumentation.cursorDrawPasses >= 1, true);
+  // The restore redraw follows the same pixel-identity rule as the block
+  // caret: theme bg/fg words (background 0x1a1b26ff -> 0x031a1b26,
+  // foreground 0xc0caf5ff -> 0x03c0caf5), the cell's style bits OR'ed in
+  // (this truecolor cell has none), and lastBg === bg so the differential
+  // left-clip stays off.
+  const restore = f.glyphCellCalls.at(-1);
+  assert.equal(restore.bg >>> 0, (0x03000000 | 0x1a1b26) >>> 0);
+  assert.equal(restore.fg >>> 0, (0x03000000 | 0xc0caf5) >>> 0);
+  assert.equal(restore.lastBg, restore.bg);
 });
 
 function parserFixture(t, { cols = 10, rows = 3, TerminalClass = Terminal, reduced = true } = {}) {
