@@ -529,6 +529,11 @@ const SFTP = {
         this._refreshQueued = null;
         this._refreshInFlight = null;
         this._mkdir = null;
+        // Same parity as the mkdir edit: a path edit in progress can never
+        // commit on a dead session (navigate refuses), so tear it down —
+        // Enter would otherwise consume the editor's finish lock with
+        // nothing rendered, sticking the input open (Esc included).
+        if (this._editingPath) this._renderBreadcrumb();
         document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">会话已断开，请重新连接后再使用 SFTP</div>';
     },
 
@@ -644,6 +649,9 @@ const SFTP = {
     _editPath(prefill) {
         const el = document.getElementById('sftp-breadcrumb');
         if (!el || el.querySelector('input')) return; // already in edit mode
+        // A dead session refuses every navigation, so an editor opened on
+        // it could never commit (and Enter would stick it open).
+        if (this._sessionDead) return;
         // A user navigation/open in flight re-renders the breadcrumb on
         // completion, which would destroy the half-typed editor; entry is
         // refused instead (the double-click gesture preempts a segment

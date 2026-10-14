@@ -419,6 +419,43 @@ test('T40: a fresh open() after the death rebinds and clears the dead state', as
     assert.ok(vm.els.body.children.some(c => (c.innerHTML || '').includes('b.txt')), 'new session lists normally');
 });
 
+test('T40: a path edit in progress is torn down when the session dies', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', [F('a.txt')]);
+    vm.SFTP._editPath();
+    assert.equal(vm.SFTP._editingPath, true, 'editor open');
+
+    const mark = vm.els.breadcrumb.children.length;
+    deadReason(vm, 'sessA');
+    await vm.drain();
+
+    assert.equal(vm.SFTP._sessionDead, true, 'panel marked dead');
+    assert.equal(vm.SFTP._editingPath, false, 'the death ends the edit');
+    // Fake-DOM modeling note: innerHTML='' does not remove the input in the
+    // seam, so the teardown is asserted on the freshly rendered children.
+    const fresh = vm.els.breadcrumb.children.slice(mark);
+    assert.ok(fresh.length > 0 && fresh.every(c => c.tagName !== 'INPUT'),
+        'breadcrumb re-rendered without the editor input');
+    assert.equal(fresh[fresh.length - 1].textContent, 'app', 'breadcrumb restored to the last live path');
+});
+
+test('T40: the path editor refuses to open on a dead session', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', [F('a.txt')]);
+    deadReason(vm, 'sessA');
+    await vm.drain();
+
+    vm.SFTP._editPath();
+    assert.equal(vm.SFTP._editingPath, false, 'no editor on a dead session');
+    assert.ok(!vm.els.breadcrumb.children.some(c => c.tagName === 'INPUT'), 'no input mounted');
+
+    const bar = vm.ctx.document.getElementById('sftp-pathbar');
+    bar.onclick({ target: { className: '' } });
+    assert.equal(vm.SFTP._editingPath, false, 'the click entry is refused too');
+    bar.ondblclick();
+    assert.equal(vm.SFTP._editingPath, false, 'the double-click entry is refused too');
+});
+
 // ── T26 follow-up: owner-pane gating in split tabs ──────────────────────────
 // tab.connected is AGGREGATED across panes (a live sibling keeps it true), so
 // the old `dead = !tab.connected` gate stopped marking a dead split pane's
