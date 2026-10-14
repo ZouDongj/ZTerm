@@ -619,16 +619,19 @@
       // cover just-typed characters, but it must not flash them inverted.
       // Navigation slides (arrows, clicks, TUI redraws) keep the scissored
       // in-place inversion. Settled frames always invert as usual.
-      // The classification is a shell-typing affordance and only applies on
-      // the NORMAL buffer: full-screen apps (nvim, less, tmux) run on the
-      // alternate buffer, where printable keys (hjkl) are navigation over
-      // real content — a covering plain block would hide the text under the
-      // caret and flip between cover/invert as keys repeat. Inline TUIs on
-      // the normal buffer still classify printable navigation keys as
-      // typing; an accepted heuristic boundary.
+      // The classification is a text-input affordance. On the normal buffer
+      // that means shell-style typing echo. The alternate buffer is the
+      // navigation-dominated case (nvim, less, tmux: printable keys like hjkl
+      // are navigation, and a covering block would hide the text under the
+      // caret) — EXCEPT when the software caret owns the cursor: a recognized
+      // app-painted caret means an agent TUI input box (kimi, claude), which
+      // keeps the plain echo slide even on the alternate buffer (herdr and
+      // kimi both enter ?1049h, so the input boxes live there). A multiplexer
+      // shell prompt on the alternate buffer keeps the stock inversion.
+      const onAlternateBuffer = terminal.buffer.active.type === 'alternate';
       const echoNow = cursorStyle === 'block'
         && motion.animating
-        && terminal.buffer.active.type !== 'alternate'
+        && (!onAlternateBuffer || cursor.software === true)
         && clock() - lastPrintableInputAt < ECHO_PLAIN_WINDOW_MS;
       if (echoNow && !echoSlideLatched) {
         echoSlideLatched = true;

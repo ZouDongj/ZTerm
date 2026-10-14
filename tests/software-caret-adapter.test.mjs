@@ -281,7 +281,13 @@ function fixture({ reduced = true } = {}) {
     getWidth() { return cellState.width; },
   };
   const canvas = { width: 100, height: 60 };
-  const gl = { canvas };
+  const gl = {
+    canvas,
+    SCISSOR_TEST: 0x0C11,
+    enable() {},
+    disable() {},
+    scissor() {},
+  };
   const rectangleDraws = [];
   const glyphDraws = [];
   const glyphCellCalls = [];
@@ -477,6 +483,29 @@ test('B1 regression: the restore overlay draws the covering GLYPH (bar style)', 
   assert.equal(restore.bg >>> 0, (0x03000000 | 0x1a1b26) >>> 0);
   assert.equal(restore.fg >>> 0, (0x03000000 | 0xc0caf5) >>> 0);
   assert.equal(restore.lastBg, restore.bg);
+});
+
+test('alternate buffer keeps the echo slide when the software caret owns the cursor (agent TUI in a multiplexer)', () => {
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  // herdr and kimi both enter ?1049h: their input boxes live on the
+  // alternate buffer, so the buffer type alone must not gate typing echo.
+  f.terminal.buffer.active.type = 'alternate';
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f); // activation snap: settled at x=5
+  assert.equal(f.adapter.instrumentation.softwareCaret.active, true);
+
+  f.adapter.noteInput('d'); // typing at t=0
+  p.candidate(f.cand({ chunkSeq: 3, x: 6 })); p.parsed(3);
+  render(f);
+
+  // The app-painted caret sliding over an agent input box is typing echo:
+  // plain block, no inversion flash — even on the alternate buffer.
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1);
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle');
 });
 
 function parserFixture(t, { cols = 10, rows = 3, TerminalClass = Terminal, reduced = true } = {}) {

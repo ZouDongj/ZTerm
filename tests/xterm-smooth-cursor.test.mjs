@@ -535,7 +535,7 @@ test('inverted block redraw keeps the cell style bits and skips the differential
   assert.equal(call.lastBg, call.bg);
 });
 
-test('echo classification is suspended on the alternate buffer (TUI navigation inverts)', () => {
+test('echo classification is suspended for a protocol cursor on the alternate buffer (TUI navigation inverts)', () => {
   const f = fixture();
   f.active.type = 'alternate';
   f.adapter.setCursorStyle('block');
