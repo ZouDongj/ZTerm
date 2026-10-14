@@ -625,6 +625,199 @@ test('protocol-cursor echo keeps the time window: the pending flag never leaks a
   assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle');
 });
 
+test('multiplexer shell pane (alternate buffer, protocol cursor) classifies echo by write evidence', () => {
+  // Multiplexer shell panes live on the alternate buffer; per herdr's docs,
+  // host_cursor=auto presents the pane's shell caret as the native cursor on
+  // non-Windows hosts. The measured relay latency (194-375ms) defeats the
+  // 200ms window. Echo is mechanical there: the frame moving the cursor also
+  // wrote the cell the cursor vacates.
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  f.terminal.buffer.active.type = 'alternate';
+  f.coreService.isCursorHidden = false; // native protocol cursor visible
+  render(f); // initial snap at cursorX=1
+  const p = f.adapter.softwareCaretPort;
+  f.adapter.noteInput('e');
+  f.setTime(320); // the echo frame lands past the window (herdr relay band)
+  p.unit({ hadCandidate: false, chunkSeq: 1, wrote: [[0, 1]] }); // echo wrote the vacated cell
+  p.parsed(1);
+  f.terminal.buffer.active.cursorX = 2;
+  render(f);
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1);
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle');
+});
+
+test('alternate-buffer navigation never writes the vacated cell and keeps the inversion slide', () => {
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  f.terminal.buffer.active.type = 'alternate';
+  f.coreService.isCursorHidden = false;
+  render(f);
+  const p = f.adapter.softwareCaretPort;
+  f.adapter.noteInput('j'); // hjkl ARE printable — input-side evidence must not matter here
+  f.setTime(320);
+  p.unit({ hadCandidate: false, chunkSeq: 1, wrote: [] }); // a pure cursor-move frame writes nothing
+  p.parsed(1);
+  f.terminal.buffer.active.cursorX = 2;
+  render(f);
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0,
+    'navigation without a written vacated cell must keep the inversion');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph');
+});
+
+test('real native-mode multiplexer echo frame classifies echo end-to-end (observer wrote cells through the real parser)', async t => {
+  // Synthetic remote-herdr native grammar: on the alternate buffer the echo
+  // frame writes the character at the caret cell inside a sync unit and the
+  // visible protocol caret ends one cell further. The observer's per-unit
+  // write evidence must reach the classification through the real IPC wiring.
+  const f = ipcParserFixture(t, { cols: 80, rows: 24, reduced: false });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  await f.write('\x1b[?1049h\x1b[?7l'); // herdr enters the alternate buffer
+  await f.write('\x1b[1;1HPS> '); // prompt, caret ends at col 5 (0-based x=4)
+  render(f); // settle snap
+  f.adapter.noteInput('e'); // keystroke at t=0
+  f.setTime(320); // the frame lands in the measured herdr relay band
+  await f.write('\x1b[?2026h\x1b]8;;\x1b\\\x1b[1;5H\x1b[0;2;38;5;11;49me\x1b[0m\x1b[?2026l');
+  assert.equal(f.source.buffer.active.cursorX, 5, 'the echoed print advances the real caret');
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1,
+    'the frame wrote the vacated cell — the slide is typing echo');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle');
+});
+
+test('real native-mode multiplexer cursor move without writes keeps the inversion end-to-end', async t => {
+  const f = ipcParserFixture(t, { cols: 80, rows: 24, reduced: false });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  await f.write('\x1b[?1049h\x1b[?7l');
+  await f.write('\x1b[1;1HPS> ');
+  render(f);
+  f.setTime(320);
+  await f.write('\x1b[?2026h\x1b[1;6H\x1b[?2026l'); // pure CUP: navigation, no writes
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0,
+    'a write-less move on the alternate buffer keeps the inversion');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph');
+});
+
+test('write evidence binds to the vacated cell, not to any recent write', () => {
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  f.terminal.buffer.active.type = 'alternate';
+  f.coreService.isCursorHidden = false;
+  render(f);
+  const p = f.adapter.softwareCaretPort;
+  f.setTime(320);
+  p.unit({ hadCandidate: false, chunkSeq: 1, wrote: [[2, 9]] }); // a status-line repaint far away
+  p.parsed(1);
+  f.terminal.buffer.active.cursorX = 2;
+  render(f);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0,
+    'writes elsewhere on the screen must not classify the slide as echo');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph');
+});
+
+test('write evidence expires: an idle-batch leftover never classifies a later slide', () => {
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  f.terminal.buffer.active.type = 'alternate';
+  f.coreService.isCursorHidden = false;
+  render(f);
+  const p = f.adapter.softwareCaretPort;
+  f.setTime(320);
+  p.unit({ hadCandidate: false, chunkSeq: 1, wrote: [[0, 1]] });
+  p.parsed(1);
+  // No retarget follows the write; the cursor moves only 2s later (app-initiated).
+  f.setTime(1900);
+  f.terminal.buffer.active.cursorX = 2;
+  render(f);
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0,
+    'evidence older than the freshness bound must not classify');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph');
+});
+
+test('navigation input clears pending write evidence', () => {
+  // Type, then walk back with arrows: the second Left vacates a cell the
+  // echo wrote moments ago (still inside the batch TTL). noteInput must void
+  // the write evidence along with the credits, or that hop is misclassified
+  // as typing echo.
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  f.terminal.buffer.active.type = 'alternate';
+  f.coreService.isCursorHidden = false;
+  render(f); // initial snap at cursorX=1
+  const p = f.adapter.softwareCaretPort;
+  f.adapter.noteInput('a');
+  f.setTime(320);
+  p.unit({ hadCandidate: false, chunkSeq: 1, wrote: [[0, 1]] });
+  p.parsed(1);
+  f.terminal.buffer.active.cursorX = 2;
+  render(f); // echo slide 1
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1);
+  f.setTime(500);
+  render(f); // settle: the echo latch clears
+  f.adapter.noteInput('b');
+  f.setTime(560);
+  p.unit({ hadCandidate: false, chunkSeq: 2, wrote: [[0, 2]] });
+  p.parsed(2);
+  f.terminal.buffer.active.cursorX = 3;
+  render(f); // echo slide 2
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 2);
+  f.setTime(760);
+  render(f); // settle: the latch clears before navigation
+  f.adapter.noteInput('\x1b[D'); // Left: pure CUP, no writes — voids evidence
+  f.setTime(790);
+  p.unit({ hadCandidate: false, chunkSeq: 3, wrote: [] });
+  p.parsed(3);
+  f.terminal.buffer.active.cursorX = 2;
+  render(f); // navigation hop 1: vacated cell 3 was never written
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 2);
+  f.setTime(970);
+  render(f); // settle
+  f.adapter.noteInput('\x1b[D');
+  f.setTime(1000);
+  p.unit({ hadCandidate: false, chunkSeq: 4, wrote: [] });
+  p.parsed(4);
+  f.terminal.buffer.active.cursorX = 1;
+  render(f); // navigation hop 2: vacated cell 2 WAS written by echo 2
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 2,
+    'stale echo writes must not classify a navigation hop as typing echo');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph');
+});
+
+test('write evidence stays scoped to the alternate buffer and its buffer of origin', () => {
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  f.coreService.isCursorHidden = false;
+  render(f); // normal buffer, snap at cursorX=1
+  const p = f.adapter.softwareCaretPort;
+  f.setTime(320);
+  p.unit({ hadCandidate: false, chunkSeq: 1, wrote: [[0, 1]] });
+  p.parsed(1);
+  f.terminal.buffer.active.cursorX = 2;
+  render(f);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0,
+    'the normal-buffer protocol path keeps the time window only');
+  // A batch observed on the normal buffer must not classify after a switch.
+  f.setTime(1900);
+  f.terminal.buffer.active.type = 'alternate';
+  f.terminal.buffer.active.cursorX = 3;
+  render(f);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0,
+    'a stale batch from the other buffer must not classify');
+});
+
 function parserFixture(t, { cols = 10, rows = 3, TerminalClass = Terminal, reduced = true } = {}) {
   const f = fixture({ reduced });
   const source = new TerminalClass({ cols, rows });

@@ -121,6 +121,64 @@
     // leave stale credits, so up to CAP later app-initiated slides may
     // inherit a plain classification — bounded, transient artifacts.
     let echoInputCredits = 0;
+    // Write-evidenced echo for the PROTOCOL cursor path on the alternate
+    // buffer — the multiplexer shell pane case. The multiplexer holds
+    // ?1049h for its entire UI; per herdr's docs, host_cursor=auto presents
+    // the pane shell's caret as the outer terminal's NATIVE protocol cursor
+    // on non-Windows hosts (our local Windows herdr 0.9.0 probe showed the
+    // opposite — hidden protocol cursor, no painted caret — so this branch
+    // is inert in that configuration; the remote-shell symptom it targets
+    // matches the documented non-Windows behavior). Relay latency (measured
+    // 194-375ms in the herdr chain) defeats ANY time window, and credits
+    // cannot extend here: on the alternate buffer printable keys like hjkl
+    // are navigation, so input-side evidence alone would classify them as
+    // typing. Echo is mechanical instead: the frame that moves the cursor
+    // also WROTE the cell the cursor vacates (the echoed character lands at
+    // the caret's previous cell); navigation never writes. The observer
+    // already reports per-unit written cells (unit.wrote); keep the newest
+    // few chunk batches and match the vacated cell at retarget time.
+    // Batches expire by age so leftovers from an idle prompt never classify
+    // a later app-initiated slide. Known limit: a chunk boundary cutting
+    // through a write unit loses that unit's cells (only complete units are
+    // reported), so a split echo frame can miss its classification.
+    const ECHO_WRITE_BATCH_KEEP = 4;
+    const ECHO_WRITE_BATCH_MS = 1500;
+    let echoWriteBatches = []; // [{ seq, at, cells: Set<'row:col'> }], arrival order
+    let pendingWriteEcho = false; // evidence for the latest retarget's run
+    let echoWriteBufferType = null; // batches are coordinate-bound to their buffer
+    function noteUnitWrites(info) {
+      if (!info || !info.wrote || !info.wrote.length) return;
+      const bufferType = terminal.buffer.active.type;
+      if (bufferType !== echoWriteBufferType) {
+        echoWriteBufferType = bufferType;
+        echoWriteBatches = [];
+        pendingWriteEcho = false;
+      }
+      const at = clock();
+      const last = echoWriteBatches[echoWriteBatches.length - 1];
+      const batch = last && last.seq === info.chunkSeq ? last : null;
+      const target = batch || { seq: info.chunkSeq, at, cells: new Set() };
+      for (const w of info.wrote) target.cells.add(w[0] + ':' + w[1]);
+      target.at = at;
+      if (!batch) {
+        echoWriteBatches.push(target);
+        if (echoWriteBatches.length > ECHO_WRITE_BATCH_KEEP) echoWriteBatches.shift();
+      }
+    }
+    function echoWriteCovers(y, x) {
+      // Batches are coordinate-bound to the buffer they were observed on;
+      // the observer parses pre-write, so a mid-chunk buffer switch can
+      // leave one stale-tagged batch alive until the next write unit.
+      if (echoWriteBufferType !== terminal.buffer.active.type) return false;
+      const at = clock();
+      const key = y + ':' + x;
+      for (let i = echoWriteBatches.length - 1; i >= 0; i--) {
+        const batch = echoWriteBatches[i];
+        if (at - batch.at > ECHO_WRITE_BATCH_MS) break; // arrival order: older batches are all stale
+        if (batch.cells.has(key)) return true;
+      }
+      return false;
+    }
     // Once a slide starts inside the echo window it stays plain for the whole
     // animation run, even when app retargets or blink freezes stretch it past
     // the window — no mid-slide plain/inversion flip.
@@ -240,6 +298,7 @@
       // only cell-level contradiction breaks the run.
       unit(info) {
         if (disposed) return;
+        noteUnitWrites(info);
         if (!info.hadCandidate) {
           const cell = sw.published || sw.pending;
           if (cell) {
@@ -281,6 +340,10 @@
       },
       invalidate(reason) {
         sw.generation += 1;
+        // Coordinate space changed: write evidence from before the boundary
+        // would classify against cells that no longer mean the same thing.
+        echoWriteBatches = [];
+        pendingWriteEcho = false;
         revokeSoftware('invalidate:' + (reason || 'unknown'));
         if (reason === 'session-reset') {
           sw.watermark = 0;
@@ -355,7 +418,12 @@
         // motion change, smooth toggle) still land immediately.
         motion.reposition(cursorBeforeBase.x, cursorBeforeBase.y, at);
         snapBeforeNextDraw = false;
+        pendingWriteEcho = false;
       } else if (targetChanged) {
+        // Echo evidence binds to the cell the cursor VACATES: a typing-echo
+        // frame writes the character at the caret's previous cell, then
+        // moves the caret past it. Navigation retargets never write there.
+        pendingWriteEcho = lastTarget !== null && echoWriteCovers(lastTarget.y, lastTarget.x);
         motion.setTarget(cursorBeforeBase.x, cursorBeforeBase.y, at);
         instrumentation.retargets.push({
           at,
@@ -640,29 +708,32 @@
       // cover just-typed characters, but it must not flash them inverted.
       // Navigation slides (arrows, clicks, TUI redraws) keep the scissored
       // in-place inversion. Settled frames always invert as usual.
-      // The classification is a text-input affordance. On the normal buffer
-      // that means shell-style typing echo. The alternate buffer is the
-      // navigation-dominated case (nvim, less, tmux: printable keys like hjkl
-      // are navigation, and a covering block would hide the text under the
-      // caret) — EXCEPT when the software caret owns the cursor: a recognized
-      // app-painted caret means an agent TUI input box (kimi, claude), which
-      // keeps the plain echo slide even on the alternate buffer (herdr and
-      // kimi both enter ?1049h, so the input boxes live there). A multiplexer
-      // shell prompt on the alternate buffer keeps the stock inversion.
-      // The software path classifies by pending-echo credits (render
-      // latency through a multiplexer exceeds any safe time window); the
-      // protocol path keeps the prompt-echo time window. The window pays
-      // first: during a fast burst the latest keystroke keeps it warm, so
-      // mid-burst frames classify echo without touching the balance, and
-      // credits are spent only on frames that arrive after the window has
-      // gone cold (a burst's tail).
+      // The classification is a text-input affordance with three evidences:
+      //  1. Time window — the normal-buffer shell echo (prompt is prompt).
+      //  2. Pending-echo credits — the software-caret path, where a trusted
+      //     app-painted caret means an agent TUI input box (kimi, claude);
+      //     its frames may land hundreds of ms late through a multiplexer,
+      //     past any window. Printable keystrokes bank credits, navigation
+      //     input clears them.
+      //  3. Write evidence — the protocol cursor on the alternate buffer
+      //     (a multiplexer's shell pane presenting the pane caret as the
+      //     native cursor — per herdr's docs the non-Windows default; no
+      //     software caret owns it there, and the same relay latency defeats
+      //     the window). The retarget counts as echo only when a recent unit
+      //     WROTE the vacated cell; hjkl and other navigation never write,
+      //     so they keep the inversion.
+      // The window pays first: during a fast burst the latest keystroke
+      // keeps it warm, so mid-burst frames classify echo without touching
+      // the balance, and credits are spent only on frames that arrive after
+      // the window has gone cold (a burst's tail).
       const onAlternateBuffer = terminal.buffer.active.type === 'alternate';
       const withinEchoWindow = clock() - lastPrintableInputAt < ECHO_PLAIN_WINDOW_MS;
       const echoCreditUsable = cursor.software === true && echoInputCredits > 0 && !withinEchoWindow;
+      const protocolWriteEcho = onAlternateBuffer && cursor.software !== true && pendingWriteEcho;
       const echoNow = cursorStyle === 'block'
         && motion.animating
-        && (!onAlternateBuffer || cursor.software === true)
-        && (withinEchoWindow || echoCreditUsable);
+        && (!onAlternateBuffer || cursor.software === true || protocolWriteEcho)
+        && (withinEchoWindow || echoCreditUsable || protocolWriteEcho);
       if (echoNow && !echoSlideLatched) {
         echoSlideLatched = true;
         instrumentation.echoSlides += 1;
@@ -891,12 +962,17 @@
       // path, so this sees local keystrokes even when the echo is remote.
       // A printable keystroke banks one echo credit per printed character
       // for the software-caret path (its frames may land hundreds of ms late
-      // through a multiplexer); any non-printable input clears the balance,
-      // so a navigation key never inherits a stale typing classification.
+      // through a multiplexer); any non-printable input clears the balance
+      // AND the write evidence, so a navigation key never inherits a stale
+      // typing classification from either path (e.g. an arrow pressed within
+      // the batch TTL right after typing, whose retarget crosses cells the
+      // echo just wrote).
       noteInput(data) {
         if (disposed || typeof data !== 'string') return;
         if (data.includes('\x1b') || data.includes('\x7f') || !/[\x20-\x7e\u00a0-\uffff]/.test(data)) {
           echoInputCredits = 0;
+          echoWriteBatches = [];
+          pendingWriteEcho = false;
           return;
         }
         lastPrintableInputAt = clock();
