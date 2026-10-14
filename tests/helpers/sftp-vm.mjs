@@ -76,6 +76,8 @@ export async function loadSftpVm() {
     };
     mk('sftp-conn');
     const breadcrumb = mk('sftp-breadcrumb');
+    // The address-bar double-click gesture binds #sftp-pathbar at render.
+    mk('sftp-pathbar');
     const body = mk('sftp-body');
     mk('sftp-pin-btn');
     // The width-drag IIFE resolves #sftp-resize against #main-area at load.

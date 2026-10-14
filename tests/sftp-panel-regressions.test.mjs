@@ -203,6 +203,70 @@ test('breadcrumb path edit still opens during a background cwd follow (control)'
     assert.equal(vm.SFTP._editingPath, true, 'follow completion preserves the editor');
 });
 
+test('double-click on the address bar preempts the navigation its first click started', async () => {
+    // With a long path the address bar is all segments: the gesture's first
+    // click navigates (instant breadcrumb semantics), and the dblclick must
+    // still reach the editor — the in-flight navigation is superseded so
+    // its completion can neither move the view nor tear the editor down.
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', [{ name: 'old.txt', isDir: false, size: 1, mtime: 0 }]);
+    const bar = vm.ctx.document.getElementById('sftp-pathbar');
+    assert.equal(typeof bar.ondblclick, 'function', 'double-click handler bound to the address bar');
+
+    const nav = vm.SFTP.navigate('/srv'); // the gesture's first click hit a segment
+    await vm.drain();
+    assert.equal(vm.pending('sftp-readdir').length, 1, 'segment navigation in flight');
+
+    bar.ondblclick(); // the double-click gesture
+    assert.equal(vm.SFTP._editingPath, true, 'editor opened despite the in-flight navigation');
+    const input = vm.els.breadcrumb.children.find(c => c.tagName === 'INPUT');
+    assert.ok(input, 'editor input mounted');
+    assert.equal(input.value, '/srv/app', 'prefilled with the current path, not the clicked segment');
+    assert.ok(vm.els.body.children.some(r => r.innerHTML.includes('old.txt')),
+        'the loading swap was undone — the current listing is back on screen');
+
+    vm.settle(vm.pending('sftp-readdir')[0], { files: [{ name: 'x.txt', isDir: false, size: 1, mtime: 0 }] });
+    await vm.drain();
+    await nav;
+    assert.equal(vm.SFTP._path, '/srv/app', 'the superseded navigation did not move the view');
+    assert.equal(vm.SFTP._editingPath, true, 'the superseded completion did not tear the editor down');
+    assert.ok(vm.els.breadcrumb.children.includes(input), 'editor input still mounted');
+    assert.ok(!vm.toasts.some(t => t.isErr), 'the superseded request stays silent');
+});
+
+test('a superseded segment navigation that fails stays silent', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+    const bar = vm.ctx.document.getElementById('sftp-pathbar');
+
+    const nav = vm.SFTP.navigate('/srv');
+    await vm.drain();
+    bar.ondblclick();
+    assert.equal(vm.SFTP._editingPath, true, 'editor opened despite the in-flight navigation');
+
+    vm.fail(vm.pending('sftp-readdir')[0], 'session gone'); // the superseded request rejects
+    await vm.drain();
+    await nav;
+    assert.ok(!vm.toasts.some(t => t.isErr), 'no error toast from the superseded request');
+    assert.equal(vm.SFTP._path, '/srv/app', 'the view did not move');
+    assert.equal(vm.SFTP._editingPath, true, 'editor survives the failed superseded request');
+    assert.ok(!vm.SFTP._sessionDead, 'the failure of a superseded request marks nothing dead');
+});
+
+test('double-click on the idle address bar opens the editor (control)', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+    const bar = vm.ctx.document.getElementById('sftp-pathbar');
+
+    bar.ondblclick();
+    assert.equal(vm.SFTP._editingPath, true, 'a double-click opens the editor');
+    const input = vm.els.breadcrumb.children.find(c => c.tagName === 'INPUT');
+    assert.ok(input && input.value === '/srv/app', 'prefilled with the current path');
+
+    bar.ondblclick(); // a repeated gesture with the editor open is a no-op
+    assert.equal(vm.els.breadcrumb.children.filter(c => c.tagName === 'INPUT').length, 1, 'still exactly one editor input');
+});
+
 test('dropping a folder is rejected up front: no transfer entry, no start toast', async () => {
     const vm = await loadSftpVm();
     await openOn(vm, 'sessA', '/srv/app', []);

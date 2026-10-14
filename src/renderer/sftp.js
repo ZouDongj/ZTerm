@@ -551,23 +551,52 @@ const SFTP = {
             seg.addEventListener('click', () => this.navigate(path));
             el.appendChild(seg);
         });
-        // Double-click the address bar to edit the path (as in tabby): the breadcrumb is
-        // replaced by an input prefilled with the current path; Enter navigates, Esc/blur restores the breadcrumb
-        el.ondblclick = () => this._editPath();
+        // Double-click anywhere in the address bar edits the path (as in
+        // tabby). Native dblclick is reliable here even though a segment's
+        // FIRST click navigates immediately: Blink dispatches dblclick to
+        // the node under the pointer at the second click, which always
+        // bubbles up to this persistent container. What actually kept the
+        // editor from opening was _editPath's in-flight user-navigation
+        // guard, so the gesture goes through _editPathPreempt, which
+        // supersedes that navigation first. Opening from dblclick (after
+        // the presses' default focus actions) also lets the input keep the
+        // focus _editPath gives it — the tab-rename input works the same
+        // way.
+        const bar = document.getElementById('sftp-pathbar');
+        if (bar) bar.ondblclick = () => this._editPathPreempt(this._path);
     },
 
-    _editPath() {
+    // The double-click gesture's segment clicks may have started a
+    // navigation. Supersede it: its completion must neither move the view
+    // nor tear the editor down, and its loading swap is undone — the
+    // current listing is still held in _files. Only a navigation is
+    // superseded: the initial open load (nothing listed yet) still refuses
+    // the editor through _editPath's guard.
+    _editPathPreempt(path) {
+        const el = document.getElementById('sftp-breadcrumb');
+        if (!el || el.querySelector('input')) return; // already in edit mode
+        if (this._listed && this._viewReq && this._viewReq.user) {
+            SFTP._reqSeq++;
+            this._viewReq = null;
+            this._renderFiles();
+        }
+        this._editPath(path);
+    },
+
+    _editPath(prefill) {
         const el = document.getElementById('sftp-breadcrumb');
         if (!el || el.querySelector('input')) return; // already in edit mode
         // A user navigation/open in flight re-renders the breadcrumb on
         // completion, which would destroy the half-typed editor; entry is
-        // refused instead. Background follow/refresh completions preserve an
-        // editor (_renderListing nonUser), so they do not block entry.
+        // refused instead (the double-click gesture preempts a segment
+        // navigation first, so it never reaches this guard with one in
+        // flight). Background follow/refresh completions preserve an editor
+        // (_renderListing nonUser), so they do not block entry.
         if (this._viewReq && this._viewReq.user) return;
         this._editingPath = true;
         const input = document.createElement('input');
         input.className = 'sftp-path-input inline-edit';
-        input.value = this._path || '/';
+        input.value = prefill || this._path || '/';
         input.spellcheck = false;
         el.innerHTML = '';
         el.appendChild(input);
