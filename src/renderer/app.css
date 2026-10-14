@@ -523,19 +523,24 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
    while empty (no session label yet). */
 .sftp-header .sftp-conn{flex-shrink:0;max-width:45%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:"Cascadia Code",Consolas,monospace;font-size:10.5px;color:var(--text-3);background:rgba(255,255,255,0.045);border-radius:7px;padding:3px 8px}
 .sftp-header .sftp-conn:empty{display:none}
-/* Address field: one container for the breadcrumb AND the double-click path
-   editor (the input replaces the crumbs in place, seamlessly). */
+/* Address field: one container for the breadcrumb AND the path editor
+   (the input replaces the crumbs in place, seamlessly). Entry: single
+   click on empty space / icon / "…" crumb, or double-click anywhere. */
 .sftp-pathbar{display:flex;align-items:center;gap:6px;height:28px;margin:0 18px 10px;padding:0 9px;background:rgba(255,255,255,0.045);border-radius:8px;flex-shrink:0;transition:box-shadow 0.12s}
 .sftp-pathbar:focus-within{box-shadow:inset 0 0 0 1.5px rgba(var(--accent-rgb),0.4)}
 .sftp-pathbar-icon{display:flex;align-items:center;color:var(--text-3);flex-shrink:0}
 .sftp-breadcrumb{display:flex;align-items:center;gap:2px;flex:1;min-width:0;font-family:"Cascadia Code",Consolas,monospace;font-size:11.5px;color:var(--text-2);overflow:hidden;white-space:nowrap;user-select:none}
 .sftp-breadcrumb span{cursor:pointer;padding:2px 6px;border-radius:5px;transition:all 0.12s;flex-shrink:0}
-/* Overlong paths: only the trailing segment absorbs the shrink and ends in
-   an ellipsis instead of the field clipping mid-glyph. */
+/* Overlong paths: middle segments collapse into a "…" crumb (root and the
+   current directory stay visible); a still-overlong trailing segment ends
+   in an ellipsis instead of the field clipping mid-glyph — the edit entry
+   then relies on the icon, separators, "…" or double-click rather than
+   empty space. */
 .sftp-breadcrumb span:last-child{flex-shrink:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .sftp-breadcrumb span:hover{background:rgba(var(--accent-rgb),0.12);color:var(--text-1)}
 .sftp-breadcrumb .sep{color:var(--text-3);cursor:default;opacity:0.6}
 .sftp-breadcrumb .sep:hover{background:none;color:var(--text-3)}
+.sftp-breadcrumb .more{color:var(--text-3)}
 .sftp-path-input{flex:1;min-width:0;width:100%;background:transparent;border:none;padding:0;color:var(--text-1);font-size:11.5px;font-family:inherit;outline:none}
 .sftp-actions{display:flex;gap:2px;flex-shrink:0;align-items:center;margin-left:auto}
 .sftp-actions button{width:28px;height:28px;border-radius:8px;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all 0.12s;line-height:1;padding:0}

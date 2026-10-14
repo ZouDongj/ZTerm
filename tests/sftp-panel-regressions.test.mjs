@@ -267,6 +267,64 @@ test('double-click on the idle address bar opens the editor (control)', async ()
     assert.equal(vm.els.breadcrumb.children.filter(c => c.tagName === 'INPUT').length, 1, 'still exactly one editor input');
 });
 
+test('single click on empty address-bar space opens the editor; segment clicks are untouched', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+    const bar = vm.ctx.document.getElementById('sftp-pathbar');
+    assert.equal(typeof bar.onclick, 'function', 'click handler bound to the address bar');
+
+    // A segment click bubbles to the bar but must be left to the segment's
+    // own navigation handler — the editor stays closed.
+    const seg = vm.els.breadcrumb.children.find(c => c.className === 'seg' && c.textContent === 'app');
+    assert.ok(seg, 'segment rendered');
+    bar.onclick({ target: seg });
+    assert.equal(vm.SFTP._editingPath, false, 'segment clicks never open the editor');
+
+    // Empty space (no seg class) opens the editor on a single click.
+    bar.onclick({ target: { className: '' } });
+    assert.equal(vm.SFTP._editingPath, true, 'empty-space click opens the editor');
+    const input = vm.els.breadcrumb.children.find(c => c.tagName === 'INPUT');
+    assert.ok(input && input.value === '/srv/app', 'prefilled with the current path');
+});
+
+test('overlong paths collapse middle segments into a "…" crumb (root and current directory stay)', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/a/bb/ccc/dddd', []);
+    let checks = 0;
+    vm.SFTP._crumbOverflows = () => ++checks <= 2; // force two collapse rounds
+    vm.SFTP._renderBreadcrumb();
+    // Fake-DOM modeling note: innerHTML='' does not remove appended children
+    // in the seam, so the fit loop's intermediate builds accumulate; the
+    // final build is the last 7 nodes (real DOM: the only 7).
+    const last = vm.els.breadcrumb.children.slice(-7);
+    const texts = Array.from(last, c => c.textContent);
+    assert.deepEqual(texts, ['/', '/', '…', '/', 'ccc', '/', 'dddd'],
+        `root, "…" and the two trailing segments remain: ${JSON.stringify(texts)}`);
+    const more = last.find(c => c.className === 'more');
+    assert.equal(more.title, '/a/bb', 'tooltip names the deepest collapsed ancestor');
+
+    // The "…" crumb is not a segment: clicking it opens the editor instead
+    // of navigating.
+    const bar = vm.ctx.document.getElementById('sftp-pathbar');
+    bar.onclick({ target: more });
+    assert.equal(vm.SFTP._editingPath, true, '"…" click opens the editor');
+    assert.equal(vm.pending('sftp-readdir').length, 0, 'no navigation issued');
+    const input = vm.els.breadcrumb.children.find(c => c.tagName === 'INPUT');
+    assert.equal(input.value, '/a/bb/ccc/dddd', 'editor prefilled with the full path');
+
+    // The collapse never hides the current directory, even when the bar is
+    // impossibly narrow (overflow on every check).
+    vm.els.breadcrumb.children.length = 0;
+    vm.SFTP._editingPath = false;
+    vm.SFTP._crumbOverflows = () => true;
+    vm.SFTP._renderBreadcrumb();
+    const tail = vm.els.breadcrumb.children.slice(-5);
+    assert.deepEqual(Array.from(tail, c => c.textContent), ['/', '/', '…', '/', 'dddd'],
+        'the current directory always survives the collapse');
+    assert.equal(tail.find(c => c.className === 'more').title, '/a/bb/ccc',
+        'the collapsed range now reaches one level up');
+});
+
 test('dropping a folder is rejected up front: no transfer entry, no start toast', async () => {
     const vm = await loadSftpVm();
     await openOn(vm, 'sessA', '/srv/app', []);

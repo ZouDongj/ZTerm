@@ -40,6 +40,8 @@ const SFTP = {
     _refreshInFlight: null,  // identity {epoch} of the upload-refresh run that owns the coalescing slot; only that run's own finally may clear/drain it (a stale finally cannot touch a successor view)
     _refreshQueued: null,    // owner {tabId,path} owed one coalesced follow-up refresh once the current binding's in-flight refresh settles
     _editingPath: false, // breadcrumb path edit in progress (a cwd follow must not destroy it)
+    _crumbRO: null,    // ResizeObserver refitting the breadcrumb collapse on dock width changes (created once)
+    _crumbWidth: null, // breadcrumb box width at the last fit, dedupes observer callbacks
     _saveDialogOpen: false, // a save dialog is up: re-entrant download() calls return early
     _mkdir: null,      // inline mkdir edit state {tabId, base, ready, moving, row} while its input row is open
     _sessionDead: false, // the bound session died mid-panel: navigations are refused until a fresh open() rebinds
@@ -534,36 +536,92 @@ const SFTP = {
         const el = document.getElementById('sftp-breadcrumb');
         el.innerHTML = '';
         this._editingPath = false; // any listing render ends an in-progress path edit
-        const root = document.createElement('span');
-        root.textContent = '/';
-        root.addEventListener('click', () => this.navigate('/'));
-        el.appendChild(root);
+        const parts = this._path.split('/').filter(Boolean);
+        const paths = [];
         let current = '';
-        this._path.split('/').filter(Boolean).forEach(p => {
-            current += '/' + p;
-            const path = current;
-            const sep = document.createElement('span');
-            sep.className = 'sep';
-            sep.textContent = '/';
-            el.appendChild(sep);
-            const seg = document.createElement('span');
-            seg.textContent = p; // assign via textContent to prevent filename injection
-            seg.addEventListener('click', () => this.navigate(path));
-            el.appendChild(seg);
-        });
-        // Double-click anywhere in the address bar edits the path (as in
-        // tabby). Native dblclick is reliable here even though a segment's
-        // FIRST click navigates immediately: Blink dispatches dblclick to
-        // the node under the pointer at the second click, which always
-        // bubbles up to this persistent container. What actually kept the
-        // editor from opening was _editPath's in-flight user-navigation
-        // guard, so the gesture goes through _editPathPreempt, which
-        // supersedes that navigation first. Opening from dblclick (after
-        // the presses' default focus actions) also lets the input keep the
-        // focus _editPath gives it — the tab-rename input works the same
-        // way.
+        parts.forEach(p => { current += '/' + p; paths.push(current); });
+        const build = (hidden) => {
+            el.innerHTML = '';
+            const root = document.createElement('span');
+            root.className = 'seg';
+            root.textContent = '/';
+            root.addEventListener('click', () => this.navigate('/'));
+            el.appendChild(root);
+            const addSep = () => {
+                const sep = document.createElement('span');
+                sep.className = 'sep';
+                sep.textContent = '/';
+                el.appendChild(sep);
+            };
+            if (hidden > 0 && parts.length > 1) {
+                addSep();
+                const more = document.createElement('span');
+                more.className = 'more';
+                more.textContent = '…';
+                more.title = paths[hidden - 1]; // the collapsed range ends here
+                el.appendChild(more);
+            }
+            for (let i = hidden; i < parts.length; i++) {
+                addSep();
+                const seg = document.createElement('span');
+                seg.className = 'seg';
+                seg.textContent = parts[i]; // textContent prevents filename injection
+                const path = paths[i];
+                seg.addEventListener('click', () => this.navigate(path));
+                el.appendChild(seg);
+            }
+        };
+        build(0);
+        // Explorer/Dolphin convention: collapse middle segments into a "…"
+        // crumb while the bar overflows. The guaranteed invariant is that
+        // root and the current directory stay visible — a long directory
+        // name can still ellipsize-fill the whole bar, so the edit entry
+        // never relies on empty space alone: the icon, separators and the
+        // "…" crumb are clickable non-segment space, and double-click works
+        // anywhere. The "…" crumb is deliberately not a segment: its click
+        // falls through to the bar's edit entry.
+        let hidden = 0;
+        while (hidden < parts.length - 1 && this._crumbOverflows(el)) {
+            hidden++;
+            build(hidden);
+        }
+        this._crumbWidth = el.clientWidth;
+        // Re-fit on dock width changes. Live refit during the width drag is
+        // intentional (unlike the terminal fit, which _sftpAnimating and
+        // _sftpResizing suppress): the collapse stays truthful while the
+        // user sizes the dock, and a fit here moves only a few small nodes.
+        // A re-render while editing would end the edit, so the observer
+        // stays out then (the listing's own next render re-fits).
+        if (!this._crumbRO && typeof ResizeObserver === 'function') {
+            this._crumbRO = new ResizeObserver(() => {
+                if (this._editingPath || !this._listed) return;
+                if (el.clientWidth === this._crumbWidth) return;
+                this._renderBreadcrumb();
+            });
+            this._crumbRO.observe(el);
+        }
+        // Edit entries (Explorer/Dolphin convention): a single click on
+        // empty space — or the icon, a separator, the "…" crumb — edits the
+        // path; a double-click anywhere (segments included) edits too.
+        // Segment single clicks navigate and never reach the edit branch
+        // (.seg). Both entries route through _editPathPreempt so a
+        // navigation the gesture itself started is superseded first; the
+        // input also keeps the focus _editPath gives it because neither
+        // handler runs ahead of the press's default focus action (the
+        // tab-rename input works the same way).
         const bar = document.getElementById('sftp-pathbar');
-        if (bar) bar.ondblclick = () => this._editPathPreempt(this._path);
+        if (bar) {
+            bar.onclick = (e) => {
+                const t = e.target;
+                if (t && /\bseg\b/.test(String(t.className || ''))) return;
+                this._editPathPreempt(this._path);
+            };
+            bar.ondblclick = () => this._editPathPreempt(this._path);
+        }
+    },
+
+    _crumbOverflows(el) {
+        return el.clientWidth > 0 && el.scrollWidth > el.clientWidth;
     },
 
     // The double-click gesture's segment clicks may have started a
