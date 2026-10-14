@@ -5,8 +5,14 @@
   const DEFAULT_JUMP_DISTANCE = 8;
   // A block-caret slide starting within this window after a printable local
   // keystroke is typing echo: draw it as a plain block (no in-place glyph
-  // inversion), so just-typed characters are covered, never flashed.
+  // inversion), so just-typed characters are covered, never flashed. This
+  // time signal serves the protocol-cursor path (shell echo is prompt).
   const ECHO_PLAIN_WINDOW_MS = 200;
+  // Stale-credit bound for the software-caret echo classification (see the
+  // echoInputCredits declaration): covers the tail frames of a burst in the
+  // measured multiplexer latency band, caps misclassification of later
+  // app-initiated slides when an echo frame never arrives.
+  const ECHO_CREDIT_CAP = 4;
   const MAX_TIMESTAMPS = 128;
   const MAX_CAPTURE_FRAMES = 12;
   const RGB_COLOR_MODE = 0x03000000;
@@ -100,6 +106,21 @@
     // the caret may cover the just-typed characters but must not flash them
     // inverted, so the glyph pass is skipped for the slide's duration.
     let lastPrintableInputAt = -Infinity;
+    // Pending-echo credits for the software-caret path. The time window
+    // alone cannot classify echo there: an agent TUI behind a multiplexer
+    // renders asynchronously, and the measured keystroke→frame latency in
+    // the herdr chain is 194-375ms — outside ANY window that would still
+    // spare navigation. A printable keystroke banks one credit per printed
+    // character (capped); when a slide starts with the window cold, a credit
+    // pays for it (once, at the latch transition). While the window is warm
+    // it pays instead, so mid-burst frames never drain credits; a burst's
+    // TAIL frames land in the cold zone — L-200ms of frame time, up to ~3
+    // frames in the measured band — and each consumes one credit, which is
+    // why a boolean flag is insufficient for fast typing (T ≤ L-200ms).
+    // Non-printable input clears the balance; echo frames that never come
+    // leave stale credits, so up to CAP later app-initiated slides may
+    // inherit a plain classification — bounded, transient artifacts.
+    let echoInputCredits = 0;
     // Once a slide starts inside the echo window it stays plain for the whole
     // animation run, even when app retargets or blink freezes stretch it past
     // the window — no mid-slide plain/inversion flip.
@@ -628,14 +649,28 @@
       // keeps the plain echo slide even on the alternate buffer (herdr and
       // kimi both enter ?1049h, so the input boxes live there). A multiplexer
       // shell prompt on the alternate buffer keeps the stock inversion.
+      // The software path classifies by pending-echo credits (render
+      // latency through a multiplexer exceeds any safe time window); the
+      // protocol path keeps the prompt-echo time window. The window pays
+      // first: during a fast burst the latest keystroke keeps it warm, so
+      // mid-burst frames classify echo without touching the balance, and
+      // credits are spent only on frames that arrive after the window has
+      // gone cold (a burst's tail).
       const onAlternateBuffer = terminal.buffer.active.type === 'alternate';
+      const withinEchoWindow = clock() - lastPrintableInputAt < ECHO_PLAIN_WINDOW_MS;
+      const echoCreditUsable = cursor.software === true && echoInputCredits > 0 && !withinEchoWindow;
       const echoNow = cursorStyle === 'block'
         && motion.animating
         && (!onAlternateBuffer || cursor.software === true)
-        && clock() - lastPrintableInputAt < ECHO_PLAIN_WINDOW_MS;
+        && (withinEchoWindow || echoCreditUsable);
       if (echoNow && !echoSlideLatched) {
         echoSlideLatched = true;
         instrumentation.echoSlides += 1;
+        // Consume only when a credit actually paid for this run, and only at
+        // the latch transition — not on every animating draw — so earlier
+        // frames of the same burst cannot drain the tail's credits.
+        // Retargets inside the run stay echo via the latch itself.
+        if (echoCreditUsable) echoInputCredits -= 1;
       }
       if (!motion.animating) echoSlideLatched = false;
       const echoSlide = cursorStyle === 'block' && echoSlideLatched;
@@ -854,11 +889,19 @@
       // sequences, control combos as C0 bytes — their cursor echoes are
       // navigation and keep the inversion slide. Wired from the PTY input
       // path, so this sees local keystrokes even when the echo is remote.
+      // A printable keystroke banks one echo credit per printed character
+      // for the software-caret path (its frames may land hundreds of ms late
+      // through a multiplexer); any non-printable input clears the balance,
+      // so a navigation key never inherits a stale typing classification.
       noteInput(data) {
         if (disposed || typeof data !== 'string') return;
-        if (data.includes('\x1b') || data.includes('\x7f')) return;
-        if (!/[\x20-\x7e\u00a0-\uffff]/.test(data)) return;
+        if (data.includes('\x1b') || data.includes('\x7f') || !/[\x20-\x7e\u00a0-\uffff]/.test(data)) {
+          echoInputCredits = 0;
+          return;
+        }
         lastPrintableInputAt = clock();
+        const printed = data.match(/[\x20-\x7e\u00a0-\uffff]/g);
+        echoInputCredits = Math.min(ECHO_CREDIT_CAP, echoInputCredits + printed.length);
       },
       setEnabled(value) {
         enabled = value !== false;

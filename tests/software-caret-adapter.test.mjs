@@ -508,6 +508,123 @@ test('alternate buffer keeps the echo slide when the software caret owns the cur
   assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle');
 });
 
+test('multiplexer render latency beyond the echo window still classifies as typing echo', () => {
+  // Measured keystroke→frame latency through herdr relaying kimi is
+  // 194-375ms: outside any time window that would still spare navigation.
+  // The software-caret path classifies by the pending-echo flag instead.
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  f.terminal.buffer.active.type = 'alternate';
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f);
+  assert.equal(f.adapter.instrumentation.softwareCaret.active, true);
+
+  f.adapter.noteInput('d'); // keystroke at t=0
+  f.setTime(150); render(f); // an unrelated status-line repaint must not consume the flag
+  f.setTime(320);            // the echo frame lands past the 200ms window
+  p.candidate(f.cand({ chunkSeq: 3, x: 6 })); p.parsed(3);
+  render(f);
+
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1, 'late echo frame keeps the plain slide');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle');
+
+  // The flag paid for exactly one slide: a later caret move with no new
+  // printable input (app-initiated redraw) keeps the inversion.
+  f.setTime(500); render(f); // settle
+  f.setTime(700);
+  p.candidate(f.cand({ chunkSeq: 4, x: 7 })); p.parsed(4);
+  render(f);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1, 'stale flag must not reclassify later moves');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph');
+});
+
+test('fast burst: echo credits cover every tail frame after the window goes cold', () => {
+  // Five keystrokes 100ms apart, echo frames 300ms behind (the measured
+  // herdr band): the burst keeps the time window warm through the third
+  // frame, but the frames for keys 4 and 5 land 200ms/300ms after the last
+  // keystroke — the cold zone. A boolean flag pays for only ONE of them and
+  // re-exposes the burst tail to the inversion flash; per-keystroke credits
+  // cover both.
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  f.terminal.buffer.active.type = 'alternate';
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 3 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 4 })); p.parsed(2);
+  render(f);
+
+  const keys = ['a', 'b', 'c', 'd', 'e'];
+  keys.forEach((ch, i) => { f.setTime(i * 100); f.adapter.noteInput(ch); });
+  let seq = 2;
+  const frame = (t, x) => {
+    f.setTime(t);
+    p.candidate(f.cand({ chunkSeq: ++seq, x })); p.parsed(seq);
+    render(f);
+  };
+  const settle = (t) => { f.setTime(t); render(f); };
+
+  frame(300, 5);  // window warm (key 4 at t=300)
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1);
+  settle(395);
+  frame(400, 6);  // window warm (key 5 at t=400)
+  settle(495);
+  frame(500, 7);  // window warm (100ms since key 5)
+  settle(595);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 3, 'warm window pays mid-burst, credits untouched');
+  frame(600, 8);  // cold: 200ms since key 5 — first credit
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 4, 'first cold frame paid by a credit');
+  settle(695);
+  frame(700, 9);  // cold: 300ms since key 5 — second credit (a boolean flag runs out here)
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 5, 'the burst tail stays plain');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle');
+});
+
+test('navigation input drops the pending echo classification', () => {
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  f.terminal.buffer.active.type = 'alternate';
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f);
+
+  f.adapter.noteInput('d');        // typing at t=0...
+  f.setTime(50);
+  f.adapter.noteInput('\x1b[D');   // ...then an arrow key before the echo frame lands
+  f.setTime(300);
+  p.candidate(f.cand({ chunkSeq: 3, x: 4 })); p.parsed(3); // caret moves left (navigation)
+  render(f);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0,
+    'an arrow key must not inherit the typed echo classification');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph');
+});
+
+test('protocol-cursor echo keeps the time window: the pending flag never leaks across sources', () => {
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  f.coreService.isCursorHidden = false; // visible protocol cursor on the normal buffer
+  render(f); // initial snap at cursorX=1
+  f.adapter.noteInput('d'); // keystroke at t=0 (sets the flag too)
+  f.setTime(300);           // shell echo lands past the window
+  f.terminal.buffer.active.cursorX = 2;
+  render(f);
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0,
+    'the software-only pending flag must not classify protocol slides');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph');
+
+  // Control: inside the window the protocol path still classifies echo.
+  f.adapter.noteInput('e');
+  f.terminal.buffer.active.cursorX = 3;
+  render(f);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1);
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle');
+});
+
 function parserFixture(t, { cols = 10, rows = 3, TerminalClass = Terminal, reduced = true } = {}) {
   const f = fixture({ reduced });
   const source = new TerminalClass({ cols, rows });
