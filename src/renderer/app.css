@@ -46,7 +46,7 @@ body.no-animations .startup-splash .cell{transition:none}
 .titlebar{height:38px;background:var(--surface-win);display:flex;align-items:center;padding:0 0 0 12px;flex-shrink:0}
 /* Tauri frameless drag region */
 [data-tauri-drag-region]{-webkit-app-region:drag}
-#tabbar{display:flex;align-items:center;gap:2px;flex:1;overflow:hidden;min-width:0;contain:layout style;will-change:transform}#tabbar *{-webkit-app-region:no-drag}
+#tabbar{display:flex;align-items:center;gap:2px;flex:1;overflow:hidden;min-width:0;padding-right:48px;contain:layout style;will-change:transform}#tabbar *{-webkit-app-region:no-drag}/* padding-right mirrors TAB_STRIP_RIGHT_RESERVE in tabstrip-layout.js: permanent breathing room before the SFTP/transfer/window-control cluster; the empty stretch stays a window-drag area */
 /* Scrollable tab viewport (Windows Terminal tab-row model, ported via
    tabstrip-layout.js): tabs live inside #tab-viewport; the add/menu buttons
    stay OUTSIDE it so overflow can never clip them. The viewport scrolls

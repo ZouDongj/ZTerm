@@ -343,7 +343,11 @@ const TabManager = {
                 siblings++;
                 chrome += (el.offsetWidth || 0) + (cs ? (parseFloat(cs.marginLeft) || 0) + (parseFloat(cs.marginRight) || 0) : 0);
             }
-            const avail = (bar.clientWidth || 0) - chrome - 2 * siblings;
+            // clientWidth includes the right breathing-reserve padding
+            // (TAB_STRIP_RIGHT_RESERVE, mirrored in app.css), so subtract it:
+            // the flips happen while a visible gap remains and the buttons
+            // never jam against the titlebar's right-side cluster.
+            const avail = (bar.clientWidth || 0) - TAB_STRIP_RIGHT_RESERVE - chrome - 2 * siblings;
             // Decision basis: the per-tab CONTENT widths measured at render
             // time (cached on the tab object; unmeasured tabs fall back to
             // the content floor so a never-painted tab still reserves a

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { computeTabStripPlan, TAB_MIN_WIDTH, TAB_MAX_WIDTH, TAB_CONTENT_MIN } = require('../src/renderer/tabstrip-layout.js');
+const { computeTabStripPlan, TAB_MIN_WIDTH, TAB_MAX_WIDTH, TAB_CONTENT_MIN, TAB_STRIP_RIGHT_RESERVE } = require('../src/renderer/tabstrip-layout.js');
 
 test('内容总和放得下：sparse，不钉宽度（按钮紧跟最后的 tab）', () => {
     assert.deepEqual(computeTabStripPlan([110, 140, 200], 1200, 2, 100), { state: 'sparse', tabWidth: null });
@@ -65,4 +65,8 @@ test('默认常量即 WT/MUX 的 100/240 + 内容地板 110', () => {
     assert.equal(TAB_MAX_WIDTH, 240);
     assert.equal(TAB_CONTENT_MIN, 110);
     assert.equal(computeTabStripPlan(Array(10).fill(110), 1017, 2).state, 'overflow'); // 缺省 minWidth 走默认常量
+});
+
+test('右侧呼吸留白常量与 CSS #tabbar padding-right 同步', () => {
+    assert.equal(TAB_STRIP_RIGHT_RESERVE, 48);
 });

@@ -3931,11 +3931,15 @@ async function main() {
       const before = vp.scrollLeft;
       TabManager._nudgeTabStrip(1);
       const afterNudge = vp.scrollLeft;
+      const menuBtn = document.getElementById('btn-menu');
       const overflow = {
         cls: bar.classList.contains('tabbar-overflow'),
         arrows: shown(leftBtn) && shown(rightBtn),
         widths100: widths.length === n && widths.every(w => w === 100),
         nudged: afterNudge > before,
+        // Breathing reserve: even jammed full, the menu button stops
+        // TAB_STRIP_RIGHT_RESERVE (48) px short of the bar's right edge.
+        gapToEdge: menuBtn ? Math.round(bar.getBoundingClientRect().right - menuBtn.getBoundingClientRect().right) : null,
       };
       // Expand far past any plausible content total: deterministic sparse
       // regardless of how many tabs the live session carries (the basis
@@ -3962,6 +3966,7 @@ async function main() {
     check('标签栏溢出：窄条出现滚动箭头且 tab 钉在 100px，拉宽后恢复 sparse（不钉宽、按钮紧跟）',
       !!stripOv && stripOv.overflow && stripOv.overflow.cls === true && stripOv.overflow.arrows === true &&
       stripOv.overflow.widths100 === true && stripOv.overflow.nudged === true &&
+      stripOv.overflow.gapToEdge != null && Math.abs(stripOv.overflow.gapToEdge - 48) <= 3 &&
       stripOv.restored && stripOv.restored.state === 'sparse' && stripOv.restored.noClasses === true &&
       stripOv.restored.arrowsHidden === true && stripOv.restored.inlineCleared === true &&
       stripOv.restored.hug != null && stripOv.restored.hug >= 0 && stripOv.restored.hug < 40,

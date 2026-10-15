@@ -26,6 +26,12 @@
 const TAB_MIN_WIDTH = 100;
 const TAB_MAX_WIDTH = 240;
 const TAB_CONTENT_MIN = 110; // mirrors Flutter's kTabRowContentMin; CSS .tab min-width enforces it at measure time
+// Permanent breathing room between the strip's right end (menu button) and
+// the titlebar's SFTP/transfer/window-control cluster. Mirrored by the
+// #tabbar padding-right in app.css; the caller subtracts it from the
+// availability so the sharing/overflow flips happen while a visible gap
+// remains — the buttons never jam against the window controls.
+const TAB_STRIP_RIGHT_RESERVE = 48;
 
 // desiredWidths: per-tab content px measured with no state classes applied
 // (unmeasurable entries fall back to TAB_CONTENT_MIN); availableWidth: px the
@@ -48,5 +54,5 @@ function computeTabStripPlan(desiredWidths, availableWidth, gap, minWidth) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { computeTabStripPlan, TAB_MIN_WIDTH, TAB_MAX_WIDTH, TAB_CONTENT_MIN };
+    module.exports = { computeTabStripPlan, TAB_MIN_WIDTH, TAB_MAX_WIDTH, TAB_CONTENT_MIN, TAB_STRIP_RIGHT_RESERVE };
 }
