@@ -203,11 +203,12 @@ const TabManager = {
     _renamingTabId: null,
 
     // ── Tab strip layout (Windows Terminal tab-row model) ──
-    // Three states via tabstrip-layout.js on one continuous clamp curve:
-    // sparse pins the 240px cap, sharing pins floor(equal share), overflow
-    // pins 100px + scroll arrows. Widths are pinned in px (not flex shares)
-    // so a close can hold siblings' rects steady while the pointer is over
-    // the strip (MUX defers re-width until pointer-leave for the same reason).
+    // Three states via tabstrip-layout.js, decided on the measured per-tab
+    // content widths: sparse keeps content sizing (buttons hug the last
+    // tab), sharing pins floor(equal share), overflow pins 100px + scroll
+    // arrows. Widths are pinned in px (not flex shares) so a close can hold
+    // siblings' rects steady while the pointer is over the strip (MUX defers
+    // re-width until pointer-leave for the same reason).
     _pointerInStrip: false,
     _deferStripRelayout: false,
     _lastStripPlan: null,
@@ -325,7 +326,6 @@ const TabManager = {
         const deferred = this._deferStripRelayout && this._pointerInStrip && plan;
         if (force || !deferred) {
             this._deferStripRelayout = false;
-            const count = vp.querySelectorAll('.tab').length;
             // The viewport does not grow (flex:0 1 auto) so the add/menu
             // buttons stay anchored right after the last tab — meaning its
             // width is the CONTENT width, not the availability. Measure from
@@ -344,7 +344,16 @@ const TabManager = {
                 chrome += (el.offsetWidth || 0) + (cs ? (parseFloat(cs.marginLeft) || 0) + (parseFloat(cs.marginRight) || 0) : 0);
             }
             const avail = (bar.clientWidth || 0) - chrome - 2 * siblings;
-            plan = computeTabStripPlan(count, avail, 2, TAB_MIN_WIDTH, TAB_MAX_WIDTH);
+            // Decision basis: the per-tab CONTENT widths measured at render
+            // time (cached on the tab object; unmeasured tabs fall back to
+            // the content floor so a never-painted tab still reserves a
+            // sane slot).
+            const desired = [...vp.querySelectorAll('.tab')].map(el => {
+                const t = this.tabs.find(x => x.id === el.getAttribute('data-tab'));
+                const w = t && t._desiredW;
+                return (Number.isFinite(w) && w > 0) ? w : Math.max(TAB_CONTENT_MIN, el.offsetWidth || 0);
+            });
+            plan = computeTabStripPlan(desired, avail, 2, TAB_MIN_WIDTH);
             this._lastStripPlan = plan;
         }
         bar.classList.toggle('tabbar-sharing', plan.state === 'sharing');
@@ -1110,6 +1119,21 @@ const TabManager = {
             vp.appendChild(div);
         });
         this.updateActiveClass();
+        // Measure each tab's content-driven width with the state classes
+        // lifted (they would otherwise pin the width and poison the
+        // measurement): _relayout decides the sparse->sharing flip from the
+        // per-tab content total. The kept rename node and mid-exit tabs have
+        // unstable widths — keep their cached value instead. Removal and
+        // re-pinning (in _relayout below) happen in the same task, so no
+        // frame is ever painted with the classes off.
+        bar.classList.remove('tabbar-sharing', 'tabbar-overflow');
+        const byId = new Map(this.tabs.map(t => [t.id, t]));
+        vp.querySelectorAll('.tab').forEach(el => {
+            const t = byId.get(el.getAttribute('data-tab'));
+            if (!t || el === renameKeep || this._closingTabs.has(t.id)) return;
+            const w = el.offsetWidth;
+            if (Number.isFinite(w) && w > 0) t._desiredW = w;
+        });
         vp.scrollLeft = prevScroll;
         this._relayout(false);
     },

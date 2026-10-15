@@ -56,15 +56,14 @@ body.no-animations .startup-splash .cell{transition:none}
 #tabbar.tabbar-overflow .tab-scroll-btn{display:inline-flex}
 .tab-scroll-btn:hover{background:rgba(255,255,255,0.06);color:var(--text-1)}
 .tab-scroll-btn.disabled{opacity:0.3;pointer-events:none}
-/* Tab width states (numbers mirror tabstrip-layout.js): every state pins an
-   equal JS-computed inline width — a continuous clamp curve: sparse pins the
-   240px cap, sharing pins floor(equal share), overflow pins 100px and
-   scrolls. Pinning (not flex shares) is required by the close-deferral
-   contract — a pure flex share would re-widen siblings the instant one
-   closes, moving them under the pointer. Widths change instantly, never
-   through a transition (layout-animation stalls the WebView2 pump —
-   see .tab-exit). */
-.tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;border-radius:12px;transition:background 0.12s,color 0.12s;white-space:nowrap;height:28px;max-width:240px;-webkit-app-region:no-drag;user-select:none}/* max-width mirrors TAB_MAX_WIDTH in tabstrip-layout.js */
+/* Tab width states (numbers mirror tabstrip-layout.js): sparse leaves tabs
+   at their content width (no inline pinning — the add/menu buttons hug the
+   last tab); sharing/overflow pin an equal JS-computed inline width.
+   Pinning (not flex shares) is required by the close-deferral contract — a
+   pure flex share would re-widen siblings the instant one closes, moving
+   them under the pointer. Widths change instantly, never through a
+   transition (layout-animation stalls the WebView2 pump — see .tab-exit). */
+.tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;border-radius:12px;transition:background 0.12s,color 0.12s;white-space:nowrap;height:28px;min-width:110px;max-width:240px;-webkit-app-region:no-drag;user-select:none}/* min-width mirrors TAB_CONTENT_MIN, max-width mirrors TAB_MAX_WIDTH in tabstrip-layout.js — the sparse flip is decided from these measured content widths */
 #tabbar.tabbar-sharing .tab,#tabbar.tabbar-overflow .tab{flex:0 0 auto;min-width:0;max-width:none}
 #tabbar.tabbar-overflow .tab{width:100px}/* mirrors TAB_MIN_WIDTH in tabstrip-layout.js; inline pinning alone would arrive too late — render() restores scrollLeft before _relayout pins widths, so the width must come from CSS at append time */
 /* Semantic action buttons inside tabs: UA reset + stable hit regions.

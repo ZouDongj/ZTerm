@@ -3904,10 +3904,11 @@ async function main() {
     // 15.11 Tab strip overflow: squeezing the bar below the 100px/tab floor
     //     must flip the strip to overflow mode (scroll arrows shown, tabs
     //     pinned at exactly 100px, arrow nudge scrolls the viewport), and
-    //     expanding it past the 240px/tab cap must return it to sparse (tabs
-    //     pinned at the 240 max, arrows hidden). The restore check uses an
-    //     oversized basis rather than the natural width: the live session can
-    //     carry enough tabs that even the full window stays in overflow.
+    //     expanding it well past the content total must return it to sparse
+    //     (no inline width pinning, arrows hidden, add button hugging the
+    //     last tab). The restore check uses an oversized basis rather than
+    //     the natural width: the live session can carry enough tabs that
+    //     even the full window stays in overflow.
     const stripOv = await cdp.eval(`(async () => {
       const bar = document.getElementById('tabbar');
       const vp = document.getElementById('tab-viewport');
@@ -3936,16 +3937,21 @@ async function main() {
         widths100: widths.length === n && widths.every(w => w === 100),
         nudged: afterNudge > before,
       };
-      // Expand past the 240 cap: deterministic sparse regardless of how many
-      // tabs the live session carries (the basis overflows the window, but
-      // clientWidth still reports it).
+      // Expand far past any plausible content total: deterministic sparse
+      // regardless of how many tabs the live session carries (the basis
+      // overflows the window, but clientWidth still reports it).
       bar.style.flex = '0 0 ' + (n * 260 + 400) + 'px';
       TabManager._relayout(true);
+      const lastTab = [...vp.querySelectorAll('.tab')].pop();
+      const addBtn = document.getElementById('btn-add-tab');
+      const hug = (lastTab && addBtn)
+        ? addBtn.getBoundingClientRect().left - lastTab.getBoundingClientRect().right : null;
       const restored = {
         state: TabManager._lastStripPlan && TabManager._lastStripPlan.state,
         noClasses: !bar.classList.contains('tabbar-overflow') && !bar.classList.contains('tabbar-sharing'),
         arrowsHidden: !shown(leftBtn) && !shown(rightBtn),
-        pinnedMax: [...vp.querySelectorAll('.tab')].every(el => el.style.width === '240px' && el.offsetWidth === 240),
+        inlineCleared: [...vp.querySelectorAll('.tab')].every(el => el.style.width === ''),
+        hug,
       };
       // Hand the strip back to its natural width for the following sections.
       bar.style.flex = '';
@@ -3953,11 +3959,12 @@ async function main() {
       for (const id of created) { try { TabManager.closeTab(id); } catch (e) {} }
       return { n, squeeze, widths, overflow, restored };
     })()`).catch((e) => ({ evalError: String((e && e.message) || e) }));
-    check('标签栏溢出：窄条出现滚动箭头且 tab 钉在 100px，拉宽后恢复 sparse',
+    check('标签栏溢出：窄条出现滚动箭头且 tab 钉在 100px，拉宽后恢复 sparse（不钉宽、按钮紧跟）',
       !!stripOv && stripOv.overflow && stripOv.overflow.cls === true && stripOv.overflow.arrows === true &&
       stripOv.overflow.widths100 === true && stripOv.overflow.nudged === true &&
       stripOv.restored && stripOv.restored.state === 'sparse' && stripOv.restored.noClasses === true &&
-      stripOv.restored.arrowsHidden === true && stripOv.restored.pinnedMax === true,
+      stripOv.restored.arrowsHidden === true && stripOv.restored.inlineCleared === true &&
+      stripOv.restored.hug != null && stripOv.restored.hug >= 0 && stripOv.restored.hug < 40,
       JSON.stringify(stripOv));
     await sleep(500); // let the staggered removals of the padding tabs settle
 
