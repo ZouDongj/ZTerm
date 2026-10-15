@@ -51,7 +51,7 @@ body.no-animations .startup-splash .cell{transition:none}
    tabstrip-layout.js): tabs live inside #tab-viewport; the add/menu buttons
    stay OUTSIDE it so overflow can never clip them. The viewport scrolls
    programmatically only (arrows + wheel) — no visible scrollbar. */
-#tab-viewport{display:flex;align-items:center;gap:2px;flex:1;min-width:0;overflow:hidden;position:relative}
+#tab-viewport{display:flex;align-items:center;gap:2px;flex:0 1 auto;min-width:0;overflow:hidden;position:relative}/* no grow: the add/menu buttons stay anchored right after the last tab; _relayout measures availability from #tabbar */
 .tab-scroll-btn{width:24px;height:24px;border-radius:6px;flex-shrink:0;display:none;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;background:transparent;border:none;padding:0;user-select:none;transition:background 0.12s,color 0.12s}
 #tabbar.tabbar-overflow .tab-scroll-btn{display:inline-flex}
 .tab-scroll-btn:hover{background:rgba(255,255,255,0.06);color:var(--text-1)}

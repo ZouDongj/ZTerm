@@ -326,17 +326,24 @@ const TabManager = {
         if (force || !deferred) {
             this._deferStripRelayout = false;
             const count = vp.querySelectorAll('.tab').length;
-            // The viewport holds ONLY tabs, so its width with the arrows
-            // hidden is exactly the availability — no button widths/margins
-            // to measure and drift out of sync. When the arrows are showing,
-            // add back what they occupy (their width plus the two bar gaps
-            // they displace) so the decision basis stays the arrows-hidden
-            // width and showing them can never flip the verdict back.
-            let avail = vp.clientWidth || 0;
-            const leftArrow = document.getElementById('tab-scroll-left');
-            const rightArrow = document.getElementById('tab-scroll-right');
-            const arrowW = (leftArrow ? leftArrow.offsetWidth || 0 : 0) + (rightArrow ? rightArrow.offsetWidth || 0 : 0);
-            if (arrowW) avail += arrowW + 4;
+            // The viewport does not grow (flex:0 1 auto) so the add/menu
+            // buttons stay anchored right after the last tab — meaning its
+            // width is the CONTENT width, not the availability. Measure from
+            // the bar instead: total width minus every visible non-viewport
+            // sibling (outer width incl. margins) and the flex gaps. The
+            // scroll arrows are skipped: the decision basis is the
+            // arrows-hidden width, so toggling them can never flip the
+            // verdict back (no oscillation).
+            let chrome = 0, siblings = 0;
+            const gcs = typeof getComputedStyle === 'function' ? getComputedStyle : null;
+            for (const el of bar.children) {
+                if (el === vp || el.id === 'tab-scroll-left' || el.id === 'tab-scroll-right') continue;
+                const cs = gcs ? gcs(el) : null;
+                if (cs && cs.display === 'none') continue;
+                siblings++;
+                chrome += (el.offsetWidth || 0) + (cs ? (parseFloat(cs.marginLeft) || 0) + (parseFloat(cs.marginRight) || 0) : 0);
+            }
+            const avail = (bar.clientWidth || 0) - chrome - 2 * siblings;
             plan = computeTabStripPlan(count, avail, 2, TAB_MIN_WIDTH, TAB_MAX_WIDTH);
             this._lastStripPlan = plan;
         }
