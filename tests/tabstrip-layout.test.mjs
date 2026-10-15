@@ -1,7 +1,8 @@
 // ZTerm - tab strip layout classification unit tests (node --test)
-// The three states mirror Windows Terminal's tab row: sparse (content-sized,
-// 240 cap), sharing (equal pinned widths, 100 floor), overflow (100 pinned +
-// scroll). Boundary correctness here is what keeps trailing tabs reachable.
+// The three states mirror Windows Terminal's tab row as one continuous clamp
+// curve: sparse pins the 240 cap, sharing pins floor(equal share) down to the
+// 100 floor, overflow pins 100 + scrolls. Boundary correctness here is what
+// keeps the width jumps monotone and trailing tabs reachable.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -9,13 +10,13 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { computeTabStripPlan, TAB_MIN_WIDTH, TAB_MAX_WIDTH } = require('../src/renderer/tabstrip-layout.js');
 
-test('少 tab：sparse，不钉宽度（内容自适应）', () => {
-    assert.deepEqual(computeTabStripPlan(3, 1200, 2, 100, 240), { state: 'sparse', tabWidth: null });
+test('少 tab：sparse，钉上限宽度（WT 等宽语义）', () => {
+    assert.deepEqual(computeTabStripPlan(3, 1200, 2, 100, 240), { state: 'sparse', tabWidth: 240 });
 });
 
 test('share 恰好等于上限仍是 sparse（240 边界）', () => {
-    assert.deepEqual(computeTabStripPlan(5, 1210, 2, 100, 240), { state: 'sparse', tabWidth: null }); // share = 240.4
-    assert.deepEqual(computeTabStripPlan(5, 1208, 2, 100, 240), { state: 'sparse', tabWidth: null }); // share = 240.0
+    assert.deepEqual(computeTabStripPlan(5, 1210, 2, 100, 240), { state: 'sparse', tabWidth: 240 }); // share = 240.4
+    assert.deepEqual(computeTabStripPlan(5, 1208, 2, 100, 240), { state: 'sparse', tabWidth: 240 }); // share = 240.0
 });
 
 test('中等数量：sharing，等分取整且不低于下限', () => {

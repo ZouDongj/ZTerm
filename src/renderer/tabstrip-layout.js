@@ -1,15 +1,19 @@
 // ZTerm - tab strip layout classification (pure logic; browser global + CommonJS dual export, node:test-able)
 //
 // Three states, mirroring Windows Terminal's tab row (MUX TabView Equal mode,
-// ported earlier by zterm-flutter's TabRowMetrics):
-//   sparse   - few tabs: tabs are content-sized, capped at TAB_MAX_WIDTH.
+// ported earlier by zterm-flutter's TabRowMetrics). The pinned width is a
+// single continuous clamp(avail/count, TAB_MIN_WIDTH, TAB_MAX_WIDTH) curve:
+//   sparse   - few tabs: every tab pinned at TAB_MAX_WIDTH (share >= max).
 //   sharing  - tabs share the strip equally at floor(share) px each while
-//              100 <= share < 240 (equal widths, shrink to fit).
+//              min <= share < max (equal widths, shrink to fit).
 //   overflow - share fell below TAB_MIN_WIDTH: pin every tab to
 //              TAB_MIN_WIDTH and let the strip scroll (arrow buttons + wheel)
 //              instead of shrinking further. Without this the flex line
 //              overflows its hidden-clip parent and trailing tabs (then the
 //              add button) become unreachable.
+// The clamp keeps the curve continuous: adding a tab can only ever shrink
+// the pinned width, never grow it, and the state boundaries are invisible
+// (240 -> 239 -> ... -> 101 -> 100 + arrows).
 //
 // The caller measures the strip with the scroll arrows HIDDEN and decides
 // from that single availability, so toggling the arrows can never oscillate
@@ -23,7 +27,8 @@ const TAB_MAX_WIDTH = 240;
 // exit fade, so they count); availableWidth: px the tab viewport would get
 // with the arrows hidden; gap: CSS gap between tabs.
 // Returns { state, tabWidth } — tabWidth is the px width to pin on every tab
-// in sharing/overflow, null in sparse (content-sized).
+// (max in sparse, floor(share) in sharing, min in overflow), or null for
+// degenerate inputs (no measurement: leave tabs to CSS content sizing).
 function computeTabStripPlan(count, availableWidth, gap, minWidth, maxWidth) {
     const min = minWidth ?? TAB_MIN_WIDTH;
     const max = maxWidth ?? TAB_MAX_WIDTH;
@@ -32,7 +37,7 @@ function computeTabStripPlan(count, availableWidth, gap, minWidth, maxWidth) {
         return { state: 'sparse', tabWidth: null };
     }
     const share = (availableWidth - g * (count - 1)) / count;
-    if (share >= max) return { state: 'sparse', tabWidth: null };
+    if (share >= max) return { state: 'sparse', tabWidth: max };
     if (share >= min) return { state: 'sharing', tabWidth: Math.max(min, Math.floor(share)) };
     return { state: 'overflow', tabWidth: min };
 }

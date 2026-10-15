@@ -3904,10 +3904,10 @@ async function main() {
     // 15.11 Tab strip overflow: squeezing the bar below the 100px/tab floor
     //     must flip the strip to overflow mode (scroll arrows shown, tabs
     //     pinned at exactly 100px, arrow nudge scrolls the viewport), and
-    //     expanding it past the 240px/tab cap must return it to sparse
-    //     (arrows hidden, inline width pins cleared). The restore check uses
-    //     an oversized basis rather than the natural width: the live session
-    //     can carry enough tabs that even the full window stays in overflow.
+    //     expanding it past the 240px/tab cap must return it to sparse (tabs
+    //     pinned at the 240 max, arrows hidden). The restore check uses an
+    //     oversized basis rather than the natural width: the live session can
+    //     carry enough tabs that even the full window stays in overflow.
     const stripOv = await cdp.eval(`(async () => {
       const bar = document.getElementById('tabbar');
       const vp = document.getElementById('tab-viewport');
@@ -3945,7 +3945,7 @@ async function main() {
         state: TabManager._lastStripPlan && TabManager._lastStripPlan.state,
         noClasses: !bar.classList.contains('tabbar-overflow') && !bar.classList.contains('tabbar-sharing'),
         arrowsHidden: !shown(leftBtn) && !shown(rightBtn),
-        inlineCleared: [...vp.querySelectorAll('.tab')].every(el => !el.style.width),
+        pinnedMax: [...vp.querySelectorAll('.tab')].every(el => el.style.width === '240px' && el.offsetWidth === 240),
       };
       // Hand the strip back to its natural width for the following sections.
       bar.style.flex = '';
@@ -3957,7 +3957,7 @@ async function main() {
       !!stripOv && stripOv.overflow && stripOv.overflow.cls === true && stripOv.overflow.arrows === true &&
       stripOv.overflow.widths100 === true && stripOv.overflow.nudged === true &&
       stripOv.restored && stripOv.restored.state === 'sparse' && stripOv.restored.noClasses === true &&
-      stripOv.restored.arrowsHidden === true && stripOv.restored.inlineCleared === true,
+      stripOv.restored.arrowsHidden === true && stripOv.restored.pinnedMax === true,
       JSON.stringify(stripOv));
     await sleep(500); // let the staggered removals of the padding tabs settle
 

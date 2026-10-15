@@ -203,11 +203,11 @@ const TabManager = {
     _renamingTabId: null,
 
     // ── Tab strip layout (Windows Terminal tab-row model) ──
-    // Three states via tabstrip-layout.js: sparse (content-sized, 240px cap),
-    // sharing (equal JS-pinned widths, 100px floor), overflow (100px pinned +
-    // scroll arrows). Widths are pinned in px (not flex shares) so a close
-    // can hold siblings' rects steady while the pointer is over the strip
-    // (MUX defers re-width until pointer-leave for the same reason).
+    // Three states via tabstrip-layout.js on one continuous clamp curve:
+    // sparse pins the 240px cap, sharing pins floor(equal share), overflow
+    // pins 100px + scroll arrows. Widths are pinned in px (not flex shares)
+    // so a close can hold siblings' rects steady while the pointer is over
+    // the strip (MUX defers re-width until pointer-leave for the same reason).
     _pointerInStrip: false,
     _deferStripRelayout: false,
     _lastStripPlan: null,
@@ -350,7 +350,7 @@ const TabManager = {
         bar.classList.toggle('tabbar-sharing', plan.state === 'sharing');
         bar.classList.toggle('tabbar-overflow', plan.state === 'overflow');
         vp.querySelectorAll('.tab').forEach(el => {
-            el.style.width = plan.state === 'sharing' ? plan.tabWidth + 'px' : '';
+            el.style.width = plan.tabWidth == null ? '' : plan.tabWidth + 'px';
         });
         this._updateScrollArrows();
     },
