@@ -291,7 +291,7 @@ function loadVm() {
     // split.js/sftp.js own these as script-level bindings; the parts they read
     // at fit time are the drag/window-resize/dock-animation suppression flags.
     vm.runInContext('var _spannerDrag = false; var _windowResizing = false; var _sftpAnimating = false;', ctx);
-    for (const f of ['split-layout.js', 'pane-fields.js', 'ssh-attempts.js', 'tab-title-utils.js', 'terminal.js', 'tabs.js', 'ipc.js']) {
+    for (const f of ['split-layout.js', 'pane-fields.js', 'ssh-attempts.js', 'tab-title-utils.js', 'terminal.js', 'tabstrip-layout.js', 'tabs.js', 'ipc.js']) {
         vm.runInContext(src(f), ctx, { filename: f });
     }
     ctx.TabManager = vm.runInContext('TabManager', ctx);

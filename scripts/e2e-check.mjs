@@ -3901,6 +3901,66 @@ async function main() {
       }
     }
 
+    // 15.11 Tab strip overflow: squeezing the bar below the 100px/tab floor
+    //     must flip the strip to overflow mode (scroll arrows shown, tabs
+    //     pinned at exactly 100px, arrow nudge scrolls the viewport), and
+    //     expanding it past the 240px/tab cap must return it to sparse
+    //     (arrows hidden, inline width pins cleared). The restore check uses
+    //     an oversized basis rather than the natural width: the live session
+    //     can carry enough tabs that even the full window stays in overflow.
+    const stripOv = await cdp.eval(`(async () => {
+      const bar = document.getElementById('tabbar');
+      const vp = document.getElementById('tab-viewport');
+      if (!bar || !vp) return { error: 'strip chrome missing' };
+      const created = [];
+      while (TabManager.tabs.length < 3) {
+        created.push(TabManager.createTab({ name: 'E2E-STRIP', type: 'local' }));
+      }
+      const n = TabManager.tabs.length;
+      const squeeze = Math.max(160, n * 100 - 20);
+      bar.style.flex = '0 0 ' + squeeze + 'px';
+      TabManager._relayout(true);
+      const leftBtn = document.getElementById('tab-scroll-left');
+      const rightBtn = document.getElementById('tab-scroll-right');
+      const shown = (el) => !!el && getComputedStyle(el).display !== 'none';
+      const widths = [...vp.querySelectorAll('.tab')].map(el => el.offsetWidth);
+      // The live session may already sit in overflow with the strip scrolled
+      // to the active tab — start from the left edge so the nudge can move.
+      vp.scrollLeft = 0;
+      const before = vp.scrollLeft;
+      TabManager._nudgeTabStrip(1);
+      const afterNudge = vp.scrollLeft;
+      const overflow = {
+        cls: bar.classList.contains('tabbar-overflow'),
+        arrows: shown(leftBtn) && shown(rightBtn),
+        widths100: widths.length === n && widths.every(w => w === 100),
+        nudged: afterNudge > before,
+      };
+      // Expand past the 240 cap: deterministic sparse regardless of how many
+      // tabs the live session carries (the basis overflows the window, but
+      // clientWidth still reports it).
+      bar.style.flex = '0 0 ' + (n * 260 + 400) + 'px';
+      TabManager._relayout(true);
+      const restored = {
+        state: TabManager._lastStripPlan && TabManager._lastStripPlan.state,
+        noClasses: !bar.classList.contains('tabbar-overflow') && !bar.classList.contains('tabbar-sharing'),
+        arrowsHidden: !shown(leftBtn) && !shown(rightBtn),
+        inlineCleared: [...vp.querySelectorAll('.tab')].every(el => !el.style.width),
+      };
+      // Hand the strip back to its natural width for the following sections.
+      bar.style.flex = '';
+      TabManager._relayout(true);
+      for (const id of created) { try { TabManager.closeTab(id); } catch (e) {} }
+      return { n, squeeze, widths, overflow, restored };
+    })()`).catch((e) => ({ evalError: String((e && e.message) || e) }));
+    check('标签栏溢出：窄条出现滚动箭头且 tab 钉在 100px，拉宽后恢复 sparse',
+      !!stripOv && stripOv.overflow && stripOv.overflow.cls === true && stripOv.overflow.arrows === true &&
+      stripOv.overflow.widths100 === true && stripOv.overflow.nudged === true &&
+      stripOv.restored && stripOv.restored.state === 'sparse' && stripOv.restored.noClasses === true &&
+      stripOv.restored.arrowsHidden === true && stripOv.restored.inlineCleared === true,
+      JSON.stringify(stripOv));
+    await sleep(500); // let the staggered removals of the padding tabs settle
+
     // Cleanup: close this section's tabs (after the send path is restored, so
     // the pty-destroy traffic reaches the backends)
     await cdp.eval(`(() => { [${A}, ${B}, ${N}, ${C}, ${CC}, ${E}, ${F}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} }); return true; })()`).catch(() => null);

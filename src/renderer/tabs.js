@@ -202,10 +202,177 @@ const TabManager = {
     // node so background lifecycle redraws never interrupt the typing.
     _renamingTabId: null,
 
+    // ── Tab strip layout (Windows Terminal tab-row model) ──
+    // Three states via tabstrip-layout.js: sparse (content-sized, 240px cap),
+    // sharing (equal JS-pinned widths, 100px floor), overflow (100px pinned +
+    // scroll arrows). Widths are pinned in px (not flex shares) so a close
+    // can hold siblings' rects steady while the pointer is over the strip
+    // (MUX defers re-width until pointer-leave for the same reason).
+    _pointerInStrip: false,
+    _deferStripRelayout: false,
+    _lastStripPlan: null,
+    _stripObserver: null,
+
+    // Build (idempotently) the strip chrome: ‹ viewport › before the
+    // add/menu buttons. Also repairs bare stub DOMs (tests) that pre-populate
+    // #tabbar without the viewport: stray .tab children move inside it.
+    _ensureStripChrome() {
+        const bar = document.getElementById('tabbar');
+        if (!bar) return null;
+        let vp = document.getElementById('tab-viewport');
+        if (!vp) {
+            const mkArrow = (id, icon, dir) => {
+                const b = document.createElement('div');
+                b.id = id;
+                b.className = 'tab-scroll-btn';
+                b.innerHTML = Icons.iconSvg(icon, 12);
+                this._wireScrollArrow(b, dir);
+                return b;
+            };
+            vp = document.createElement('div');
+            vp.id = 'tab-viewport';
+            const first = bar.children[0] || null;
+            bar.insertBefore(mkArrow('tab-scroll-left', 'chevron-left', -1), first);
+            bar.insertBefore(vp, first);
+            bar.insertBefore(mkArrow('tab-scroll-right', 'chevron-right', 1), first);
+            // Adopt any tabs a stub/test placed directly under #tabbar.
+            bar.querySelectorAll('.tab').forEach(el => { if (el.parentElement === bar) vp.appendChild(el); });
+        }
+        return vp;
+    },
+
+    _wireStripInteraction(bar) {
+        if (bar._stripWired) return;
+        bar._stripWired = true;
+        const vp = document.getElementById('tab-viewport');
+        if (vp) {
+            // Wheel over the strip scrolls it horizontally; map the dominant
+            // axis so both vertical wheels and trackpad/tilt horizontal
+            // deltas work (WebView2 wheel deltas are always pixel-mode).
+            vp.addEventListener('wheel', (e) => {
+                const d = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+                if (!d) return;
+                vp.scrollLeft += d;
+                if (e.cancelable) e.preventDefault();
+            }, { passive: false });
+            vp.addEventListener('scroll', () => this._updateScrollArrows());
+        }
+        bar.addEventListener('pointerenter', () => { this._pointerInStrip = true; });
+        bar.addEventListener('pointerleave', () => {
+            this._pointerInStrip = false;
+            if (this._deferStripRelayout) {
+                this._deferStripRelayout = false;
+                this._relayout(true);
+            }
+        });
+        if (typeof ResizeObserver === 'function') {
+            this._stripObserver = new ResizeObserver(() => this._relayout(true));
+            this._stripObserver.observe(bar);
+        }
+    },
+
+    // Click-and-hold scroll arrow: 50px per step (MUX TabView's scroll
+    // amount), auto-repeating while held like the XAML RepeatButton.
+    _wireScrollArrow(btn, dir) {
+        let repeat = null, delay = null;
+        const stop = () => {
+            if (delay) { clearTimeout(delay); delay = null; }
+            if (repeat) { clearInterval(repeat); repeat = null; }
+        };
+        btn.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0 || btn.classList.contains('disabled')) return;
+            e.preventDefault();
+            // Capture the pointer so the hold keeps reporting pointerup even
+            // if the cursor slips off the button; a window blur mid-hold
+            // (alt-tab) must never leave the repeat timer running.
+            if (btn.setPointerCapture) { try { btn.setPointerCapture(e.pointerId); } catch (err) {} }
+            this._nudgeTabStrip(dir);
+            stop();
+            delay = setTimeout(() => { repeat = setInterval(() => this._nudgeTabStrip(dir), 90); }, 350);
+        });
+        btn.addEventListener('pointerup', stop);
+        btn.addEventListener('pointercancel', stop);
+        btn.addEventListener('pointerleave', stop);
+        if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('blur', stop);
+    },
+
+    _nudgeTabStrip(dir) {
+        const vp = document.getElementById('tab-viewport');
+        if (!vp) return;
+        vp.scrollLeft += dir * 50;
+        this._updateScrollArrows();
+    },
+
+    _updateScrollArrows() {
+        const vp = document.getElementById('tab-viewport');
+        const left = document.getElementById('tab-scroll-left');
+        const right = document.getElementById('tab-scroll-right');
+        if (!vp || !left || !right) return;
+        const maxScroll = (vp.scrollWidth || 0) - (vp.clientWidth || 0);
+        left.classList.toggle('disabled', (vp.scrollLeft || 0) <= 1);
+        right.classList.toggle('disabled', (vp.scrollLeft || 0) >= maxScroll - 1);
+    },
+
+    // Recompute the strip state and pin tab widths. While a close deferral is
+    // armed (pointer over the strip), re-apply the last plan instead: the DOM
+    // may lose the closing tab, but the survivors keep their pixel rects
+    // until the pointer leaves.
+    _relayout(force) {
+        const bar = document.getElementById('tabbar');
+        const vp = document.getElementById('tab-viewport');
+        if (!bar || !vp) return;
+        let plan = this._lastStripPlan;
+        const deferred = this._deferStripRelayout && this._pointerInStrip && plan;
+        if (force || !deferred) {
+            this._deferStripRelayout = false;
+            const count = vp.querySelectorAll('.tab').length;
+            // The viewport holds ONLY tabs, so its width with the arrows
+            // hidden is exactly the availability — no button widths/margins
+            // to measure and drift out of sync. When the arrows are showing,
+            // add back what they occupy (their width plus the two bar gaps
+            // they displace) so the decision basis stays the arrows-hidden
+            // width and showing them can never flip the verdict back.
+            let avail = vp.clientWidth || 0;
+            const leftArrow = document.getElementById('tab-scroll-left');
+            const rightArrow = document.getElementById('tab-scroll-right');
+            const arrowW = (leftArrow ? leftArrow.offsetWidth || 0 : 0) + (rightArrow ? rightArrow.offsetWidth || 0 : 0);
+            if (arrowW) avail += arrowW + 4;
+            plan = computeTabStripPlan(count, avail, 2, TAB_MIN_WIDTH, TAB_MAX_WIDTH);
+            this._lastStripPlan = plan;
+        }
+        bar.classList.toggle('tabbar-sharing', plan.state === 'sharing');
+        bar.classList.toggle('tabbar-overflow', plan.state === 'overflow');
+        vp.querySelectorAll('.tab').forEach(el => {
+            el.style.width = plan.state === 'sharing' ? plan.tabWidth + 'px' : '';
+        });
+        this._updateScrollArrows();
+    },
+
+    // Bring a tab fully into the viewport (used on switch/create; a no-op
+    // when the strip fits). Manual math instead of scrollIntoView: the
+    // latter would also scroll outer containers (block axis) on some pages.
+    _scrollTabIntoView(tabId) {
+        const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => fn();
+        raf(() => {
+            const vp = document.getElementById('tab-viewport');
+            const el = vp && vp.querySelector(`.tab[data-tab="${tabId}"]`);
+            if (!vp || !el) return;
+            if (!Number.isFinite(el.offsetLeft) || !Number.isFinite(el.offsetWidth)) return;
+            const left = el.offsetLeft, right = left + el.offsetWidth;
+            if (left < vp.scrollLeft) vp.scrollLeft = left;
+            else if (right > vp.scrollLeft + vp.clientWidth) vp.scrollLeft = right - vp.clientWidth;
+            this._updateScrollArrows();
+        });
+    },
+
     init() {
-        // Mount chrome once: addBtn / menuBtn (no longer rebuilt on every render)
+        // Mount chrome once: scroll arrows + viewport / addBtn / menuBtn (no
+        // longer rebuilt on every render). Tabs live INSIDE the viewport so
+        // the add/menu buttons can never be overflow-clipped (WT keeps its
+        // "+" in the non-scrolling footer for the same reason).
         const bar = document.getElementById('tabbar');
         if (bar) {
+            this._ensureStripChrome();
             if (!document.getElementById('btn-add-tab')) {
                 const addBtn = document.createElement('div');
                 addBtn.id = 'btn-add-tab';
@@ -225,6 +392,7 @@ const TabManager = {
                 menuBtn.onclick = (e) => { e.stopPropagation(); toggleMenuPopup(); };
                 bar.appendChild(menuBtn);
             }
+            this._wireStripInteraction(bar);
         }
 
         ipcRenderer.once('profiles', async (event, { profiles, sshProfiles, lastTabs }) => {
@@ -347,6 +515,9 @@ const TabManager = {
     },
 
     createTab(options = {}) {
+        // A new tab is an explicit geometry change: drop any close-deferral
+        // so the strip re-plans immediately and the new tab is reachable.
+        this._deferStripRelayout = false;
         const { name, type, command, args, host, port, user, credId, privateKey, sshProfileId } = options;
         const id = 't_' + (this._counter++);
         const isSSH = type === 'ssh';
@@ -396,6 +567,7 @@ const TabManager = {
         }
         this.activeId = id;
         this.updateActiveClass();
+        this._scrollTabIntoView(id);
         const tab = this.tabs.find(t => t.id === id);
         if (tab && tab.type === 'settings') {
             document.getElementById('settings-pane').classList.add('active');
@@ -514,6 +686,11 @@ const TabManager = {
             document.getElementById('settings-pane')?.classList.remove('active');
         }
         this._closingTabs.add(id);
+        // MUX TabView defers re-width after a tab close until the pointer
+        // leaves the strip, so rapid-fire closes never move the next tab's
+        // close button out from under the cursor. Arm that deferral here;
+        // render()/_relayout() keep applying the pre-close plan while set.
+        if (this._pointerInStrip) this._deferStripRelayout = true;
         // Cancellation is committed at initiation, not at the deferred
         // removal: an attempt still in flight is cancelled by its immutable
         // identity (the main process locates that exact pending generation),
@@ -849,6 +1026,11 @@ const TabManager = {
 
     render() {
         const bar = document.getElementById('tabbar');
+        const vp = this._ensureStripChrome() || bar;
+        // The rebuild collapses the viewport's scroll width to zero and back;
+        // without a restore the scroll offset silently clamps to 0 and the
+        // strip jumps to its left edge on every background redraw.
+        const prevScroll = vp.scrollLeft || 0;
         // An in-flight rename must survive background redraws (lifecycle
         // events render at any time): rebuilding this tab would remove the
         // focused input, and Blink's synchronous blur-on-removal would
@@ -856,9 +1038,9 @@ const TabManager = {
         // hosting node instead and re-seat it at its order position below.
         const renamingId = this._renamingTabId;
         let renameKeep = (renamingId && this.tabs.some(t => t.id === renamingId))
-            ? bar.querySelector(`.tab[data-tab="${renamingId}"]`) : null;
+            ? vp.querySelector(`.tab[data-tab="${renamingId}"]`) : null;
         if (renameKeep && !renameKeep.querySelector('.tab-rename-input')) renameKeep = null;
-        bar.querySelectorAll('.tab').forEach(el => {
+        vp.querySelectorAll('.tab').forEach(el => {
             if (el === renameKeep) return;
             // The renamed tab is GONE (closed mid-edit): removing its input
             // is an automatic collapse — defuse the blur handler so the
@@ -871,8 +1053,6 @@ const TabManager = {
             el.remove();
         });
 
-        const addBtn = document.getElementById('btn-add-tab');
-
         const sortedTabs = this.orderedTabs();
         sortedTabs.forEach(t => {
             if (renameKeep && t.id === renamingId) {
@@ -882,7 +1062,7 @@ const TabManager = {
                 // button stay stale until the rename finishes.
                 renameKeep.dataset.tip = this._tabDisplayName(t);
                 renameKeep.classList.toggle('tab-exit', this._closingTabs.has(t.id));
-                bar.insertBefore(renameKeep, addBtn);
+                vp.appendChild(renameKeep);
                 return;
             }
             const div = document.createElement('div');
@@ -920,9 +1100,11 @@ const TabManager = {
             // look alive and intercept clicks. Re-apply so they stay born
             // invisible and inert (no transition, per the .tab-exit rule).
             if (this._closingTabs.has(t.id)) div.classList.add('tab-exit');
-            bar.insertBefore(div, addBtn);
+            vp.appendChild(div);
         });
         this.updateActiveClass();
+        vp.scrollLeft = prevScroll;
+        this._relayout(false);
     },
 
     updateActiveClass() {

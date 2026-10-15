@@ -70,7 +70,7 @@ function loadTabsVm(background) {
     ctx.setThemeBackground = (bg) => { themeBackground = bg; };
     ctx.globalThis = ctx;
     vm.createContext(ctx);
-    for (const f of ['split-layout.js', 'pane-fields.js', 'ssh-attempts.js', 'tab-title-utils.js', 'tabs.js']) {
+    for (const f of ['split-layout.js', 'pane-fields.js', 'ssh-attempts.js', 'tab-title-utils.js', 'tabstrip-layout.js', 'tabs.js']) {
         vm.runInContext(src(f), ctx, { filename: f });
     }
     ctx.TabManager = vm.runInContext('TabManager', ctx);

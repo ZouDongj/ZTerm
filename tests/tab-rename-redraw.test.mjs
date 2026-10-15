@@ -109,8 +109,11 @@ test('repeated redraws and a tab reorder re-seat the kept node at its position',
     ctx.TabManager.render();
 
     const bar = ctx.document.getElementById('tabbar');
-    assert.deepEqual(bar.children.map(el => el.getAttribute('data-tab') || el.id), ['t_rn', 't_other2', 'btn-add-tab'],
-        'the kept node sits at its order position, add-button last');
+    const vp = bar.children.find(el => el.id === 'tab-viewport');
+    assert.ok(vp, 'tab viewport exists in the bar');
+    assert.deepEqual(vp.children.map(el => el.getAttribute('data-tab') || el.id), ['t_rn', 't_other2'],
+        'the kept node sits at its order position inside the viewport');
+    assert.equal(bar.children[bar.children.length - 1].id, 'btn-add-tab', 'add-button still last in the bar');
     assert.equal(ctx.document.querySelector('.tab-rename-input'), input, 'the input is still the live one');
 });
 

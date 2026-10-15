@@ -411,7 +411,7 @@ export function loadVm() {
     // replicate that resolution exactly.
     vm.runInContext(vendor('addon-search.js'), ctx, { filename: 'addon-search.js' });
     ctx.SearchAddon = ctx.SearchAddon.SearchAddon;
-    for (const f of ['split-layout.js', 'pane-fields.js', 'ssh-attempts.js', 'tab-title-utils.js', 'terminal.js', 'tabs.js', 'ipc.js']) {
+    for (const f of ['split-layout.js', 'pane-fields.js', 'ssh-attempts.js', 'tab-title-utils.js', 'terminal.js', 'tabstrip-layout.js', 'tabs.js', 'ipc.js']) {
         vm.runInContext(src(f), ctx, { filename: f });
     }
     ctx.TabManager = vm.runInContext('TabManager', ctx);

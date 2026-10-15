@@ -47,7 +47,25 @@ body.no-animations .startup-splash .cell{transition:none}
 /* Tauri frameless drag region */
 [data-tauri-drag-region]{-webkit-app-region:drag}
 #tabbar{display:flex;align-items:center;gap:2px;flex:1;overflow:hidden;min-width:0;contain:layout style;will-change:transform}#tabbar *{-webkit-app-region:no-drag}
-.tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;border-radius:12px;transition:background 0.12s,color 0.12s;white-space:nowrap;height:28px;max-width:180px;-webkit-app-region:no-drag;user-select:none}
+/* Scrollable tab viewport (Windows Terminal tab-row model, ported via
+   tabstrip-layout.js): tabs live inside #tab-viewport; the add/menu buttons
+   stay OUTSIDE it so overflow can never clip them. The viewport scrolls
+   programmatically only (arrows + wheel) — no visible scrollbar. */
+#tab-viewport{display:flex;align-items:center;gap:2px;flex:1;min-width:0;overflow:hidden;position:relative}
+.tab-scroll-btn{width:24px;height:24px;border-radius:6px;flex-shrink:0;display:none;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;background:transparent;border:none;padding:0;user-select:none;transition:background 0.12s,color 0.12s}
+#tabbar.tabbar-overflow .tab-scroll-btn{display:inline-flex}
+.tab-scroll-btn:hover{background:rgba(255,255,255,0.06);color:var(--text-1)}
+.tab-scroll-btn.disabled{opacity:0.3;pointer-events:none}
+/* Tab width states (numbers mirror tabstrip-layout.js): sparse keeps content
+   sizing capped at 240px; sharing pins every tab to an equal JS-computed
+   inline width (needed for the close-deferral contract below — a pure flex
+   share would re-widen siblings the instant one closes, moving them under
+   the pointer); overflow pins 100px and scrolls. Widths change instantly,
+   never through a transition (layout-animation stalls the WebView2 pump —
+   see .tab-exit). */
+.tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;border-radius:12px;transition:background 0.12s,color 0.12s;white-space:nowrap;height:28px;max-width:240px;-webkit-app-region:no-drag;user-select:none}/* max-width mirrors TAB_MAX_WIDTH in tabstrip-layout.js */
+#tabbar.tabbar-sharing .tab,#tabbar.tabbar-overflow .tab{flex:0 0 auto;min-width:0;max-width:none}
+#tabbar.tabbar-overflow .tab{width:100px}/* mirrors TAB_MIN_WIDTH in tabstrip-layout.js; inline pinning alone would arrive too late — render() restores scrollLeft before _relayout pins widths, so the width must come from CSS at append time */
 /* Semantic action buttons inside tabs: UA reset + stable hit regions.
    Every action lives in a permanently-reserved slot; hover/focus
    toggles ONLY painted visibility (opacity + pointer-events), never the
