@@ -251,6 +251,9 @@ const TabManager = {
     _deferStripRelayout: false,
     _lastStripPlan: null,
     _stripObserver: null,
+    // Tab id currently widened by hover (sharing/overflow only); the active
+    // tab is always the first expansion priority, this is the second.
+    _hoverExpandId: null,
 
     // Build (idempotently) the strip chrome: ‹ viewport › before the
     // add/menu buttons. Also repairs bare stub DOMs (tests) that pre-populate
@@ -295,6 +298,59 @@ const TabManager = {
                 if (e.cancelable) e.preventDefault();
             }, { passive: false });
             vp.addEventListener('scroll', () => this._updateScrollArrows());
+            // Hover expansion (sharing/overflow only): the tab under the
+            // pointer widens toward its content width after a short dwell;
+            // once one tab is expanded, sweeping across neighbors retargets
+            // immediately. A live close deferral owns the strip widths and a
+            // drag owns the tab positions — hover stays out of both.
+            let hoverTimer = null, hoverCandidate = null;
+            const hoverTabId = (e) => {
+                const el = e.target && e.target.closest ? e.target.closest('.tab') : null;
+                return (el && vp.contains(el)) ? el.getAttribute('data-tab') : null;
+            };
+            const clearHoverExpand = (relayout) => {
+                if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+                hoverCandidate = null;
+                if (this._hoverExpandId == null) return;
+                this._hoverExpandId = null;
+                if (relayout) this._relayoutWithFlip();
+            };
+            vp.addEventListener('pointerover', (e) => {
+                if (this._dragTab || (this._deferStripRelayout && this._pointerInStrip)) return;
+                if (!this._lastStripPlan || this._lastStripPlan.tabWidth == null) return;
+                const id = hoverTabId(e);
+                if (id === hoverCandidate) return; // intra-tab movement: the dwell keeps running
+                hoverCandidate = id;
+                if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+                // Moving into a strip gap keeps the current expansion (a
+                // sweep crosses gaps constantly); only leaving the viewport
+                // collapses it. The active tab is already expanded as the
+                // first priority — hovering it needs no second entry.
+                if (id == null) return;
+                if (id === this.activeId) {
+                    if (this._hoverExpandId != null) { this._hoverExpandId = null; this._relayoutWithFlip(); }
+                    return;
+                }
+                if (this._hoverExpandId != null) {
+                    this._hoverExpandId = id; // already expanded: retarget immediately
+                    this._relayoutWithFlip();
+                    return;
+                }
+                hoverTimer = setTimeout(() => {
+                    hoverTimer = null;
+                    if (this._dragTab || (this._deferStripRelayout && this._pointerInStrip)) return;
+                    // The strip may have flipped sparse since the pointerover
+                    // (resize/close): expanding there is pointless state.
+                    if (!this._lastStripPlan || this._lastStripPlan.tabWidth == null) return;
+                    this._hoverExpandId = id;
+                    this._relayoutWithFlip();
+                }, 150);
+            });
+            vp.addEventListener('pointerleave', () => {
+                // The deferral path must not force a relayout here: the BAR
+                // pointerleave recomputes once the pointer is fully out.
+                clearHoverExpand(!(this._deferStripRelayout && this._pointerInStrip));
+            });
         }
         bar.addEventListener('pointerenter', () => { this._pointerInStrip = true; });
         bar.addEventListener('pointerleave', () => {
@@ -390,20 +446,103 @@ const TabManager = {
             // time (cached on the tab object; unmeasured tabs fall back to
             // the content floor so a never-painted tab still reserves a
             // sane slot).
-            const desired = [...vp.querySelectorAll('.tab')].map(el => {
+            const tabEls = [...vp.querySelectorAll('.tab')];
+            const desired = tabEls.map(el => {
                 const t = this.tabs.find(x => x.id === el.getAttribute('data-tab'));
                 const w = t && t._desiredW;
                 return (Number.isFinite(w) && w > 0) ? w : Math.max(TAB_CONTENT_MIN, el.offsetWidth || 0);
             });
             plan = computeTabStripPlan(desired, avail, 2, TAB_MIN_WIDTH);
+            // Priority expansion is part of the plan so a deferred re-apply
+            // keeps the exact same pixel widths while the pointer is over
+            // the strip.
+            plan.widths = this._expandedStripWidths(plan, avail, tabEls);
             this._lastStripPlan = plan;
         }
         bar.classList.toggle('tabbar-sharing', plan.state === 'sharing');
         bar.classList.toggle('tabbar-overflow', plan.state === 'overflow');
         vp.querySelectorAll('.tab').forEach(el => {
-            el.style.width = plan.tabWidth == null ? '' : plan.tabWidth + 'px';
+            const w = plan.widths ? plan.widths.get(el.getAttribute('data-tab')) : null;
+            el.style.width = w != null ? w + 'px' : (plan.tabWidth == null ? '' : plan.tabWidth + 'px');
         });
         this._updateScrollArrows();
+    },
+
+    // Priority expansion for the crowded states: in sharing/overflow the
+    // active tab (then the hovered one) widens toward its measured content
+    // width so its name and icons stay readable — the fixed share is only a
+    // floor, never a cap on the tab the user is looking at. Siblings absorb
+    // the difference in sharing (never below TAB_MIN_WIDTH), the scrolling
+    // strip simply grows in overflow. The state verdict itself always comes
+    // from the UNEXPANDED widths, so expanding can never flip the state and
+    // oscillate. Returns a per-tab px Map, or null when nothing expands
+    // (sparse plan, single tab, no priority tab present).
+    _expandedStripWidths(plan, avail, els) {
+        if (!plan || plan.tabWidth == null || els.length < 2) return null;
+        const prio = [];
+        for (const id of [this.activeId, this._hoverExpandId]) {
+            if (id == null || prio.includes(id) || this._closingTabs.has(id)) continue;
+            if (els.some(el => el.getAttribute('data-tab') === id)) prio.push(id);
+        }
+        if (!prio.length) return null;
+        const gap = 2, count = els.length, others = count - prio.length;
+        const byId = new Map(this.tabs.map(t => [t.id, t]));
+        const widths = new Map();
+        for (const id of prio) {
+            const t = byId.get(id);
+            const desired = (t && Number.isFinite(t._desiredW) && t._desiredW > 0) ? t._desiredW : plan.tabWidth;
+            widths.set(id, Math.min(TAB_MAX_WIDTH, Math.max(plan.tabWidth, desired)));
+        }
+        if (plan.state !== 'sharing') {
+            // overflow: the strip scrolls, so priority tabs simply take
+            // their width and everyone else keeps the plan pin.
+            els.forEach(el => {
+                const id = el.getAttribute('data-tab');
+                if (!widths.has(id)) widths.set(id, plan.tabWidth);
+            });
+            return widths;
+        }
+        // sharing: siblings split what the priority tabs leave behind.
+        const sumPrio = prio.reduce((acc, id) => acc + widths.get(id), 0);
+        let otherW = others > 0 ? Math.floor((avail - sumPrio - gap * (count - 1)) / others) : 0;
+        if (others > 0 && otherW >= TAB_MIN_WIDTH) {
+            otherW = Math.min(otherW, plan.tabWidth);
+        } else {
+            // Either too crowded for the full expansion (squeeze the priority
+            // tabs into what the sibling floor leaves), or the every-tab-is-
+            // priority case (others === 0, e.g. exactly two tabs), which
+            // always lands here: the same water-fill splits the whole budget
+            // between the priority tabs. Sharing guarantees the budget covers
+            // at least the plan width for each priority tab (share >= min),
+            // so the water-fill never breaks the floor.
+            let left = avail - gap * (count - 1) - TAB_MIN_WIDTH * others;
+            prio.forEach((id, i) => {
+                const reserve = plan.tabWidth * (prio.length - i - 1);
+                const w = Math.min(widths.get(id), Math.max(plan.tabWidth, left - reserve));
+                widths.set(id, w);
+                left -= w;
+            });
+            otherW = TAB_MIN_WIDTH;
+        }
+        if (others > 0) els.forEach(el => {
+            const id = el.getAttribute('data-tab');
+            if (!widths.has(id)) widths.set(id, otherW);
+        });
+        return widths;
+    },
+
+    // Recompute the strip plan and FLIP-animate the reflow. Used by the
+    // hover/active expansion, which fires outside render(). A close
+    // deferral owns every strip width until the pointer leaves the bar —
+    // it must not be force-recomputed away mid-close.
+    _relayoutWithFlip() {
+        if (this._deferStripRelayout && this._pointerInStrip) return;
+        const vp = document.getElementById('tab-viewport');
+        if (!vp) { this._relayout(true); return; }
+        const prevRects = this._captureStripRects(vp);
+        this._relayout(true);
+        this._reholdStripSlides(vp, prevRects);
+        this._applyStripFlip(vp, prevRects);
     },
 
     // Bring a tab fully into the viewport (used on switch/create; a no-op
@@ -630,6 +769,10 @@ const TabManager = {
         }
         this.activeId = id;
         this.updateActiveClass();
+        // Active-tab expansion: in sharing/overflow the newly active tab
+        // widens toward its content width (FLIP-animated; a no-op in sparse,
+        // or while a close deferral owns the strip).
+        this._relayoutWithFlip();
         this._scrollTabIntoView(id);
         const tab = this.tabs.find(t => t.id === id);
         if (tab && tab.type === 'settings') {
@@ -764,6 +907,11 @@ const TabManager = {
             document.getElementById('settings-pane')?.classList.remove('active');
         }
         this._closingTabs.add(id);
+        // A hover expansion on the dying tab lapses here: leaving the id set
+        // would make the next hovered tab skip its 150ms dwell (the "already
+        // expanded, retarget immediately" branch) even though the strip is
+        // no longer in an expanded state.
+        if (this._hoverExpandId === id) this._hoverExpandId = null;
         // MUX TabView defers re-width after a tab close until the pointer
         // leaves the strip, so rapid-fire closes never move the next tab's
         // close button out from under the cursor. Arm that deferral here;

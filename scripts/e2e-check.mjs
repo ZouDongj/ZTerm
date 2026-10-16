@@ -3902,13 +3902,16 @@ async function main() {
     }
 
     // 15.11 Tab strip overflow: squeezing the bar below the 100px/tab floor
-    //     must flip the strip to overflow mode (scroll arrows shown, tabs
-    //     pinned at exactly 100px, arrow nudge scrolls the viewport), and
-    //     expanding it well past the content total must return it to sparse
-    //     (no inline width pinning, arrows hidden, add button hugging the
-    //     last tab). The restore check uses an oversized basis rather than
-    //     the natural width: the live session can carry enough tabs that
-    //     even the full window stays in overflow.
+    //     must flip the strip to overflow mode (scroll arrows shown,
+    //     background tabs pinned at exactly 100px, arrow nudge scrolls the
+    //     viewport), and expanding it well past the content total must
+    //     return it to sparse (no inline width pinning, arrows hidden, add
+    //     button hugging the last tab). The crowded states also EXPAND the
+    //     active tab (and a hovered background tab after a short dwell)
+    //     toward its content width so its name/icons stay readable. The
+    //     restore check uses an oversized basis rather than the natural
+    //     width: the live session can carry enough tabs that even the full
+    //     window stays in overflow.
     const stripOv = await cdp.eval(`(async () => {
       const bar = document.getElementById('tabbar');
       const vp = document.getElementById('tab-viewport');
@@ -3924,7 +3927,7 @@ async function main() {
       const leftBtn = document.getElementById('tab-scroll-left');
       const rightBtn = document.getElementById('tab-scroll-right');
       const shown = (el) => !!el && getComputedStyle(el).display !== 'none';
-      const widths = [...vp.querySelectorAll('.tab')].map(el => el.offsetWidth);
+      const rows = [...vp.querySelectorAll('.tab')].map(el => ({ w: el.offsetWidth, active: el.classList.contains('active') }));
       // The live session may already sit in overflow with the strip scrolled
       // to the active tab — start from the left edge so the nudge can move.
       vp.scrollLeft = 0;
@@ -3935,12 +3938,33 @@ async function main() {
       const overflow = {
         cls: bar.classList.contains('tabbar-overflow'),
         arrows: shown(leftBtn) && shown(rightBtn),
-        widths100: widths.length === n && widths.every(w => w === 100),
+        // Background tabs pinned at the floor (TAB_MIN_WIDTH 100); the
+        // active tab widened toward its content width (clamped to
+        // [TAB_MIN_WIDTH, TAB_MAX_WIDTH] = [100, 240]).
+        widths100: rows.length === n && rows.every(r => r.active ? (r.w >= 100 && r.w <= 240) : r.w === 100),
+        activeExpanded: rows.some(r => r.active && r.w > 100),
         nudged: afterNudge > before,
         // Breathing reserve: even jammed full, the menu button stops
         // TAB_STRIP_RIGHT_RESERVE (48) px short of the bar's right edge.
         gapToEdge: menuBtn ? Math.round(bar.getBoundingClientRect().right - menuBtn.getBoundingClientRect().right) : null,
       };
+      // Hover expansion: the hovered background tab widens past the floor
+      // after the dwell; leaving the viewport collapses it back. Poll for
+      // the widening rather than sleeping a fixed span past the 150ms dwell.
+      const hoverEl = [...vp.querySelectorAll('.tab')].find(el => !el.classList.contains('active'));
+      let hoverW = null, hoverCollapsedW = null;
+      if (hoverEl) {
+        hoverEl.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
+        for (let i = 0; i < 10 && !(hoverW > 100); i++) {
+          await new Promise(r => setTimeout(r, 60));
+          hoverW = hoverEl.offsetWidth;
+        }
+        vp.dispatchEvent(new PointerEvent('pointerleave'));
+        await new Promise(r => setTimeout(r, 30));
+        hoverCollapsedW = hoverEl.offsetWidth;
+      }
+      overflow.hoverExpanded = hoverW != null && hoverW > 100;
+      overflow.hoverCollapsed = hoverCollapsedW === 100;
       // Expand far past any plausible content total: deterministic sparse
       // regardless of how many tabs the live session carries (the basis
       // overflows the window, but clientWidth still reports it).
@@ -3961,11 +3985,13 @@ async function main() {
       bar.style.flex = '';
       TabManager._relayout(true);
       for (const id of created) { try { TabManager.closeTab(id); } catch (e) {} }
-      return { n, squeeze, widths, overflow, restored };
+      return { n, squeeze, rows, overflow, restored };
     })()`).catch((e) => ({ evalError: String((e && e.message) || e) }));
-    check('标签栏溢出：窄条出现滚动箭头且 tab 钉在 100px，拉宽后恢复 sparse（不钉宽、按钮紧跟）',
+    check('标签栏溢出：窄条出现滚动箭头且后台 tab 钉在 100px（active/hover 展宽），拉宽后恢复 sparse（不钉宽、按钮紧跟）',
       !!stripOv && stripOv.overflow && stripOv.overflow.cls === true && stripOv.overflow.arrows === true &&
-      stripOv.overflow.widths100 === true && stripOv.overflow.nudged === true &&
+      stripOv.overflow.widths100 === true && stripOv.overflow.activeExpanded === true &&
+      stripOv.overflow.hoverExpanded === true && stripOv.overflow.hoverCollapsed === true &&
+      stripOv.overflow.nudged === true &&
       stripOv.overflow.gapToEdge != null && Math.abs(stripOv.overflow.gapToEdge - 48) <= 3 &&
       stripOv.restored && stripOv.restored.state === 'sparse' && stripOv.restored.noClasses === true &&
       stripOv.restored.arrowsHidden === true && stripOv.restored.inlineCleared === true &&
