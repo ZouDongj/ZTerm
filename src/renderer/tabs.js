@@ -1,6 +1,44 @@
 // ZTerm - tab management (the entire TabManager object) (split out of renderer.html as a pure code move, logic unchanged)
 const GAP_PX = 8; // fixed pixel gap between panes
 
+// Tab-strip slide animations (WAAPI, composite transforms only — layout
+// transitions stay banned on the strip; see the .tab-exit comment in
+// app.css). Every slide this code creates carries this id so cancel/filter
+// never touches unrelated animations (CSS color transitions, bell flash)
+// living on the same element.
+const STRIP_SLIDE_ID = 'zterm-strip-slide';
+
+function _cancelStripSlides(el) {
+    if (!el.getAnimations) return;
+    try { el.getAnimations().forEach(a => { if (a.id === STRIP_SLIDE_ID) a.cancel(); }); } catch (e) {}
+}
+
+// An element's current composited translateX (0 when unanimated): the
+// computed style reflects in-flight WAAPI values, so a follow-up slide
+// chains from where the tab actually is instead of snapping back to 0.
+function _stripSlideOffset(el) {
+    try {
+        const t = getComputedStyle(el).transform;
+        if (!t || t === 'none') return 0;
+        const e = new DOMMatrixReadOnly(t).e;
+        return Number.isFinite(e) ? e : 0;
+    } catch (e) { return 0; }
+}
+
+// Slide a strip tab by `delta` from its CURRENT visual offset — a rapid
+// close burst retargets the follower mid-flight instead of restarting it
+// from 0 (which read as a right-then-left jump).
+function _slideStripTab(el, delta, fill) {
+    const from = _stripSlideOffset(el);
+    _cancelStripSlides(el);
+    try {
+        const anim = el.animate(
+            [{ transform: `translateX(${from}px)` }, { transform: `translateX(${from + delta}px)` }],
+            { duration: 180, easing: 'cubic-bezier(0.05, 0.7, 0.1, 1)', fill: fill || 'none' });
+        anim.id = STRIP_SLIDE_ID;
+    } catch (e) {}
+}
+
 // Look up loginScripts from the SSH profile
 function _getLoginScripts(tab, pane) {
     const profileId = (pane && pane._sshProfileId) || tab.sshProfileId;
@@ -580,9 +618,14 @@ const TabManager = {
             } else if (oldTab && oldTab.splitRoot) {
                 const split = document.getElementById('split_' + this.activeId);
                 if (split) split.style.display = 'none';
+                // WebGL contexts are budgeted by visibility: release the
+                // outgoing tab's contexts (after the idle grace) so the page
+                // total stays bounded by what is actually on screen.
+                if (typeof _detachWebglRenderer === 'function') getAllPanes(oldTab).forEach(p => _detachWebglRenderer(p, p.term));
             } else {
                 const el = document.getElementById('wrap_' + this.activeId);
                 if (el) el.classList.remove('active');
+                if (oldTab && typeof _detachWebglRenderer === 'function') _detachWebglRenderer(oldTab, oldTab.term);
             }
         }
         this.activeId = id;
@@ -597,6 +640,7 @@ const TabManager = {
         } else if (tab && tab.splitRoot) {
             const split = document.getElementById('split_' + id);
             if (split) { split.style.display = 'flex'; this._layoutTime = Date.now(); this._layoutSplit(tab); }
+            if (typeof _attachWebglRenderer === 'function') getAllPanes(tab).forEach(p => { if (p.term) _attachWebglRenderer(p, p.term); });
             const focused = getAllPanes(tab).find(p => p.focused);
             if (focused && focused.term) {
                 // Re-check at fire time: a reconnect/close inside the 250ms
@@ -604,7 +648,12 @@ const TabManager = {
                 // the scheduling-time guard would throw.
                 if (focused.fitAddon) setTimeout(() => {
                     if (!focused.term) return;
-                    _fitWithScroll(focused.term, focused.fitAddon, document.getElementById('pane-body_' + focused.id));
+                    // Same-frame flush variant (see the non-split branch):
+                    // fit() clears the WebGL bitmap synchronously and the
+                    // debounced repaint would composite one cleared frame.
+                    const body = document.getElementById('pane-body_' + focused.id);
+                    if (typeof _fitTermSync === 'function') _fitTermSync(focused.term, focused.fitAddon, body);
+                    else _fitWithScroll(focused.term, focused.fitAddon, body);
                 }, 250);
                 // Fire-time validated: the pane may be closed/disposed, the
                 // tab switched away, or a newer focus intent (overlay/search
@@ -615,6 +664,9 @@ const TabManager = {
             const el = document.getElementById('wrap_' + id);
             if (el) {
                 el.classList.add('active');
+                // Attach the GPU renderer before the fit so the (restored,
+                // never-fitted) grid jump repaints through it atomically.
+                if (tab && tab.term && typeof _attachWebglRenderer === 'function') _attachWebglRenderer(tab, tab.term);
                 if (tab && tab.fitAddon) setTimeout(() => {
                     // A running dock open/close animation owns the wrap width
                     // (and the terminal already took its predicted final
@@ -624,7 +676,13 @@ const TabManager = {
                     // guard: _sftpAnimating lives in sftp.js, which some test
                     // harnesses never load.)
                     if (typeof _sftpAnimating !== 'undefined' && _sftpAnimating) return;
-                    _fitWithScroll(tab.term, tab.fitAddon, tab.term?.element?.parentElement);
+                    // _fitTermSync over _fitWithScroll: fit() clears the WebGL
+                    // bitmap synchronously; the same-frame flush keeps the
+                    // clear+repaint atomic (no blank frame on activation).
+                    // (typeof guard: _fitTermSync lives in terminal.js, which
+                    // some test harnesses never load.)
+                    if (typeof _fitTermSync === 'function') _fitTermSync(tab.term, tab.fitAddon, tab.term?.element?.parentElement);
+                    else _fitWithScroll(tab.term, tab.fitAddon, tab.term?.element?.parentElement);
                 }, 10);
                 // Re-check at fire time: a reconnect/close inside the 100ms
                 // window nulls the terminal (scheduling-time guard only).
@@ -738,7 +796,27 @@ const TabManager = {
         // layout-property transitions — they stall the WebView2 host message
         // pump for seconds (see the rule's comment in app.css).
         const tabEl = document.querySelector(`.tab[data-tab="${id}"]`);
-        if (tabEl) tabEl.classList.add('tab-exit');
+        if (tabEl) {
+            tabEl.classList.add('tab-exit');
+            // Follow-through slide: siblings after the closing tab start
+            // moving left NOW (composited transform, no layout) instead of
+            // teleporting when the slot collapses at doRemove. The slide is
+            // forwards-filled so it holds until the collapse; render()
+            // re-anchors the hold on rebuilt elements (a background redraw
+            // discards element-level animations) via _reholdStripSlides.
+            const vp = document.getElementById('tab-viewport');
+            const dx = (tabEl.offsetWidth || 0) + 2; // one slot + the strip gap
+            if (vp && !this._dragTab && Number.isFinite(dx) && dx > 0 && typeof tabEl.animate === 'function') {
+                let past = false;
+                vp.querySelectorAll('.tab').forEach(el => {
+                    if (el === tabEl) { past = true; return; }
+                    if (!past || typeof el.animate !== 'function') return;
+                    // A sibling already dying keeps its own slot+slide.
+                    if (this._closingTabs.has(el.getAttribute('data-tab'))) return;
+                    _slideStripTab(el, -dx, 'forwards');
+                });
+            }
+        }
         // Compute the next tab BEFORE splice (after splice, the old idx+1 occupies idx).
         // Tabs being closed must be skipped: during a burst the tabs array is not yet spliced,
         // so blindly taking a neighbor reactivates a dying tab and later keys ping-pong between dying tabs.
@@ -814,7 +892,7 @@ const TabManager = {
                     // Stagger per-pane term.dispose like the tab-level
                     // stagger: a split tab closing must not fire N WebGL
                     // context teardowns in one task.
-                    if (p.term) setTimeout(() => { try { p._smoothCursor?.dispose(); p._smoothCursor = null; p.term.dispose(); } catch(e) {} }, i * 80);
+                    if (p.term) setTimeout(() => { try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(p.term); p._smoothCursor?.dispose(); p._smoothCursor = null; p.term.dispose(); } catch(e) {} }, i * 80);
                 });
                 const split = document.getElementById('split_' + id);
                 if (split) split.remove();
@@ -830,7 +908,7 @@ const TabManager = {
                     _cancelSshAttemptOf(tab, tab.tabId);
                     delete ptyBuffers[tab.tabId];
                 }
-                if (tab.term) try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}
+                if (tab.term) try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(tab.term); tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}
             }
             this.render();
             // Correct activeId regardless of wasActive: a BACKGROUND tab
@@ -855,9 +933,10 @@ const TabManager = {
         };
         if (tabEl) {
             // Stagger deferred removals: a rapid burst must not fire N
-            // term.dispose() calls (each releasing a WebGL context) at the
-            // same instant — parallel context teardown synchronously waits
-            // on the GPU process and froze the renderer for seconds.
+            // term.dispose() calls (each disposing its renderer — a WebGL
+            // context while the tab is visible) at the same instant —
+            // parallel context teardown synchronously waits on the GPU
+            // process and froze the renderer for seconds.
             const delay = 200 + Math.max(0, this._closingTabs.size - 1) * 120;
             setTimeout(doRemove, delay);
         } else {
@@ -905,7 +984,7 @@ const TabManager = {
         // the replacement queued behind the old invocation for up to 20s.
         _cancelSshAttemptOf(tab, tab.tabId, 'ssh-disconnect');
         if (_clearOnConnect(tab, null)) {
-            if (tab.term) { try { tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
+            if (tab.term) { try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(tab.term); tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
             const wrap = document.getElementById('wrap_' + id);
             if (wrap) { if (wrap._resizeObserver) wrap._resizeObserver.disconnect(); wrap.remove(); }
             // Explicitly release ptyBuffers (the old tabId is never reused by a new connection; otherwise buffers pile up 1MB+)
@@ -976,7 +1055,7 @@ const TabManager = {
         // display address.
         _cancelSshAttemptOf(pane, pane.tabId, 'ssh-disconnect');
         if (_clearOnConnect(tab, pane)) {
-            if (pane.term) { try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
+            if (pane.term) { try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(pane.term); pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
             const body = document.getElementById('pane-body_' + pane.id);
             if (body) body.innerHTML = '';
             // Explicitly release ptyBuffers
@@ -1051,6 +1130,11 @@ const TabManager = {
         // without a restore the scroll offset silently clamps to 0 and the
         // strip jumps to its left edge on every background redraw.
         const prevScroll = vp.scrollLeft || 0;
+        // FLIP capture: every tab's current VISUAL position (in-flight close
+        // slides included) before the rebuild; _applyStripFlip at the end of
+        // render replays the delta as a composited slide, so any reflow
+        // (close/reorder/width change) animates instead of teleporting.
+        const prevRects = this._captureStripRects(vp);
         // An in-flight rename must survive background redraws (lifecycle
         // events render at any time): rebuilding this tab would remove the
         // focused input, and Blink's synchronous blur-on-removal would
@@ -1140,6 +1224,88 @@ const TabManager = {
         });
         vp.scrollLeft = prevScroll;
         this._relayout(false);
+        this._reholdStripSlides(vp, prevRects);
+        this._applyStripFlip(vp, prevRects);
+    },
+
+    // A render rebuilds every strip element, discarding in-flight close-tab
+    // follow slides — without a re-anchor the follower snaps back right here
+    // and slides left again at doRemove (a visible bounce on any background
+    // redraw inside the exit window, e.g. an ssh-status render while closing).
+    // Continue each follower from its pre-rebuild visual offset (prevRects)
+    // toward the held target implied by the dying tabs to its left. Elements
+    // re-anchored here are skipped by _applyStripFlip (their offset is already
+    // measured into the new animation, not into FLIP's dx).
+    _reholdStripSlides(vp, prevRects) {
+        if (!vp || this._dragTab || this._closingTabs.size === 0 || !vp.querySelectorAll) return;
+        let cumDx = 0;
+        vp.querySelectorAll('.tab').forEach(el => {
+            const tabId = el.getAttribute('data-tab');
+            if (this._closingTabs.has(tabId)) {
+                cumDx += (el.offsetWidth || 0) + 2; // dying slot + strip gap
+                return;
+            }
+            if (cumDx <= 0 || typeof el.animate !== 'function' || !el.getBoundingClientRect) return;
+            const prev = prevRects ? prevRects.get(tabId) : null;
+            const layoutLeft = el.getBoundingClientRect().left;
+            // Continue from where the OLD element visually was (its in-flight
+            // slide is in the capture), never from the bare layout position.
+            const from = prev == null ? 0 : prev - layoutLeft;
+            const to = -cumDx;
+            el._stripSlideHeld = true;
+            _cancelStripSlides(el);
+            if (Math.abs(from - to) < 0.5) {
+                if (el.style) el.style.transform = `translateX(${to}px)`;
+                return;
+            }
+            try {
+                const anim = el.animate(
+                    [{ transform: `translateX(${from}px)` }, { transform: `translateX(${to}px)` }],
+                    { duration: 180, easing: 'cubic-bezier(0.05, 0.7, 0.1, 1)', fill: 'forwards' });
+                anim.id = STRIP_SLIDE_ID;
+            } catch (e) {}
+        });
+    },
+
+    // FLIP helpers for the tab strip. Positions are animated with WAAPI
+    // composite transforms only — layout-property transitions stay banned on
+    // the strip (they stall the WebView2 host message pump; see the .tab-exit
+    // comment in app.css). Returns null while a tab drag is live: drag
+    // positions are pointer-driven and must never be smoothed.
+    _captureStripRects(vp) {
+        if (!vp || this._dragTab || !vp.querySelectorAll) return null;
+        const rects = new Map();
+        vp.querySelectorAll('.tab').forEach(el => {
+            const r = el.getBoundingClientRect && el.getBoundingClientRect();
+            if (r && Number.isFinite(r.left)) rects.set(el.getAttribute('data-tab'), r.left);
+        });
+        return rects;
+    },
+
+    _applyStripFlip(vp, prevRects) {
+        if (!vp || !prevRects || prevRects.size === 0 || this._dragTab) return;
+        vp.querySelectorAll('.tab').forEach(el => {
+            // A re-held close slide owns this tab's offset for this render.
+            if (el._stripSlideHeld) return;
+            if (typeof el.animate !== 'function') return;
+            const prev = prevRects.get(el.getAttribute('data-tab'));
+            if (prev == null) return; // newborn tab: no prior position to slide from
+            const r = el.getBoundingClientRect();
+            const dx = prev - r.left;
+            if (!Number.isFinite(dx) || Math.abs(dx) < 0.5) return;
+            // Cancel a still-running (or forwards-filled) strip slide: its
+            // composite offset was measured into dx, so cancelling +
+            // re-animating from dx chains the motion instead of
+            // double-applying it. Only our own tagged slides are touched —
+            // CSS transitions and the bell flash share the element.
+            _cancelStripSlides(el);
+            try {
+                const anim = el.animate(
+                    [{ transform: `translateX(${dx}px)` }, { transform: 'translateX(0px)' }],
+                    { duration: 180, easing: 'cubic-bezier(0.05, 0.7, 0.1, 1)' });
+                anim.id = STRIP_SLIDE_ID;
+            } catch (e) {}
+        });
     },
 
     updateActiveClass() {
@@ -1452,7 +1618,12 @@ const TabManager = {
         setTimeout(() => { this._layoutAnimating = false; }, 300);
         setTimeout(() => {
             allPanes.forEach(p => {
-                if (p.term && p.fitAddon) _fitWithScroll(p.term, p.fitAddon, document.getElementById('pane-body_' + p.id));
+                if (!p.term || !p.fitAddon) return;
+                const body = document.getElementById('pane-body_' + p.id);
+                // Same-frame flush variant: a settle that still corrects the
+                // grid repaints without a cleared-canvas frame (see switchTo).
+                if (typeof _fitTermSync === 'function') _fitTermSync(p.term, p.fitAddon, body);
+                else _fitWithScroll(p.term, p.fitAddon, body);
             });
         }, 250);
         // After tree changes, existing panes' xterm loses focus; forcibly refocus the focused pane
@@ -1819,7 +1990,7 @@ const TabManager = {
             // by the pty-created handler.)
             _cancelSshAttemptOf(pane, null);
         }
-        if (pane.term) try { pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}
+        if (pane.term) try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(pane.term); pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}
         // Disconnect the dying pane's body observer NOW: every path the
         // deferred removal fans into (survivors re-render, collapse via
         // _exitSplit, whole-tab closeTab) iterates only SURVIVING panes, so
@@ -2378,7 +2549,7 @@ const TabManager = {
                 // Attempt identity carries the pending cancel — see _closePane.
                 _cancelSshAttemptOf(p, p.tabId);
             }
-            if (i > 0 && p.term) try { p._smoothCursor?.dispose(); p._smoothCursor = null; p.term.dispose(); } catch(e) {}
+            if (i > 0 && p.term) try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(p.term); p._smoothCursor?.dispose(); p._smoothCursor = null; p.term.dispose(); } catch(e) {}
         });
         // Sync all tab fields from the surviving pane — otherwise tab.type/host/user etc. keep the old tab's type
         // (e.g. an SSH tab exits split leaving a local pane but stays marked SSH: after restart it would really connect via SSH with a mismatched pane name)

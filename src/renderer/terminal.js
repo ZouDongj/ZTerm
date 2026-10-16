@@ -211,6 +211,131 @@ function _wireSmoothCursorWebgl(term, webglAddon) {
     return wrapper;
 }
 
+// ── WebGL context budget: attach on show, release on idle-hide ──
+// Chromium caps live WebGL contexts per page (~16) and LRU-evicts the oldest
+// past the cap; a terminal whose context was evicted composites WHITE until
+// the browser restores it (the rapid tab-close white flash — a restored
+// session with many tabs held one resident context each). Hidden terminals
+// do not need GPU rendering: the addon is created only for a visible wrap and
+// released after the wrap has stayed hidden for WEBGL_IDLE_RELEASE_MS (the
+// vendored dispose restores the DOM renderer and re-handleResize()s, so
+// background output keeps rendering; the idle grace avoids GL churn on quick
+// tab hops — and the ADR4 e2e reads a hidden source tab's
+// _smoothCursor._adapter a few seconds after extract, so the grace must
+// exceed that read delay). Live contexts stay bounded by recently-visible
+// panes.
+// Records are keyed BY TERMINAL, not by holder slot: terminals migrate
+// across tab/pane wrappers (split/extract/drag/collapse/reconnect) and
+// holder-keyed bookkeeping orphaned the record on every migration — the
+// stranded context leaked past the cap, and the zombie slot blocked
+// re-attach, stacking a SECOND WebglAddon (and canvas) onto one terminal.
+const WEBGL_IDLE_RELEASE_MS = 20000;
+// Hard budget on simultaneously-live contexts, enforced by LRU force-release
+// at attach time: the idle grace alone cannot bound a rapid creation burst
+// (a dozen tabs inside one grace window still hold one context each), and
+// past Chromium's per-page cap (~16) the oldest context is evicted — the
+// evicted terminal composites WHITE for seconds. Eight keeps generous
+// headroom (one window shows one tab, split into at most a few panes;
+// everything else is hidden and DOM-rendered).
+const WEBGL_CONTEXT_BUDGET = 8;
+const _webglByTerm = new WeakMap(); // term → { addon, idleTimer, wrapper }
+const _webglLive = new Set(); // terms holding a live addon, LRU attach order
+
+// Immediate release: cancels a pending idle timer and disposes the addon (the
+// vendored dispose restores the DOM renderer, so background output keeps
+// rendering). Called on every terminal dispose path so the ledger never
+// retains dead terminals, and by the budget enforcer for hidden laggards.
+function _releaseWebglForTerm(term) {
+    const rec = term ? _webglByTerm.get(term) : null;
+    if (!rec) return;
+    if (rec.idleTimer) { clearTimeout(rec.idleTimer); rec.idleTimer = null; }
+    const addon = rec.addon;
+    rec.addon = null;
+    const wrapper = rec.wrapper;
+    rec.wrapper = null;
+    _webglLive.delete(term);
+    try { wrapper?.dispose?.(); } catch (e) {}
+    if (addon) try { addon.dispose(); } catch (e) {}
+}
+
+function _attachWebglRenderer(holder, term) {
+    if (!holder || !term) return;
+    let rec = _webglByTerm.get(term);
+    if (rec) {
+        if (rec.idleTimer) { clearTimeout(rec.idleTimer); rec.idleTimer = null; }
+        if (rec.addon) {
+            // Still attached (within the idle grace): re-point the holder's
+            // smooth cursor — a migration may have moved or cleared the slot.
+            holder._smoothCursor = rec.wrapper;
+            _webglLive.delete(term); _webglLive.add(term); // LRU touch
+            return;
+        }
+    } else {
+        rec = { addon: null, idleTimer: null, wrapper: null };
+        _webglByTerm.set(term, rec);
+    }
+    // The WebGL addon must load AFTER open(): loading it before open loses the
+    // render-service registration race to the DOM renderer, silently falling
+    // back to DOM rendering (verified: no .xterm-webgl canvas, adapter idle).
+    let addon = null;
+    try { addon = new WebglAddon(); term.loadAddon(addon); } catch (e) { console.warn('WebglAddon init failed:', e); return; }
+    rec.addon = addon;
+    _webglLive.delete(term);
+    _webglLive.add(term);
+    // Over budget: force-release the least-recently attached contexts. The
+    // just-attached terminal is visible and is never the victim.
+    while (_webglLive.size > WEBGL_CONTEXT_BUDGET) {
+        const oldest = _webglLive.values().next().value;
+        if (!oldest || oldest === term) break;
+        _releaseWebglForTerm(oldest);
+    }
+    // Unrecoverable context loss (the vendored addon's own 3s restore window
+    // elapsed): fall back to the DOM renderer — its dispose path restores it —
+    // instead of keeping a dead white canvas. Deferred out of the emit.
+    try {
+        addon.onContextLoss?.(() => {
+            setTimeout(() => {
+                if (rec.addon !== addon) return;
+                rec.addon = null;
+                _webglLive.delete(term);
+                try { addon.dispose(); } catch (e) {}
+            }, 0);
+        });
+    } catch (e) {}
+    try { holder._smoothCursor?.dispose?.(); } catch (e) {}
+    holder._smoothCursor = _wireSmoothCursorWebgl(term, addon);
+    rec.wrapper = holder._smoothCursor;
+    // Re-sync settings the wrapper would have received while detached (its
+    // setOptions also writes term.options, which hot-reload skips for
+    // adapter-less holders).
+    if (holder._smoothCursor) {
+        try {
+            holder._smoothCursor.setOptions({
+                animations: _settingsConfig.animations,
+                cursorBlink: _settingsConfig.cursorBlink === true,
+                cursorStyle: _settingsConfig.cursor || 'bar',
+            });
+        } catch (e) {}
+    }
+    // Repaint through the new renderer in this frame — both renderers draw
+    // the same buffer, and the flush keeps the swap free of any
+    // cleared-canvas composite.
+    try { term.refresh(0, term.rows - 1); } catch (e) {}
+    _flushTermRender(term);
+}
+
+function _detachWebglRenderer(holder, term) {
+    const rec = term ? _webglByTerm.get(term) : null;
+    if (!rec || !rec.addon || rec.idleTimer) return;
+    rec.idleTimer = setTimeout(() => {
+        rec.idleTimer = null;
+        // A dispose path or the budget enforcer may have released the record
+        // while the grace timer was pending — both clear rec.addon first.
+        if (!rec.addon) return;
+        _releaseWebglForTerm(term);
+    }, WEBGL_IDLE_RELEASE_MS);
+}
+
 // Create a .term-wrap with an inner content wrapper. The inner wrapper fills the
 // area inside .term-wrap's padding, so xterm's FitAddon measures the real terminal
 // area instead of the padded container.
@@ -573,14 +698,12 @@ function wireTerminal(tab, tabId) {
         if (_tryWin32CtrlJ(term, e)) return false;
         return _shortcutPassthrough(term, e);
     });
-    // The WebGL addon must load AFTER open(): loading it before open loses the
-    // render-service registration race to the DOM renderer, silently falling
-    // back to DOM rendering (verified: no .xterm-webgl canvas, adapter idle).
-    let webglAddon = null;
-    try { webglAddon = new WebglAddon(); term.loadAddon(webglAddon); } catch(e) { console.warn('WebglAddon init failed:', e); }
+    // WebGL attaches only while the wrap is visible (context budget — see
+    // _attachWebglRenderer); a background tab renders through the DOM
+    // renderer until activation.
+    if (wrap.classList.contains('active')) _attachWebglRenderer(tab, term);
     tab.term = term;
     tab.fitAddon = fitAddon;
-    tab._smoothCursor = _wireSmoothCursorWebgl(term, webglAddon);
 
     function applyFit() {
         if (_spannerDrag || TabManager._maximizing) return;
@@ -807,12 +930,12 @@ function wireTerminalToPane(tab, pane) {
         if (_tryWin32CtrlJ(term, e)) return false;
         return _shortcutPassthrough(term, e);
     });
-    // WebGL addon loads after open() — see wireTerminal for the race details.
-    let webglAddon = null;
-    try { webglAddon = new WebglAddon(); term.loadAddon(webglAddon); } catch(e) { console.warn('WebglAddon init failed:', e); }
+    // WebGL addon loads after open() — see _attachWebglRenderer for the race
+    // details; contexts are budgeted by visibility (only the active tab's
+    // panes hold one).
+    if (TabManager.activeId === tab.id) _attachWebglRenderer(pane, term);
     pane.term = term;
     pane.fitAddon = fitAddon;
-    pane._smoothCursor = _wireSmoothCursorWebgl(term, webglAddon);
 
     function applyFit(retries = 10) {
         // _windowResizing: suppress fit (and the immediate resize report)

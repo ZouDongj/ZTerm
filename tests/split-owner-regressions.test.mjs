@@ -387,6 +387,9 @@ function wiredSplitTab(ctx, id, backend1, backend2) {
 test('A: perceivedCaret survives single→split (adapter moved to the pane)', () => {
     const ctx = loadVm();
     const tab = wiredTab(ctx, 't_a1', 'local_1');
+    // Adapters are visibility-bound now (WebGL attaches only to the visible
+    // tab — context budget): activation is what wires the smooth cursor.
+    ctx.TabManager.switchTo(tab.id);
     ctx.__adapterCells.set(tab.term, { x: 7, y: 2 });
     const provider = ctx.__imeProviders.get(tab.term);
     assert.ok(provider, 'provider installed at wiring time');
@@ -403,6 +406,7 @@ test('A: perceivedCaret survives single→split (adapter moved to the pane)', ()
 test('A: perceivedCaret survives pane→extracted tab and ignores the cleared old owner', () => {
     const ctx = loadVm();
     const { tab, p1, p2 } = wiredSplitTab(ctx, 't_a2', 'local_1', 'local_2');
+    ctx.TabManager.switchTo(tab.id); // visibility-bound adapters (see above)
     ctx.__adapterCells.set(p1.term, { x: 3, y: 9 });
     ctx.__adapterCells.set(p2.term, { x: 11, y: 5 });
     const providerP2 = ctx.__imeProviders.get(p2.term);
@@ -435,8 +439,10 @@ test('A: perceivedCaret survives cross-tab drag migration', () => {
 test('A: perceivedCaret falls back to null once the session is closed', () => {
     const ctx = loadVm();
     const other = wiredTab(ctx, 't_keep', 'local_9');
+    ctx.TabManager.switchTo(other.id); // visibility-bound adapters (see above)
     ctx.__adapterCells.set(other.term, { x: 8, y: 8 });
     const tab = wiredTab(ctx, 't_a4', 'local_1');
+    ctx.TabManager.switchTo(tab.id);
     ctx.__adapterCells.set(tab.term, { x: 5, y: 6 });
     const provider = ctx.__imeProviders.get(tab.term);
     assert.deepEqual(provider(), { x: 5, y: 6 });
