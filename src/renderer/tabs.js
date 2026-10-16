@@ -491,7 +491,11 @@ const TabManager = {
         for (const id of prio) {
             const t = byId.get(id);
             const desired = (t && Number.isFinite(t._desiredW) && t._desiredW > 0) ? t._desiredW : plan.tabWidth;
-            widths.set(id, Math.min(TAB_MAX_WIDTH, Math.max(plan.tabWidth, desired)));
+            // +8 display slack: the measured content width is an EXACT fit
+            // for the label, so a 1px sub-pixel shortage flips the name to
+            // ellipsis; the expansion exists to show the full name, so it
+            // carries a small margin (the classifier keeps the pure value).
+            widths.set(id, Math.min(TAB_MAX_WIDTH, Math.max(plan.tabWidth, desired + 8)));
         }
         if (plan.state !== 'sharing') {
             // overflow: the strip scrolls, so priority tabs simply take
@@ -1367,7 +1371,16 @@ const TabManager = {
         vp.querySelectorAll('.tab').forEach(el => {
             const t = byId.get(el.getAttribute('data-tab'));
             if (!t || el === renameKeep || this._closingTabs.has(t.id)) return;
+            // Read the NATURAL content width: with the state classes lifted
+            // the tab is a default flex item (shrink 1), so a viewport too
+            // narrow for the content total would squeeze it and floor the
+            // measurement at min-width — poisoning _desiredW exactly in the
+            // crowded states whose expansion targets read it. Freeze the
+            // flex for the measurement (same task as the re-pin below, so
+            // nothing paints mid-state).
+            el.style.flex = '0 0 auto';
             const w = el.offsetWidth;
+            el.style.flex = '';
             if (Number.isFinite(w) && w > 0) t._desiredW = w;
         });
         vp.scrollLeft = prevScroll;
