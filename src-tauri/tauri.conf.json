@@ -24,6 +24,10 @@
       "nsis": {
         "installMode": "both",
         "languages": ["SimpChinese", "English"],
+        "customLanguageFiles": {
+          "SimpChinese": "./installer-languages/SimpChinese.nsh",
+          "English": "./installer-languages/English.nsh"
+        },
         "installerHooks": "./installer.nsh",
         "installerIcon": "../build/icon.ico",
         "uninstallerIcon": "../build/icon.ico"
