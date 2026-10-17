@@ -30,6 +30,10 @@ const DEFAULT_SHORTCUTS = {
     quickCommands: 'Alt+Q',
     commandPalette: 'Ctrl+Shift+P',
     cloneTab: 'Ctrl+Shift+T',
+    // MobaXterm-style reconnect key (issue #19). Ctrl+Shift+R is unclaimed by
+    // every binding above and by common shell/readline usage; plain Ctrl+R
+    // (readline reverse search) stays free because the combo differs.
+    reconnectTab: 'Ctrl+Shift+R',
     'toggle-statusbar': 'Ctrl+Shift+B',
     perfCapture: 'Ctrl+Shift+D',
 };
@@ -180,6 +184,15 @@ const SHORTCUT_ACTIONS = {
         const tab = TabManager.getActive();
         if (tab && tab.type !== 'settings' && !document.querySelector('.overlay.open')) {
             TabManager.cloneTab(tab.id);
+        }
+    },
+    reconnectTab: () => {
+        // Only SSH tabs have a session to reconnect; local/settings tabs no-op
+        // (TabManager.reconnectTab guards the same way). An open overlay owns
+        // the keyboard, same rule as cloneTab.
+        const tab = TabManager.getActive();
+        if (tab && tab.type === 'ssh' && !document.querySelector('.overlay.open')) {
+            TabManager.reconnectTab(tab.id);
         }
     },
     'toggle-statusbar': () => {
@@ -390,6 +403,7 @@ const SHORTCUT_LABELS = {
     quickCommands: '快捷命令',
     commandPalette: '命令面板',
     cloneTab: '克隆标签页',
+    reconnectTab: '重新连接 SSH 会话',
     'toggle-statusbar': '显示/隐藏状态栏',
     perfCapture: '性能采样（4秒，复制到剪贴板）',
 };
@@ -456,10 +470,16 @@ function startShortcutCapture(actionId, btn) {
         } else if (result) {
             const combo = result;
             const keyPart = combo.split('+').pop();
-            const ok = combo.includes('Ctrl+') || combo.includes('Alt+') || /^F\d{1,2}$/.test(keyPart);
+            // Win counts as a qualifying modifier (issue #23): a recorded
+            // Win+X combo only ever exists when the keydown actually reached
+            // the page, so OS-reserved chords simply cannot be captured. Bare
+            // Win alone never gets here — the modifier wait above holds the
+            // capture open until a non-modifier key arrives.
+            const ok = combo.includes('Ctrl+') || combo.includes('Alt+') || combo.includes('Win+')
+                || /^F\d{1,2}$/.test(keyPart);
             const bindings = _getShortcutBindings();
             const conflict = ok && Object.keys(bindings).find(id => id !== actionId && bindings[id] === combo);
-            if (!ok) showToast('普通按键不能单独作为快捷键（需含 Ctrl/Alt，或使用 F1-F12）');
+            if (!ok) showToast('普通按键不能单独作为快捷键（需含 Ctrl/Alt/Win，或使用 F1-F12）');
             else if (conflict) showToast('快捷键已被「' + SHORTCUT_LABELS[conflict] + '」占用');
             else {
                 if (!_settingsConfig.shortcuts) _settingsConfig.shortcuts = {};
