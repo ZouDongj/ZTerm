@@ -88,7 +88,15 @@ body.no-animations .startup-splash .cell{transition:none}
 .ic-green{color:#7dd58a}
 .tab-icon.connected{background:#7dd58a}
 .tab-icon.disconnected{background:rgba(255,255,255,0.25)}
-.tab-close{font-size:13px;line-height:1;color:var(--text-3);margin-left:2px;cursor:pointer;opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
+.tab-close{font-size:13px;line-height:1;color:var(--text-3);cursor:pointer;opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
+/* Pin the trailing action group (reconnect + close) to the tab's trailing
+   edge: the auto margin absorbs any free width (min-width and expanded
+   states), so the close button rests at the edge like WT/Chrome instead of
+   floating right after a short title. In content-hug widths the margin
+   collapses to zero and the layout is unchanged. The slot stays reserved
+   either way; hover still toggles only opacity. Needs higher specificity
+   than the .tab button reset's margin:0. */
+.tab .tab-name + button{margin-left:auto}
 .tab:hover .tab-close,.tab.active .tab-close,.tab-close:focus-visible{opacity:0.7;pointer-events:auto}
 .tab-close:hover{opacity:1!important;color:#f19b92}
 /* ── Tab drag-to-split ── */
@@ -129,7 +137,7 @@ body.tab-dragging{user-select:none}
 .drop-zone .zone-right{top:0;right:0;bottom:0;width:30%;background:linear-gradient(270deg,rgba(var(--accent-rgb),0.28),transparent)}
 .drop-zone .zone-top{top:0;left:0;right:0;height:30%;background:linear-gradient(180deg,rgba(var(--accent-rgb),0.28),transparent)}
 .drop-zone .zone-bottom{bottom:0;left:0;right:0;height:30%;background:linear-gradient(0deg,rgba(var(--accent-rgb),0.28),transparent)}
-.tab-reconnect{font-size:12px;margin-left:2px;cursor:pointer;color:#ffb74d;opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
+.tab-reconnect{font-size:12px;cursor:pointer;color:#ffb74d;opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
 .tab:hover .tab-reconnect,.tab.active .tab-reconnect,.tab-reconnect:focus-visible{opacity:0.7;pointer-events:auto}
 .tab-reconnect:hover{opacity:1!important}
 /* Manual reconnect affordance (connected tabs). Same stable-slot contract as
@@ -137,7 +145,7 @@ body.tab-dragging{user-select:none}
    opacity only — the earlier zero-width-to-20px max-width hover animation
    reflowed the whole tab bar per frame and fed an event→layout→event loop
    that could pin the main thread. Never animate layout here. */
-.tab-reconnect-normal{font-size:12px;margin-left:2px;cursor:pointer;color:var(--text-2);opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
+.tab-reconnect-normal{font-size:12px;cursor:pointer;color:var(--text-2);opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
 .tab:hover .tab-reconnect-normal,.tab-reconnect-normal:focus-visible{opacity:0.5;pointer-events:auto}
 .tab-reconnect-normal:hover{opacity:1!important;color:rgb(var(--accent-rgb))}
 #btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;font-size:16px;transition:all 0.12s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
