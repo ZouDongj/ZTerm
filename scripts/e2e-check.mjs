@@ -2684,8 +2684,8 @@ async function main() {
       cardStruct.rowBg === 'rgba(0, 0, 0, 0)' &&
       cardStruct.headingBtns === 1 && cardStruct.addBtn === true &&
       cardStruct.addH === '32px' && cardStruct.addRadius === '9px' &&
-      cardStruct.quietBtns.join(',') === '折叠/展开';
-    check('SSH 设置页：每组一张设置卡片 + 分节标题 + 工具栏（合并折叠开关）', cardOk === true, JSON.stringify(cardStruct));
+      cardStruct.quietBtns.join(',') === '折叠全部,展开全部';
+    check('SSH 设置页：每组一张设置卡片 + 分节标题 + 工具栏', cardOk === true, JSON.stringify(cardStruct));
     // Card-row hover is the user-picked combo (rounded wash + accent edge
     // bar), now provided by the BASE .ssh-mgr-row rules so the flat manager
     // overlay shares the exact same hover; the card scope only overrides
@@ -2804,39 +2804,29 @@ async function main() {
     await shot('settings-appearance-ref');
     await cdp.eval(`openSettings('ssh'); 'ssh-13.10'`).catch(() => null);
     await sleep(350);
-    // Collapse-all via the merged toolbar toggle hides each whole card but
-    // keeps the section titles; the same toggle expands back. Real button
-    // clicks, not the bare functions, so the rewired toolbar itself is
-    // exercised, and the toggle's aria/tooltip state flips with each click.
+    // Collapse-all via the moved toolbar buttons hides each whole card but
+    // keeps the section titles; expand-all restores. Real button clicks, not
+    // the bare functions, so the rewired toolbar itself is exercised.
     const collapseAll = await cdp.eval(`(() => {
       const btns = [...document.querySelectorAll('[data-page="ssh"] .settings-toolbar .settings-quiet-action')];
-      if (btns.length !== 1) return { n: -btns.length };
       btns[0].click();
       const cards = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-items')];
       const titles = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-title')];
       return {
         hidden: cards.every(c => c.classList.contains('collapsed') && getComputedStyle(c).display === 'none' && c.offsetHeight === 0),
         titlesUp: titles.every(t => t.offsetHeight > 0),
-        n: cards.length,
-        aria: btns[0].getAttribute('aria-expanded'),
-        tip: btns[0].title
+        n: cards.length
       };
     })()`).catch(() => null);
-    check('SSH 设置页：折叠开关隐藏整张卡片保留组标题', !!collapseAll && collapseAll.hidden === true && collapseAll.titlesUp === true && collapseAll.n === 2 &&
-      collapseAll.aria === 'false' && collapseAll.tip === '展开全部分组', JSON.stringify(collapseAll));
+    check('SSH 设置页：折叠全部隐藏整张卡片保留组标题', !!collapseAll && collapseAll.hidden === true && collapseAll.titlesUp === true && collapseAll.n === 2, JSON.stringify(collapseAll));
     await shot('ssh-settings-collapsed');
     const expandAllBack = await cdp.eval(`(() => {
       const btns = [...document.querySelectorAll('[data-page="ssh"] .settings-toolbar .settings-quiet-action')];
-      btns[0].click();
+      btns[1].click();
       const cards = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-items')];
-      return {
-        back: cards.every(c => !c.classList.contains('collapsed') && c.offsetHeight > 0),
-        aria: btns[0].getAttribute('aria-expanded'),
-        tip: btns[0].title
-      };
-    })()`).catch(() => null);
-    check('SSH 设置页：折叠开关再点恢复卡片', !!expandAllBack && expandAllBack.back === true &&
-      expandAllBack.aria === 'true' && expandAllBack.tip === '折叠全部分组', JSON.stringify(expandAllBack));
+      return cards.every(c => !c.classList.contains('collapsed') && c.offsetHeight > 0);
+    })()`).catch(() => false);
+    check('SSH 设置页：展开全部恢复卡片', expandAllBack === true, '');
     // Rename entry: opacity-revealed on focus (keyboard reachable), and the
     // reveal must not nudge the section title's height. The opacity has a
     // 120ms transition, so the post-focus read happens after a real sleep.
