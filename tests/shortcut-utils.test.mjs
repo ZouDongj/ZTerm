@@ -21,9 +21,12 @@ test('comboFromEvent Ctrl+Shift 组合', () => {
     assert.equal(comboFromEvent(ev({ ctrlKey: true, shiftKey: true, key: 'N' })), 'Ctrl+Shift+N');
 });
 
-test('comboFromEvent Ctrl+Meta 都归为 Ctrl', () => {
-    assert.equal(comboFromEvent(ev({ metaKey: true, key: 'W' })), 'Ctrl+W');
-    assert.equal(comboFromEvent(ev({ ctrlKey: true, metaKey: true, key: 'W' })), 'Ctrl+W');
+test('comboFromEvent Meta(Win) 记录为独立 Win 修饰键（不再并入 Ctrl）', () => {
+    assert.equal(comboFromEvent(ev({ metaKey: true, key: 'W' })), 'Win+W');
+    assert.equal(comboFromEvent(ev({ ctrlKey: true, metaKey: true, key: 'X' })), 'Ctrl+Win+X');
+    assert.equal(comboFromEvent(ev({ metaKey: true, shiftKey: true, key: 'ArrowUp' })), 'Win+Shift+ArrowUp');
+    // Ctrl alone stays Ctrl: the recorded strings for Ctrl+X and Ctrl+Win+X differ
+    assert.notEqual(comboFromEvent(ev({ ctrlKey: true, key: 'X' })), comboFromEvent(ev({ ctrlKey: true, metaKey: true, key: 'X' })));
 });
 
 test('comboFromEvent 空格转为 Space', () => {
@@ -54,6 +57,12 @@ test('comboDisplay 方向键转箭头符号', () => {
     assert.equal(comboDisplay('Ctrl+F'), 'Ctrl+F');
 });
 
+test('comboDisplay Win 修饰键按字面渲染为 Win', () => {
+    assert.equal(comboDisplay('Ctrl+Win+X'), 'Ctrl+Win+X');
+    assert.equal(comboDisplay('Win+ArrowLeft'), 'Win+←');
+    assert.equal(comboDisplay('Win+Shift+ArrowUp'), 'Win+Shift+↑');
+});
+
 // ── mergeShortcutBindings ──
 
 test('mergeShortcutBindings 用户覆盖默认且保留未覆盖项', () => {
@@ -69,6 +78,20 @@ test('mergeShortcutBindings 无覆盖/空覆盖时保持默认', () => {
     // returns a new object; arguments are not mutated
     const merged = mergeShortcutBindings(defaults, {});
     assert.notEqual(merged, defaults);
+});
+
+test('mergeShortcutBindings 遗留存储绑定（不含 Win）原样合并', () => {
+    // Stored configs written before Win became a modifier never contain Win;
+    // they must keep merging (and therefore matching) unchanged.
+    const defaults = { a: 'Ctrl+A', b: 'Ctrl+B', reconnectTab: 'Ctrl+Shift+R' };
+    const stored = { b: 'Ctrl+W' }; // legacy override, recorded when Meta folded into Ctrl
+    const merged = mergeShortcutBindings(defaults, stored);
+    assert.equal(merged.b, 'Ctrl+W');
+    assert.equal(merged.a, 'Ctrl+A');
+    // a Win binding recorded now overrides the same way any combo does
+    assert.equal(mergeShortcutBindings(defaults, { a: 'Ctrl+Win+A' }).a, 'Ctrl+Win+A');
+    // round-trip through JSON (the persisted-config shape) keeps Win intact
+    assert.equal(JSON.parse(JSON.stringify(merged)).b, 'Ctrl+W');
 });
 
 // ── browserAcceleratorDenied (Edge-OOUI accelerator interception) ──

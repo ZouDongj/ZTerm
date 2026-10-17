@@ -3,7 +3,7 @@ let _paletteSelected = 0;
 
 // Action display order (semantic: tabs → splits → SSH → search → settings/quick commands)
 const _paletteOrder = [
-    'newTab', 'closeTab', 'nextTab', 'prevTab', 'renameTab', 'cloneTab',
+    'newTab', 'closeTab', 'nextTab', 'prevTab', 'renameTab', 'cloneTab', 'reconnectTab',
     'closePane', 'splitH', 'splitV', 'maximizePane',
     'extractPane', 'nextPane', 'prevPane', 'syncInput',
     'sshPanel', 'sftp',

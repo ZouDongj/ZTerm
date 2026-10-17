@@ -3,9 +3,15 @@
 // Build a canonical combo string (Ctrl+Shift+N form) from a KeyboardEvent.
 // e.code is more reliable than e.key — immune to keyboard layout, Alt-key
 // system interception, and IME states.
+// Win (e.metaKey) is a first-class modifier, NOT folded into Ctrl (issue #23):
+// folding made Ctrl+Win+X record as Ctrl+X, so the two were indistinguishable
+// in matching and display. Caveat: Windows owns some Win chords (Win+L,
+// Win+Ctrl+Left/Right, the Start menu) and never delivers them to WebView2 —
+// such combos simply cannot be recorded, only ones that arrive as keydowns.
 function comboFromEvent(e) {
     const parts = [];
-    if (e.ctrlKey || e.metaKey) parts.push('Ctrl');
+    if (e.ctrlKey) parts.push('Ctrl');
+    if (e.metaKey) parts.push('Win');
     if (e.altKey) parts.push('Alt');
     if (e.shiftKey) parts.push('Shift');
     let key = e.key;
@@ -19,7 +25,8 @@ function comboFromEvent(e) {
     return parts.join('+');
 }
 
-// Display text for a combo: arrow keys render as arrow glyphs
+// Display text for a combo: arrow keys render as arrow glyphs. Modifier parts
+// are already canonical ('Win' renders literally as Win).
 function comboDisplay(combo) {
     return combo.replace(/ArrowUp/g, '↑').replace(/ArrowDown/g, '↓')
         .replace(/ArrowLeft/g, '←').replace(/ArrowRight/g, '→');

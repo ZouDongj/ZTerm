@@ -203,3 +203,134 @@ test('resetShortcut after a clear restores the default binding', () => {
     assert.equal(f.context._getShortcutBindings().closeTab, 'Ctrl+Shift+W', 'default binding restored');
     assert.match(f.table.innerHTML, /Ctrl\+Shift\+W/, 'the list shows the default combo again');
 });
+
+// ── Win as a first-class modifier (issue #23) ──
+// comboFromEvent no longer folds metaKey into Ctrl: Ctrl+Win+X records as
+// its own combo, and the capture validation accepts Win-qualified combos
+// (bare Win alone can never be recorded — the modifier wait holds the
+// capture open, the OS owns the key).
+
+test('capture records Ctrl+Win+X as a distinct combo and persists it', () => {
+    const f = fixture();
+    f.arm('closeTab');
+    const ev = f.keydown({ key: 'x', ctrlKey: true, metaKey: true, target: XTERM_TARGET });
+    assert.equal(ev.defaultPrevented, true, 'the recording keydown is consumed');
+    assert.equal(f.captureState(), null, 'capture finished');
+    assert.deepEqual(JSON.parse(JSON.stringify(f.context._settingsConfig.shortcuts)), { closeTab: 'Ctrl+Win+X' });
+    assert.equal(f.sends.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(f.sends[0].payload)), { closeTab: 'Ctrl+Win+X' });
+    assert.match(f.table.innerHTML, /Ctrl\+Win\+X/, 'the list renders the Win combo');
+});
+
+test('capture accepts Win without Ctrl/Alt (e.g. Win+X, when the OS delivers it)', () => {
+    const f = fixture();
+    f.arm('closeTab');
+    f.keydown({ key: 'x', metaKey: true, target: XTERM_TARGET });
+    assert.deepEqual(JSON.parse(JSON.stringify(f.context._settingsConfig.shortcuts)), { closeTab: 'Win+X' });
+    assert.equal(f.sends.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(f.sends[0].payload)), { closeTab: 'Win+X' });
+});
+
+test('bare Win (Meta keydown alone) keeps the capture waiting', () => {
+    const f = fixture();
+    f.arm('closeTab');
+    f.keydown({ key: 'Meta', metaKey: true, target: XTERM_TARGET });
+    assert.ok(f.captureState(), 'capture is still armed — Win alone is not a binding');
+    assert.equal(f.context._settingsConfig.shortcuts, undefined, 'nothing was recorded');
+    // the next real key completes the combo with the Win modifier
+    f.keydown({ key: 'k', metaKey: true, target: XTERM_TARGET });
+    assert.deepEqual(JSON.parse(JSON.stringify(f.context._settingsConfig.shortcuts)), { closeTab: 'Win+K' });
+});
+
+test('dispatcher separation: a Ctrl+X binding does not fire on Ctrl+Win+X and vice versa', () => {
+    // Record closeTab = Ctrl+X through the real capture flow.
+    const f = fixture();
+    f.arm('closeTab');
+    f.keydown({ key: 'x', ctrlKey: true, target: XTERM_TARGET });
+
+    const pressed = f.keydown({ key: 'x', ctrlKey: true, metaKey: true, target: XTERM_TARGET });
+    assert.equal(pressed.defaultPrevented, undefined, 'Ctrl+Win+X is delivered to the terminal, not the Ctrl+X action');
+    assert.equal(pressed.propagationStopped, undefined);
+
+    const plain = f.keydown({ key: 'x', ctrlKey: true, target: XTERM_TARGET });
+    assert.equal(plain.defaultPrevented, true, 'plain Ctrl+X still fires the recorded binding');
+});
+
+test('dispatcher separation: a Win combo binding ignores the same combo without Win', () => {
+    const f = fixture();
+    f.arm('closeTab');
+    f.keydown({ key: 'x', ctrlKey: true, metaKey: true, target: XTERM_TARGET }); // records Ctrl+Win+X
+
+    const plain = f.keydown({ key: 'x', ctrlKey: true, target: XTERM_TARGET });
+    assert.equal(plain.defaultPrevented, undefined, 'plain Ctrl+X does not fire the Ctrl+Win+X binding');
+
+    const withWin = f.keydown({ key: 'x', ctrlKey: true, metaKey: true, target: XTERM_TARGET });
+    assert.equal(withWin.defaultPrevented, true, 'Ctrl+Win+X fires its own binding');
+});
+
+test('legacy stored bindings (recorded before Win existed) keep firing unchanged', () => {
+    const f = fixture();
+    // A config persisted by an older build: overrides never contain Win.
+    f.context._settingsConfig.shortcuts = { renameTab: 'Ctrl+W' };
+
+    const fires = f.keydown({ key: 'w', ctrlKey: true, target: XTERM_TARGET });
+    assert.equal(fires.defaultPrevented, true, 'the stored Ctrl+W override still matches');
+
+    const withWin = f.keydown({ key: 'w', ctrlKey: true, metaKey: true, target: XTERM_TARGET });
+    assert.equal(withWin.defaultPrevented, undefined, 'Ctrl+Win+W is a different combo and falls through');
+});
+
+// ── reconnectTab action (issue #19) ──
+// Default Ctrl+Shift+R reconnects the ACTIVE tab when it is an SSH tab;
+// local/settings tabs and open overlays no-op (the key is still consumed —
+// same dispatcher idiom as closeTab on a settings tab).
+
+function reconnectFixture(activeTab) {
+    const f = fixture();
+    const calls = [];
+    f.context.TabManager = {
+        tabs: activeTab ? [activeTab] : [],
+        getActive: () => activeTab || null,
+        reconnectTab: id => calls.push(id),
+    };
+    return { f, calls };
+}
+
+test('reconnectTab default Ctrl+Shift+R reconnects the active SSH tab', () => {
+    const { f, calls } = reconnectFixture({ id: 'ssh1', type: 'ssh' });
+    assert.equal(f.context._getShortcutBindings().reconnectTab, 'Ctrl+Shift+R', 'registry default');
+
+    const ev = f.keydown({ key: 'r', ctrlKey: true, shiftKey: true, target: XTERM_TARGET });
+    assert.equal(ev.defaultPrevented, true, 'the combo is consumed');
+    assert.deepEqual(calls, ['ssh1'], 'TabManager.reconnectTab ran for the active tab');
+});
+
+test('reconnectTab no-ops on local and settings tabs (key stays consumed)', () => {
+    for (const type of ['local', 'settings']) {
+        const { f, calls } = reconnectFixture({ id: 't1', type });
+        const ev = f.keydown({ key: 'r', ctrlKey: true, shiftKey: true, target: XTERM_TARGET });
+        assert.equal(ev.defaultPrevented, true, `${type}: dispatcher still consumes the combo`);
+        assert.deepEqual(calls, [], `${type}: no reconnect was started`);
+    }
+});
+
+test('reconnectTab no-ops while an overlay is open', () => {
+    const { f, calls } = reconnectFixture({ id: 'ssh1', type: 'ssh' });
+    f.context.document.querySelector = sel => (sel === '.overlay.open' ? {} : null);
+    f.keydown({ key: 'r', ctrlKey: true, shiftKey: true, target: XTERM_TARGET });
+    assert.deepEqual(calls, [], 'the open overlay owns the keyboard');
+});
+
+test('reconnectTab does not fire on Ctrl+Win+R (Win is a distinct modifier)', () => {
+    const { f, calls } = reconnectFixture({ id: 'ssh1', type: 'ssh' });
+    const ev = f.keydown({ key: 'r', ctrlKey: true, shiftKey: true, metaKey: true, target: XTERM_TARGET });
+    assert.equal(ev.defaultPrevented, undefined, 'Ctrl+Shift+Win+R reaches the terminal');
+    assert.deepEqual(calls, []);
+});
+
+test('settings table lists the reconnect row with its default combo', () => {
+    const f = fixture();
+    f.context.renderShortcutsList();
+    assert.match(f.table.innerHTML, /重新连接 SSH 会话/);
+    assert.match(f.table.innerHTML, /Ctrl\+Shift\+R/);
+});
