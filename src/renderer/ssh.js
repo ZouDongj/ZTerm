@@ -543,10 +543,25 @@ function _sshUpdateCount(containerId, matched, total) {
     el.textContent = matched === total ? `${total} 个连接` : `${matched} / ${total} 个连接`;
 }
 
+// Keep the merged fold toggle honest on every render: tooltip and ARIA state
+// announce the action the next click performs. Derived from the persistent
+// collapse set, not the force-expanded search display, so the button always
+// describes what it will do to the stored fold state.
+function _sshUpdateFoldButton(containerId) {
+    const btn = document.querySelector(`[data-ssh-fold="${containerId}"]`);
+    if (!btn) return;
+    const collapsed = _sshAllGroupsCollapsed(Object.keys(getSSHGroups()), _sshMgrView(containerId).collapsed);
+    const tip = collapsed ? '展开全部分组' : '折叠全部分组';
+    btn.title = tip;
+    btn.setAttribute('aria-label', tip);
+    btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+}
+
 // Shared A-scheme renderer for both manager entries. Display format comes
 // from ssh-display.js; order and IDs are the stored profile order/identity.
 function renderSSHManagerInto(listEl, view) {
     if (!listEl) return;
+    _sshUpdateFoldButton(listEl.id);
     const profiles = TabManager.sshProfiles || [];
     const snap = _sshFocusSnapshot(listEl);
     const querying = view.query.trim().length > 0;
@@ -616,6 +631,17 @@ function sshGroupHeaderKey(e) {
     }
 }
 
+// Fold-all decision, kept free of DOM access so tests drive it directly:
+// the merged toggle keeps collapsing while any group is expanded and only
+// switches to expand once every group is folded. No groups at all rests on
+// expand (nothing is left standing open).
+function _sshAllGroupsCollapsed(groupNames, collapsed) {
+    for (const g of groupNames || []) {
+        if (!collapsed.has(g)) return false;
+    }
+    return true;
+}
+
 // Collapse/expand-all applies to its own manager container only
 // (settings page and overlay do not affect each other)
 function collapseAllGroups(containerId) {
@@ -628,6 +654,14 @@ function expandAllGroups(containerId) {
     const view = _sshMgrView(containerId);
     view.collapsed.clear();
     renderSSHManagerInto(document.getElementById(containerId), view);
+}
+
+// The merged toolbar toggle (one button instead of a collapse/expand pair):
+// its effective action comes from the current fold state of its container.
+function toggleAllGroups(containerId) {
+    const allCollapsed = _sshAllGroupsCollapsed(Object.keys(getSSHGroups()), _sshMgrView(containerId).collapsed);
+    if (allCollapsed) expandAllGroups(containerId);
+    else collapseAllGroups(containerId);
 }
 
 function startRenameGroup(btn, oldName) {
