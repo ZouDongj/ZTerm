@@ -269,6 +269,7 @@ function loadVm() {
         getTerminalTheme: () => ({}),
         colorFgbgForBackground: () => null,
         _normalizeFontFamily: (s) => s,
+        _normalizeWordSeparators: (v) => (typeof v === 'string' && v ? v : ''),
         _getAccentColor: () => '#ffffff',
         _clampFontWeight: (v, d) => d,
         _settingsConfig: {},

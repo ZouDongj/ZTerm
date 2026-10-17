@@ -173,6 +173,8 @@ function loadSettingsIntoForm() {
     if (blinkEl) blinkEl.value = config.cursorBlink !== false ? 'on' : 'off';
     const contrastEl = document.getElementById('set-contrast');
     if (contrastEl && config.minimumContrastRatio) contrastEl.value = config.minimumContrastRatio;
+    const wsEl = document.getElementById('set-word-separators');
+    if (wsEl) wsEl.value = _normalizeWordSeparators(config.wordSeparators);
     // Local shell defaults (options come from auto-detected profiles)
     const dsEl = document.getElementById('set-default-shell');
     if (dsEl) {
@@ -697,6 +699,10 @@ function saveTerminal() {
     }
     const bell = document.getElementById('set-bell')?.value || 'off';
     const cursorBlink = (document.getElementById('set-blink')?.value || 'on') === 'on';
+    // Double-click word separators: the raw input string, verbatim (spaces,
+    // quotes and backticks are literal separator characters, so no trim).
+    // '' means "follow the vendored default" on the apply side below.
+    const wordSeparators = _normalizeWordSeparators(document.getElementById('set-word-separators')?.value);
     const autoCopy = getToggle('toggle-autocopy');
     const rightClickPaste = getToggle('toggle-rightclick');
     const richTextCopy = getToggle('toggle-richtext');
@@ -710,7 +716,7 @@ function saveTerminal() {
         .filter(p => { const el = document.getElementById('toggle-shell-' + p.id); return el && !el.classList.contains('on'); })
         .map(p => p.id);
 
-    const config = { cursor, scrollback, bell, cursorBlink, autoCopy, rightClickPaste, richTextCopy, smartCopy, osc52, restoreLocalContent, defaultShell, startupDir, updateProxy, hiddenProfiles };
+    const config = { cursor, scrollback, bell, cursorBlink, wordSeparators, autoCopy, rightClickPaste, richTextCopy, smartCopy, osc52, restoreLocalContent, defaultShell, startupDir, updateProxy, hiddenProfiles };
     _settingsConfig = { ..._settingsConfig, ...config };
     persistSettings();
 
@@ -719,6 +725,12 @@ function saveTerminal() {
             t.term.options.cursorBlink = cursorBlink;
             t.term.options.cursorStyle = cursor;
             t.term.options.scrollback = scrollback;
+            // Word separators are read live from rawOptions at click time,
+            // so the assignment takes effect on the next double-click without
+            // a repaint. Assigning '' (setting cleared) resets to the vendored
+            // default: xterm's option sanitizer substitutes its own default
+            // for falsy values, so no hardcoded copy of the default is needed.
+            t.term.options.wordSeparator = wordSeparators;
             if (t._smoothCursor) t._smoothCursor.setOptions({ cursorBlink, cursorStyle: cursor });
         }
         if (t.splitRoot) {
@@ -727,6 +739,7 @@ function saveTerminal() {
                     p.term.options.cursorBlink = cursorBlink;
                     p.term.options.cursorStyle = cursor;
                     p.term.options.scrollback = scrollback;
+                    p.term.options.wordSeparator = wordSeparators;
                     if (p._smoothCursor) p._smoothCursor.setOptions({ cursorBlink, cursorStyle: cursor });
                 }
             });
@@ -759,6 +772,7 @@ function persistSettings() {
         scrollback: config.scrollback,
         bell: config.bell,
         cursorBlink: config.cursorBlink,
+        wordSeparators: config.wordSeparators,
         autoCopy: config.autoCopy,
         rightClickPaste: config.rightClickPaste,
         richTextCopy: config.richTextCopy,

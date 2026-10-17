@@ -300,6 +300,7 @@ function loadVm() {
         getTerminalTheme: () => ({}),
         colorFgbgForBackground: () => null,
         _normalizeFontFamily: (s) => s,
+        _normalizeWordSeparators: (v) => (typeof v === 'string' && v ? v : ''),
         _getAccentColor: () => '#ffffff',
         // utils.js global the search decoration options read (page always has it)
         _getAccentColorAlpha: (a) => `rgba(255,255,255,${a})`,

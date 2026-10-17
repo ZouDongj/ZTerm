@@ -253,3 +253,17 @@ function _clampFontWeight(v, dflt) {
     return Math.min(1000, Math.max(1, n));
 }
 
+// Double-click word separators (the vendored xterm option `wordSeparator`: a
+// plain character set matched by membership, no regex syntax). Returns the
+// configured string verbatim -- spaces, quotes and backticks are literal
+// separators, so the value is never trimmed -- or '' when the config is
+// unset/empty/not a string. '' means "follow the vendored default" on both
+// consume sides: _buildTerminalOptions omits the option entirely (a future
+// vendor default change stays free), and the live reset assigns '' (xterm's
+// option sanitizer substitutes its own default for falsy values). Startup
+// (_buildTerminalOptions) and the settings hot update (saveTerminal) must
+// share this logic.
+function _normalizeWordSeparators(value) {
+    return typeof value === 'string' && value ? value : '';
+}
+
