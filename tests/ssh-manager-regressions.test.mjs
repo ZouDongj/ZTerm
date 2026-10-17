@@ -10,7 +10,7 @@
 // already applied to tab rename in tabs.js.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadSshVm, runIn, mkEvt } from './helpers/manager-vm.mjs';
+import { loadSshVm, mkEvt } from './helpers/manager-vm.mjs';
 
 // Stage one group header exactly as _sshGroupHtml paints it: title row with
 // the name span and the rename button (its inline onclick attribute kept, as
@@ -240,100 +240,6 @@ test('(guard) a profile with a saved password keeps the status-row flow', () => 
     pwdInput.onkeydown(mkEvt({ key: 'Escape' }));
     assert.equal(statusEl.style.display, 'flex', 'Esc cancels back to the status row');
     assert.equal(ctx.__overlayCloseCalls, 0, 'Esc does not close the dialog here');
-});
-
-// ── Merged fold-all toggle (issue #11) ──
-// One toggle per container replaces the collapse/expand pair: it collapses
-// while any group is expanded and expands once every group is folded. The
-// decision is a DOM-free predicate; the shared renderer refreshes the
-// button's tooltip and ARIA state, so every repaint path (single-group
-// toggles, CRUD, search) keeps the button honest.
-
-test('the fold decision is pure over the group state', () => {
-    const ctx = loadSshVm();
-    const p = ctx._sshAllGroupsCollapsed;
-    assert.equal(p([], new Set()), true, 'no groups: rests on expand');
-    assert.equal(p(['Prod'], new Set()), false, 'one live group means collapse');
-    assert.equal(p(['Prod', 'Dev'], new Set(['Prod'])), false, 'partially folded still means collapse');
-    assert.equal(p(['Prod', 'Dev'], new Set(['Prod', 'Dev'])), true, 'fully folded means expand');
-    assert.equal(p(['Prod'], new Set(['Prod', 'Gone'])), true, 'stale collapse entries do not block expand');
-});
-
-// The harness DOM resolves class chains and bare tags only, so the fold
-// button (located by [data-ssh-fold], the same convention as data-ssh-count
-// and data-ssh-search) is special-cased onto querySelector — the same shim
-// pattern as the menu-popup probe above.
-function stageFoldUi(ctx, profiles) {
-    ctx.TabManager.sshProfiles = profiles;
-    const btn = ctx.document.createElement('button');
-    btn.setAttribute('data-ssh-fold', 'ssh-manager-list');
-    const origQ = ctx.document.querySelector;
-    ctx.document.querySelector = sel =>
-        sel === '[data-ssh-fold="ssh-manager-list"]' ? btn : origQ.call(ctx.document, sel);
-    ctx.SshDisplay = {
-        sshProfileMatches: () => true,
-        sshDisplayModel: p => ({ named: false, primary: p.id, user: 'user', port: 22, keyAuth: false, primaryIsHost: true, endpoint: 'h:22' }),
-    };
-    ctx.renderSSHManagerInto(ctx.document.getElementById('ssh-manager-list'), ctx._sshMgrView('ssh-manager-list'));
-    return btn;
-}
-
-const PROFILES_2G = [{ id: 'a', group: 'Prod' }, { id: 'b', group: 'Dev' }];
-
-test('the toggle collapses everything, then expands everything', () => {
-    const ctx = loadSshVm();
-    const btn = stageFoldUi(ctx, PROFILES_2G);
-    assert.equal(btn.getAttribute('aria-expanded'), 'true', 'fresh view: groups stand expanded');
-    assert.equal(btn.title, '折叠全部分组', 'tooltip names the collapse action');
-
-    ctx.toggleAllGroups('ssh-manager-list');
-    assert.equal(runIn(ctx, "_sshMgrViews.get('ssh-manager-list').collapsed.size"), 2, 'both groups folded');
-    assert.equal(btn.getAttribute('aria-expanded'), 'false');
-    assert.equal(btn.title, '展开全部分组', 'tooltip flips to the expand action');
-
-    ctx.toggleAllGroups('ssh-manager-list');
-    assert.equal(runIn(ctx, "_sshMgrViews.get('ssh-manager-list').collapsed.size"), 0, 'expand clears the fold set');
-    assert.equal(btn.getAttribute('aria-expanded'), 'true');
-});
-
-test('a partially folded list still collapses, never expands', () => {
-    const ctx = loadSshVm();
-    const btn = stageFoldUi(ctx, PROFILES_2G);
-    runIn(ctx, "_sshMgrViews.get('ssh-manager-list').collapsed.add('Prod')");
-    ctx.renderSSHManagerInto(ctx.document.getElementById('ssh-manager-list'), ctx._sshMgrView('ssh-manager-list'));
-    assert.equal(btn.getAttribute('aria-expanded'), 'true', 'one live group still reads as expanded');
-
-    ctx.toggleAllGroups('ssh-manager-list');
-
-    assert.equal(runIn(ctx, "_sshMgrViews.get('ssh-manager-list').collapsed.size"), 2, 'partial state collapses all');
-});
-
-test('a single-group header toggle re-syncs the button through the shared renderer', () => {
-    const ctx = loadSshVm();
-    const btn = stageFoldUi(ctx, PROFILES_2G);
-    ctx.toggleAllGroups('ssh-manager-list'); // fold everything first
-    assert.equal(btn.getAttribute('aria-expanded'), 'false');
-
-    const list = ctx.document.getElementById('ssh-manager-list');
-    list.className = 'ssh-mgr-list';
-    const header = ctx.document.createElement('div');
-    header.className = 'ssh-mgr-group-title';
-    header.setAttribute('data-group', 'Prod');
-    list.appendChild(header);
-    ctx.toggleSSHGroup(header); // re-open one group through the header path
-
-    assert.equal(runIn(ctx, "_sshMgrViews.get('ssh-manager-list').collapsed.has('Prod')"), false, 'header re-opened its group');
-    assert.equal(btn.getAttribute('aria-expanded'), 'true', 'button re-synced by the shared renderer');
-    assert.equal(btn.title, '折叠全部分组');
-});
-
-test('a profile-less render still syncs the button to its expand resting state', () => {
-    const ctx = loadSshVm();
-    const btn = stageFoldUi(ctx, []);
-    assert.equal(btn.getAttribute('aria-expanded'), 'false', 'nothing stands expanded');
-    assert.equal(btn.title, '展开全部分组');
-    ctx.toggleAllGroups('ssh-manager-list'); // must stay a harmless no-op
-    assert.equal(runIn(ctx, "_sshMgrViews.get('ssh-manager-list').collapsed.size"), 0);
 });
 
 // ── SFTP menu action ──

@@ -470,7 +470,8 @@
               </label>
               <span class="ssh-mgr-count" data-ssh-count="settings-ssh-list"></span>
               <div class="settings-toolbar-actions">
-                <button class="settings-quiet-action" data-ssh-fold="settings-ssh-list" aria-expanded="true" title="折叠全部分组" aria-label="折叠全部分组" onclick="toggleAllGroups('settings-ssh-list')">折叠/展开</button>
+                <button class="settings-quiet-action" onclick="collapseAllGroups('settings-ssh-list')">折叠全部</button>
+                <button class="settings-quiet-action" onclick="expandAllGroups('settings-ssh-list')">展开全部</button>
               </div>
             </div>
             <div id="settings-ssh-list" class="ssh-mgr-list settings-card-list"></div>
@@ -687,7 +688,8 @@
       <span class="ssh-mgr-count" data-ssh-count="ssh-manager-list"></span>
     </div>
     <div class="ssh-manager-actions">
-      <button data-ssh-fold="ssh-manager-list" aria-expanded="true" title="折叠全部分组" aria-label="折叠全部分组" onclick="toggleAllGroups('ssh-manager-list')">折叠/展开</button>
+      <button onclick="collapseAllGroups('ssh-manager-list')">折叠全部</button>
+      <button onclick="expandAllGroups('ssh-manager-list')">展开全部</button>
       <div class="spacer"></div>
       <button class="primary" data-ssh-add="overlay" aria-haspopup="menu" aria-expanded="false" aria-controls="ssh-add-menu" onclick="openSSHAddMenu(this)">+ 添加连接<svg class="ssh-add-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
     </div>
