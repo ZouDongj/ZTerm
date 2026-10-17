@@ -2684,8 +2684,8 @@ async function main() {
       cardStruct.rowBg === 'rgba(0, 0, 0, 0)' &&
       cardStruct.headingBtns === 1 && cardStruct.addBtn === true &&
       cardStruct.addH === '32px' && cardStruct.addRadius === '9px' &&
-      cardStruct.quietBtns.join(',') === '折叠全部,展开全部';
-    check('SSH 设置页：每组一张设置卡片 + 分节标题 + 工具栏', cardOk === true, JSON.stringify(cardStruct));
+      cardStruct.quietBtns.join(',') === '折叠/展开';
+    check('SSH 设置页：每组一张设置卡片 + 分节标题 + 工具栏（合并折叠开关）', cardOk === true, JSON.stringify(cardStruct));
     // Card-row hover is the user-picked combo (rounded wash + accent edge
     // bar), now provided by the BASE .ssh-mgr-row rules so the flat manager
     // overlay shares the exact same hover; the card scope only overrides
@@ -2804,29 +2804,39 @@ async function main() {
     await shot('settings-appearance-ref');
     await cdp.eval(`openSettings('ssh'); 'ssh-13.10'`).catch(() => null);
     await sleep(350);
-    // Collapse-all via the moved toolbar buttons hides each whole card but
-    // keeps the section titles; expand-all restores. Real button clicks, not
-    // the bare functions, so the rewired toolbar itself is exercised.
+    // Collapse-all via the merged toolbar toggle hides each whole card but
+    // keeps the section titles; the same toggle expands back. Real button
+    // clicks, not the bare functions, so the rewired toolbar itself is
+    // exercised, and the toggle's aria/tooltip state flips with each click.
     const collapseAll = await cdp.eval(`(() => {
       const btns = [...document.querySelectorAll('[data-page="ssh"] .settings-toolbar .settings-quiet-action')];
+      if (btns.length !== 1) return { n: -btns.length };
       btns[0].click();
       const cards = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-items')];
       const titles = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-title')];
       return {
         hidden: cards.every(c => c.classList.contains('collapsed') && getComputedStyle(c).display === 'none' && c.offsetHeight === 0),
         titlesUp: titles.every(t => t.offsetHeight > 0),
-        n: cards.length
+        n: cards.length,
+        aria: btns[0].getAttribute('aria-expanded'),
+        tip: btns[0].title
       };
     })()`).catch(() => null);
-    check('SSH 设置页：折叠全部隐藏整张卡片保留组标题', !!collapseAll && collapseAll.hidden === true && collapseAll.titlesUp === true && collapseAll.n === 2, JSON.stringify(collapseAll));
+    check('SSH 设置页：折叠开关隐藏整张卡片保留组标题', !!collapseAll && collapseAll.hidden === true && collapseAll.titlesUp === true && collapseAll.n === 2 &&
+      collapseAll.aria === 'false' && collapseAll.tip === '展开全部分组', JSON.stringify(collapseAll));
     await shot('ssh-settings-collapsed');
     const expandAllBack = await cdp.eval(`(() => {
       const btns = [...document.querySelectorAll('[data-page="ssh"] .settings-toolbar .settings-quiet-action')];
-      btns[1].click();
+      btns[0].click();
       const cards = [...document.querySelectorAll('#settings-ssh-list .ssh-mgr-group-items')];
-      return cards.every(c => !c.classList.contains('collapsed') && c.offsetHeight > 0);
-    })()`).catch(() => false);
-    check('SSH 设置页：展开全部恢复卡片', expandAllBack === true, '');
+      return {
+        back: cards.every(c => !c.classList.contains('collapsed') && c.offsetHeight > 0),
+        aria: btns[0].getAttribute('aria-expanded'),
+        tip: btns[0].title
+      };
+    })()`).catch(() => null);
+    check('SSH 设置页：折叠开关再点恢复卡片', !!expandAllBack && expandAllBack.back === true &&
+      expandAllBack.aria === 'true' && expandAllBack.tip === '折叠全部分组', JSON.stringify(expandAllBack));
     // Rename entry: opacity-revealed on focus (keyboard reachable), and the
     // reveal must not nudge the section title's height. The opacity has a
     // 120ms transition, so the post-focus read happens after a real sleep.
@@ -3377,6 +3387,221 @@ async function main() {
       typeof updProxyInvalid === 'string' && updProxyInvalid.includes('invalid update proxy') &&
       updProxyRoundTrip === 'http://127.0.0.1:9' && proxyCleared === true,
       JSON.stringify({ setup: updProxySetup, persisted: proxyPersisted, dead: updProxyDead, invalid: updProxyInvalid, roundTrip: updProxyRoundTrip, cleared: proxyCleared }));
+
+    // 14.9 Double-click word separators (issue #8): with the vendored
+    //     default a double-click selects the whole CIDR ('.' and '/' are not
+    //     separators); after configuring '/' as a separator the same click
+    //     stops at it. Covers live-apply to a tab opened BEFORE the change,
+    //     the startup path (tab opened after), a split pane (creation path
+    //     and live reset), the clear-restores-default path (xterm's option
+    //     sanitizer substitutes the vendored default for ''), and disk
+    //     persistence of the setting.
+    const wsTab = await cdp.eval(`TabManager.createTab({ name: 'E2E-WS', type: 'local' })`);
+    const WS = JSON.stringify(wsTab);
+    await waitForValue(cdp, `(() => { const t = TabManager.tabs.find(x => x.id === ${WS}); return !!(t && t.term && t.tabId); })()`, true, 15000);
+    await cdp.eval(`(() => { TabManager.switchTo(${WS}); return true; })()`);
+    // Fixture goes straight into the buffer: word selection reads the
+    // buffer, not the PTY input path.
+    async function wsWrite(termExpr, marker) {
+      await cdp.eval(`(() => { (${termExpr}).write('192.168.1.2/24 ' + ${JSON.stringify(marker)} + '\\r\\n'); return true; })()`);
+      await waitForValue(cdp, `(() => {
+        const term = (${termExpr});
+        const b = term.buffer.active;
+        for (let i = b.length - 1; i >= 0; i--) { const l = b.getLine(i); if (l && l.translateToString(true).includes(${JSON.stringify(marker)})) return true; }
+        return false;
+      })()`, true, 8000);
+    }
+    // Viewport pixel of the middle of "168" on the LAST fixture line (the
+    // one just written; earlier lines may have scrolled out).
+    async function wsCellPos(termExpr, marker) {
+      return cdp.eval(`(() => {
+        const term = (${termExpr});
+        if (!term) return null;
+        const b = term.buffer.active;
+        let row = -1, col = -1;
+        for (let i = b.length - 1; i >= 0; i--) {
+          const l = b.getLine(i); if (!l) continue;
+          const s = l.translateToString(true);
+          const k = s.indexOf('192.168.1.2/24');
+          if (k >= 0 && s.includes(${JSON.stringify(marker)})) { row = i; col = k + 5; break; }
+        }
+        if (row < 0) return null;
+        const dims = term._core._renderService.dimensions.css.cell;
+        const cv = term.element.querySelector('canvas');
+        const rect = (cv || term.element).getBoundingClientRect();
+        const vx = row - b.viewportY;
+        if (vx < 0) return null;
+        return { x: Math.round(rect.left + (col + 0.5) * dims.width), y: Math.round(rect.top + (vx + 0.5) * dims.height) };
+      })()`);
+    }
+    async function wsDoubleClick(termExpr, marker) {
+      const pos = await wsCellPos(termExpr, marker);
+      if (!pos) return 'no-pos';
+      for (const [type, clickCount] of [['mousePressed', 1], ['mouseReleased', 1], ['mousePressed', 2], ['mouseReleased', 2]]) {
+        await cdp.send('Input.dispatchMouseEvent', { type, x: pos.x, y: pos.y, button: 'left', clickCount });
+      }
+      await sleep(150);
+      return cdp.eval(`(() => { const t = (${termExpr}); return t.hasSelection() ? t.getSelection() : ''; })()`);
+    }
+    const wsTermExpr = `TabManager.tabs.find(x => x.id === ${WS}).term`;
+    await wsWrite(wsTermExpr, 'WS1');
+    const wsSelDefault = await wsDoubleClick(wsTermExpr, 'WS1');
+    check('双击选词：默认分隔符整选 CIDR', wsSelDefault === '192.168.1.2/24', JSON.stringify({ sel: wsSelDefault }));
+    // Configure '/' → live-apply reaches the already-open tab.
+    const wsSetup = await cdp.eval(`(async () => {
+      openSettings('terminal');
+      await new Promise(r => setTimeout(r, 300));
+      const input = document.getElementById('set-word-separators');
+      if (!input) return { hasInput: false };
+      input.value = '/';
+      saveTerminal();
+      closeSettingsTab();
+      TabManager.switchTo(${WS});
+      await new Promise(r => setTimeout(r, 100));
+      const t = TabManager.tabs.find(x => x.id === ${WS});
+      return { hasInput: true, raw: t.term.options.wordSeparator };
+    })()`).catch((e) => ({ evalError: String((e && e.message) || e) }));
+    await wsWrite(wsTermExpr, 'WS2');
+    const wsSelLive = wsSetup && wsSetup.hasInput === true ? await wsDoubleClick(wsTermExpr, 'WS2') : 'no-setup';
+    // The configured set REPLACES the default: with '/' alone, space is no
+    // longer a separator, so a fixture landing on the shell prompt's line
+    // legitimately selects through the prompt. The feature's observable is
+    // the right edge stopping at '/', not the left edge's extent.
+    const wsLiveOk = typeof wsSelLive === 'string' && wsSelLive.endsWith('192.168.1.2') && !wsSelLive.includes('/');
+    check('双击选词：配置 / 后已开终端即时生效', wsLiveOk, JSON.stringify({ setup: wsSetup, sel: wsSelLive }));
+    // Startup path: a tab created while '/' is configured.
+    const wsTab2 = await cdp.eval(`TabManager.createTab({ name: 'E2E-WS2', type: 'local' })`);
+    const WS2 = JSON.stringify(wsTab2);
+    await waitForValue(cdp, `(() => { const t = TabManager.tabs.find(x => x.id === ${WS2}); return !!(t && t.term && t.tabId); })()`, true, 15000);
+    await cdp.eval(`(() => { TabManager.switchTo(${WS2}); return true; })()`);
+    const ws2TermExpr = `TabManager.tabs.find(x => x.id === ${WS2}).term`;
+    const ws2Raw = await cdp.eval(`(() => (${ws2TermExpr}).options.wordSeparator)()`);
+    await wsWrite(ws2TermExpr, 'WS3');
+    const wsSelStartup = await wsDoubleClick(ws2TermExpr, 'WS3');
+    const wsStartupOk = typeof wsSelStartup === 'string' && wsSelStartup.endsWith('192.168.1.2') && !wsSelStartup.includes('/');
+    check('双击选词：新建终端启动路径带上分隔符', ws2Raw === '/' && wsStartupOk, JSON.stringify({ raw: ws2Raw, sel: wsSelStartup }));
+    // Split pane: creation options include the separator.
+    await cdp.eval(`TabManager.splitHorizontal()`);
+    await waitForValue(cdp, `getAllPanes(TabManager.tabs.find(x => x.id === ${WS2})).filter(p => p.term && p.tabId).length`, 2, 15000);
+    const wsPaneExpr = `getAllPanes(TabManager.tabs.find(x => x.id === ${WS2}))[1].term`;
+    await cdp.eval(`(() => { (${wsPaneExpr}).focus(); return true; })()`);
+    await wsWrite(wsPaneExpr, 'WS4');
+    const wsSelPane = await wsDoubleClick(wsPaneExpr, 'WS4');
+    const wsPaneOk = typeof wsSelPane === 'string' && wsSelPane.endsWith('192.168.1.2') && !wsSelPane.includes('/');
+    check('双击选词：分屏面板同样生效', wsPaneOk, JSON.stringify({ sel: wsSelPane }));
+    // Clear the setting → xterm's sanitizer restores the vendored default,
+    // live, split panes included.
+    const wsClear = await cdp.eval(`(async () => {
+      openSettings('terminal');
+      await new Promise(r => setTimeout(r, 300));
+      const input = document.getElementById('set-word-separators');
+      input.value = '';
+      saveTerminal();
+      closeSettingsTab();
+      TabManager.switchTo(${WS2});
+      await new Promise(r => setTimeout(r, 100));
+      return { raw: (${wsPaneExpr}).options.wordSeparator };
+    })()`).catch(() => null);
+    await wsWrite(wsPaneExpr, 'WS5');
+    const wsSelCleared = await wsDoubleClick(wsPaneExpr, 'WS5');
+    check('双击选词：清空设置恢复默认（含分屏面板）', wsSelCleared === '192.168.1.2/24', JSON.stringify({ clear: wsClear, sel: wsSelCleared }));
+    // Persistence: set '/' once more and poll the config file, then clear.
+    await cdp.eval(`(async () => {
+      openSettings('terminal');
+      await new Promise(r => setTimeout(r, 300));
+      document.getElementById('set-word-separators').value = '/';
+      saveTerminal();
+      closeSettingsTab();
+      return 'set';
+    })()`).catch(() => null);
+    let wsPersisted = null;
+    for (let i = 0; i < 25 && wsPersisted !== true; i++) {
+      await sleep(200);
+      try { wsPersisted = JSON.parse(readFileSync(DATA_CONFIG, 'utf8')).terminal?.wordSeparators === '/'; } catch {}
+    }
+    await cdp.eval(`(async () => {
+      openSettings('terminal');
+      await new Promise(r => setTimeout(r, 300));
+      const v = document.getElementById('set-word-separators')?.value;
+      document.getElementById('set-word-separators').value = '';
+      saveTerminal();
+      closeSettingsTab();
+      return v;
+    })()`).catch(() => null);
+    let wsClearedDisk = false;
+    for (let i = 0; i < 25 && wsClearedDisk !== true; i++) {
+      await sleep(200);
+      try { const v = JSON.parse(readFileSync(DATA_CONFIG, 'utf8')).terminal?.wordSeparators; if (v === '' || v === undefined) { wsClearedDisk = true; break; } } catch {}
+    }
+    check('双击选词：设置持久化与回填', wsPersisted === true && wsClearedDisk === true, JSON.stringify({ persisted: wsPersisted, cleared: wsClearedDisk }));
+    // Tidy: close both fixture tabs so later sections see a clean strip.
+    await cdp.eval(`(() => { try { TabManager.closeTab(${WS2}); TabManager.closeTab(${WS}); } catch (e) {} return true; })()`);
+    await sleep(300);
+
+    // 14.10 Reconnect shortcut + Win as its own modifier (issues #19, #23):
+    //     real Ctrl+Shift+R key events reconnect the active SSH tab and
+    //     no-op (but stay consumed) on a local tab; rebinding to Ctrl+Win+R
+    //     moves the action to the exact new combo — Ctrl+Shift+R stops
+    //     firing, proving Win is matched as a distinct modifier instead of
+    //     folding into Ctrl. reconnectTab itself is spied, never dialed.
+    const scTab = await cdp.eval(`TabManager.createTab({ name: 'E2E-SC', type: 'local' })`);
+    const SC = JSON.stringify(scTab);
+    await waitForValue(cdp, `(() => { const t = TabManager.tabs.find(x => x.id === ${SC}); return !!(t && t.term && t.tabId); })()`, true, 15000);
+    await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${SC});
+      window.__e2eReconnectCalls = 0;
+      window.__e2eOrigReconnect = TabManager.reconnectTab.bind(TabManager);
+      TabManager.reconnectTab = () => { window.__e2eReconnectCalls++; };
+      tab.type = 'ssh'; // routing guard only; the spy swallows the dial
+      TabManager.switchTo(${SC});
+      return true;
+    })()`);
+    async function sendCombo(key, code, vk, modifiers) {
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers });
+      await sleep(120);
+      return cdp.eval(`window.__e2eReconnectCalls`);
+    }
+    const scOnSsh = await sendCombo('R', 'KeyR', 82, 2 | 8); // Ctrl+Shift+R
+    await cdp.eval(`(() => { const t = TabManager.tabs.find(x => x.id === ${SC}); t.type = 'local'; return true; })()`);
+    const scOnLocal = await sendCombo('R', 'KeyR', 82, 2 | 8);
+    check('重连快捷键：Ctrl+Shift+R 仅对 SSH 标签生效', scOnSsh === 1 && scOnLocal === 1, JSON.stringify({ ssh: scOnSsh, local: scOnLocal }));
+    // Rebind to Ctrl+Win+R through the config object (the capture UI is unit
+    // covered; here the live matcher must honor the new combo exactly).
+    await cdp.eval(`(() => {
+      const t = TabManager.tabs.find(x => x.id === ${SC}); t.type = 'ssh';
+      _settingsConfig.shortcuts = { ...(_settingsConfig.shortcuts || {}), reconnectTab: 'Ctrl+Win+R' };
+      persistSettings();
+      return true;
+    })()`);
+    const scOldCombo = await sendCombo('R', 'KeyR', 82, 2 | 8);   // Ctrl+Shift+R no longer bound
+    const scWinCombo = await sendCombo('r', 'KeyR', 82, 2 | 4);   // Ctrl+Win+R (Meta bit, no Shift)
+    check('重连快捷键：改绑 Ctrl+Win+R 精确匹配（Win 不并入 Ctrl）', scOldCombo === 1 && scWinCombo === 2, JSON.stringify({ old: scOldCombo, win: scWinCombo }));
+    // Command palette lists the action with its live combo.
+    const scPalette = await cdp.eval(`(async () => {
+      openPalette();
+      await new Promise(r => setTimeout(r, 150));
+      const rows = [...document.querySelectorAll('#palette-list *')].map(el => el.textContent);
+      const hit = rows.some(t => t.includes('重新连接'));
+      closePalette();
+      return hit;
+    })()`).catch(() => null);
+    check('重连快捷键：命令面板收录重连动作', scPalette === true, JSON.stringify({ hit: scPalette }));
+    // Restore every override and close the fixture tab.
+    await cdp.eval(`(() => {
+      TabManager.reconnectTab = window.__e2eOrigReconnect;
+      const t = TabManager.tabs.find(x => x.id === ${SC});
+      if (t) { t.type = 'local'; }
+      if (_settingsConfig.shortcuts) { delete _settingsConfig.shortcuts.reconnectTab; persistSettings(); }
+      try { TabManager.closeTab(${SC}); } catch (e) {}
+      return true;
+    })()`);
+    let scRestored = false;
+    for (let i = 0; i < 20; i++) {
+      await sleep(200);
+      try { const s = JSON.parse(readFileSync(DATA_CONFIG, 'utf8')).shortcuts; if (!s || !s.reconnectTab) { scRestored = true; break; } } catch {}
+    }
+    await sleep(200);
 
     // 15. ADR-0004 split session ownership & layout migration: per-tab
     //     maximize state with a REAL Esc key, split-while-maximized pane
