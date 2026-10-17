@@ -378,6 +378,7 @@ export function loadVm() {
         // colorFgbg use their own fixture (pty-create-colorfgbg.test.mjs).
         colorFgbgForBackground: () => null,
         _normalizeFontFamily: (s) => s,
+        _normalizeWordSeparators: (v) => (typeof v === 'string' && v ? v : ''),
         _getAccentColor: () => 'rgb(97,175,239)',
         _getAccentColorAlpha: (a) => `rgba(97,175,239,${a})`,
         _clampFontWeight: (v, d) => d,

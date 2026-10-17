@@ -104,6 +104,7 @@ function loadSettingsVm() {
         applyTerminalScheme() {},
         getAllPanes: () => [],
         _normalizeFontFamily: (family) => family || '',
+        _normalizeWordSeparators: (v) => (typeof v === 'string' && v ? v : ''),
         _clampFontWeight: (v, dflt) => parseInt(v, 10) || parseInt(dflt, 10),
         showToast: (msg, isError) => toasts.push({ msg, isError }),
     };

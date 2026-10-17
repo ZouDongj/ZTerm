@@ -363,7 +363,7 @@ function _buildTerminalOptions() {
     // which switches the glyph atlas to an alpha canvas and therefore to
     // grayscale anti-aliasing (Tabby does not use LCD subpixel AA; confirmed
     // by pixel-level A/B comparison).
-    return {
+    const options = {
         cursorBlink: c.cursorBlink === true,
         cursorStyle: c.cursor || 'bar',
         fontSize: c.fontSize || 16,
@@ -383,6 +383,13 @@ function _buildTerminalOptions() {
         customGlyphs: true,
         overviewRuler: { width: 6 },
     };
+    // Double-click word separators: pass the option only when the user
+    // configured a non-empty set (see _normalizeWordSeparators); an unset
+    // config must keep following the vendored default instead of pinning a
+    // copy of it.
+    const wordSeparators = _normalizeWordSeparators(c.wordSeparators);
+    if (wordSeparators) options.wordSeparator = wordSeparators;
+    return options;
 }
 
 // OSC 8 hyperlinks: same unified entry as plain links, replacing the vendored

@@ -217,6 +217,19 @@
               </div>
             </div>
 
+            <div class="settings-section">选词</div>
+            <div class="settings-card">
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">双击选词分隔符</div>
+                  <div class="settings-card-desc">双击选中单词时的边界字符，逐字符字面匹配（无正则）；空格、引号、反引号同样是普通字符，留空恢复默认（默认集合含空格）</div>
+                </div>
+                <div class="settings-card-control">
+                  <input type="text" id="set-word-separators" placeholder="留空使用默认 ()[]{}',&quot;`" onchange="saveTerminal()">
+                </div>
+              </div>
+            </div>
+
             <div class="settings-section">Bell 通知</div>
             <div class="settings-card">
               <div class="settings-row">
