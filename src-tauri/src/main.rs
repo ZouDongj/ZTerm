@@ -7,8 +7,25 @@ mod update_http;
 mod zterm;
 
 use serde_json::json;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Emitter;
+
+/// Whether the DWM Mica backdrop was applied to the main window.
+/// The renderer reads this through `window_material` before the window is
+/// shown, so the first painted frame already uses the native backdrop or the
+/// CSS fallback (never a flash of the wrong layer).
+static MICA_APPLIED: AtomicBool = AtomicBool::new(false);
+
+/// Tauri command: report the window material chosen at startup.
+#[tauri::command]
+fn window_material() -> &'static str {
+    if MICA_APPLIED.load(Ordering::Relaxed) {
+        "mica"
+    } else {
+        "css"
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -76,6 +93,7 @@ async fn main() {
             zterm::clipboard_write_text,
             zterm::clipboard_read_text,
             zterm::renderer_ready,
+            window_material,
         ])
         .setup(|app| {
             // Register the global AppHandle (used to emit events such as config-corrupted)
@@ -94,16 +112,25 @@ async fn main() {
             .title("ZTerm")
             .inner_size(1100.0, 720.0)
             .min_inner_size(600.0, 400.0)
+            // ZTerm has a single dark appearance. Pin the window theme so a
+            // light Windows app mode cannot make the native Mica backdrop
+            // light behind the white-on-dark UI.
+            .theme(Some(tauri::Theme::Dark))
             .decorations(false)
+            // Transparent window: the DWM Mica backdrop (and, on systems
+            // without it, the CSS wallpaper layer) shows through the WebView.
+            // The alpha-0 background is what Windows needs to keep the client
+            // area composited with the desktop; a non-zero alpha is ignored.
+            .transparent(true)
             // Stay hidden until the window state is restored — otherwise the window
             // flashes at the default size, then jumps from windowed to maximized
             .visible(false)
             // Disable WebView2 form autofill (the white suggestion popup shown while typing);
             // a terminal has no use for browser-style autofill
             .general_autofill_enabled(false)
-            // Match the window/WebView background to the theme (#21252b): during
-            // resize drags, edges not yet covered by WebView content would flash default white
-            .background_color(tauri::window::Color(33, 37, 43, 255))
+            // Fully transparent WebView background: mica (or the CSS fallback)
+            // supplies the window surface. No white/opaque flash while resizing.
+            .background_color(tauri::window::Color(0, 0, 0, 0))
             .enable_clipboard_access()
             // Disable LCD subpixel text antialiasing so every piece of UI text
             // (tabs, menus, settings, status bar) renders with grayscale AA —
@@ -125,6 +152,22 @@ async fn main() {
             .zoom_hotkeys_enabled(false)
             .devtools(cfg!(debug_assertions))
             .build()?;
+
+            // Native Windows 11 Mica: the same backdrop DWM paints for File
+            // Explorer, sampled from the desktop wallpaper. It requires a
+            // transparent window (set above). If DWM rejects it (Windows 10,
+            // composition disabled), the renderer keeps the CSS wallpaper
+            // fallback instead.
+            #[cfg(windows)]
+            {
+                let effects = tauri::window::EffectsBuilder::new()
+                    .effect(tauri::window::Effect::MicaDark)
+                    .build();
+                match window.set_effects(effects) {
+                    Ok(()) => MICA_APPLIED.store(true, Ordering::Relaxed),
+                    Err(e) => eprintln!("[zterm] mica unavailable, using CSS fallback: {e}"),
+                }
+            }
 
             #[cfg(windows)]
             disable_browser_accelerator_keys(&window);

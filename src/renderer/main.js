@@ -155,8 +155,16 @@ ipcRenderer.on('window-shown', () => {
 });
 
 // Renderer finished loading and listeners are registered: tell the main process to restore the window state and show the window.
-// This lets the main process guarantee window-shown is only emitted after listeners are ready (otherwise the splash would stall)
-ipcRenderer.invoke('renderer-ready').catch(() => {});
+// This lets the main process guarantee window-shown is only emitted after listeners are ready (otherwise the splash would stall).
+// First ask which window material the main process managed to apply (native Mica vs the CSS wallpaper fallback) so the first
+// painted frame already has the right layer; a 300ms race keeps a stuck IPC from blocking startup.
+Promise.race([
+    ipcRenderer.invoke('window-material'),
+    new Promise(resolve => setTimeout(() => resolve('css'), 300)),
+]).catch(() => 'css').then(material => {
+    document.documentElement.dataset.material = material === 'mica' ? 'mica' : 'css';
+    return ipcRenderer.invoke('renderer-ready').catch(() => {});
+});
 
 // Startup splash: fades out once the first terminal's first frame has rendered (precise xterm onRender detection + 3s fallback)
 let _splashHidden = false;

@@ -1123,6 +1123,10 @@ const TabManager = {
         // trigger cancels it by identity below as before).
         if (tab._reconnectPending) return;
         tab._reconnectPending = true;
+        tab._sshConnecting = true;
+        tab._sshErrored = false;
+        tab._sshReconnectNotice = true;
+        if (typeof showToast === 'function') showToast('正在重连: ' + this._tabDisplayName(tab));
 
         // The old session is discarded below: the SFTP panel must not stay
         // bound to it (it would show a dead session's listing).
@@ -1198,6 +1202,10 @@ const TabManager = {
         // identity to supersede — merging keeps one connect per pane.
         if (pane._reconnectPending) return;
         pane._reconnectPending = true;
+        pane._sshConnecting = true;
+        pane._sshErrored = false;
+        tab._sshReconnectNotice = true;
+        if (typeof showToast === 'function') showToast('正在重连: ' + (pane._sshHost || pane.name || tab.name));
         // The old session is discarded below: the SFTP panel must not stay
         // bound to it.
         this._closeSftpForSessions([pane.tabId]);
@@ -1340,13 +1348,28 @@ const TabManager = {
                 inner = `<span class="tab-lead-icon">${Icons.iconSvg('settings', 14)}</span><span class="tab-name">${escHtml(this._tabDisplayName(t))}</span>`;
             } else {
                 let dotClass = t.connected ? 'connected' : 'disconnected';
+                if (!t.connected) {
+                    if (t.splitRoot) {
+                        const panes = getAllPanes(t);
+                        if (panes.some(p => p._sshConnecting)) dotClass = 'connecting';
+                        else if (panes.some(p => p._sshErrored)) dotClass = 'error';
+                    } else if (t._sshConnecting) {
+                        dotClass = 'connecting';
+                    } else if (t._sshErrored) {
+                        dotClass = 'error';
+                    }
+                }
                 const showDot = _settingsConfig.showStatusDot !== false;
                 inner = (showDot ? `<span class="tab-icon ${dotClass}"></span>` : '') + `<span class="tab-name">${escHtml(this._tabDisplayName(t))}</span>`;
                 // In split mode the tab label shows no reconnect button; each pane reconnects via its own pane header
                 if (t.type === 'ssh' && !t.splitRoot) {
-                    const rcClass = t.connected ? 'tab-reconnect-normal' : 'tab-reconnect';
-                    const rcTitle = t.connected ? '强制重连' : '重新连接';
-                    inner += `<button type="button" class="${rcClass}" title="${rcTitle}" onclick="event.stopPropagation();TabManager.reconnectTab('${t.id}');this.blur()" ondblclick="event.stopPropagation()">${Icons.iconSvg('rotate-cw', 12)}</button>`;
+                    if (t._sshConnecting) {
+                        inner += `<button type="button" class="tab-reconnect tab-reconnect-busy" title="正在重连" onclick="event.stopPropagation()">${Icons.iconSvg('rotate-cw', 12)}</button>`;
+                    } else {
+                        const rcClass = t.connected ? 'tab-reconnect-normal' : 'tab-reconnect';
+                        const rcTitle = t.connected ? '强制重连' : '重新连接';
+                        inner += `<button type="button" class="${rcClass}" title="${rcTitle}" onclick="event.stopPropagation();TabManager.reconnectTab('${t.id}');this.blur()" ondblclick="event.stopPropagation()">${Icons.iconSvg('rotate-cw', 12)}</button>`;
+                    }
                 }
             }
             inner += `<button type="button" class="tab-close" onclick="event.stopPropagation();TabManager.closeTab('${t.id}');this.blur()" ondblclick="event.stopPropagation()">${Icons.iconSvg('x', 13)}</button>`;
@@ -1689,12 +1712,15 @@ const TabManager = {
             el.setAttribute('data-pane', pane.id);
             el.onmousedown = () => { if (!tab._maximizedPaneId) this._focusPane(tab, pane.id); };
             // Pane drag-reorder uses a Tabby-style drop-zone layer (rendered at _onPaneDragStart); panes carry no drop listeners of their own
-            const dc = (pane.connected !== false && (pane.connected || !!pane.tabId)) ? 'connected' : 'disconnected';
+            const dc = pane._sshConnecting ? 'connecting'
+                : pane._sshErrored ? 'error'
+                : ((pane.connected !== false && (pane.connected || !!pane.tabId)) ? 'connected' : 'disconnected');
             const showDot = _settingsConfig.showStatusDot !== false;
             const hdr = document.createElement('div');
             hdr.className = 'pane-header';
-            // Only SSH panes show the reconnect button
-            const reconnectPaneBtn = pane.type === 'ssh' ? '<button title="强制重连" onclick="event.stopPropagation();TabManager._reconnectPane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('rotate-cw', 12) + '</button>' : '';
+            // Only a disconnected SSH pane offers reconnecting; a live session
+            // does not need a force-reconnect entry in the pane header.
+            const reconnectPaneBtn = pane.type === 'ssh' && pane.connected === false && !pane._sshConnecting ? '<button title="重新连接" onclick="event.stopPropagation();TabManager._reconnectPane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('rotate-cw', 12) + '</button>' : '';
             hdr.innerHTML = (showDot ? '<span class="dot ' + dc + '"></span>' : '') +
                 '<span class="label">' + escHtml(pane.name || tab.name) + '</span>' +
                 reconnectPaneBtn +
@@ -1730,7 +1756,9 @@ const TabManager = {
                 existing.delete(p.id);
                 el.classList.remove('pane-exit'); // a pane mid-fade-out re-entering the tree is revived
                 // Reused node: refresh the connection-status dot (state may have changed with the tree)
-                const dc = (p.connected !== false && (p.connected || !!p.tabId)) ? 'connected' : 'disconnected';
+                const dc = p._sshConnecting ? 'connecting'
+                    : p._sshErrored ? 'error'
+                    : ((p.connected !== false && (p.connected || !!p.tabId)) ? 'connected' : 'disconnected');
                 const dot = el.querySelector('.dot');
                 if (dot) dot.className = 'dot ' + dc;
                 return;
@@ -1966,7 +1994,14 @@ const TabManager = {
         const hit = document.elementFromPoint(e.clientX, e.clientY);
         const zoneEl = hit && hit.closest ? hit.closest('.pane-drop-zone') : null;
         document.querySelectorAll('.pane-drop-zone.drag-over').forEach(el => { if (el !== zoneEl) el.classList.remove('drag-over'); });
-        if (zoneEl) zoneEl.classList.add('drag-over');
+        if (zoneEl) {
+            zoneEl.classList.add('drag-over');
+            const zone = state.zones && state.zones[parseInt(zoneEl.getAttribute('data-zone-idx'), 10)];
+            if (zone) this._updatePaneDropPreview(state.sourceTab, zone);
+            else this._hideDropHint();
+        } else {
+            this._hideDropHint();
+        }
     },
 
     _onPanePointerUp(e) {
@@ -2107,6 +2142,7 @@ const TabManager = {
     _onPaneDragEnd() {
         document.body.classList.remove('pane-dragging');
         this._hidePaneDropZones();
+        this._hideDropHint();
         const state = this._paneDragState;
         if (state) {
             if (state.ghost) state.ghost.remove();
@@ -2832,6 +2868,7 @@ const TabManager = {
     _tabHideSplitZones() {
         this._tabSplitZones = null;
         document.getElementById('tab-drop-layer')?.remove();
+        this._hideDropHint();
     },
 
     // Geometry hit test on current zones (the drag overlay intercepts mouse
@@ -2862,6 +2899,102 @@ const TabManager = {
             targetPaneId: rel && !isContainer ? rel.id : null,
             anchor: rel,
         };
+    },
+
+    // ── v12 drop preview ──
+    // The prototype's feedback is not a thin edge bar but the full rect the
+    // dropped pane will occupy. Hit detection stays untouched (the 8% bars and
+    // 28/30% edge bands still decide); this only visualizes the result.
+    _dropSideLabel(side) {
+        return ({ l: '左侧', r: '右侧', t: '上方', b: '下方' })[side] || '';
+    },
+
+    _showDropHint(rect, name, action) {
+        if (!rect) { this._hideDropHint(); return; }
+        let el = document.getElementById('drop-hint');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'drop-hint';
+            el.className = 'drop-hint';
+            el.innerHTML = '<div class="dh"><span class="dh-dot"></span><span class="dh-name"></span><b class="dh-action"></b></div>';
+            document.body.appendChild(el);
+        }
+        const key = name + '\u0000' + action;
+        if (el.dataset.key !== key) {
+            el.querySelector('.dh-name').textContent = name;
+            el.querySelector('.dh-action').textContent = action;
+            el.dataset.key = key;
+        }
+        el.style.left = rect.left + 'px';
+        el.style.top = rect.top + 'px';
+        el.style.width = rect.width + 'px';
+        el.style.height = rect.height + 'px';
+        el.classList.add('show');
+    },
+
+    _hideDropHint() {
+        const el = document.getElementById('drop-hint');
+        if (!el) return;
+        el.classList.remove('show');
+    },
+
+    _updateTabDropPreview(sourceTab, targetTab, side, anchor) {
+        if (!side) { this._hideDropHint(); return; }
+        const rootEl = targetTab.splitRoot
+            ? document.getElementById('split_' + targetTab.id)
+            : document.getElementById('wrap_' + targetTab.id);
+        if (!rootEl) { this._hideDropHint(); return; }
+        const r = rootEl.getBoundingClientRect();
+        if (!r.width || !r.height) { this._hideDropHint(); return; }
+        let box;
+        if (!targetTab.splitRoot) {
+            const vertical = side === 't' || side === 'b';
+            box = {
+                left: r.left + (side === 'r' ? r.width / 2 : 0),
+                top: r.top + (side === 'b' ? r.height / 2 : 0),
+                width: vertical ? r.width : r.width / 2,
+                height: vertical ? r.height / 2 : r.height,
+            };
+        } else {
+            const pct = previewDropRect(targetTab.splitRoot, {
+                side,
+                relative: anchor,
+                gapX: targetTab._gapXPct,
+                gapY: targetTab._gapYPct,
+            });
+            if (!pct) { this._hideDropHint(); return; }
+            box = {
+                left: r.left + r.width * pct.x / 100,
+                top: r.top + r.height * pct.y / 100,
+                width: r.width * pct.w / 100,
+                height: r.height * pct.h / 100,
+            };
+        }
+        this._showDropHint(box, this._tabDisplayName(sourceTab), this._dropSideLabel(side) + '分屏');
+    },
+
+    _updatePaneDropPreview(tab, zone) {
+        if (!zone || !tab.splitRoot) { this._hideDropHint(); return; }
+        const rootEl = document.getElementById('split_' + tab.id);
+        if (!rootEl) { this._hideDropHint(); return; }
+        const r = rootEl.getBoundingClientRect();
+        if (!r.width || !r.height) { this._hideDropHint(); return; }
+        const src = this._paneDragState && this._paneDragState.sourcePane;
+        const pct = previewDropRect(tab.splitRoot, {
+            side: zone.side,
+            relative: zone.relativeTo,
+            moving: src,
+            gapX: tab._gapXPct,
+            gapY: tab._gapYPct,
+        });
+        if (!pct) { this._hideDropHint(); return; }
+        const name = src ? ((src._toolName || '').trim() || src.name || this._tabDisplayName(tab)) : this._tabDisplayName(tab);
+        this._showDropHint({
+            left: r.left + r.width * pct.x / 100,
+            top: r.top + r.height * pct.y / 100,
+            width: r.width * pct.w / 100,
+            height: r.height * pct.h / 100,
+        }, name, '移到' + this._dropSideLabel(zone.side));
     },
 
     // ── Tab drag via pointer events ──
@@ -3039,6 +3172,11 @@ const TabManager = {
                         }
                     } catch (err) {
                         console.warn('[tabdrag] bars failed:', err);
+                    }
+                    try {
+                        this._updateTabDropPreview(tab, targetTab, side, targetAnchor);
+                    } catch (err) {
+                        console.warn('[tabdrag] preview failed:', err);
                     }
                 } else {
                     this._tabHideSplitZones();

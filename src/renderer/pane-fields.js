@@ -54,6 +54,10 @@ function adoptPaneFieldsIntoTab(tab, pane) {
     // error/drop and local process exit) is session state and migrates with
     // the terminal — a pending paste must stay cancelled after the move.
     tab._sessionFailed = pane._sessionFailed === true;
+    // Visual connection state (busy ring / error dot) follows the adopted
+    // session too, so a collapse does not leave the tab strip stale.
+    tab._sshConnecting = pane._sshConnecting === true;
+    tab._sshErrored = pane._sshErrored === true;
 }
 
 if (typeof module !== 'undefined' && module.exports) {

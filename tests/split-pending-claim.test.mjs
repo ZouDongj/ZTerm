@@ -81,6 +81,8 @@ test('ssh-connecting claims the collapsed pending pane via its attempt token', (
     f.callbacks.get('ssh-connecting')({}, { tabId: 'ssh_7', rendererId: 'p_9', attemptId: f.tab._pendingAttempt });
     assert.equal(f.tab.tabId, 'ssh_7', 'connecting phase must adopt the backend id');
     assert.ok(f.wireCalls.some(c => c.tab === f.tab && c.backendId === 'ssh_7'), 'wireTerminal path invoked for the tab');
+    assert.equal(f.tab._sshConnecting, true, 'connecting flag drives the busy dot');
+    assert.equal(f.tab._sshErrored, false, 'a fresh attempt clears the error flag');
 });
 
 test('ssh-error reaches the collapsed pending pane (no misdirected toast-only path)', () => {
@@ -89,6 +91,8 @@ test('ssh-error reaches the collapsed pending pane (no misdirected toast-only pa
     assert.equal(f.tab.tabId, 'ssh_8', 'error path records the backend id');
     assert.equal(f.tab.connected, false);
     assert.ok(f.wireCalls.some(c => c.tab === f.tab), 'error terminal still wired for the pane');
+    assert.equal(f.tab._sshConnecting, false, 'a failure ends the busy state');
+    assert.equal(f.tab._sshErrored, true, 'error flag drives the red dot');
 });
 
 test('ssh-connected marks the collapsed pending pane as connected', () => {
@@ -96,4 +100,6 @@ test('ssh-connected marks the collapsed pending pane as connected', () => {
     f.callbacks.get('ssh-connected')({}, { tabId: 'ssh_9', rendererId: 'p_9', attemptId: f.tab._pendingAttempt });
     assert.equal(f.tab.connected, true);
     assert.ok(f.wireCalls.some(c => c.tab === f.tab && c.backendId === 'ssh_9'));
+    assert.equal(f.tab._sshConnecting, false, 'a connection clears the busy state');
+    assert.equal(f.tab._sshErrored, false, 'a connection clears the error state');
 });

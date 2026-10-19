@@ -33,7 +33,7 @@ test('ICONS 每个值都是非空 path 数据', () => {
 });
 
 test('iconSvg 输出与既有内联 SVG 同格式', () => {
-    const svg = iconSvg('zap', 14);
+    const svg = iconSvg('chevron-right', 14);
     assert.ok(svg.startsWith('<svg'), 'must start with <svg');
     assert.ok(svg.includes('stroke="currentColor"'), 'must inherit text color');
     assert.ok(svg.includes('width="14"') && svg.includes('height="14"'), 'size applied');
@@ -59,7 +59,16 @@ test('填充条目以 fill="currentColor" 渲染且不带描边属性', () => {
 });
 
 test('描边条目仍走 fill="none" + stroke 渲染', () => {
-    const svg = iconSvg('search', 15);
+    const svg = iconSvg('chevron-right', 15);
     assert.ok(svg.includes('fill="none"') && svg.includes('stroke="currentColor"'));
     assert.ok(!svg.includes('stroke="none"'));
+});
+
+test('对象图标从 14px 起使用双色实心，小尺寸回退细线', () => {
+    const big = iconSvg('server', 18);
+    assert.ok(big.includes('fill="currentColor"') && big.includes('stroke="none"'));
+    assert.ok(big.includes('opacity=".7"'), 'second rack bay tone');
+    assert.ok(!big.includes('stroke-width="2"'), 'not the line glyph at 18px');
+    const small = iconSvg('server', 12);
+    assert.ok(small.includes('stroke-width="2"'), 'micro size keeps the line glyph');
 });

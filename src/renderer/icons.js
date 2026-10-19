@@ -53,6 +53,9 @@
     search: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
     // Top-right menu button (three dots), collected from tabs.js
     'more-vertical': '<circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/>',
+    palette: '<circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/><circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/><circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/><circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>',
+    highlighter: '<path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/>',
+    keyboard: '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/>',
     // Window controls (minus/square + the existing x; restore reuses copy's
     // overlapping rectangles). The minus dash is longer than stock Lucide
     // (M4..20 vs M5..19): window-control glyphs need the optical weight of
@@ -69,12 +72,62 @@
     'file-filled': '<path d="M6 2c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6H6zm7 7V3.5L18.5 9H13z"/>',
   };
 
+  // Filled two-tone glyphs for objects (terminals, hosts, folders, files,
+  // settings, search): the base shape carries the accent and the inner
+  // details are drawn in the same currentColor at low alpha, so they read as
+  // darker grooves on dark chrome without hardcoding a background colour.
+  // Thin-line glyphs stay for micro controls (chevrons, close, + at 11px).
+  const DUOTONE_ICONS = {
+    terminal: '<rect x="3" y="4" width="18" height="16" rx="3" opacity=".9"/>' +
+      '<path d="M7.6 9 10.8 12l-3.2 3" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" opacity=".28"/>' +
+      '<path d="M12.6 15h4.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".28"/>',
+    settings: ICONS.settings.replace('<circle cx="12" cy="12" r="3"/>', '') +
+      '<circle cx="12" cy="12" r="3.2" opacity=".28"/>',
+    folder: ICONS.folder +
+      '<path d="M3 9h18" fill="none" stroke="currentColor" stroke-width="1.6" opacity=".22"/>',
+    file: ICONS.file +
+      '<path d="M14 2v4a2 2 0 0 0 2 2h4" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".24"/>',
+    search: '<circle cx="11" cy="11" r="8" opacity=".9"/>' +
+      '<circle cx="11" cy="11" r="3.6" opacity=".28"/>' +
+      '<path d="m21 21-4.35-4.35" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" opacity=".9"/>',
+    plus: '<rect x="10.5" y="4" width="3" height="16" rx="1.5" opacity=".9"/>' +
+      '<rect x="4" y="10.5" width="16" height="3" rx="1.5" opacity=".55"/>',
+    palette: '<path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.65-.75 1.65-1.69 0-.44-.18-.84-.44-1.13-.29-.29-.44-.65-.44-1.12a1.64 1.64 0 0 1 1.67-1.67h2c3.05 0 5.55-2.5 5.55-5.55C21.97 6.01 17.46 2 12 2Z" opacity=".9"/>' +
+      '<circle cx="7.6" cy="9.6" r="1.2" opacity=".26"/><circle cx="10.6" cy="6.6" r="1.2" opacity=".26"/><circle cx="15.2" cy="6.9" r="1.2" opacity=".26"/><circle cx="18.1" cy="10.2" r="1.2" opacity=".26"/>',
+    highlighter: '<path d="M15.6 3.4a2.1 2.1 0 0 1 3 3L8.1 16.9 4 18l1.1-4.1L15.6 3.4Z" opacity=".9"/>' +
+      '<path d="M4 21h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".22"/>',
+    keyboard: '<rect x="2.5" y="5.5" width="19" height="13" rx="2.5" opacity=".9"/>' +
+      '<rect x="5.5" y="8" width="2" height="1.6" rx=".5" opacity=".26"/><rect x="8.5" y="8" width="2" height="1.6" rx=".5" opacity=".26"/><rect x="11.5" y="8" width="2" height="1.6" rx=".5" opacity=".26"/><rect x="14.5" y="8" width="2" height="1.6" rx=".5" opacity=".26"/><rect x="17.5" y="8" width="2" height="1.6" rx=".5" opacity=".26"/>' +
+      '<rect x="5.5" y="11.2" width="2" height="1.6" rx=".5" opacity=".26"/><rect x="8.5" y="11.2" width="2" height="1.6" rx=".5" opacity=".26"/><rect x="11.5" y="11.2" width="2" height="1.6" rx=".5" opacity=".26"/><rect x="14.5" y="11.2" width="2" height="1.6" rx=".5" opacity=".26"/>' +
+      '<rect x="7" y="14.4" width="10" height="1.6" rx=".8" opacity=".26"/>',
+    zap: '<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" opacity=".9"/>',
+    server: '<rect x="2.6" y="3.4" width="18.8" height="4.6" rx="1.6" opacity=".92"/>' +
+      '<rect x="2.6" y="9.7" width="18.8" height="4.6" rx="1.6" opacity=".7"/>' +
+      '<rect x="2.6" y="16" width="18.8" height="4.6" rx="1.6" opacity=".5"/>' +
+      '<circle cx="5.8" cy="5.7" r=".9" opacity=".28"/>' +
+      '<circle cx="5.8" cy="12" r=".9" opacity=".24"/>' +
+      '<circle cx="5.8" cy="18.3" r=".9" opacity=".2"/>' +
+      '<rect x="9" y="5.2" width="8" height="1" rx=".5" opacity=".28"/>' +
+      '<rect x="9" y="11.5" width="8" height="1" rx=".5" opacity=".24"/>' +
+      '<rect x="9" y="17.8" width="8" height="1" rx=".5" opacity=".2"/>',
+  };
+
   // Build an inline SVG string for `name` at `size` px. Stroked entries match
   // the hand-written inline SVGs in renderer.html (24x24 viewBox, fill="none",
   // stroke="currentColor"); entries in FILLED_ICONS render solid with
-  // fill="currentColor" and stroke="none". Unknown names return '' so callers
-  // can embed the result directly without breaking markup.
+  // fill="currentColor" and stroke="none". Object glyphs in DUOTONE_ICONS use
+  // the filled treatment from 14px up; below that the line version stays
+  // legible. Unknown names return '' so callers can embed the result directly
+  // without breaking markup.
+  // A few glyphs carry too much interior detail to survive a filled rendering
+  // at the 14px tab-strip size; they switch to duotone one step later.
+  const DUOTONE_MIN = { settings: 16 };
+
   function iconSvg(name, size = 14) {
+    const duo = DUOTONE_ICONS[name];
+    if (duo && size >= (DUOTONE_MIN[name] || 14)) {
+      return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="currentColor" stroke="none">' + duo + '</svg>';
+    }
     const filled = FILLED_ICONS[name];
     if (filled) {
       return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="currentColor" stroke="none">' + filled + '</svg>';
@@ -84,7 +137,7 @@
     return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + body + '</svg>';
   }
 
-  const api = { iconSvg, ICONS, FILLED_ICONS };
+  const api = { iconSvg, ICONS, FILLED_ICONS, DUOTONE_ICONS };
   root.Icons = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 }(typeof globalThis !== 'undefined' ? globalThis : this));

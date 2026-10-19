@@ -8,10 +8,13 @@ const _sshAttempts = (typeof sshAttempts !== 'undefined') ? sshAttempts : null;
 // Update the pane status dot DOM (TabManager.render() does not repaint pane headers, so it must be updated manually)
 function _updatePaneDot(pane, connected) {
     pane.connected = connected;
+    const state = pane._sshConnecting ? 'connecting'
+        : pane._sshErrored ? 'error'
+        : (connected ? 'connected' : 'disconnected');
     const el = document.querySelector(`.split-pane[data-pane="${pane.id}"] .pane-header .dot`);
     if (el) {
-        el.classList.remove('connected', 'disconnected');
-        el.classList.add(connected ? 'connected' : 'disconnected');
+        el.classList.remove('connected', 'disconnected', 'connecting', 'error');
+        el.classList.add(state);
     }
 }
 
@@ -379,20 +382,26 @@ function _applySshConnecting(attemptId, tabId) {
         // A fresh connect attempt is a NEW session generation: any
         // failure marker from a previous generation no longer applies.
         pane._sessionFailed = false;
+        pane._sshConnecting = true;
+        pane._sshErrored = false;
         // In preserve mode (clearOnConnect=false) the terminal already exists: do not rebuild it, or the preserved content would be replaced with an empty terminal
         if (!pane.term) wireTerminalToPane(tab, pane);
         if (pane.term) {
             pane.term.write('\x1b[33mConnecting to ' + (pane._sshHost || tab.host || pane.name || tab.name) + '...\x1b[0m\r\n');
             _syncFitAndReportSize(tab, pane);
         }
+        TabManager.render();
         return true;
     }
     if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(tab);
     tab.tabId = tabId;
     tab._sessionFailed = false; // new generation — see the pane branch
+    tab._sshConnecting = true;
+    tab._sshErrored = false;
     if (!tab.term) wireTerminal(tab, tabId);
     if (tab.term) tab.term.write('\x1b[33mConnecting to ' + (tab.host || tab.name) + '...\x1b[0m\r\n');
     _syncFitAndReportSize(tab, null);
+    TabManager.render();
     return true;
 }
 
@@ -411,6 +420,8 @@ function _applySshConnected(attemptId, tabId) {
             if (pane.term) pane.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
             tab.connected = true;
             pane._sessionFailed = false; // live again — pending input is valid
+            pane._sshConnecting = false;
+            pane._sshErrored = false;
             _updatePaneDot(pane, true);
             // Aggregated AFTER the pane state lands: this pane is live, so the
             // tab reads connected (uniform with the disconnect paths).
@@ -419,12 +430,16 @@ function _applySshConnected(attemptId, tabId) {
             tab._sshRetried = 0;
             tab.connected = true;
             tab._sessionFailed = false; // live again — see the split branch
+            tab._sshConnecting = false;
+            tab._sshErrored = false;
             if (!tab.term) wireTerminal(tab, tabId);
             if (tab.term) tab.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
         }
+        const wasReconnect = !!tab._sshReconnectNotice;
+        tab._sshReconnectNotice = false;
         TabManager.render();
         TabManager.updateStatus();
-        showToast('SSH 已连接: ' + _sshDisplayName(tab, pane));
+        showToast((wasReconnect ? 'SSH 已重新连接: ' : 'SSH 已连接: ') + _sshDisplayName(tab, pane));
         // Fallback size settle: the connecting phase already fit and opened the PTY at the right size via pendingSizes,
         // but if the container had zero size during connecting (tab hidden, etc.), settle once more here; after connected the size is registered and usable
         _scheduleSettleResize(tab);
@@ -459,12 +474,18 @@ function _applySshFailed(attemptId, tabId, error) {
         // known failed — pending input for THIS pane must be cancelled even
         // though the old id remains (sync input would relay it to siblings).
         pane._sessionFailed = true;
+        pane._sshConnecting = false;
+        pane._sshErrored = true;
         _updatePaneDot(pane, false);
+        tab._sshReconnectNotice = false;
         // The failed pane is dead, but live siblings keep the tab connected.
         _aggregateSplitConnected(tab);
     } else {
         tab.connected = false;
         tab._sessionFailed = true; // same liveness marker as the pane branch
+        tab._sshConnecting = false;
+        tab._sshErrored = true;
+        tab._sshReconnectNotice = false;
         if (!tab.tabId && tabId) tab.tabId = tabId;
         if (tab.term) {
             tab.term.write('\r\n\x1b[31m[SSH Error] ' + msg + '\x1b[0m\r\n');
@@ -582,6 +603,10 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, attemptId, error }) => 
             // The source session is known dead: pending input (e.g. an
             // in-flight right-click paste) must be cancelled, not delivered.
             pane._sessionFailed = true;
+            pane._sshConnecting = false;
+            pane._sshErrored = true;
+            _updatePaneDot(pane, false);
+            _aggregateSplitConnected(tab);
         } else {
             if (tab.tabId) {
                 _cancelSshAttemptOf(tab, tab.tabId, 'ssh-disconnect'); // same identity-exact discard
@@ -591,7 +616,12 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, attemptId, error }) => 
             }
             tab.tabId = null;
             tab._sessionFailed = true; // same liveness marker as the pane branch
+            tab._sshConnecting = false;
+            tab._sshErrored = true;
         }
+        tab._sshReconnectNotice = false;
+        TabManager.render();
+        TabManager.updateStatus();
         // The discarded session no longer backs an SSH target: drop the dock
         // binding and the bar button until the retry reconnects
         if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
@@ -652,7 +682,10 @@ ipcRenderer.on('ssh-disconnected', (event, { tabId, reason, path }) => {
         tab.connected = false;
         // Known-disconnected source session: cancel pending input.
         pane._sessionFailed = true;
+        pane._sshConnecting = false;
+        pane._sshErrored = false;
         _updatePaneDot(pane, false);
+        tab._sshReconnectNotice = false;
         // This pane is dead, but live siblings keep the tab connected.
         _aggregateSplitConnected(tab);
         if (pane.term) pane.term.write(line);
@@ -662,6 +695,9 @@ ipcRenderer.on('ssh-disconnected', (event, { tabId, reason, path }) => {
     }
     tab.connected = false;
     tab._sessionFailed = true; // same liveness marker as the pane branch
+    tab._sshConnecting = false;
+    tab._sshErrored = false;
+    tab._sshReconnectNotice = false;
     if (tab.term) tab.term.write(line);
     TabManager.render();
     TabManager.updateStatus();

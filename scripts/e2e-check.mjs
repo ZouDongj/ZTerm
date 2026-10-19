@@ -1940,19 +1940,19 @@ async function main() {
         user: document.getElementById('ssh-edit-user').value,
         auth: document.getElementById('ssh-edit-auth').value,
         keypath: document.getElementById('ssh-edit-keypath').value,
-        pwdRowHidden: document.getElementById('ssh-pwd-row').style.display === 'none'
+        pwdRowDim: document.getElementById('ssh-pwd-field').classList.contains('auth-dim')
       };
       closeOverlay('overlay-ssh-edit');
       return r2;
     })()`).catch(() => null);
-    check('模板选择：管理浮层入口+键盘导航 Enter 选中（" 副本"后缀/keypath 携带/密码行隐藏）', !!tplKeyProbe &&
+    check('模板选择：管理浮层入口+键盘导航 Enter 选中（" 副本"后缀/keypath 携带/密码行置灰）', !!tplKeyProbe &&
       tplKeyProbe.menuOpen === true && tplKeyProbe.pickerOpen === true && tplKeyProbe.mgrClosed === true &&
       tplKeyProbe.sel === 'ssh_e2essh2' && tplKeyProbe.actDesc === 'ssh-tpl-opt-ssh_e2essh2' &&
       tplKeyProbe.editTitle === '从模板新建 SSH 连接' &&
       tplKeyProbe.name === '构建机 副本' && tplKeyProbe.host === 'builder.example.com' &&
       String(tplKeyProbe.port) === '2222' && tplKeyProbe.user === 'ci' &&
       tplKeyProbe.auth === '密钥' && tplKeyProbe.keypath === 'C:/keys/ci' &&
-      tplKeyProbe.pwdRowHidden === true,
+      tplKeyProbe.pwdRowDim === true,
       JSON.stringify(tplKeyProbe));
     // Picker Esc closes only the picker and restores focus to the invoking
     // add button (opener restore, same contract as the session selector).
@@ -2664,6 +2664,7 @@ async function main() {
         refCardBg: refCard ? getComputedStyle(refCard).backgroundColor : 'missing',
         cardRadius: cs && cs.borderRadius,
         cardShadow: cs && cs.boxShadow, cardPadding: cs && cs.padding,
+        cardHairline: cs ? getComputedStyle(cards[0], '::before').content : null,
         ruleDisplay: rule ? getComputedStyle(rule).display : 'missing',
         titleWeight: title && getComputedStyle(title).fontWeight,
         titleTracking: title && getComputedStyle(title).letterSpacing,
@@ -2678,7 +2679,7 @@ async function main() {
     const cardOk = !!cardStruct && cardStruct.groups === 2 && cardStruct.cards === 2 &&
       cardStruct.refCardBg.startsWith('rgb') && cardStruct.cardBg === cardStruct.refCardBg &&
       cardStruct.cardRadius === '14px' &&
-      (cardStruct.cardShadow || '').includes('inset') && cardStruct.cardPadding === '6px 16px' &&
+      cardStruct.cardShadow === 'none' && cardStruct.cardHairline === '""' && cardStruct.cardPadding === '6px 16px' &&
       cardStruct.ruleDisplay === 'none' && cardStruct.titleWeight === '600' &&
       !['normal', '0px'].includes(cardStruct.titleTracking || '') &&
       cardStruct.rowBg === 'rgba(0, 0, 0, 0)' &&
@@ -2760,22 +2761,21 @@ async function main() {
       hoverLive.flat.barOpacity === '0.85' && hoverLive.flat.barW === '3px' && hoverLive.flat.barH === '26px' &&
       hoverLive.flat.barColor === hoverLive.expectedBar,
       JSON.stringify(hoverLive && hoverLive.flat));
-    // Floating surfaces must carry the inset hairline border (zt-tip parity)
-    // so menus read as distinct from the dark terminal background.
+    // Floating surfaces carry the v12 top-lit hairline (a gradient pseudo
+    // element) instead of a uniform inset ring.
     const menuEdge = await cdp.eval(`(() => {
       const rules = [...document.styleSheets].flatMap(s => { try { return [...s.cssRules]; } catch { return []; } });
-      // WebView2 keeps the var()-containing declaration verbatim (no rgba
-      // whitespace normalization), so compare with whitespace stripped.
-      const hasEdge = sel => rules.some(r => r.selectorText === sel &&
-        (r.style.boxShadow || '').replace(/\\s+/g, '').includes('inset0001pxrgba(255,255,255,0.06)'));
-      return { popup: hasEdge('.menu-popup'), tabCtx: hasEdge('.tab-context-menu'),
-               dd: hasEdge('.cust-dropdown .dd-menu'), combo: hasEdge('.cust-combo .dd-menu'),
-               transfer: hasEdge('.transfer-window') };
+      const hairlineRules = rules.filter(r => (r.selectorText || '').includes('::before') &&
+        ((r.style.getPropertyValue('mask-composite') || '').includes('exclude') ||
+         (r.style.getPropertyValue('-webkit-mask-composite') || '').includes('xor')));
+      const hasEdge = sel => hairlineRules.some(r => (r.selectorText || '').includes(sel));
+      return { popup: hasEdge('.menu-popup::before'), tabCtx: hasEdge('.tab-context-menu::before'),
+               dd: hasEdge('.dd-menu::before'), combo: hasEdge('.dd-menu::before'),
+               transfer: hasEdge('.transfer-window::before') };
     })()`).catch(() => null);
-    check('浮层菜单：下拉与传输记录面板均带 inset 描边', !!menuEdge && menuEdge.popup === true && menuEdge.tabCtx === true && menuEdge.dd === true && menuEdge.combo === true && menuEdge.transfer === true, JSON.stringify(menuEdge));
-    // The container's focus-within accent border is the search field's only
-    // focus indicator (the inner input's ring is intentionally off). Read
-    // after a real sleep: border-color has a 120ms transition.
+    check('浮层菜单：下拉与传输记录面板均带顶部受光发丝线', !!menuEdge && menuEdge.popup === true && menuEdge.tabCtx === true && menuEdge.dd === true && menuEdge.combo === true && menuEdge.transfer === true, JSON.stringify(menuEdge));
+    // The container's focus-within accent ring is the search field's only
+    // focus indicator (the inner input's ring is intentionally off).
     const searchFocusPre = await cdp.eval(`(() => {
       const box = document.querySelector('[data-page="ssh"] .settings-toolbar .ssh-mgr-search');
       const input = document.querySelector('[data-ssh-search="settings-ssh-list"]');
@@ -4185,6 +4185,10 @@ async function main() {
       // overflows the window, but clientWidth still reports it).
       bar.style.flex = '0 0 ' + (n * 260 + 400) + 'px';
       TabManager._relayout(true);
+      // Widths change instantly, but the strip FLIP from the preceding hover
+      // expansion may still be interpolating transforms. Measure the settled
+      // frame so hug reflects layout, not mid-animation rects.
+      await new Promise(r => setTimeout(r, 260));
       const lastTab = [...vp.querySelectorAll('.tab')].pop();
       const addBtn = document.getElementById('btn-add-tab');
       const hug = (lastTab && addBtn)

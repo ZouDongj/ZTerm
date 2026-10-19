@@ -25,16 +25,12 @@ function toggleMenuPopup() {
     const btn = document.getElementById('btn-menu');
     if (btn) {
         const rect = btn.getBoundingClientRect();
-        const popupWidth = 180;
+        const popupWidth = popup.offsetWidth || 228;
         popup.style.top = (rect.bottom + 4) + 'px';
-        // Align left edge to button left, expand rightward; fall back to right-aligned if no space
-        if (window.innerWidth - rect.left >= popupWidth) {
-            popup.style.left = rect.left + 'px';
-            popup.style.right = 'auto';
-        } else {
-            popup.style.left = 'auto';
-            popup.style.right = (window.innerWidth - rect.right) + 'px';
-        }
+        // Align the left edge to the button, clamped so the popup never runs
+        // past the right edge (the menu is wider than the old 180px hint).
+        popup.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - popupWidth - 8)) + 'px';
+        popup.style.right = 'auto';
     }
     // Disable SFTP menu item when no connected SSH session backs the dock
     // (same focused-pane rule as the bar button's visibility)
@@ -261,16 +257,39 @@ function renderSessionList(filter) {
     return items;
 }
 
+// A host row reads as an identity, not a generic machine: use the first
+// letter of a human name. Names auto-derived from an IP ("192.168...") would
+// only yield a meaningless "1", so those keep the server glyph instead.
+function _hostInitial(profile) {
+    const name = profile && typeof profile.name === 'string' ? profile.name.trim() : '';
+    if (!name) return '';
+    // An auto-named IP is still an identity: its last octet ("88") says more
+    // than a generic server glyph and keeps the whole list visually even.
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(name)) return name.split('.').pop();
+    if (/^[\d.:[\]-]/.test(name)) {
+        const letter = name.match(/[A-Za-z\u4e00-\u9fa5]/);
+        return letter ? letter[0].toUpperCase() : '';
+    }
+    const match = name.match(/[\p{L}\p{N}]/u);
+    return match ? match[0].toUpperCase() : '';
+}
+
+function _sessionIconHtml(profile, cls) {
+    const initial = _hostInitial(profile);
+    if (initial) return `<span class="${cls} is-mono" aria-hidden="true">${escHtml(initial)}</span>`;
+    return `<span class="${cls}" aria-hidden="true">${Icons.iconSvg('server', 19)}</span>`;
+}
+
 // Same display algorithm as the SSH manager (ssh-display.js); only grouping
 // and selection presentation differ
 function _sessionRowHtml(item) {
     const selected = !!_sessionSel && _sessionSel.activeId === item.id;
-    let icon, primary, meta, group = '', titleText = '';
+    let iconHtml, primary, meta, group = '', titleText = '';
     if (item.type === 'ssh') {
         const m = SshDisplay.sshDisplayModel(item.sshProfile);
         const keyBadge = m.keyAuth
             ? `<span class="ss-key" role="img" aria-label="密钥认证" title="密钥认证">${Icons.iconSvg('key', 11)}</span>` : '';
-        icon = 'server';
+        iconHtml = _sessionIconHtml(item.sshProfile, 'ss-row-icon');
         primary = `<span class="ss-primary ${m.primaryIsHost ? 'host' : ''}">${escHtml(m.primary)}</span>`;
         meta = m.named
             ? `<span class="mono">${escHtml(m.endpoint)}</span><span class="dot">·</span><span>${escHtml(m.user)}</span>${keyBadge}`
@@ -278,13 +297,13 @@ function _sessionRowHtml(item) {
         titleText = m.named ? `${m.primary} — ${m.endpoint} · ${m.user}` : `${m.primary} — ${m.user} · 端口 ${m.port}`;
         group = item.badge || '';
     } else {
-        icon = 'terminal';
+        iconHtml = `<span class="ss-row-icon" aria-hidden="true">${Icons.iconSvg('terminal', 19)}</span>`;
         primary = `<span class="ss-primary">${escHtml(item.name)}</span>`;
         meta = `<span>${escHtml(item.detail)}</span>`;
         titleText = item.detail ? `${item.name} — ${item.detail}` : item.name;
     }
     return `<div class="ss-row" role="option" id="sess-opt-${escAttr(item.id)}" aria-selected="${selected}" data-id="${escAttr(item.id)}" title="${escAttr(titleText)}">
-      <span class="ss-row-icon" aria-hidden="true">${Icons.iconSvg(icon, 19)}</span>
+      ${iconHtml}
       <span class="ss-identity">${primary}<span class="ss-meta">${meta}</span></span>
       ${group ? `<span class="ss-group-name">${escHtml(group)}</span>` : ''}
       <span class="ss-open" aria-hidden="true">${Icons.iconSvg('enter-arrow', 15)}</span>
@@ -473,8 +492,12 @@ function _sshRowHtml(p) {
     // No profile values in inline JS: clicks resolve the action
     // and profile id from data attributes via the container delegation below.
     // No title tooltip on the identity: it would just repeat the visible text.
+    const initial = _hostInitial(p);
+    const iconHtml = initial
+        ? `<span class="ssh-mgr-server is-mono" aria-hidden="true">${escHtml(initial)}</span>`
+        : `<span class="ssh-mgr-server" aria-hidden="true">${Icons.iconSvg('server', 21)}</span>`;
     return `<article class="ssh-mgr-row" data-profile-id="${escAttr(p.id)}">
-      <span class="ssh-mgr-server" aria-hidden="true">${Icons.iconSvg('server', 21)}</span>
+      ${iconHtml}
       <div class="ssh-mgr-identity" role="button" tabindex="0" data-action="edit" aria-label="编辑 ${escAttr(m.primary)} — ${escAttr(metaText)}">
         <span class="ssh-mgr-primary ${m.primaryIsHost ? 'host' : ''}">${escHtml(m.primary)}</span>
         <span class="ssh-mgr-meta">${meta}${keyBadge}</span>
@@ -1124,8 +1147,9 @@ function _sshTemplateRowHtml(item) {
         : `<span>${escHtml(m.user)}</span><span class="dot">·</span><span>端口 <span class="mono">${escHtml(String(m.port))}</span></span>${keyBadge}`;
     const titleText = m.named ? `${m.primary} — ${m.endpoint} · ${m.user}` : `${m.primary} — ${m.user} · 端口 ${m.port}`;
     const group = item.badge || '';
+    const iconHtml = _sessionIconHtml(item.sshProfile, 'ss-row-icon');
     return `<div class="ss-row" role="option" id="ssh-tpl-opt-${escAttr(item.id)}" aria-selected="${selected}" data-id="${escAttr(item.id)}" title="${escAttr(titleText)}">
-      <span class="ss-row-icon" aria-hidden="true">${Icons.iconSvg('server', 19)}</span>
+      ${iconHtml}
       <span class="ss-identity">${primary}<span class="ss-meta">${meta}</span></span>
       ${group ? `<span class="ss-group-name">${escHtml(group)}</span>` : ''}
       <span class="ss-open" aria-hidden="true">${Icons.iconSvg('enter-arrow', 15)}</span>
@@ -1316,8 +1340,15 @@ function openSSHEdit(isNew, profileId) {
     openOverlay('overlay-ssh-edit');
     setTimeout(() => {
         _initTabSlider();
+        _syncSSHAuthTabs();
         convertSelects();
         document.getElementById('ssh-edit-name').focus();
+        const nameEl = document.getElementById('ssh-edit-name');
+        // Convenience autofocus must not paint the keyboard focus ring on
+        // open; drop the suppression as soon as the field loses focus so a
+        // later keyboard visit shows the normal accent ring.
+        nameEl.classList.add('ssh-autofocus');
+        nameEl.addEventListener('blur', () => nameEl.classList.remove('ssh-autofocus'), { once: true });
     }, 100);
 }
 
@@ -1407,10 +1438,41 @@ function initGroupCombo() {
         }
     });
 }
+function _syncSSHAuthTabs() {
+    const sel = document.getElementById('ssh-edit-auth');
+    const tabs = document.getElementById('ssh-auth-tabs');
+    const slider = document.getElementById('ssh-auth-slider');
+    if (!sel || !tabs || !slider) return;
+    tabs.querySelectorAll('.auth-tab').forEach(b => {
+        const on = b.dataset.auth === sel.value;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    const active = tabs.querySelector('.auth-tab.active');
+    if (active) {
+        slider.style.left = active.offsetLeft + 'px';
+        slider.style.width = active.offsetWidth + 'px';
+    }
+}
+function setSSHAuth(value) {
+    const sel = document.getElementById('ssh-edit-auth');
+    if (!sel) return;
+    sel.value = value;
+    updateAuthFields();
+}
 function updateAuthFields() {
-    const isKey = document.getElementById('ssh-edit-auth').value === '密钥';
-    document.getElementById('ssh-pwd-row').style.display = isKey ? 'none' : '';
-    document.getElementById('ssh-key-row').style.display = isKey ? '' : 'none';
+    const sel = document.getElementById('ssh-edit-auth');
+    if (!sel) return;
+    const isKey = sel.value === '密钥';
+    const pwdField = document.getElementById('ssh-pwd-field');
+    if (pwdField) pwdField.classList.toggle('auth-dim', isKey);
+    const keyGroup = document.getElementById('ssh-key-row')?.querySelector('.form-group');
+    if (keyGroup) keyGroup.classList.toggle('auth-dim', !isKey);
+    const pwdInput = document.getElementById('ssh-edit-password');
+    if (pwdInput) pwdInput.disabled = isKey;
+    const keyInput = document.getElementById('ssh-edit-keypath');
+    if (keyInput) keyInput.disabled = !isKey;
+    _syncSSHAuthTabs();
 }
 
 function switchSSHTab(name) {

@@ -29,6 +29,12 @@
   </svg>
 </div>
 <div class="window">
+  <!-- Window surface: native DWM Mica (Windows 11) or the CSS wallpaper
+       fallback, unified by the design's mica tint. -->
+  <div class="mica" aria-hidden="true">
+    <div class="mica-wall"></div>
+    <div class="mica-tint"></div>
+  </div>
   <div class="titlebar" data-tauri-drag-region>
     <div id="tabbar"></div>
     <!-- SFTP dock toggle: visible only while the active tab's focused pane is
@@ -455,6 +461,27 @@
                 </div>
                 <div class="toggle-switch on" id="toggle-statusdot" onclick="toggleSwitch(this);saveAppearance()"></div>
               </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">终端面板包边</div>
+                  <div class="settings-card-desc">开启为顶亮渐变光边；关闭则无包边</div>
+                </div>
+                <div class="toggle-switch" id="toggle-pane-ring" onclick="toggleSwitch(this);saveAppearance()"></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">面板受光线</div>
+                  <div class="settings-card-desc">设置面板、卡片、对话框、菜单、通知与搜索框的顶亮发丝线</div>
+                </div>
+                <div class="toggle-switch on" id="toggle-panel-edge" onclick="toggleSwitch(this);saveAppearance()"></div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-card-label">
+                  <div class="settings-card-title">SFTP 侧栏材质</div>
+                  <div class="settings-card-desc">开启使用云母特殊材质；关闭则跟随终端配色</div>
+                </div>
+                <div class="toggle-switch on" id="toggle-sftp-material" onclick="toggleSwitch(this);saveAppearance()"></div>
+              </div>
             </div>
           </div>
           <!-- SSH page -->
@@ -481,7 +508,7 @@
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
               <div><h2>高亮</h2><p class="desc">自定义终端输出高亮规则。</p></div>
               <div style="display:flex;gap:6px;flex-shrink:0">
-                <button class="btn-primary" style="font-size:12px;padding:5px 12px" onclick="openHighlightEdit(true)">+ 添加规则</button>
+                <button class="btn-primary settings-primary-add" onclick="openHighlightEdit(true)">+ 添加规则</button>
               </div>
             </div>
 
@@ -506,7 +533,7 @@
               </div>
             </div>
 
-            <div id="highlight-rules-list"></div>
+            <div id="highlight-rules-list" class="settings-card settings-rules-card"></div>
           </div>
           <!-- Quick Commands page -->
           <div class="settings-page" data-page="quickcommands">
@@ -624,7 +651,7 @@
              entry: single click on empty space / icon / "…" crumb, or
              double-click anywhere. -->
         <div class="sftp-pathbar" id="sftp-pathbar">
-          <span class="sftp-pathbar-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>
+          <span class="sftp-pathbar-icon" id="sftp-path-icon" aria-hidden="true"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>
           <div class="sftp-breadcrumb" id="sftp-breadcrumb"></div>
         </div>
         <div class="sftp-toolbar">
@@ -736,7 +763,8 @@
       <div class="panel-tab active" data-tab="conn" onclick="switchSSHTab('conn')">连接</div>
       <div class="panel-tab" data-tab="scripts" onclick="switchSSHTab('scripts')">登录脚本<span id="ls-tab-badge" class="panel-tab-badge"></span></div>
     </div>
-    <div style="padding:0 20px 20px">
+    <div class="ssh-edit-body" style="padding:0 20px 20px">
+      <div class="ssh-edit-panes">
       <!-- Connection tab -->
       <div id="ssh-tab-conn" class="ssh-tab-panel active" style="flex-direction:column;gap:12px">
         <div class="form-row">
@@ -769,14 +797,19 @@
           </div>
           <div class="form-group">
             <label>认证方式</label>
-            <select id="ssh-edit-auth" class="styled-select" onchange="updateAuthFields()">
+            <div class="auth-tabs" id="ssh-auth-tabs" role="group" aria-label="认证方式">
+              <div class="auth-tab-slider" id="ssh-auth-slider"></div>
+              <button type="button" class="auth-tab active" data-auth="密码" aria-pressed="true" onclick="setSSHAuth('密码')">密码</button>
+              <button type="button" class="auth-tab" data-auth="密钥" aria-pressed="false" onclick="setSSHAuth('密钥')">密钥</button>
+            </div>
+            <select id="ssh-edit-auth" class="auth-native" tabindex="-1" aria-hidden="true" onchange="updateAuthFields()">
               <option>密码</option>
               <option>密钥</option>
             </select>
           </div>
         </div>
         <div class="form-row" id="ssh-pwd-row">
-          <div class="form-group">
+          <div class="form-group" id="ssh-pwd-field">
             <label>密码</label>
             <div id="ssh-pwd-status" class="ssh-pwd-status" style="display:none">
               <span class="ssh-pwd-status-text"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> 密码已加密保存</span>
@@ -800,27 +833,27 @@
             <input id="ssh-edit-note" type="text" placeholder="可选">
           </div>
         </div>
-        <div class="form-row" id="ssh-key-row" style="display:none">
+        <div class="form-row" id="ssh-key-row">
           <div class="form-group" style="grid-column:1/-1">
             <label>私钥路径</label>
             <input id="ssh-edit-keypath" type="text" placeholder="~/.ssh/id_rsa">
           </div>
         </div>
         <div class="form-row">
-          <div class="form-group" style="grid-column:1/-1;flex-direction:row;align-items:center;gap:8px">
+          <div class="form-group ssh-toggle-line" style="grid-column:1/-1">
             <div class="toggle-switch" id="ssh-edit-followcwd" onclick="this.classList.toggle('on')"></div>
-            <div>
-              <div style="font-size:12.5px;color:#abb2bf">SFTP 跟随终端目录</div>
-              <div style="font-size:11px;color:rgba(171,178,191,0.35)">开启后 SFTP 自动进入终端当前目录（首次连接无欢迎信息）</div>
+            <div class="ssh-toggle-copy">
+              <div class="ssh-toggle-title">SFTP 跟随终端目录</div>
+              <div class="ssh-toggle-desc">开启后 SFTP 自动进入终端当前目录（首次连接无欢迎信息）</div>
             </div>
           </div>
         </div>
         <div class="form-row">
-          <div class="form-group" style="grid-column:1/-1;flex-direction:row;align-items:center;gap:8px">
+          <div class="form-group ssh-toggle-line" style="grid-column:1/-1">
             <div class="toggle-switch on" id="ssh-edit-clearonconnect" onclick="this.classList.toggle('on')"></div>
-            <div>
-              <div style="font-size:12.5px;color:#abb2bf">连接时清空终端</div>
-              <div style="font-size:11px;color:rgba(171,178,191,0.35)">关闭后，强制或断开重连时保留之前的终端内容</div>
+            <div class="ssh-toggle-copy">
+              <div class="ssh-toggle-title">连接时清空终端</div>
+              <div class="ssh-toggle-desc">关闭后，强制或断开重连时保留之前的终端内容</div>
             </div>
           </div>
         </div>
@@ -830,7 +863,8 @@
         <div id="login-scripts-container" style="display:flex;flex-direction:column;gap:2px;max-height:320px;overflow-y:auto"></div>
         <span class="form-section-add" onclick="addLoginScriptRow()" style="align-self:flex-start">+ 添加脚本</span>
       </div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      </div>
+      <div class="ssh-edit-footer" style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
         <button class="btn-outline" onclick="closeSSHEdit()">取消</button>
         <button class="btn-primary" id="ssh-edit-save-btn" onclick="saveSSHEdit()">保存</button>
       </div>

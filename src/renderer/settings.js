@@ -156,6 +156,32 @@ function renderSSHManagerInSettings() {
     renderSSHManagerInto(document.getElementById('settings-ssh-list'), _sshMgrView('settings-ssh-list'));
 }
 
+// The sidebar ships as plain labels so the markup stays easy to scan; decorate
+// it once at startup with the same icon set used by the rest of the chrome.
+function decorateSettingsSidebar() {
+    const map = {
+        terminal: 'terminal',
+        appearance: 'palette',
+        ssh: 'server',
+        highlight: 'highlighter',
+        quickcommands: 'zap',
+        keys: 'keyboard',
+        about: 'info',
+    };
+    document.querySelectorAll('.settings-sidebar-item').forEach(item => {
+        if (item.querySelector('.settings-nav-icon')) return;
+        const match = (item.getAttribute('onclick') || '').match(/'([^']+)'/);
+        const name = match && map[match[1]];
+        if (!name || typeof Icons === 'undefined') return;
+        const span = document.createElement('span');
+        span.className = 'settings-nav-icon';
+        span.setAttribute('aria-hidden', 'true');
+        span.innerHTML = Icons.iconSvg(name, 15);
+        item.prepend(span);
+    });
+}
+decorateSettingsSidebar();
+
 function toggleSwitch(el) {
     el.classList.toggle('on');
 }
@@ -235,6 +261,9 @@ function loadSettingsIntoForm() {
     }
     setToggle('toggle-animations', config.animations !== false);
     setToggle('toggle-statusdot', config.showStatusDot !== false);
+    setToggle('toggle-pane-ring', config.paneRing === true);
+    setToggle('toggle-panel-edge', config.panelEdge !== false);
+    setToggle('toggle-sftp-material', config.sftpMaterial !== false);
     setToggle('toggle-richtext', config.richTextCopy === true);
     setToggle('toggle-smartcopy', config.smartCopy !== false);
     setToggle('toggle-osc52', config.osc52 !== false);
@@ -635,10 +664,13 @@ function saveAppearance() {
     updateAccentDot();
     const animations = getToggle('toggle-animations');
     const showStatusDot = getToggle('toggle-statusdot');
+    const paneRing = getToggle('toggle-pane-ring');
+    const panelEdge = getToggle('toggle-panel-edge');
+    const sftpMaterial = getToggle('toggle-sftp-material');
     const terminalScheme = document.getElementById('set-terminal-scheme')?.value || 'onedark';
     const minimumContrastRatio = parseFloat(document.getElementById('set-contrast')?.value) || 4;
 
-    const config = { fontFamily, uiFont, uiFallbackFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, terminalScheme, minimumContrastRatio, theme: 'dark' };
+    const config = { fontFamily, uiFont, uiFallbackFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, paneRing, panelEdge, sftpMaterial, terminalScheme, minimumContrastRatio, theme: 'dark' };
     _settingsConfig = { ..._settingsConfig, ...config };
     persistSettings();
     applyUiFont();
@@ -646,6 +678,7 @@ function saveAppearance() {
     // Apply animations setting
     const winEl = document.querySelector('.window');
     if (winEl) winEl.classList.toggle('no-animations', animations === false);
+    if (typeof applyChromeFlags === 'function') applyChromeFlags();
 
     // Apply status dot setting
     TabManager.render();
@@ -765,6 +798,9 @@ function persistSettings() {
         animations: config.animations,
         showStatusDot: config.showStatusDot,
         showStatusbar: config.showStatusbar,
+        paneRing: config.paneRing,
+        panelEdge: config.panelEdge,
+        sftpMaterial: config.sftpMaterial,
         minimumContrastRatio: config.minimumContrastRatio,
     });
     ipcRenderer.send('save-terminal-settings', {
@@ -797,11 +833,13 @@ async function loadSettings() {
                 shortcuts: full.shortcuts || {},
             };
             // Restore persisted statusbar visibility as soon as config is in
+            if (typeof applyChromeFlags === 'function') applyChromeFlags();
             applyStatusbarVisibility();
             return;
         }
     } catch(e) { console.error('[loadSettings]', e); }
-    _settingsConfig = { cursor: 'bar', scrollback: 10000, bell: 'off', cursorBlink: true, autoCopy: true, rightClickPaste: true, fontFamily: '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace', fontSize: 16, lineHeight: 1.125, fontWeight: '400', fontWeightBold: '600', accentColor: '#61afef', theme: 'dark', animations: true, showStatusDot: true, restoreLocalContent: false, smartCopy: true, osc52: true, richTextCopy: false };
+    _settingsConfig = { cursor: 'bar', scrollback: 10000, bell: 'off', cursorBlink: true, autoCopy: true, rightClickPaste: true, fontFamily: '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace', fontSize: 16, lineHeight: 1.125, fontWeight: '400', fontWeightBold: '600', accentColor: '#61afef', theme: 'dark', animations: true, showStatusDot: true, paneRing: false, panelEdge: true, sftpMaterial: true, restoreLocalContent: false, smartCopy: true, osc52: true, richTextCopy: false };
+    if (typeof applyChromeFlags === 'function') applyChromeFlags();
     applyStatusbarVisibility();
 }
 

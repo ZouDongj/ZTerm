@@ -17,6 +17,12 @@ function normalizeRemotePath(p) {
     return segs.length ? '/' + segs.join('/') : '/';
 }
 
+// SFTP pathbar leading glyph: the prototype uses a hard-drive for the remote
+// filesystem root and a folder elsewhere. The filled hard-drive keeps the
+// v12 object-icon treatment while the folder falls back to the line glyph at
+// this 13px size.
+const SFTP_ROOT_ICON = '<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M13.85 7.85 11.9 3.73v-.01A1.2 1.2 0 0 0 10.75 3h-5.5a1.2 1.2 0 0 0-1.13.72L2.15 7.86Q2 8.16 2 8.5v2A1.5 1.5 0 0 0 3.5 12h9a1.5 1.5 0 0 0 1.5-1.5v-2q0-.33-.15-.65M5.25 4h5.5a.24.24 0 0 1 .23.14L12.34 7H3.66l1.36-2.86A.24.24 0 0 1 5.25 4M13 10.5a.5.5 0 0 1-.5.5h-9a.5.5 0 0 1-.5-.5v-2a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 .5.5zm-1-1a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0"/></svg>';
+
 // ── SFTP Panel ──
 // Fit suppression while the dock's open/close width animation runs (180ms CSS
 // transition; the flag drops at ~220ms when one settle pass refits). Same
@@ -356,13 +362,13 @@ const SFTP = {
             if (typeof TabManager === 'undefined') return;
             const tab = TabManager.getActive();
             if (!tab || tab.type === 'settings') return;
-            // Dock total width = panel + its 8px gutter, mirroring the
+            // Dock total width = panel + its 12px gutter, mirroring the
             // .sftp-dock / .main.sftp-open rules in app.css:
-            // min(--sftp-width, mainW - 240px) + 8px.
+            // min(--sftp-width, mainW - 240px) + 12px.
             const mainW = main.getBoundingClientRect().width;
             if (!(mainW > 0)) return;
             const cssW = parseFloat(main.style.getPropertyValue('--sftp-width')) || 320;
-            const delta = Math.max(0, Math.min(cssW, mainW - 240) + 8);
+            const delta = Math.max(0, Math.min(cssW, mainW - 240) + 12);
             if (delta <= 0) return;
             const sign = opening ? -1 : 1;
             const resizeOne = (term, paneW, rootW) => {
@@ -541,6 +547,13 @@ const SFTP = {
         const el = document.getElementById('sftp-breadcrumb');
         el.innerHTML = '';
         this._editingPath = false; // any listing render ends an in-progress path edit
+        // The leading glyph describes the filesystem position, not the
+        // current folder: root is a hard drive, everything else a folder.
+        const pathIcon = document.getElementById('sftp-path-icon');
+        if (pathIcon) {
+            pathIcon.innerHTML = this._path === '/' ? SFTP_ROOT_ICON
+                : (typeof Icons !== 'undefined' ? Icons.iconSvg('folder', 13) : '');
+        }
         const parts = this._path.split('/').filter(Boolean);
         const paths = [];
         let current = '';
@@ -702,12 +715,12 @@ const SFTP = {
         if (this._path !== '/') {
             const up = document.createElement('div');
             up.className = 'sftp-item';
-            up.innerHTML = '<span class="sftp-item-icon ic-accent">' + Icons.iconSvg('folder-filled', 16) + '</span><span class="sftp-item-name">..</span>';
+            up.innerHTML = '<span class="sftp-item-icon ic-accent">' + Icons.iconSvg('folder', 16) + '</span><span class="sftp-item-name">..</span>';
             up.addEventListener('click', () => this.goUp());
             body.appendChild(up);
         }
         this._files.forEach(f => {
-            const icon = f.isDir ? '<span class="ic-accent">' + Icons.iconSvg('folder-filled', 16) + '</span>' : Icons.iconSvg('file-filled', 16);
+            const icon = f.isDir ? '<span class="ic-accent">' + Icons.iconSvg('folder', 16) + '</span>' : Icons.iconSvg('file', 16);
             // Directories carry no size: the column shows an em dash so the
             // right edge stays visually aligned across mixed listings.
             const size = f.isDir ? '—' : formatSize(f.size);
@@ -968,7 +981,7 @@ const SFTP = {
         const row = document.createElement('div');
         row.className = 'sftp-item';
         row.id = 'sftp-mkdir-row';
-        row.innerHTML = '<span class="sftp-item-icon ic-accent">' + Icons.iconSvg('folder-filled', 16) + '</span><input class="inline-edit" placeholder="新建目录名称，Enter 确认 / Esc 取消" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none">';
+        row.innerHTML = '<span class="sftp-item-icon ic-accent">' + Icons.iconSvg('folder', 16) + '</span><input class="inline-edit" placeholder="新建目录名称，Enter 确认 / Esc 取消" style="flex:1;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:#abb2bf;font-size:12.5px;font-family:inherit;outline:none">';
         snap.row = row;
         body.insertBefore(row, body.firstChild);
         const input = row.querySelector('input');
@@ -1566,9 +1579,9 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) =>
         let rafPending = false;
         let pendingWidth = null;
         const onMove = (ev) => {
-            // The handle lives in the 8px gutter left of the panel; subtract
+            // The handle lives in the 12px gutter left of the panel; subtract
             // half the gutter so the handle midpoint tracks the cursor.
-            pendingWidth = clamp(rect.right - ev.clientX - 4, rect);
+            pendingWidth = clamp(rect.right - ev.clientX - 6, rect);
             if (rafPending) return;
             rafPending = true;
             requestAnimationFrame(() => {

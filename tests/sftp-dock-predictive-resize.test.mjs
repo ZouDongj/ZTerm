@@ -3,7 +3,7 @@
 // ResizeObserver fits (_sftpAnimating), so without the prediction the terminal
 // re-gridded only in the post-animation settle (~540ms after the click) — the
 // flicker this feature removes. These tests pin the geometry math:
-//   delta = min(--sftp-width || 320, mainW - 240) + 8px gutter
+//   delta = min(--sftp-width || 320, mainW - 240) + 12px gutter
 //   cols' = cols ∓ round(delta / cellW)   (split panes absorb width*delta/rootW)
 // and the suppression of the switchTo 10ms fit while the animation owns the
 // wrap width. Everything runs against the REAL renderer stack through the
@@ -39,13 +39,13 @@ function stageMainArea(vm, width) {
 
 test('dock open resizes the active terminal to the predicted final grid up front', async () => {
     const vm = await loadSftpVm();
-    stageMainArea(vm, 1076); // wrap animates 1076 → 748 (delta = 320 panel + 8 gutter)
+    stageMainArea(vm, 1076); // wrap animates 1076 → 744 (delta = 320 panel + 12 gutter)
     const term = fakeTerm(129, 40, 8);
     vm.ctx.TabManager.tabs[0].term = term; // tabA is the active tab
 
     vm.SFTP._setDockVisible(true);
 
-    assert.deepEqual(term.resized, [[88, 40]], '129 cols − round(328/8) = 88 at animation start');
+    assert.deepEqual(term.resized, [[87, 40]], '129 cols − round(332/8) = 87 at animation start');
 });
 
 test('dock close resizes back to the wider grid up front', async () => {
@@ -57,7 +57,7 @@ test('dock close resizes back to the wider grid up front', async () => {
     vm.SFTP._setDockVisible(true);
     vm.SFTP._setDockVisible(false);
 
-    assert.deepEqual(term.resized, [[88, 40], [129, 40]], 'the close restores 129 cols at animation start');
+    assert.deepEqual(term.resized, [[87, 40], [129, 40]], 'the close restores 129 cols at animation start');
 });
 
 test('a terminal without a canvas (DOM fallback) is skipped silently', async () => {
@@ -108,8 +108,8 @@ test('split panes absorb the dock delta in proportion to their widths', async ()
         rootEl.appendChild(el);
         return el;
     };
-    paneEl('p_1', 750); // absorbs 750*328/1000 = 246px = 30.75 → 31 cols
-    paneEl('p_2', 242); // absorbs 242*328/1000 ≈ 79.4px = 9.92 → 10 cols
+    paneEl('p_1', 750); // absorbs 750*332/1000 = 249px = 31.1 → 31 cols
+    paneEl('p_2', 242); // absorbs 242*332/1000 ≈ 80.3px = 10.0 → 10 cols
     p1.term = fakeTerm(100, 40, 8);
     p2.term = fakeTerm(40, 40, 8);
 

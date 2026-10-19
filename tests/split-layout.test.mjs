@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { getAllPanes, findPane, getParentOf, normalize, applyDragRatios } =
+const { getAllPanes, findPane, getParentOf, normalize, applyDragRatios, previewDropRect } =
     require('../src/renderer/split-layout.js');
 
 // ── tree traversal ──
@@ -255,4 +255,55 @@ test('applyDragRatios 极端拖动不产生负数', () => {
     assert.ok(a >= 0 && b >= 0);
     const [a2, b2] = applyDragRatios(0.06, 0.94, -10, 0.05);
     assert.ok(a2 >= 0 && b2 >= 0);
+});
+
+// ── drop preview geometry (v12 full-area preview) ──
+
+const p = (id) => ({ id });
+
+test('previewDropRect: root edge on a two-pane split yields half', () => {
+    const p1 = p('p1'), p2 = p('p2');
+    const root = { orientation: 'h', children: [p1, p2], ratios: [0.5, 0.5] };
+    const r = previewDropRect(root, { side: 'l', relative: null, gapX: 0, gapY: 0 });
+    assert.ok(Math.abs(r.x - 0) < 1e-9);
+    assert.ok(Math.abs(r.w - 50) < 1e-9);
+    assert.ok(Math.abs(r.h - 100) < 1e-9);
+});
+
+test('previewDropRect: gap is subtracted from the available span', () => {
+    const p1 = p('p1'), p2 = p('p2');
+    const root = { orientation: 'h', children: [p1, p2], ratios: [0.5, 0.5] };
+    // A root-edge drop flattens into the existing row (normalize), so the
+    // preview is one of three slots: 100 - 2 gaps, split 50/25/25.
+    const r = previewDropRect(root, { side: 'l', relative: null, gapX: 2, gapY: 0 });
+    assert.ok(Math.abs(r.w - 48) < 1e-9, `w=${r.w}`);
+});
+
+test('previewDropRect: inserting beside a sibling splits that slot three ways', () => {
+    const p1 = p('p1'), p2 = p('p2');
+    const root = { orientation: 'h', children: [p1, p2], ratios: [0.5, 0.5] };
+    const r = previewDropRect(root, { side: 'r', relative: p1, gapX: 2, gapY: 0 });
+    assert.ok(Math.abs(r.x - 34) < 1e-9, `x=${r.x}`);
+    assert.ok(Math.abs(r.w - 32) < 1e-9, `w=${r.w}`);
+});
+
+test('previewDropRect: moving a pane previews the post-detach tree', () => {
+    const p1 = p('p1'), p2 = p('p2');
+    const root = { orientation: 'h', children: [p1, p2], ratios: [0.5, 0.5] };
+    const r = previewDropRect(root, { side: 'r', relative: p2, moving: p1, gapX: 0, gapY: 0 });
+    assert.ok(Math.abs(r.x - 50) < 1e-9, `x=${r.x}`);
+    assert.ok(Math.abs(r.w - 50) < 1e-9, `w=${r.w}`);
+});
+
+test('previewDropRect: single root leaf splits in half', () => {
+    const p1 = p('p1');
+    const r = previewDropRect(p1, { side: 't', relative: null, gapX: 0, gapY: 0 });
+    assert.ok(Math.abs(r.y - 0) < 1e-9);
+    assert.ok(Math.abs(r.h - 50) < 1e-9);
+});
+
+test('previewDropRect: dropping onto the moving pane itself is rejected', () => {
+    const p1 = p('p1'), p2 = p('p2');
+    const root = { orientation: 'h', children: [p1, p2], ratios: [0.5, 0.5] };
+    assert.equal(previewDropRect(root, { side: 'l', relative: p1, moving: p1 }), null);
 });

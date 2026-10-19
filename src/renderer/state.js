@@ -14,6 +14,22 @@ const TERMINAL_SCHEMES = {
         brightBlack:'#545862', brightRed:'#e06c75', brightGreen:'#98c379', brightYellow:'#e5c07b',
         brightBlue:'#61afef', brightMagenta:'#c678dd', brightCyan:'#56b6c2', brightWhite:'#ffffff',
     },
+    inkFamily: {
+        name: 'Ink Family',
+        background:'#0e1117', foreground:'#ccd3e0',
+        black:'#0e1117', red:'#ee8089', green:'#a9d97c', yellow:'#efce8c',
+        blue:'#79bcf7', magenta:'#d18fe8', cyan:'#67c7d4', white:'#ccd3e0',
+        brightBlack:'#8a93a6', brightRed:'#ee8089', brightGreen:'#a9d97c', brightYellow:'#efce8c',
+        brightBlue:'#79bcf7', brightMagenta:'#d18fe8', brightCyan:'#67c7d4', brightWhite:'#eef2f8',
+    },
+    obsidian: {
+        name: 'Obsidian',
+        background:'#0a0b0f', foreground:'#e6ebf3',
+        black:'#15161e', red:'#f7768e', green:'#9ece6a', yellow:'#e0af68',
+        blue:'#7aa2f7', magenta:'#bb9af7', cyan:'#7dcfff', white:'#c0caf5',
+        brightBlack:'#939cb0', brightRed:'#f7768e', brightGreen:'#9ece6a', brightYellow:'#e0af68',
+        brightBlue:'#7aa2f7', brightMagenta:'#bb9af7', brightCyan:'#7dcfff', brightWhite:'#e6ebf3',
+    },
     snazzy: {
         name: 'Snazzy',
         background:'#282a36', foreground:'#eff0eb',
@@ -140,7 +156,7 @@ const TERMINAL_SCHEMES = {
         black:'#000000', red:'#cc0000', green:'#4e9a06', yellow:'#c4a000',
         blue:'#3465a4', magenta:'#75507b', cyan:'#06989a', white:'#d3d7cf',
         brightBlack:'#555753', brightRed:'#ef2929', brightGreen:'#8ae234', brightYellow:'#fce94f',
-        brightBlue:'#729fcf', brightMagenta:'#ad7fa8', brightCyan:'#34e2e2', brightWhite:'#eeeec',
+        brightBlue:'#729fcf', brightMagenta:'#ad7fa8', brightCyan:'#34e2e2', brightWhite:'#eeeeec',
     },
     tangoLight: {
         name: 'Tango Light',
@@ -148,7 +164,7 @@ const TERMINAL_SCHEMES = {
         black:'#000000', red:'#cc0000', green:'#4e9a06', yellow:'#c4a000',
         blue:'#3465a4', magenta:'#75507b', cyan:'#06989a', white:'#d3d7cf',
         brightBlack:'#555753', brightRed:'#ef2929', brightGreen:'#8ae234', brightYellow:'#fce94f',
-        brightBlue:'#729fcf', brightMagenta:'#ad7fa8', brightCyan:'#34e2e2', brightWhite:'#eeeec',
+        brightBlue:'#729fcf', brightMagenta:'#ad7fa8', brightCyan:'#34e2e2', brightWhite:'#eeeeec',
     },
     darkPlus: {
         name: 'Dark+',
@@ -242,18 +258,9 @@ function getTerminalTheme() {
 function applyTerminalScheme() {
     const theme = getTerminalTheme();
     document.documentElement.style.setProperty('--term-bg', theme.background);
-    // Surface derivation: the terminal scheme background is the primary input;
-    // the whole UI surface ladder (window base / floats / cards) is derived in
-    // the same hue so the terminal canvas never looks pasted onto a foreign
-    // frame. Elevation = HSL lightness steps (tonal), not shadows.
-    const hsl = hexToHsl(theme.background);
-    if (hsl) {
-        const sat = Math.max(hsl.s, 0.06);
-        const root = document.documentElement.style;
-        root.setProperty('--surface-win', hslToHex(hsl.h, sat, 0.065));
-        root.setProperty('--surface-float', hslToHex(hsl.h, sat, 0.185));
-        root.setProperty('--surface-card', hslToHex(hsl.h, sat, 0.24));
-    }
+    // The v12 frame is a mica/acrylic material system: its surfaces are fixed by
+    // app.css and must not be re-derived from the terminal scheme background.
+    // Only the terminal canvas (--term-bg) follows the scheme.
     TabManager.tabs.forEach(t => {
         if (t.term) {
             // xterm caret must stay visible: the WebGL smooth-cursor adapter
@@ -309,5 +316,23 @@ function toggleStatusbar() {
     applyStatusbarVisibility();
     persistSettings();
     return _settingsConfig.showStatusbar;
+}
+
+// ── v12 surface switches (persisted in appearance) ──
+// pane ring: off by default, matching the prototype's no-ring window state.
+// panel edge: the top-lit hairline on every floating surface, on by default.
+// sftp material: the dock uses Mica/acrylic; off falls back to the terminal
+// scheme's canvas color.
+function applyChromeFlags() {
+    const win = document.querySelector('.window');
+    if (!win) return;
+    const noEdge = _settingsConfig.panelEdge === false;
+    win.classList.toggle('no-ring', _settingsConfig.paneRing !== true);
+    win.classList.toggle('no-edge', noEdge);
+    win.classList.toggle('dock-plain', _settingsConfig.sftpMaterial === false);
+    // Dialogs/menus are siblings of .window (not descendants), so the surface
+    // edge switch must also sit on <body>; a .window-only class left the SSH
+    // edit panel's hairline visible after turning the switch off.
+    document.body.classList.toggle('no-edge', noEdge);
 }
 

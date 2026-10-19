@@ -1,22 +1,79 @@
 /* ZTerm - all styles (extracted unchanged from renderer.html <style>) */
-/* Design C1v2-A (Contrast Float): three-level color separation for window/pane/overlay + floating cards + zero divider lines */
+/* Design v12 "Luminous Mica": desktop-sourced window backdrop, tonal layers,
+   top-lit hairlines, filled controls and restrained motion. */
 :root{
-  --accent-rgb:97,175,239;--accent-contrast:#10161d;--term-bg:#282c34;
-  --surface-win:#12141b;      /* window base */
-  --surface-float:#2a303e;    /* overlay layer (dialogs/panels/settings page) */
-  --surface-card:#343b4b;     /* settings card (one level above the overlay) */
-  --text-1:#abb2bf;           /* primary text (kept at the original baseline to avoid glare) */
-  --text-2:#a2aab7;             /* secondary text: >=4.5:1 contrast on win/float/card backgrounds (8.1/5.9/4.8) */
-  --text-3:#6a7280;             /* de-emphasized: icons, placeholders and decoration only, never carries regular information */
-  --shadow-pane:0 4px 16px rgba(0,0,0,0.28);
-  --shadow-float:0 12px 32px rgba(0,0,0,0.35);
+  /* The app is dark-only; keep native form controls/scrollbars dark even
+     when Windows is in light app mode. */
+  color-scheme:dark;
+  --accent-rgb:97,175,239;--accent:rgb(var(--accent-rgb));--accent-contrast:#10161d;--term-bg:#282c34;
+  /* Text ladder: pure white never used; 92/62/40 keeps a calm hierarchy */
+  --t1:rgba(255,255,255,.92);--t2:rgba(255,255,255,.62);--t3:rgba(255,255,255,.40);
+  --text-1:var(--t1);--text-2:var(--t2);--text-3:var(--t3);
+  --stroke:rgba(255,255,255,.085);--stroke-soft:rgba(255,255,255,.055);
+  --fill-hover:rgba(255,255,255,.055);--fill-press:rgba(255,255,255,.03);
+  --mica-tint:rgba(25,27,33,.66);
+  --acrylic:rgba(43,46,54,.66);
+  --surface-win:#12141b;      /* opaque fallbacks: badges, menus outside the mica */
+  --surface-float:rgba(30,33,41,.88); /* dialogs and large panels (readability first) */
+  --surface-card:rgba(255,255,255,.028); /* cards inside the settings glass */
+  --wall:
+    radial-gradient(46% 60% at 69% 28%, rgba(53,119,240,.95) 0%, rgba(53,119,240,0) 64%),
+    radial-gradient(38% 52% at 33% 63%, rgba(18,181,200,.85) 0%, rgba(18,181,200,0) 62%),
+    radial-gradient(50% 58% at 77% 80%, rgba(122,60,240,.85) 0%, rgba(122,60,240,0) 60%),
+    radial-gradient(30% 40% at 18% 20%, rgba(23,224,192,.55) 0%, rgba(23,224,192,0) 62%),
+    linear-gradient(155deg, #0a1a4a 0%, #071130 48%, #04081c 100%);
+  --shadow-pane:0 14px 34px -10px rgba(2,4,10,.45);
+  --shadow-float:0 18px 44px rgba(0,0,0,.46),0 3px 10px rgba(0,0,0,.32);
+  --ease:cubic-bezier(.2,.8,.3,1);
 }
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
 /* Form controls do not inherit fonts by default (textarea falls back to UA monospace); make them follow the UI font */
 textarea{font-family:inherit}
-html,body{background:var(--surface-win);margin:0;padding:0;overflow:hidden;width:100vw;height:100vh}
+html,body{background:transparent;margin:0;padding:0;overflow:hidden;width:100vw;height:100vh}
 body{display:flex;justify-content:center;align-items:center;min-height:100vh;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
-.window{width:100vw;height:100vh;background:var(--surface-win);display:flex;flex-direction:column;overflow:hidden}
+.window{width:100vw;height:100vh;background:transparent;display:flex;flex-direction:column;overflow:hidden;position:relative}
+/* Window surface: native DWM Mica comes from the OS; the CSS wallpaper is the
+   fallback for Windows 10 / composition-disabled systems. The design's tint is
+   applied on top of BOTH: it is the material's unifying layer, not a fallback
+   colour (the raw wallpaper otherwise makes the top and bottom read as two
+   different surfaces). */
+.mica{position:absolute;inset:0;pointer-events:none;z-index:0;overflow:hidden}
+.mica-wall{position:absolute;inset:-90px;background:var(--wall);background-attachment:fixed;
+  filter:blur(64px) saturate(.68) brightness(.9)}
+.mica-tint{position:absolute;inset:0;background:var(--mica-tint)}
+[data-material="mica"] .mica-wall{display:none}
+/* Top-lit hairline shared by floating surfaces: 1px gradient border that
+   fades downward, replacing the uniform white ring. */
+.menu-popup::before,.panel::before,.transfer-window::before,.sftp-window::before,
+.tab-context-menu::before,.dd-menu::before,.settings-card::before,.ssh-card::before,
+.settings-card-list .ssh-mgr-group-items::before,.zt-tip::before,.color-picker::before,
+.search-bar::before,.settings-pane::before{content:"";position:absolute;inset:0;border-radius:inherit;padding:1px;pointer-events:none;z-index:9;
+  background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.02) 55%,rgba(255,255,255,0) 100%);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;mask-composite:exclude}
+/* v12 appearance switches. Ring is off by default, so terminal panes keep only
+   their depth shadow; enabling it restores the top-lit inset edge. */
+.window.no-ring .term-wrap,
+.window.no-ring .split-pane,
+.window.no-ring .split-pane.active,
+.window.no-ring .split-pane.maximized{box-shadow:var(--shadow-pane)}
+/* Panel edge hides the shared hairline on every floating surface at once.
+   The class lives on <body> as well as .window: dialogs/menus are siblings of
+   .window, and a .window-only scope left the SSH edit panel ring visible. */
+.no-edge .menu-popup::before,.no-edge .panel::before,
+.no-edge .transfer-window::before,.no-edge .sftp-window::before,
+.no-edge .tab-context-menu::before,.no-edge .dd-menu::before,
+.no-edge .settings-card::before,.no-edge .ssh-card::before,
+.no-edge .settings-card-list .ssh-mgr-group-items::before,
+.no-edge .zt-tip::before,.no-edge .color-picker::before,
+.no-edge .search-bar::before,.no-edge .settings-pane::before{display:none}
+/* SFTP material off: the dock follows the active terminal scheme instead of
+   compositing the desktop through acrylic. */
+.window.dock-plain .sftp-window{
+  background:var(--term-bg);
+  -webkit-backdrop-filter:none;backdrop-filter:none;
+  box-shadow:var(--shadow-pane)}
+.window.dock-plain .sftp-window::before{display:none}
 /* Startup animation: plays once after the window state is restored and shown (borrowing Tabby's approach: pure ease-out fade-in, no scaling) */
 .window.win-in{animation:zterm-window-in 0.4s ease-out}
 @keyframes zterm-window-in{from{opacity:0}to{opacity:1}}
@@ -42,8 +99,13 @@ body.no-animations .startup-splash .cell{transition:none}
 .window.no-animations *::after{transition:none!important;animation:none!important}
 .window.no-animations.win-in{animation:none!important}
 
-/* Titlebar */
-.titlebar{height:38px;background:var(--surface-win);display:flex;align-items:center;padding:0 0 0 12px;flex-shrink:0}
+/* Titlebar (transparent: the window material shows through). 46px = the
+   original 38px band plus the 8px gap the pane used to sit below it: the
+   tab strip and window controls are centred in the full visual band, so the
+   space above and below the 28px tab is equal (9px each) and the pane top
+   still starts at 46px. Left padding matches the 12px pane margin so the
+   first tab's left edge aligns with the terminal pane. */
+.titlebar{height:46px;background:transparent;display:flex;align-items:center;padding:0 0 0 12px;flex-shrink:0;position:relative;z-index:12}
 /* Tauri frameless drag region */
 [data-tauri-drag-region]{-webkit-app-region:drag}
 #tabbar{display:flex;align-items:center;gap:2px;flex:1;overflow:hidden;min-width:0;padding-right:48px;contain:layout style;will-change:transform}#tabbar *{-webkit-app-region:no-drag}/* padding-right mirrors TAB_STRIP_RIGHT_RESERVE in tabstrip-layout.js: permanent breathing room before the SFTP/transfer/window-control cluster; the empty stretch stays a window-drag area */
@@ -86,8 +148,11 @@ body.no-animations .startup-splash .cell{transition:none}
    green for download */
 .ic-accent{color:rgb(var(--accent-rgb))}
 .ic-green{color:#7dd58a}
-.tab-icon.connected{background:#7dd58a}
-.tab-icon.disconnected{background:rgba(255,255,255,0.25)}
+.tab-icon.connected{background:#6ccb5f}
+.tab-icon.disconnected{background:#8a8f99}
+.tab-icon.error{background:#ff6b60}
+.tab-icon.connecting{background:transparent;border:1.5px solid rgba(255,255,255,0.22);border-top-color:#f2b64e;animation:status-spin 1s linear infinite}
+@keyframes status-spin{to{transform:rotate(360deg)}}
 .tab-close{font-size:13px;line-height:1;color:var(--text-3);cursor:pointer;opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
 /* Pin the trailing action group (reconnect + close) to the tab's trailing
    edge: the auto margin absorbs any free width (min-width and expanded
@@ -114,7 +179,7 @@ body.tab-dragging{user-select:none}
 .tab.drag-over-left{box-shadow:inset 2px 0 0 0 rgba(var(--accent-rgb),0.6)}
 .tab.drag-over-right{box-shadow:inset -2px 0 0 0 rgba(var(--accent-rgb),0.6)}
 .tab-rename-input{background:rgba(var(--accent-rgb),0.1);border:1px solid rgba(var(--accent-rgb),0.35);border-radius:6px;padding:2px 6px;color:var(--text-1);font-size:13px;font-family:inherit;outline:none;width:110px}
-.tab-context-menu{position:fixed;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);z-index:200;overflow:hidden;min-width:180px;padding:4px;user-select:none}
+.tab-context-menu{position:fixed;background:var(--acrylic);border-radius:12px;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(26px) saturate(1.45);backdrop-filter:blur(26px) saturate(1.45);z-index:200;overflow:hidden;min-width:180px;padding:4px;user-select:none}
 .tab-context-item{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:8px 12px;font-size:12px;color:var(--text-2);cursor:pointer;border-radius:8px;transition:background 0.12s}
 .tab-context-item:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 .tab-context-shortcut{font-size:10px;font-family:inherit;color:var(--text-3);background:rgba(255,255,255,0.05);padding:2px 7px;border-radius:4px;flex-shrink:0}
@@ -148,6 +213,8 @@ body.tab-dragging{user-select:none}
 .tab-reconnect-normal{font-size:12px;cursor:pointer;color:var(--text-2);opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
 .tab:hover .tab-reconnect-normal,.tab-reconnect-normal:focus-visible{opacity:0.5;pointer-events:auto}
 .tab-reconnect-normal:hover{opacity:1!important;color:rgb(var(--accent-rgb))}
+.tab-reconnect-busy{opacity:0.72;pointer-events:none}
+.tab-reconnect-busy svg{animation:status-spin 0.8s linear infinite}
 #btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;font-size:16px;transition:all 0.12s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
 #btn-add-tab:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 
@@ -157,13 +224,15 @@ body.tab-dragging{user-select:none}
 .win-ctrl{width:46px;height:100%;border:none;background:transparent;color:var(--text-2);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.12s;padding:0}
 .win-ctrl:hover{background:rgba(var(--accent-rgb),0.12);color:var(--text-1)}
 .win-close:hover{background:#c42b1c;color:#fff}
-/* Main: no base rounded frame; panes float directly on the window */
-.main{flex:1;display:flex;position:relative;background:transparent;margin:2px 12px 8px}
-/* With the statusbar visible the bar itself fills the gap below; 8px reads
-   right. Hidden, the terminal meets the window edge directly and needs the
-   same 12px as left/right. */
+/* Main: no base rounded frame; panes float directly on the window. The
+   titlebar already carries the full 46px visual band, so there is no extra
+   top gap here. 12px sides / 8px bottom are the tuned terminal breathing
+   distance; the first tab shares the 12px left edge. */
+.main{flex:1;display:flex;position:relative;background:transparent;margin:0 12px 8px}
+/* Hidden statusbar: the terminal keeps the same 12px gap as left/right so
+   the content frame stays symmetric. */
 body.hide-statusbar .main{margin-bottom:12px}
-.term-wrap{position:absolute;top:0;left:0;right:0;bottom:0;display:none;overflow:hidden;border-radius:12px;padding:12px;background:var(--term-bg);box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);transition:background 0.25s}
+.term-wrap{position:absolute;top:0;left:0;right:0;bottom:0;display:none;overflow:hidden;border-radius:12px;padding:9px 16px 16px;background:var(--term-bg);box-shadow:var(--shadow-pane),inset 0 1px 0 rgba(255,255,255,.10),inset 0 0 0 1px rgba(255,255,255,.035);transition:background 0.25s,box-shadow 0.2s var(--ease)}
 .term-wrap.active{display:flex}
 .term-inner{flex:1;min-height:0;min-width:0}
 .term-inner .xterm{height:100%;width:100%}
@@ -183,15 +252,15 @@ body.hide-statusbar .main{margin-bottom:12px}
 .xterm-link{text-decoration:underline;cursor:pointer}
 
 /* ── Split panes (absolute positioning — Tabby model) ── */
-.split-root{position:relative;width:100%;height:100%;overflow:hidden;padding:6px;background:transparent}
+.split-root{position:relative;width:100%;height:100%;overflow:hidden;padding:0;background:transparent}
 .split-root.resizing .split-pane{transition:none!important}
-.split-pane{position:absolute;display:flex;flex-direction:column;overflow:hidden;border-radius:12px;background:var(--term-bg);box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);transition:left 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),top 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),width 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),height 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),opacity 0.2s,transform 0.2s,background 0.25s}
+.split-pane{position:absolute;display:flex;flex-direction:column;overflow:hidden;border-radius:12px;background:var(--term-bg);box-shadow:var(--shadow-pane),inset 0 1px 0 rgba(255,255,255,.10),inset 0 0 0 1px rgba(255,255,255,.035);transition:left 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),top 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),width 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),height 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),opacity 0.2s,transform 0.2s,background 0.25s,box-shadow 0.2s var(--ease)}
 .split-root.sync-input .split-pane{outline:1.5px solid rgba(var(--accent-rgb),0.45);outline-offset:-1.5px}
 .split-pane.pane-enter{opacity:0;transform:scale(0.94)}
 .split-pane.pane-exit{opacity:0;transform:scale(0.94);pointer-events:none;z-index:5}
-.split-pane.active{box-shadow:inset 0 0 0 1px rgba(var(--accent-rgb),0.12)}
+.split-pane.active{box-shadow:var(--shadow-pane),inset 0 1px 0 rgba(var(--accent-rgb),0.55),inset 0 0 0 1px rgba(var(--accent-rgb),0.10)}
 .split-pane:not(.active)::after{content:'';position:absolute;inset:0;background:rgba(0,0,0,0.05);pointer-events:none;z-index:10;border-radius:12px;transition:background 0.2s cubic-bezier(0.05, 0.7, 0.1, 1)}
-.split-pane.maximized{z-index:10;box-shadow:inset 0 0 0 1px rgba(var(--accent-rgb),0.4)}
+.split-pane.maximized{z-index:10;box-shadow:var(--shadow-pane),inset 0 1px 0 rgba(var(--accent-rgb),0.75),inset 0 0 0 1px rgba(var(--accent-rgb),0.16)}
 .split-pane.minimized::after{background:rgba(0,0,0,0.25)}
 .split-spanner{position:absolute;z-index:20;display:flex;align-items:center;justify-content:center;transition:background 0.2s}
 .split-spanner.v{width:8px;cursor:col-resize;margin-left:-4px}
@@ -212,13 +281,15 @@ body.hide-statusbar .main{margin-bottom:12px}
 .pane-header .dot{width:7px;height:7px;border-radius:50%}
 .pane-header .dot.local{background:#7dd58a}
 .pane-header .dot.ssh{background:#ffb74d}
-.pane-header .dot.connected{background:#7dd58a}
-.pane-header .dot.disconnected{background:rgba(255,255,255,0.25)}
+.pane-header .dot.connected{background:#6ccb5f}
+.pane-header .dot.disconnected{background:#8a8f99}
+.pane-header .dot.error{background:#ff6b60}
+.pane-header .dot.connecting{background:transparent;border:1.5px solid rgba(255,255,255,0.22);border-top-color:#f2b64e;animation:status-spin 1s linear infinite}
 .pane-header button{background:transparent;border:none;color:var(--text-3);cursor:pointer;font-size:13px;width:24px;height:24px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;transition:all 0.12s;vertical-align:middle;line-height:1}
 .pane-header button:hover{background:rgba(var(--accent-rgb),0.16);color:#9cc8ee}
 .pane-header[draggable="true"]{cursor:grab}
 .pane-header[draggable="true"]:active{cursor:grabbing}
-.pane-body{position:absolute;top:32px;left:10px;right:10px;bottom:10px;overflow:hidden}
+.pane-body{position:absolute;top:39px;left:16px;right:16px;bottom:16px;overflow:hidden}
 /* Drop target styling — direction hint for tab drag-to-split */
 .split-pane.drop-target{overflow:visible}
 .split-pane.drop-target::before{content:'';position:absolute;border-radius:6px;pointer-events:none;z-index:20;transition:opacity 0.12s}
@@ -232,15 +303,24 @@ body.hide-statusbar .main{margin-bottom:12px}
 /* Pane drag-reorder drop zones (invisible when not hovered; hovering shows a dashed frame, variant E) */
 #pane-drop-layer{position:absolute;inset:0;z-index:20;pointer-events:none}
 .pane-drop-zone{position:absolute;pointer-events:auto;background:transparent;transition:background 0.12s,border-color 0.12s}
-.pane-drop-zone.drag-over{background:rgba(var(--accent-rgb),0.14);border:1px solid rgba(var(--accent-rgb),0.55);border-radius:8px}
-.pane-drag-ghost{position:fixed;z-index:9999;pointer-events:none;background:var(--surface-float);border:1px solid rgba(var(--accent-rgb),0.4);border-radius:10px;padding:5px 12px;font-size:12px;color:var(--text-1);box-shadow:var(--shadow-float);opacity:0.9;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* v12: the full-area preview below is the only drop feedback; the bars stay
+   as invisible hit layers so the proven hit geometry is untouched. */
+.pane-drop-zone.drag-over{background:transparent;border:none}
+.drop-hint{position:fixed;z-index:9997;pointer-events:none;border-radius:8px;background:rgba(var(--accent-rgb),0.09);box-shadow:inset 0 0 0 1.5px rgba(var(--accent-rgb),0.55),0 0 30px rgba(var(--accent-rgb),0.2),inset 0 1px 0 rgba(255,255,255,0.1);opacity:0;transition:left 0.18s var(--ease),top 0.18s var(--ease),width 0.18s var(--ease),height 0.18s var(--ease),opacity 0.13s}
+.drop-hint.show{opacity:1}
+.drop-hint .dh{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;align-items:center;gap:7px;height:26px;padding:0 10px;border-radius:8px;background:rgba(13,16,23,0.8);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);box-shadow:inset 0 0 0 1px rgba(255,255,255,0.08),0 4px 14px rgba(0,0,0,0.35);font-size:11px;color:var(--t2);white-space:nowrap;max-width:calc(100% - 16px);overflow:hidden}
+.drop-hint .dh-dot{width:6px;height:6px;border-radius:50%;background:var(--accent-live,#61afef);box-shadow:0 0 8px rgba(var(--accent-rgb),0.7);flex:none}
+.drop-hint .dh-name{color:var(--t1);overflow:hidden;text-overflow:ellipsis;max-width:150px}
+.drop-hint .dh-action{font-weight:500;color:var(--t2);white-space:nowrap}
+.pane-drag-ghost{position:fixed;z-index:9999;pointer-events:none;background:rgba(15,19,27,0.88);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:5px 11px;font-size:11px;color:var(--t1);box-shadow:var(--shadow-float);opacity:0.94;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* Global grabbing cursor during drag (overrides the terminal's I-beam) */
 body.pane-dragging, body.pane-dragging *{cursor:grabbing!important}
 
 /* ── Search bar ── */
-.search-bar{position:absolute;top:8px;right:8px;display:flex;align-items:center;gap:8px;padding:6px 12px;background:var(--surface-float);border-radius:10px;box-shadow:var(--shadow-float);z-index:15;opacity:0;pointer-events:none;transform:translateY(-4px);transition:opacity 0.2s,transform 0.2s}
-.search-bar.open{opacity:1;pointer-events:auto;transform:translateY(0)}
-.search-bar input{background:transparent;border:none;color:var(--text-1);font-size:12px;font-family:inherit;outline:none;width:170px}
+.search-bar{position:absolute;top:8px;left:50%;width:min(520px,calc(100% - 24px));display:flex;align-items:center;gap:8px;padding:6px 10px 6px 12px;background:var(--acrylic);border-radius:9px;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(28px) saturate(1.5);backdrop-filter:blur(28px) saturate(1.5);z-index:15;opacity:0;pointer-events:none;transform:translateX(-50%) translateY(-4px);transition:opacity 0.2s,transform 0.2s}
+.search-bar.open{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+.search-bar input{background:transparent;border:none;color:var(--text-1);font-size:12px;font-family:inherit;outline:none;flex:1;min-width:0}
+.search-bar input:focus{box-shadow:none;background:transparent}
 .search-bar input::placeholder{color:var(--text-3)}
 .search-bar>svg{color:rgba(171,178,191,0.35);flex-shrink:0}
 .search-bar .count{font-size:12px;color:var(--text-2);min-width:28px}
@@ -261,10 +341,10 @@ svg{vertical-align:-0.16em}
 
 /* Statusbar */
 /* Shared low-latency tooltip (native title attr has a ~1s OS delay) */
-.zt-tip{position:fixed;z-index:400;max-width:280px;padding:5px 9px;background:var(--surface-float);color:var(--text-1);font-size:12px;border-radius:8px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);pointer-events:none;opacity:0;transition:opacity 0.12s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.zt-tip{position:fixed;z-index:400;max-width:280px;padding:5px 9px;background:var(--surface-float);color:var(--text-1);font-size:12px;border-radius:8px;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(18px) saturate(1.3);backdrop-filter:blur(18px) saturate(1.3);pointer-events:none;opacity:0;transition:opacity 0.12s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .zt-tip.show{opacity:1}
 
-.statusbar{height:26px;background:var(--surface-win);display:flex;align-items:center;padding:0 14px;gap:16px;font-size:12px;color:var(--text-2);flex-shrink:0;overflow:hidden;transition:height 0.18s ease,opacity 0.15s ease}
+.statusbar{height:26px;background:transparent;display:flex;align-items:center;padding:0 14px;gap:16px;font-size:12px;color:var(--text-2);flex-shrink:0;overflow:hidden;transition:height 0.18s ease,opacity 0.15s ease;position:relative;z-index:12}
 /* Ctrl+Shift+B toggle: collapse with a height/opacity transition instead of
    display:none (instant). Persisted via appearance.showStatusbar. */
 body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
@@ -278,20 +358,35 @@ body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
 ::-webkit-scrollbar-corner{background:transparent}
 
 /* ── Settings page ── */
-/* Settings page follows the terminal color scheme (same base color as pane bubbles); the window/overlay three-level ladder stays unchanged */
-.settings-pane{position:absolute;top:0;left:0;right:0;bottom:0;display:none;flex-direction:column;background:var(--term-bg);overflow:hidden;border-radius:12px;transition:background 0.25s}
+/* Settings is a large supporting surface, not a transient flyout: per the
+   Acrylic guidance it stays in the SAME material family as the window, rather
+   than introducing a second coloured desktop mesh. One neutral in-app tint +
+   blur + fine noise over the same Mica; a single faint neutral specular is the
+   only light, so the page reads as a frosted version of the window. */
+.settings-pane{position:absolute;top:0;left:0;right:0;bottom:0;display:none;flex-direction:column;
+  background:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/></filter><rect width='120' height='120' filter='url(%23n)' opacity='.045'/></svg>") 0 0/120px 120px repeat,
+    radial-gradient(90% 70% at 16% -10%,rgba(255,255,255,.045),transparent 62%),
+    rgba(28,31,39,.80);
+  -webkit-backdrop-filter:blur(40px) saturate(1.12) brightness(1.04);backdrop-filter:blur(40px) saturate(1.12) brightness(1.04);
+  box-shadow:0 18px 44px -14px rgba(2,4,10,.5);overflow:hidden;border-radius:12px}
 .settings-pane.active{display:flex}
 .settings-header{height:46px;display:flex;align-items:center;padding:0 16px;gap:10px;flex-shrink:0}
-.settings-header .back-btn{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text-2);transition:all 0.12s;background:none;border:none}
+.settings-header .back-btn{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text-2);transition:background 0.12s,color 0.12s;background:none;border:none}
 .settings-header .back-btn:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 .settings-header .back-btn svg{width:16px;height:16px}
 .settings-header h1{font-size:18px;font-weight:600;color:var(--text-1)}
 .settings-body{flex:1;display:flex;overflow:hidden}
 .settings-sidebar{width:190px;padding:10px 8px;display:flex;flex-direction:column;gap:3px;flex-shrink:0}
-.settings-sidebar-item{display:flex;align-items:center;gap:10px;padding:9px 13px;border-radius:10px;font-size:14px;color:var(--text-2);cursor:pointer;transition:all 0.12s;font-weight:500;user-select:none}
+.settings-sidebar-item{display:flex;align-items:center;gap:10px;padding:9px 13px;border-radius:10px;font-size:14px;color:var(--text-2);cursor:pointer;transition:background 0.12s,color 0.12s;font-weight:500;user-select:none}
+.settings-nav-icon{width:17px;height:17px;display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--text-3)}
+.settings-sidebar-item.active .settings-nav-icon{color:#b8d9f5}
 .settings-sidebar-item:hover{background:rgba(255,255,255,0.05);color:var(--text-2)}
 .settings-sidebar-item.active{background:rgba(var(--accent-rgb),0.16);color:var(--text-1);font-weight:600}
-.settings-content{flex:1;overflow-y:auto;padding:24px 26px}
+.settings-content{flex:1;overflow-y:auto;padding:24px 26px;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.14) transparent}
+.settings-content::-webkit-scrollbar{width:9px}
+.settings-content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:99px;border:2px solid transparent;background-clip:content-box}
+.settings-content::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.24);background-clip:content-box}
 .settings-content h2{font-size:15px;color:var(--text-1);font-weight:600;margin-bottom:4px}
 .settings-content .desc{font-size:12px;color:var(--text-2);margin-bottom:16px;line-height:1.5}
 .settings-page{display:none;max-width:900px;margin:0 auto;width:100%}
@@ -301,24 +396,27 @@ body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
 /* Type ladder: page h2 15/600 > row title 14/500 > section 12/600+tracking
    (structure layer) > desc 12/400. Section labels must read as grouping, not
    content: 12px + letter-spacing keeps them clearly below row titles. */
-.settings-section{font-size:12px;color:var(--text-2);font-weight:600;letter-spacing:0.06em;margin:30px 0 10px}
+.settings-section{font-size:12px;color:var(--text-3);font-weight:600;letter-spacing:0.06em;margin:30px 0 10px}
 /* Group hint: pulled into the section's own bottom gap so it hugs its title
    (4px) while the hint-to-card gap stays on the same 10px unit as sections
    without a hint. */
-.settings-section-desc{font-size:12px;color:var(--text-2);font-weight:400;line-height:17px;letter-spacing:normal;margin:-6px 0 10px}
+.settings-section-desc{font-size:12px;color:var(--text-3);font-weight:400;line-height:17px;letter-spacing:normal;margin:-6px 0 10px}
 .settings-section:first-child{margin-top:0}
 /* 6px vertical padding keeps first/last rows clear of the rounded edge; the
-   card must read as a calm container, not a dense strip. */
-.settings-card{background:var(--surface-card);border-radius:14px;padding:6px 16px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06)}
+   card must read as a calm container, not a dense strip. Its top-lit hairline
+   comes from the shared ::before rule. */
+.settings-card{position:relative;background:var(--surface-card);border-radius:14px;padding:6px 16px}
 .settings-row{display:flex;align-items:center;min-height:54px;padding:10px 0;gap:16px}
+#shell-visibility-list .settings-row{height:48px;min-height:48px;padding:0}
 .settings-card-label{flex:1;min-width:0}
 .settings-card-title{font-size:14px;color:var(--text-1);font-weight:500;line-height:20px}
-.settings-card-desc{font-size:12px;color:var(--text-2);line-height:17px;margin-top:4px;margin-right:24px}
+.settings-card-desc{font-size:12px;color:var(--text-3);line-height:17px;margin-top:4px;margin-right:24px}
 .settings-card-control{flex-shrink:0;min-width:220px;display:flex;justify-content:flex-end}
-.settings-card-control select,.settings-card-control input{width:100%;max-width:220px;background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:9px;padding:7px 11px;color:var(--text-1);font-size:14px;font-family:inherit;outline:none;transition:all 0.12s}
+.settings-card-control select,.settings-card-control input{width:100%;max-width:220px;background:rgba(255,255,255,0.06);border:1.5px solid transparent;border-radius:9px;padding:7px 11px;color:var(--text-1);font-size:14px;font-family:inherit;outline:none;transition:background 0.12s,border-color 0.12s,box-shadow 0.12s}
 .settings-card-control input[type=number]::-webkit-outer-spin-button,.settings-card-control input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 .settings-card-control input[type=number]{-moz-appearance:textfield}
-.settings-card-control select:focus,.settings-card-control input:focus{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
+.settings-card-control select:hover,.settings-card-control input:hover{background:rgba(255,255,255,0.09)}
+.settings-card-control select:focus,.settings-card-control input:focus{background:rgba(255,255,255,0.06);border-color:transparent;box-shadow:0 0 0 2px rgba(var(--accent-rgb),0.55)}
 
 /* Responsive: stack cards on narrow windows */
 @media (max-width: 640px) {
@@ -330,7 +428,7 @@ body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
 }
 
 /* Settings card (legacy grid style, keep for SSH page) */
-.ssh-card{background:var(--surface-card);border-radius:14px;padding:16px;margin-bottom:10px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06)}
+.ssh-card{position:relative;background:var(--surface-card);border-radius:14px;padding:16px;margin-bottom:10px}
 .ssh-card-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
 .ssh-card-field{display:flex;flex-direction:column;gap:4px}
 .ssh-card-field label{font-size:11px;color:var(--text-2);font-weight:450}
@@ -344,17 +442,17 @@ body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
 }
 
 /* Accent color swatches */
-.accent-swatch{width:26px;height:26px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:all 0.12s;flex-shrink:0}
-.accent-swatch:hover{transform:scale(1.15)}
+.accent-swatch{width:16px;height:16px;border-radius:50%;cursor:pointer;border:0;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.14);transition:transform 0.12s,box-shadow 0.12s;flex-shrink:0}
+.accent-swatch:hover{transform:scale(1.12)}
 /* Selection: luminous halo ONLY — with the glow present, a crisp ring
    (2px card-colored circle) read as an extra black border and the user
    asked to drop it. */
-.accent-swatch.active{box-shadow:0 0 14px 2px currentColor}
+.accent-swatch.active{box-shadow:inset 0 0 0 1px rgba(255,255,255,0.14),0 0 0 2px var(--surface-card),0 0 0 3.5px currentColor}
 
 /* Custom color picker */
-.color-picker-overlay{position:fixed;inset:0;z-index:300;display:none;align-items:center;justify-content:center;background:rgba(8,9,12,0.55);backdrop-filter:blur(6px)}
+.color-picker-overlay{position:fixed;inset:0;z-index:300;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.44)}
 .color-picker-overlay.open{display:flex}
-.color-picker{background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float);padding:16px;width:280px;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1)}
+.color-picker{position:relative;background:var(--acrylic);border-radius:12px;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(26px) saturate(1.45);backdrop-filter:blur(26px) saturate(1.45);padding:16px;width:280px;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1)}
 .color-picker-canvas{width:100%;height:150px;border-radius:10px;cursor:crosshair;position:relative;margin-bottom:12px;background:linear-gradient(to right,#fff,transparent),linear-gradient(to top,#000,transparent)}
 .color-picker-canvas-dot{position:absolute;width:13px;height:13px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 4px rgba(0,0,0,0.6);transform:translate(-50%,-50%);pointer-events:none}
 .color-picker-hue{width:100%;height:12px;border-radius:6px;cursor:pointer;position:relative;margin-bottom:12px;background:linear-gradient(to right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)}
@@ -377,23 +475,25 @@ body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
 .toggle-info{flex:1}
 .toggle-label{font-size:14px;color:var(--text-1)}
 .toggle-desc{font-size:12px;color:var(--text-2);margin-top:2px}
-.toggle-switch{width:42px;height:23px;border-radius:12px;background:rgba(255,255,255,0.16);cursor:pointer;position:relative;transition:background 0.2s;flex-shrink:0}
-.toggle-switch.small{width:32px;height:18px}
-.toggle-switch.small::after{width:14px;height:14px}
-.toggle-switch.small.on::after{transform:translateX(14px)}
+.toggle-switch{width:36px;height:20px;border-radius:10px;background:rgba(255,255,255,0.14);cursor:pointer;position:relative;transition:background 0.18s;flex-shrink:0}
+.toggle-switch.small{width:28px;height:16px;border-radius:8px}
+.toggle-switch.small::after{width:12px;height:12px}
+.toggle-switch.small.on::after{transform:translateX(12px)}
 /* ON state uses the full accent color: a dimmed rgba(accent, 0.6) diverged
    from every other accent-bearing control (dots, focus rings, inputs). */
 .toggle-switch.on{background:rgb(var(--accent-rgb))}
-.toggle-switch::after{content:'';position:absolute;top:2px;left:2px;width:19px;height:19px;border-radius:50%;background:#fff;transition:transform 0.2s,background 0.2s}
-.toggle-switch.on::after{transform:translateX(19px);background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.4)}
+.toggle-switch::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#e8ecf3;transition:transform 0.18s,background 0.18s}
+.toggle-switch.on::after{transform:translateX(16px);background:#fff}
 
 /* Shortcut table */
-.kb-table{width:100%;border-collapse:collapse;margin-top:8px}
-.kb-table th,.kb-table td{padding:9px 13px;text-align:left;font-size:12px}
-.kb-table th{color:var(--text-2);font-weight:600;font-size:12px}
+.kb-table{width:100%;border-collapse:collapse;margin-top:4px}
+.kb-table th,.kb-table td{padding:4px 10px;text-align:left;font-size:11.5px}
+.kb-table th{color:var(--text-3);font-weight:600;font-size:10.5px;letter-spacing:0.05em}
 .kb-table td{color:var(--text-2)}
-.kb-table td kbd{background:rgba(var(--accent-rgb),0.12);padding:3px 8px;border-radius:6px;color:#9cc8ee;font-family:inherit;font-size:11px}
+.kb-table td kbd{background:rgba(255,255,255,0.07);padding:1px 6px;border-radius:5px;color:var(--text-2);font-family:inherit;font-size:10.5px}
 .kb-table tr:hover td{background:rgba(255,255,255,0.02)}
+.kb-table .shortcut-edit-btn,.kb-table .shortcut-reset-btn{height:24px;padding:0 9px;border-radius:6px;font-size:10.5px;background:transparent;border-color:transparent;color:var(--text-3)}
+.kb-table .shortcut-edit-btn:hover,.kb-table .shortcut-reset-btn:hover{background:rgba(255,255,255,0.07);border-color:transparent;color:var(--text-1)}
 .shortcut-edit-btn,.shortcut-reset-btn{font-size:11px;padding:3px 12px;border-radius:12px;background:transparent;border:1px solid rgba(var(--accent-rgb),0.3);color:var(--text-2);cursor:pointer;transition:all 0.12s}
 .shortcut-reset-btn{margin-left:6px;padding:3px 8px}
 .shortcut-edit-btn:hover,.shortcut-reset-btn:hover{background:rgba(var(--accent-rgb),0.1)}
@@ -414,30 +514,30 @@ body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
 .menu-backdrop.open{display:block}
 /* Suppress hover on tabbar buttons while menu is open */
 body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none!important;color:var(--text-3)!important}
-.menu-popup{position:fixed;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);z-index:300;min-width:220px;padding:6px;opacity:0;pointer-events:none;transform:translateY(-8px);transition:opacity 0.2s cubic-bezier(0.05,0.7,0.1,1),transform 0.2s cubic-bezier(0.05,0.7,0.1,1);user-select:none}
+.menu-popup{position:fixed;background:var(--acrylic);border-radius:8px;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(26px) saturate(1.45);backdrop-filter:blur(26px) saturate(1.45);z-index:300;min-width:228px;padding:5px;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 0.13s ease,transform 0.13s ease;user-select:none}
 .menu-popup.open{opacity:1;pointer-events:auto;transform:translateY(0)}
-.menu-item{display:flex;align-items:center;gap:12px;padding:8px 12px;font-size:14px;color:var(--text-2);cursor:pointer;border-radius:8px;transition:background 0.12s,color 0.12s;user-select:none}
+.menu-item{display:flex;align-items:center;gap:9px;height:30px;padding:0 9px;font-size:12px;color:var(--text-2);cursor:pointer;border-radius:7px;transition:background 0.12s,color 0.12s;user-select:none}
 .menu-item:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 .menu-item.disabled{opacity:0.35;pointer-events:none;cursor:default}
 .menu-item.disabled:hover{background:none;color:var(--text-2)}
-.menu-icon{font-size:15px;width:18px;text-align:center;flex-shrink:0;line-height:1}
+.menu-icon{font-size:14px;width:16px;text-align:center;flex-shrink:0;line-height:1}
 .menu-label{flex:1;min-width:0;white-space:nowrap;font-weight:500}
-.menu-shortcut{font-size:12px;font-family:inherit;color:var(--text-2);background:rgba(255,255,255,0.05);padding:2px 7px;border-radius:5px;flex-shrink:0;line-height:1.4}
+.menu-shortcut{font-size:10.5px;font-family:inherit;color:var(--text-2);background:rgba(255,255,255,0.05);padding:1px 5px;border-radius:4px;flex-shrink:0;line-height:1.4}
 
 /* ── Overlay system ── */
-.overlay{position:fixed;inset:0;z-index:30;display:none;align-items:center;justify-content:center;background:rgba(8,9,12,0.55);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+.overlay{position:fixed;inset:0;z-index:30;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.44)}
 .overlay.open{display:flex}
 .overlay-backdrop{position:absolute;inset:0}
 
-.panel{position:relative;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float);display:flex;flex-direction:column;overflow:hidden;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1)}
+.panel{position:relative;background:rgba(22,25,31,0.94);border-radius:14px;box-shadow:0 34px 90px rgba(0,0,0,0.6),0 18px 44px rgba(0,0,0,0.3);-webkit-backdrop-filter:blur(32px) saturate(1.5);backdrop-filter:blur(32px) saturate(1.5);display:flex;flex-direction:column;overflow:hidden;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1)}
 @keyframes panelIn{from{opacity:0;transform:scale(0.97) translateY(-10px)}to{opacity:1;transform:scale(1) translateY(0)}}
-.panel-header{display:flex;align-items:center;gap:10px;padding:18px 20px 10px;flex-shrink:0;user-select:none}
-.panel-header h3{font-size:14.5px;font-weight:600;color:var(--text-1)}
+.panel-header{display:flex;align-items:center;gap:10px;height:46px;padding:0 14px;flex-shrink:0;user-select:none}
+.panel-header h3{font-size:12.5px;font-weight:600;color:var(--text-1)}
 .panel-header .spacer{flex:1}
-.panel-close{width:28px;height:28px;border-radius:8px;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:all 0.12s}
-.panel-close:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+.panel-close{width:26px;height:26px;border-radius:7px;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:background 0.12s,color 0.12s}
+.panel-close:hover{background:rgba(255,255,255,0.07);color:var(--text-1)}
 .panel-list{flex:1;overflow-y:auto;padding:6px 12px 12px;display:flex;flex-direction:column;gap:2px}
-.panel-footer{display:flex;align-items:center;gap:12px;padding:12px 20px 14px;font-size:12px;color:var(--text-2);flex-shrink:0}
+.panel-footer{display:flex;align-items:center;gap:10px;height:38px;padding:0 14px;font-size:10.5px;color:var(--text-3);flex-shrink:0}
 .panel-footer kbd{background:rgba(var(--accent-rgb),0.12);padding:2px 7px;border-radius:5px;font-family:inherit;font-size:10px;color:#9cc8ee}
 
 /* Quick Commands + Palette (same visual language as the session selector:
@@ -488,7 +588,9 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ss-row[aria-selected=true]{background:rgba(var(--accent-rgb),.14);border-color:rgba(var(--accent-rgb),.28)}
 .ss-row[aria-selected=true]::before{content:"";position:absolute;left:-1px;top:15px;bottom:15px;width:2px;background:rgb(var(--accent-rgb));border-radius:2px}
 .ss-row-icon{width:25px;flex:none;display:flex;align-items:center;justify-content:center;color:var(--text-3)}
+.ss-row-icon.is-mono{width:26px;height:26px;border-radius:7px;background:rgba(var(--accent-rgb),.10);color:#9cc8ee;font-size:10.5px;font-weight:600;letter-spacing:.02em}
 .ss-row[aria-selected=true] .ss-row-icon{color:var(--text-2)}
+.ss-row[aria-selected=true] .ss-row-icon.is-mono{color:#b8d9f5}
 .ss-identity{min-width:0;flex:1;display:flex;flex-direction:column}
 .ss-primary{display:block;font-size:13.5px;font-weight:500;line-height:19px;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ss-primary.host{font-family:"Cascadia Code",Consolas,monospace;font-weight:400;font-size:12.5px;letter-spacing:.1px}
@@ -512,7 +614,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .panel-section-title{font-size:12px;font-weight:600;color:var(--text-2);text-transform:uppercase;letter-spacing:0.5px;padding:12px 12px 6px}
 
 /* ── SFTP side dock ── */
-.sftp-window{position:absolute;right:0;top:0;bottom:0;width:calc(100% - 8px);background:var(--surface-float);border-radius:18px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);overflow:hidden;display:flex;flex-direction:column}
+.sftp-window{position:absolute;right:0;top:0;bottom:0;width:calc(100% - 12px);background:var(--acrylic);border-radius:12px;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(26px) saturate(1.45);backdrop-filter:blur(26px) saturate(1.45);overflow:hidden;display:flex;flex-direction:column}
 .sftp-window.drag-over{outline:2px dashed rgba(var(--accent-rgb),0.5);outline-offset:-8px;background:rgba(var(--accent-rgb),0.04)}
 /* SFTP side dock: a fixed-width panel CLIPPED onto the right edge of .main —
    the open/close animation moves only the clip (clip-path), so the panel
@@ -524,17 +626,17 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
    and settled once afterwards (split-anim precedent). One min() bounds every
    width by the main area minus 240px of terminal, so a narrow window shrinks
    the dock on open and on window resize alike. */
-.sftp-dock{position:absolute;top:0;right:0;bottom:0;width:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 8px);overflow:hidden;z-index:6;container-type:inline-size;clip-path:inset(0 0 0 100%)}
+.sftp-dock{position:absolute;top:0;right:0;bottom:0;width:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 12px);overflow:hidden;z-index:6;container-type:inline-size;clip-path:inset(0 0 0 100%)}
 .main.sftp-open .sftp-dock{clip-path:inset(0 0 0 0)}
-.main.sftp-open .term-wrap{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 8px)}
-.main.sftp-open .settings-pane{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 8px)}
-.main.sftp-open .split-root{width:calc(100% - min(var(--sftp-width,320px), calc(100% - 240px)) - 8px)}
-.main.sftp-open .search-bar{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 16px)}
+.main.sftp-open .term-wrap{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 12px)}
+.main.sftp-open .settings-pane{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 12px)}
+.main.sftp-open .split-root{width:calc(100% - min(var(--sftp-width,320px), calc(100% - 240px)) - 12px)}
+.main.sftp-open .search-bar{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 20px)}
 .main.sftp-animating .sftp-dock{transition:clip-path 0.18s ease}
 .main.sftp-animating .term-wrap{transition:right 0.18s ease,background 0.25s}
 .main.sftp-animating .split-root{transition:width 0.18s ease}
 .main.sftp-animating .search-bar{transition:right 0.18s ease}
-.sftp-resize{position:absolute;left:0;top:0;bottom:0;width:8px;cursor:ew-resize;z-index:7;display:flex;align-items:center;justify-content:center}
+.sftp-resize{position:absolute;left:0;top:0;bottom:0;width:12px;cursor:ew-resize;z-index:7;display:flex;align-items:center;justify-content:center}
 .sftp-resize::after{content:"";width:2px;height:36px;border-radius:8px;background:rgba(255,255,255,0.12);transition:background-color 100ms ease}
 .sftp-resize:hover::after,.sftp-resize.dragging::after,.sftp-resize:focus-visible::after{background:rgb(var(--accent-rgb))}
 /* Narrow-dock degradation (container = the dock): below ~250px the size
@@ -620,7 +722,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 /* Transfer flyout: anchored below the top-bar button (position set inline),
    grouped-by-session collapsible list. pointer-events:auto re-enables hits
    on the flyout over the click-transparent #transfer-panel layer. */
-.transfer-window{position:absolute;top:42px;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);overflow:hidden;width:360px;max-height:min(440px, calc(100vh - 60px));display:flex;flex-direction:column;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1);pointer-events:auto}
+.transfer-window{position:absolute;top:42px;background:var(--acrylic);border-radius:12px;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(26px) saturate(1.45);backdrop-filter:blur(26px) saturate(1.45);overflow:hidden;width:360px;max-height:min(440px, calc(100vh - 60px));display:flex;flex-direction:column;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1);pointer-events:auto}
 .transfer-header{display:flex;align-items:center;gap:6px;padding:10px 10px 6px 14px;flex-shrink:0}
 .transfer-header h2{font-size:10.5px;color:var(--text-3);font-weight:600;letter-spacing:0.8px;margin:0}
 .transfer-header-count{min-width:16px;padding:1px 7px;border-radius:7px;background:rgba(255,255,255,0.08);color:var(--text-3);font-size:10px;text-align:center;font-variant-numeric:tabular-nums}
@@ -719,8 +821,9 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ssh-mgr-row::before{content:"";position:absolute;left:2px;top:50%;translate:0 -50%;width:3px;height:26px;border-radius:2px;background:rgb(var(--accent-rgb));opacity:0;scale:1 .4;transition:opacity 140ms ease-out,scale 140ms ease-out}
 .ssh-mgr-row:hover{background:rgba(255,255,255,.05)}
 .ssh-mgr-row:hover::before{opacity:.85;scale:1 1}
-.ssh-mgr-server{display:flex;align-items:center;justify-content:center;width:31px;height:34px;color:var(--text-3);flex:none;transition:color 120ms ease-out}
-.ssh-mgr-row:hover .ssh-mgr-server{color:var(--text-2)}
+.ssh-mgr-server{display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;background:transparent;color:#9cc8ee;flex:none;transition:color 120ms ease-out}
+.ssh-mgr-row:hover .ssh-mgr-server{color:#b8d9f5}
+.ssh-mgr-server.is-mono{background:rgba(var(--accent-rgb),.10);font-size:11.5px;font-weight:600;letter-spacing:.02em;color:#9cc8ee}
 .ssh-mgr-identity{flex:1;min-width:0;cursor:pointer;border-radius:4px;outline-offset:2px;display:flex;flex-direction:column}
 .ssh-mgr-primary{display:block;font-size:14px;line-height:21px;font-weight:500;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ssh-mgr-primary.host{font-family:"Cascadia Code",Consolas,monospace;font-weight:400;font-size:13px;letter-spacing:.15px}
@@ -742,16 +845,24 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
    settings pages: both mount the ssh-mgr-* structure inside their own
    .settings-card-list container. */
 .settings-page-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:4px}
-/* Chained to .btn-primary (defined later in this file) so the 9px radius and
-   32px height actually win the cascade. */
+/* Settings primary add: the tuned 32px / 9px hit area. The v12 tint and
+   typography stay; geometry is the settings baseline. */
 .btn-primary.settings-primary-add{height:32px;border-radius:9px;padding:0 14px;flex-shrink:0}
 .ssh-add-chevron{margin-left:5px;vertical-align:-1px}
 .ssh-mgr-searchrow.settings-toolbar{padding:0 2px;margin:14px 0 4px;flex-wrap:wrap;row-gap:8px}
 .settings-toolbar .ssh-mgr-search{border:1px solid rgba(255,255,255,.075);border-radius:9px;background:rgba(255,255,255,.025)}
-/* The scoped border above sits after the shared :focus-within rule at equal
-   specificity — restate it or the settings search loses its focus border. */
 .settings-toolbar .ssh-mgr-search:focus-within{border-color:rgba(var(--accent-rgb),.55)}
 .settings-toolbar-actions{margin-left:auto;display:flex;gap:14px}
+/* Highlight rules are one card; rows share the SSH list's 8px-inset hover
+   geometry (card padding 16 - row margin 8) and keep their actions visible. */
+.settings-rules-card{padding:6px 16px;margin-top:8px}
+.settings-rules-card .ssh-item{padding:10px 8px;min-height:62px;gap:11px;border-radius:9px;margin:0 -8px}
+.settings-rules-card .ssh-item-icon{width:32px;height:32px;border-radius:9px;background:rgba(var(--accent-rgb),.10);color:#9cc8ee;font-size:12.5px;font-weight:600}
+.settings-rules-card .ssh-item-name{font-size:13px;line-height:19px}
+.settings-rules-card .ssh-item-detail{font-size:11.5px;line-height:17px;color:var(--text-3)}
+.settings-page[data-page="quickcommands"] .toggle-row{padding:12px 16px;margin-bottom:14px;background:var(--surface-card);border-radius:11px}
+.settings-page[data-page="quickcommands"] .toggle-label{font-size:14px;color:var(--text-1);font-weight:500}
+.settings-page[data-page="quickcommands"] .toggle-desc{font-size:12px;color:var(--text-3);margin-top:2px}
 .settings-quiet-action{background:none;border:none;padding:4px 2px;font-size:11px;font-family:inherit;color:var(--text-2);cursor:pointer;border-radius:4px;transition:color .12s}
 .settings-quiet-action:hover{color:rgb(var(--accent-rgb))}
 /* Group title reads as a settings-section (structure layer), not a strip:
@@ -765,13 +876,25 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .settings-card-list .ssh-mgr-group-title .group-name-input{font-size:12px;padding:1px 8px}
 /* One card per group; a collapsed group hides the whole card (the shared
    .collapsed{display:none} rule), leaving just the section title. */
-.settings-card-list .ssh-mgr-group-items{background:var(--surface-card);border-radius:14px;padding:6px 16px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);gap:0}
+.settings-card-list .ssh-mgr-group-items{position:relative;background:var(--surface-card);border-radius:14px;padding:6px 16px;gap:0}
 /* Card-row geometry override: the row box extends 8px past its content so
-   the shared hover wash never touches the card edge; the bar nudges to
-   left:1px to match the wider box. The hover combo itself (wash + bar +
-   icon tint) comes from the base .ssh-mgr-row rules. */
+   the shared hover wash never touches the card edge (16px card padding - 8px
+   row margin); the bar nudges to left:1px to match the wider box. The hover
+   combo itself (wash + bar + icon tint) comes from the base .ssh-mgr-row
+   rules. These values are the tuned settings baseline, not v12 decoration. */
 .settings-card-list .ssh-mgr-row{border-radius:9px;margin:0 -8px;padding:10px 8px;min-height:62px;gap:12px}
 .settings-card-list .ssh-mgr-row::before{left:1px}
+.settings-card-list .ssh-mgr-server{width:32px;height:32px;border-radius:9px}
+.settings-card-list .ssh-mgr-server.is-mono{background:rgba(var(--accent-rgb),.10);font-size:12.5px}
+.settings-card-list .ssh-mgr-primary{font-size:14px;line-height:21px}
+.settings-card-list .ssh-mgr-primary.host{font-size:13px}
+.settings-card-list .ssh-mgr-meta{font-size:12px;line-height:18px;margin-top:3px;gap:9px}
+.settings-card-list .ssh-mgr-meta .mono{font-size:11.5px}
+.settings-card-list .ssh-mgr-actions{gap:4px;margin-left:15px}
+.settings-card-list .ssh-mgr-btn{width:31px;height:31px;border-radius:6px}
+/* Highlight rules use the older ssh-item markup, but keep the same visible
+   row actions as the SSH list. */
+.settings-rules-card .ssh-item-btn{width:24px;height:24px;border-radius:7px}
 
 @media(max-width:560px){
   .ssh-mgr-searchrow{padding-left:12px;padding-right:12px}
@@ -787,17 +910,34 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 }
 
 /* ── Buttons ── */
-.btn-primary{background:rgb(var(--accent-rgb));color:var(--accent-contrast);border:none;padding:7px 18px;border-radius:16px;font-size:12px;font-weight:600;cursor:pointer;transition:all 0.12s;font-family:inherit}
-.btn-primary:hover{filter:brightness(1.1)}
-.btn-primary:active{transform:translateY(1px)}
-.btn-outline{background:transparent;color:var(--text-2);border:1px solid rgba(var(--accent-rgb),0.3);padding:7px 18px;border-radius:16px;font-size:12px;cursor:pointer;transition:all 0.12s;font-family:inherit}
-.btn-outline:hover{background:rgba(var(--accent-rgb),0.1);color:var(--text-1);border-color:rgba(var(--accent-rgb),0.45)}
+.btn-primary{background:rgba(var(--accent-rgb),0.16);color:#cfe4fb;border:none;height:30px;padding:0 14px;border-radius:8px;font-size:11.5px;font-weight:500;cursor:pointer;transition:background 0.12s,color 0.12s;font-family:inherit;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.btn-primary:hover{background:rgba(var(--accent-rgb),0.26);color:#e2eefb}
+.btn-primary:active{background:rgba(var(--accent-rgb),0.2)}
+.btn-outline{background:rgba(255,255,255,0.04);color:var(--text-2);border:1px solid rgba(255,255,255,0.09);height:30px;padding:0 12px;border-radius:8px;font-size:11.5px;cursor:pointer;transition:background 0.12s,color 0.12s,border-color 0.12s;font-family:inherit;display:inline-flex;align-items:center;justify-content:center;gap:6px}
+.btn-outline:hover{background:rgba(255,255,255,0.08);color:var(--text-1);border-color:rgba(255,255,255,0.15)}
 
 /* ── Form fields ── */
 .form-group{display:flex;flex-direction:column;gap:5px}
 .form-group label{font-size:11px;color:var(--text-2);font-weight:500}
-.form-group input,.form-group select,.form-group textarea{background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:10px;padding:8px 12px;font-size:12px;color:var(--text-1);outline:none;font-family:inherit;transition:all 0.12s}
-.form-group input:focus,.form-group select:focus,.form-group textarea:focus{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
+.form-group input,.form-group select{background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:8px;height:30px;padding:0 10px;font-size:11.5px;color:var(--text-1);outline:none;font-family:inherit;transition:background 0.12s,border-color 0.12s,box-shadow 0.12s}
+.form-group textarea{background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:8px;padding:8px 10px;font-size:11.5px;color:var(--text-1);outline:none;font-family:inherit;transition:background 0.12s,border-color 0.12s,box-shadow 0.12s}
+.form-group input:focus,.form-group select:focus,.form-group textarea:focus{background:rgba(255,255,255,0.06);border-color:transparent}
+/* Dialog fields show the accent ring only for keyboard focus; the JS-opened
+   dialog autofocuses its first field, and a programmatic focus must not paint
+   a ring that reads like a stray panel border. */
+.form-group input:focus-visible,.form-group select:focus-visible,.form-group textarea:focus-visible{box-shadow:0 0 0 2px rgba(var(--accent-rgb),0.55)}
+/* The dialog's programmatic first-field focus is a convenience, not a
+   keyboard traversal: keep the field styled as focused but do not paint the
+   accent ring until the user actually tabs/clicks into a field. */
+.form-group input.ssh-autofocus:focus{box-shadow:none}
+/* SSH dialog toggle lines: the copy block is a flex child with min-width:0 so
+   long descriptions wrap inside the panel instead of being clipped by its
+   overflow:hidden edge. */
+.ssh-toggle-line{flex-direction:row;align-items:flex-start;gap:9px;min-width:0}
+.ssh-toggle-line .toggle-switch{margin-top:1px}
+.ssh-toggle-copy{min-width:0;flex:1}
+.ssh-toggle-title{font-size:12px;color:var(--text-1);line-height:18px;font-weight:450}
+.ssh-toggle-desc{font-size:10.5px;color:var(--text-3);line-height:1.5;margin-top:2px}
 .form-group select:not(.styled-select){appearance:none;cursor:pointer}
 .form-group select:not(.styled-select) option{background:var(--surface-float);color:var(--text-1)}
 
@@ -829,7 +969,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .cust-dropdown.open .dd-trigger::after{transform:translateY(-50%) rotate(180deg)}
 .cust-dropdown .dd-trigger:hover{background:rgba(255,255,255,0.07)}
 .cust-dropdown.open .dd-trigger{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
-.cust-dropdown .dd-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);z-index:50;overflow:hidden;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 0.2s,transform 0.2s;max-height:240px;overflow-y:auto}
+.cust-dropdown .dd-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:rgba(30,33,41,.97);border-radius:12px;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(20px) saturate(1.2);backdrop-filter:blur(20px) saturate(1.2);z-index:50;overflow:hidden;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 0.2s,transform 0.2s;max-height:240px;overflow-y:auto}
 .cust-dropdown.open .dd-menu{opacity:1;pointer-events:auto;transform:translateY(0)}
 .cust-dropdown .dd-option{padding:8px 12px;font-size:14px;color:var(--text-2);cursor:pointer;transition:background 0.12s;font-family:inherit}
 .cust-dropdown .dd-option:hover{background:rgba(var(--accent-rgb),0.1);color:var(--text-1)}
@@ -841,7 +981,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .cust-combo input{background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:10px;padding:8px 12px;color:var(--text-1);font-size:12px;font-family:inherit;outline:none;transition:all 0.12s;width:100%}
 .cust-combo input:focus{border-color:rgba(var(--accent-rgb),0.4);background-color:rgba(var(--accent-rgb),0.08)}
 .cust-combo input::placeholder{color:var(--text-3)}
-.cust-combo .dd-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:var(--surface-float);border-radius:12px;box-shadow:var(--shadow-float),inset 0 0 0 1px rgba(255,255,255,0.06);z-index:50;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 0.2s,transform 0.2s;max-height:180px;overflow-y:auto}
+.cust-combo .dd-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:rgba(30,33,41,.97);border-radius:12px;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(20px) saturate(1.2);backdrop-filter:blur(20px) saturate(1.2);z-index:50;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 0.2s,transform 0.2s;max-height:180px;overflow-y:auto}
 .cust-combo .dd-menu.open{opacity:1;pointer-events:auto;transform:translateY(0)}
 .cust-combo .dd-option{padding:8px 12px;font-size:12px;color:var(--text-2);cursor:pointer;transition:background 0.12s;font-family:inherit}
 .cust-combo .dd-option:hover,.cust-combo .dd-option.active{background:rgba(var(--accent-rgb),0.1);color:var(--text-1)}
@@ -849,15 +989,27 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 
 /* ── Panel tabs (SSH edit etc.) ── */
-.panel-tabs{display:flex;gap:4px;padding:4px 20px 12px;position:relative}
-.panel-tab-slider{position:absolute;border-radius:16px;background:rgba(var(--accent-rgb),0.16);transition:left 0.2s cubic-bezier(0.05, 0.7, 0.1, 1),width 0.2s cubic-bezier(0.05, 0.7, 0.1, 1);pointer-events:none;z-index:0}
-.panel-tab{position:relative;z-index:1;padding:5px 14px;font-size:12px;color:var(--text-3);cursor:pointer;border-radius:16px;transition:color 0.12s,background 0.12s;font-weight:500;user-select:none;display:flex;align-items:center;gap:5px}
-.panel-tab:hover{color:var(--text-2);background:rgba(255,255,255,0.04)}
-.panel-tab.active{color:#cfe3f6;font-weight:600;background:rgba(var(--accent-rgb),0.16)}
+.panel-tabs{display:inline-flex;gap:2px;padding:2px;margin:14px 0 0 18px;position:relative;border-radius:9px;background:rgba(255,255,255,0.06);width:max-content}
+.panel-tab-slider{position:absolute;border-radius:7px;background:rgba(255,255,255,0.09);box-shadow:0 1px 3px rgba(0,0,0,0.25);transition:left 0.22s var(--ease),width 0.22s var(--ease),top 0.22s var(--ease),height 0.22s var(--ease);pointer-events:none;z-index:0}
+.panel-tab{position:relative;z-index:1;height:24px;padding:0 11px;font-size:11px;color:var(--text-2);cursor:pointer;border-radius:7px;transition:color 0.12s,background 0.12s;font-weight:500;user-select:none;display:flex;align-items:center;gap:5px}
+.panel-tab:hover{color:var(--text-1);background:transparent}
+.panel-tab.active{color:var(--text-1);font-weight:500;background:transparent}
 .panel-tab-badge{font-size:10px;color:var(--text-3);min-width:14px;text-align:center}
 .panel-tab.active .panel-tab-badge{color:#9cc8ee}
-.ssh-tab-panel{display:none}
-.ssh-tab-panel.active{display:flex;animation:tabFadeIn 0.2s cubic-bezier(0.05, 0.7, 0.1, 1)}
+/* Auth method: v12 segmented control. The native select stays in the DOM for
+   form reads/submits but is visually replaced. */
+.auth-tabs{position:relative;display:flex;gap:2px;padding:2px;height:28px;width:100%;border-radius:9px;background:rgba(255,255,255,.06);flex:none}
+.auth-tab{position:relative;z-index:1;height:24px;flex:1;min-width:0;padding:0 11px;border:0;border-radius:7px;background:none;color:var(--text-2);font-family:inherit;font-size:11px;cursor:pointer;transition:color .13s var(--ease)}
+.auth-tab:hover{color:var(--text-1)}
+.auth-tab.active{color:var(--text-1)}
+.auth-tab-slider{position:absolute;top:2px;bottom:2px;left:2px;width:0;border-radius:7px;background:rgba(255,255,255,.09);box-shadow:0 1px 3px rgba(0,0,0,.25);transition:left .22s var(--ease),width .22s var(--ease);pointer-events:none}
+.auth-native{display:none!important}
+/* Inactive auth branch stays present (constant dialog height) but dims. */
+.auth-dim{opacity:.42;pointer-events:none}
+.ssh-tab-panel{grid-area:1/1;display:flex;flex-direction:column;visibility:hidden;opacity:0;pointer-events:none;transition:opacity 0.18s var(--ease),visibility 0.18s;min-width:0}
+.ssh-tab-panel.active{visibility:visible;opacity:1;pointer-events:auto}
+.ssh-edit-panes{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:1fr}
+.ssh-edit-footer .btn-primary,.ssh-edit-footer .btn-outline{height:28px;border-radius:7px;padding:0 11px;font-size:11px}
 #ssh-tab-conn,#ssh-tab-scripts{min-height:300px}
 
 @keyframes tabFadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
@@ -884,7 +1036,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .toast.error{background:#f2b8b5;color:#5f2120}
 .toast.error::before{mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'/%3E%3Cline x1='6' y1='6' x2='18' y2='18'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'/%3E%3Cline x1='6' y1='6' x2='18' y2='18'/%3E%3C/svg%3E")}
 /* Terminal link hover tip: shows the real target URL plus a gesture hint */
-.link-tip{position:fixed;z-index:90;max-width:480px;background:var(--surface-float);color:var(--text-1);border:1px solid var(--surface-card);border-radius:6px;padding:6px 10px;font-size:12px;line-height:1.5;pointer-events:none;opacity:0;transition:opacity 0.12s;word-break:break-all;box-shadow:var(--shadow-float)}
+.link-tip{position:fixed;z-index:90;max-width:480px;background:var(--surface-float);color:var(--text-1);border:1px solid var(--stroke);border-radius:6px;padding:6px 10px;font-size:12px;line-height:1.5;pointer-events:none;opacity:0;transition:opacity 0.12s;word-break:break-all;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(18px) saturate(1.3);backdrop-filter:blur(18px) saturate(1.3)}
 .link-tip.show{opacity:1}
 .link-tip-target{display:block;font-family:monospace}
 .link-tip-hint{display:block;color:var(--text-3);font-size:11px;margin-top:2px}
