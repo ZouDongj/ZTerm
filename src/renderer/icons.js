@@ -125,11 +125,18 @@
   // Purpose-drawn small glyphs (16-unit grid, full opacity, no downscaled
   // 24-grid detail). The settings gear is six teeth, tip r6.55 / valley r5.80,
   // 1.5 stroke and an open r2.7 hub, so it survives 12-14px anti-aliasing.
+  // The plus uses equal 1.6px arms at full opacity; the duotone plus' 55%
+  // horizontal arm reads as an uneven "T" at the 14px add-tab size.
   const SMALL_ICONS = {
     settingsSmall: {
       viewBox: '0 0 16 16',
       stroke: 1.5,
       body: '<path d="M6.53 1.62A6.55 6.55 0 0 1 9.47 1.62L9.7 2.45A5.8 5.8 0 0 1 11.96 3.76L12.79 3.53A6.55 6.55 0 0 1 14.26 6.08L13.65 6.7A5.8 5.8 0 0 1 13.65 9.3L14.26 9.92A6.55 6.55 0 0 1 12.79 12.47L11.96 12.24A5.8 5.8 0 0 1 9.7 13.55L9.47 14.38A6.55 6.55 0 0 1 6.53 14.38L6.3 13.55A5.8 5.8 0 0 1 4.04 12.24L3.21 12.47A6.55 6.55 0 0 1 1.74 9.92L2.35 9.3A5.8 5.8 0 0 1 2.35 6.7L1.74 6.08A6.55 6.55 0 0 1 3.21 3.53L4.04 3.76A5.8 5.8 0 0 1 6.3 2.45Z"/><circle cx="8" cy="8" r="2.7"/>',
+    },
+    plusSmall: {
+      viewBox: '0 0 16 16',
+      stroke: 1.6,
+      body: '<path d="M8 3v10M3 8h10"/>',
     },
   };
 

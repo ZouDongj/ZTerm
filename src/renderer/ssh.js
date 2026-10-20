@@ -1372,7 +1372,7 @@ function initGroupCombo() {
             const div = document.createElement('div');
             div.className = 'dd-option create';
             // filter is user input: escape it now that the row is HTML, not plain text
-            div.innerHTML = Icons.iconSvg('plus', 11) + ' 创建分组 "' + escHtml(filter) + '"';
+            div.innerHTML = Icons.iconSvg('plusSmall', 11) + ' 创建分组 "' + escHtml(filter) + '"';
             const pickCreate = (e) => {
                 e.preventDefault();
                 menu.classList.remove('open');

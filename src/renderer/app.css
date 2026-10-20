@@ -220,7 +220,7 @@ body.tab-dragging{user-select:none}
 .tab-reconnect-normal:hover{opacity:1!important;color:rgb(var(--accent-rgb))}
 .tab-reconnect-busy{opacity:0.72;pointer-events:none}
 .tab-reconnect-busy svg{animation:status-spin 0.8s linear infinite}
-#btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;font-size:16px;transition:all 0.12s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
+#btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-2);cursor:pointer;font-size:16px;transition:all 0.12s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
 #btn-add-tab:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 
 /* Window control buttons (registry SVG icons, 12px — Segoe MDL2 font glyphs

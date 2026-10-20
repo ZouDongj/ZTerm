@@ -578,7 +578,7 @@ const TabManager = {
                 const addBtn = document.createElement('div');
                 addBtn.id = 'btn-add-tab';
                 addBtn.dataset.tip = '新建标签页（默认终端），Ctrl+Shift+N 选择会话';
-                addBtn.innerHTML = Icons.iconSvg('plus', 14);
+                addBtn.innerHTML = Icons.iconSvg('plusSmall', 14);
                 addBtn.onclick = () => {
                     const p = getDefaultLocalProfile();
                     TabManager.createTab({ name: p.name, type: 'local', command: p.command, args: p.args });
