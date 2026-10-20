@@ -313,7 +313,9 @@ function confirmColorPicker() {
         saveAppearance();
         // Update swatch active states
         document.querySelectorAll('.accent-swatch').forEach(sw => {
-            sw.classList.toggle('active', sw.getAttribute('data-color').toUpperCase() === hex.replace('#', '').toUpperCase());
+            const on = sw.getAttribute('data-color').toUpperCase() === hex.replace('#', '').toUpperCase();
+            sw.classList.toggle('active', on);
+            sw.setAttribute('aria-checked', on ? 'true' : 'false');
         });
     }
     closeColorPicker();
@@ -413,7 +415,9 @@ function selectAccent(hex) {
         saveAppearance();
         // Update swatch active states
         document.querySelectorAll('.accent-swatch').forEach(sw => {
-            sw.classList.toggle('active', sw.getAttribute('data-color').toUpperCase() === hex.replace('#', '').toUpperCase());
+            const on = sw.getAttribute('data-color').toUpperCase() === hex.replace('#', '').toUpperCase();
+            sw.classList.toggle('active', on);
+            sw.setAttribute('aria-checked', on ? 'true' : 'false');
         });
     }
 }
@@ -423,16 +427,31 @@ function renderAccentSwatches() {
     if (!container) return;
     const colors = ['#61afef', '#9CA3FF', '#8BC4FF', '#A8DAB5', '#FFB74D', '#F2B8B5', '#abb2bf', '#87CEEB'];
     const current = document.getElementById('set-accent')?.value || '#61afef';
+    container.setAttribute('role', 'radiogroup');
+    container.setAttribute('aria-label', '强调色预设');
     container.innerHTML = '';
     colors.forEach(c => {
-        const sw = document.createElement('div');
+        const sw = document.createElement('button');
+        sw.type = 'button';
         sw.className = 'accent-swatch';
         sw.style.background = c;
         sw.style.color = c;
         sw.setAttribute('data-color', c.replace('#', ''));
         sw.title = c;
+        sw.setAttribute('role', 'radio');
+        sw.setAttribute('tabindex', '0');
+        // WCAG relative luminance: pick the tick that stays visible on any
+        // current or future preset (0.179 matches the shadcn recipe).
+        const r = parseInt(c.slice(1, 3), 16) / 255;
+        const g = parseInt(c.slice(3, 5), 16) / 255;
+        const b = parseInt(c.slice(5, 7), 16) / 255;
+        const lin = v => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        const lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+        sw.style.setProperty('--swatch-tick', lum > 0.179 ? '#111111' : '#ffffff');
+        const on = c.toUpperCase() === current.toUpperCase();
+        sw.setAttribute('aria-checked', on ? 'true' : 'false');
+        if (on) sw.classList.add('active');
         sw.onclick = () => selectAccent(c);
-        if (c.toUpperCase() === current.toUpperCase()) sw.classList.add('active');
         container.appendChild(sw);
     });
 }

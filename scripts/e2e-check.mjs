@@ -2774,13 +2774,14 @@ async function main() {
                transfer: hasEdge('.transfer-window::before') };
     })()`).catch(() => null);
     check('浮层菜单：下拉与传输记录面板均带顶部受光发丝线', !!menuEdge && menuEdge.popup === true && menuEdge.tabCtx === true && menuEdge.dd === true && menuEdge.combo === true && menuEdge.transfer === true, JSON.stringify(menuEdge));
-    // The container's focus-within accent ring is the search field's only
-    // focus indicator (the inner input's ring is intentionally off).
+    // The search field's focus indicator is an inner accent ring on the
+    // container (the inner input's ring is intentionally off), matching the
+    // unified field system's inset focus.
     const searchFocusPre = await cdp.eval(`(() => {
       const box = document.querySelector('[data-page="ssh"] .settings-toolbar .ssh-mgr-search');
       const input = document.querySelector('[data-ssh-search="settings-ssh-list"]');
       if (!box || !input) return null;
-      const before = getComputedStyle(box).borderColor;
+      const before = getComputedStyle(box).boxShadow;
       input.focus();
       return { before };
     })()`).catch(() => null);
@@ -2788,14 +2789,17 @@ async function main() {
     const searchFocusPost = await cdp.eval(`(() => {
       const box = document.querySelector('[data-page="ssh"] .settings-toolbar .ssh-mgr-search');
       if (!box) return null;
-      const r = { after: getComputedStyle(box).borderColor,
+      const r = { after: getComputedStyle(box).boxShadow,
+                  border: getComputedStyle(box).borderColor,
                   focused: document.activeElement === document.querySelector('[data-ssh-search="settings-ssh-list"]') };
       document.activeElement.blur();
       return r;
     })()`).catch(() => null);
     const searchFocusOk = !!searchFocusPre && !!searchFocusPost && searchFocusPost.focused === true &&
-      searchFocusPre.before !== searchFocusPost.after && searchFocusPost.after.includes('97, 175, 239');
-    check('SSH 设置页：搜索框焦点有容器强调边框', searchFocusOk === true, JSON.stringify({ ...searchFocusPre, ...searchFocusPost }));
+      searchFocusPre.before !== searchFocusPost.after &&
+      searchFocusPost.after.includes('inset') && searchFocusPost.after.includes('97, 175, 239') &&
+      searchFocusPost.border === 'rgba(0, 0, 0, 0)';
+    check('SSH 设置页：搜索框焦点有容器内强调环', searchFocusOk === true, JSON.stringify({ ...searchFocusPre, ...searchFocusPost }));
     await shot('settings-ssh-cards');
     // Same-condition reference: the appearance page in the very same window,
     // DPR, theme and UI font, for the side-by-side chrome comparison.

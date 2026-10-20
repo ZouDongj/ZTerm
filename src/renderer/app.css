@@ -448,11 +448,16 @@ body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
 }
 
 /* Accent color swatches */
-.accent-swatch{width:26px;height:26px;border-radius:50%;cursor:pointer;border:2px solid transparent;transition:transform 0.12s,box-shadow 0.12s;flex-shrink:0}
-.accent-swatch:hover{transform:scale(1.15)}
-/* Selection: a luminous halo plus a thin inner highlight; no extra outer
-   ring that would read as a second border. */
-.accent-swatch.active{box-shadow:0 0 14px 2px currentColor,inset 0 0 0 2px rgba(255,255,255,.9)}
+.accent-swatch{position:relative;width:26px;height:26px;border-radius:50%;cursor:pointer;border:2px solid transparent;padding:0;appearance:none;box-shadow:none;transition:transform 0.12s,box-shadow 0.12s;flex-shrink:0}
+/* Selection lives in a contrast-aware tick, not in a ring: a near-white ring
+   drawn on these light presets is only 1.5-2.4:1 against the swatch itself. */
+.accent-swatch::after{content:"";position:absolute;left:50%;top:50%;width:14px;height:14px;transform:translate(-50%,-50%);background:var(--swatch-tick,#111);opacity:0;transition:opacity 0.12s;pointer-events:none;
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E") center/contain no-repeat}
+.accent-swatch.active::after{opacity:1}
+.accent-swatch:hover{transform:scale(1.06)}
+.accent-swatch.active{transform:none;box-shadow:none}
+.accent-swatch:focus-visible{outline:none;box-shadow:0 0 0 2px #1e2330,0 0 0 4px rgba(var(--accent-rgb),.8)}
 
 /* Custom color picker */
 .color-picker-overlay{position:fixed;inset:0;z-index:300;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.44)}
@@ -797,9 +802,9 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ssh-manager-actions button.primary:hover{filter:brightness(1.1)}
 /* ── SSH manager scheme-A rows (shared by settings page and overlay; .ssh-mgr-list scope) ── */
 .ssh-mgr-searchrow{display:flex;align-items:center;gap:10px;padding:4px 18px 10px}
-.ssh-mgr-search{display:flex;align-items:center;gap:9px;height:34px;padding:0 10px;border:1px solid rgba(255,255,255,.16);border-radius:6px;color:var(--text-3);max-width:295px;flex:1;transition:border-color .12s}
-.ssh-mgr-search:focus-within{border-color:rgba(var(--accent-rgb),.55)}
-.ssh-mgr-search input{width:100%;min-width:0;background:none;border:0;outline:none;color:var(--text-1);font-size:12px;font-family:inherit}
+.ssh-mgr-search{display:flex;align-items:center;gap:9px;height:var(--field-height);padding:0 11px;background:var(--field-bg);border:1.5px solid transparent;border-radius:var(--field-radius);color:var(--text-3);max-width:295px;flex:1;transition:background .12s,border-color .12s,box-shadow .12s}
+.ssh-mgr-search:focus-within{border-color:transparent;box-shadow:var(--field-focus)}
+.ssh-mgr-search input{width:100%;min-width:0;background:none;border:0;outline:none;color:var(--text-1);font-size:13.5px;font-family:inherit}
 .ssh-mgr-search input::placeholder{color:var(--text-3)}
 .ssh-mgr-search input::-webkit-search-cancel-button{-webkit-appearance:none}
 .ssh-mgr-count{font-size:12px;color:var(--text-3);flex:none;white-space:nowrap}
@@ -853,8 +858,8 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .btn-primary.settings-primary-add{height:32px;border-radius:9px;padding:0 14px;flex-shrink:0}
 .ssh-add-chevron{margin-left:5px;vertical-align:-1px}
 .ssh-mgr-searchrow.settings-toolbar{padding:0 2px;margin:14px 0 4px;flex-wrap:wrap;row-gap:8px}
-.settings-toolbar .ssh-mgr-search{border:1px solid rgba(255,255,255,.075);border-radius:9px;background:rgba(255,255,255,.025)}
-.settings-toolbar .ssh-mgr-search:focus-within{border-color:rgba(var(--accent-rgb),.55)}
+.settings-toolbar .ssh-mgr-search{border:1.5px solid transparent;border-radius:var(--field-radius);background:var(--field-bg)}
+.settings-toolbar .ssh-mgr-search:focus-within{border-color:transparent;box-shadow:var(--field-focus)}
 .settings-toolbar-actions{margin-left:auto;display:flex;gap:14px}
 /* Highlight rules are one card; rows share the SSH list's 8px-inset hover
    geometry (card padding 16 - row margin 8) and keep their actions visible. */
