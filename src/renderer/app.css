@@ -596,9 +596,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ss-row[aria-selected=true]{background:rgba(var(--accent-rgb),.14);border-color:rgba(var(--accent-rgb),.28)}
 .ss-row[aria-selected=true]::before{content:"";position:absolute;left:-1px;top:15px;bottom:15px;width:2px;background:rgb(var(--accent-rgb));border-radius:2px}
 .ss-row-icon{width:25px;flex:none;display:flex;align-items:center;justify-content:center;color:var(--text-3)}
-.ss-row-icon.is-mono{width:26px;height:26px;border-radius:7px;background:rgba(var(--accent-rgb),.10);color:#9cc8ee;font-size:10.5px;font-weight:600;letter-spacing:.02em}
 .ss-row[aria-selected=true] .ss-row-icon{color:var(--text-2)}
-.ss-row[aria-selected=true] .ss-row-icon.is-mono{color:#b8d9f5}
 .ss-identity{min-width:0;flex:1;display:flex;flex-direction:column}
 .ss-primary{display:block;font-size:13.5px;font-weight:500;line-height:19px;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ss-primary.host{font-family:"Cascadia Code",Consolas,monospace;font-weight:400;font-size:12.5px;letter-spacing:.1px}
@@ -831,7 +829,6 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ssh-mgr-row:hover::before{opacity:.85;scale:1 1}
 .ssh-mgr-server{display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:8px;background:transparent;color:#9cc8ee;flex:none;transition:color 120ms ease-out}
 .ssh-mgr-row:hover .ssh-mgr-server{color:#b8d9f5}
-.ssh-mgr-server.is-mono{background:rgba(var(--accent-rgb),.10);font-size:11.5px;font-weight:600;letter-spacing:.02em;color:#9cc8ee}
 .ssh-mgr-identity{flex:1;min-width:0;cursor:pointer;border-radius:4px;outline-offset:2px;display:flex;flex-direction:column}
 .ssh-mgr-primary{display:block;font-size:14px;line-height:21px;font-weight:500;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ssh-mgr-primary.host{font-family:"Cascadia Code",Consolas,monospace;font-weight:400;font-size:13px;letter-spacing:.15px}
@@ -893,7 +890,6 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .settings-card-list .ssh-mgr-row{border-radius:9px;margin:0 -8px;padding:10px 8px;min-height:62px;gap:12px}
 .settings-card-list .ssh-mgr-row::before{left:1px}
 .settings-card-list .ssh-mgr-server{width:32px;height:32px;border-radius:9px}
-.settings-card-list .ssh-mgr-server.is-mono{background:rgba(var(--accent-rgb),.10);font-size:12.5px}
 .settings-card-list .ssh-mgr-primary{font-size:14px;line-height:21px}
 .settings-card-list .ssh-mgr-primary.host{font-size:13px}
 .settings-card-list .ssh-mgr-meta{font-size:12px;line-height:18px;margin-top:3px;gap:9px}
@@ -1003,6 +999,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .panel-tab:hover{color:var(--text-1);background:transparent}
 .panel-tab.active{color:var(--text-1);font-weight:500;background:transparent}
 .panel-tab-badge{font-size:10px;color:var(--text-3);min-width:14px;text-align:center}
+.panel-tab-badge:empty{display:none}
 .panel-tab.active .panel-tab-badge{color:#9cc8ee}
 /* Auth method: v12 segmented control. The native select stays in the DOM for
    form reads/submits but is visually replaced. */
@@ -1023,10 +1020,10 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 @keyframes tabFadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 
 /* ── Login Script Rows ── */
-.login-script-row{display:flex;gap:6px;align-items:center;padding:4px 6px;border-radius:9px;transition:background 0.12s;margin-bottom:2px}
+.login-script-row{display:flex;gap:6px;align-items:center;padding:6px 7px;border-radius:9px;transition:background 0.12s}
 .login-script-row:hover{background:rgba(255,255,255,0.03)}
-.login-script-row input{flex:1;min-width:0;background:rgba(255,255,255,0.045);border:1.5px solid transparent;border-radius:9px;padding:6px 10px;color:var(--text-1);font-size:12px;font-family:inherit;outline:none;transition:all 0.12s}
-.login-script-row input:focus{background:rgba(var(--accent-rgb),0.08);border-color:rgba(var(--accent-rgb),0.4)}
+.login-script-row input{flex:1;min-width:0;background:var(--field-bg);border:1.5px solid transparent;border-radius:var(--field-radius);min-height:30px;padding:6px 10px;color:var(--text-1);font-size:12px;font-family:inherit;outline:none;transition:background .12s,border-color .12s,box-shadow .12s}
+.login-script-row input:focus{background:var(--field-bg);border-color:transparent;box-shadow:var(--field-focus)}
 .login-script-row input::placeholder{color:var(--text-3)}
 .login-script-row .ls-toggle{font-size:10.5px;padding:2px 6px;border-radius:5px;color:var(--text-3);cursor:pointer;user-select:none;transition:all 0.12s;flex-shrink:0;font-weight:500;line-height:1.4;background:transparent;border:none}
 .login-script-row .ls-toggle:hover{color:var(--text-2);background:rgba(255,255,255,0.06)}

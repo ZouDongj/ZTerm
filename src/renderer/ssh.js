@@ -257,26 +257,8 @@ function renderSessionList(filter) {
     return items;
 }
 
-// A host row reads as an identity, not a generic machine: use the first
-// letter of a human name. Names auto-derived from an IP ("192.168...") would
-// only yield a meaningless "1", so those keep the server glyph instead.
-function _hostInitial(profile) {
-    const name = profile && typeof profile.name === 'string' ? profile.name.trim() : '';
-    if (!name) return '';
-    // An auto-named IP is still an identity: its last octet ("88") says more
-    // than a generic server glyph and keeps the whole list visually even.
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(name)) return name.split('.').pop();
-    if (/^[\d.:[\]-]/.test(name)) {
-        const letter = name.match(/[A-Za-z\u4e00-\u9fa5]/);
-        return letter ? letter[0].toUpperCase() : '';
-    }
-    const match = name.match(/[\p{L}\p{N}]/u);
-    return match ? match[0].toUpperCase() : '';
-}
-
+// Every SSH profile uses the same server glyph; profile names are not icons.
 function _sessionIconHtml(profile, cls) {
-    const initial = _hostInitial(profile);
-    if (initial) return `<span class="${cls} is-mono" aria-hidden="true">${escHtml(initial)}</span>`;
     return `<span class="${cls}" aria-hidden="true">${Icons.iconSvg('server', 19)}</span>`;
 }
 
@@ -492,10 +474,7 @@ function _sshRowHtml(p) {
     // No profile values in inline JS: clicks resolve the action
     // and profile id from data attributes via the container delegation below.
     // No title tooltip on the identity: it would just repeat the visible text.
-    const initial = _hostInitial(p);
-    const iconHtml = initial
-        ? `<span class="ssh-mgr-server is-mono" aria-hidden="true">${escHtml(initial)}</span>`
-        : `<span class="ssh-mgr-server" aria-hidden="true">${Icons.iconSvg('server', 21)}</span>`;
+    const iconHtml = `<span class="ssh-mgr-server" aria-hidden="true">${Icons.iconSvg('server', 21)}</span>`;
     return `<article class="ssh-mgr-row" data-profile-id="${escAttr(p.id)}">
       ${iconHtml}
       <div class="ssh-mgr-identity" role="button" tabindex="0" data-action="edit" aria-label="编辑 ${escAttr(m.primary)} — ${escAttr(metaText)}">
