@@ -1345,7 +1345,7 @@ const TabManager = {
             div.onmousedown = (e) => this._onTabPointerDown(e, t.id);
             let inner;
             if (t.type === 'settings') {
-                inner = `<span class="tab-lead-icon">${Icons.iconSvg('settings', 14)}</span><span class="tab-name">${escHtml(this._tabDisplayName(t))}</span>`;
+                inner = `<span class="tab-lead-icon">${Icons.iconSvg('settingsSmall', 14)}</span><span class="tab-name">${escHtml(this._tabDisplayName(t))}</span>`;
             } else {
                 let dotClass = t.connected ? 'connected' : 'disconnected';
                 if (!t.connected) {
@@ -1509,7 +1509,7 @@ const TabManager = {
         // innerHTML swap (no listeners involved); `info` contains user data and
         // must stay escaped, the SVG icon is a static string
         if (t.type === 'settings') {
-            document.getElementById('sb-conn').innerHTML = `<span class="sb-conn-icon">${Icons.iconSvg('settings', 12)}</span>设置`;
+            document.getElementById('sb-conn').innerHTML = `<span class="sb-conn-icon">${Icons.iconSvg('settingsSmall', 12)}</span>设置`;
             return;
         }
         let iconName = 'terminal';
