@@ -1,6 +1,7 @@
 /* ZTerm - all styles (extracted unchanged from renderer.html <style>) */
-/* Design v12 "Luminous Mica": desktop-sourced window backdrop, tonal layers,
-   top-lit hairlines, filled controls and restrained motion. */
+/* Design v12 "Luminous Ink": an opaque, designed material painted by the
+   renderer; no desktop sampling and no window-level transparency. Tonal
+   layers, top-lit hairlines, filled controls and restrained motion. */
 :root{
   /* The app is dark-only; keep native form controls/scrollbars dark even
      when Windows is in light app mode. */
@@ -11,17 +12,10 @@
   --text-1:var(--t1);--text-2:var(--t2);--text-3:var(--t3);
   --stroke:rgba(255,255,255,.085);--stroke-soft:rgba(255,255,255,.055);
   --fill-hover:rgba(255,255,255,.055);--fill-press:rgba(255,255,255,.03);
-  --mica-tint:rgba(25,27,33,.66);
   --acrylic:rgba(43,46,54,.66);
-  --surface-win:#12141b;      /* opaque fallbacks: badges, menus outside the mica */
+  --surface-win:#12141b;      /* opaque fallbacks: badges, menus outside the material */
   --surface-float:rgba(30,33,41,.88); /* dialogs and large panels (readability first) */
   --surface-card:rgba(255,255,255,.028); /* cards inside the settings glass */
-  --wall:
-    radial-gradient(46% 60% at 69% 28%, rgba(53,119,240,.95) 0%, rgba(53,119,240,0) 64%),
-    radial-gradient(38% 52% at 33% 63%, rgba(18,181,200,.85) 0%, rgba(18,181,200,0) 62%),
-    radial-gradient(50% 58% at 77% 80%, rgba(122,60,240,.85) 0%, rgba(122,60,240,0) 60%),
-    radial-gradient(30% 40% at 18% 20%, rgba(23,224,192,.55) 0%, rgba(23,224,192,0) 62%),
-    linear-gradient(155deg, #0a1a4a 0%, #071130 48%, #04081c 100%);
   --shadow-pane:0 14px 34px -10px rgba(2,4,10,.45);
   --shadow-float:0 18px 44px rgba(0,0,0,.46),0 3px 10px rgba(0,0,0,.32);
   --ease:cubic-bezier(.2,.8,.3,1);
@@ -29,19 +23,23 @@
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
 /* Form controls do not inherit fonts by default (textarea falls back to UA monospace); make them follow the UI font */
 textarea{font-family:inherit}
-html,body{background:transparent;margin:0;padding:0;overflow:hidden;width:100vw;height:100vh}
-body{display:flex;justify-content:center;align-items:center;min-height:100vh;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif}
+html{background:#0b0e14}
+html,body{margin:0;padding:0;overflow:hidden;width:100vw;height:100vh}
+body{
+  /* Luminous Ink: one opaque material surface behind the whole window.
+     Cool graphite base, a faint top-left bloom, a deep bottom-right falloff
+     and a 3.5% grain; never sampled from the desktop, never per-frame.
+     The base is deliberately the DEEPEST layer so the terminal and the
+     settings surface read as distinct elevations above it. */
+  background:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/></filter><rect width='120' height='120' filter='url(%23n)' opacity='.035'/></svg>") 0 0/120px 120px repeat,
+    radial-gradient(120% 90% at 10% -10%,rgba(97,175,239,.05),transparent 60%),
+    radial-gradient(90% 70% at 92% 108%,rgba(5,8,14,.62),transparent 65%),
+    linear-gradient(160deg,#10141b 0%,#0c1016 48%,#080b10 100%);
+  background-attachment:fixed;
+  display:flex;justify-content:center;align-items:center;min-height:100vh;font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;
+}
 .window{width:100vw;height:100vh;background:transparent;display:flex;flex-direction:column;overflow:hidden;position:relative}
-/* Window surface: native DWM Mica comes from the OS; the CSS wallpaper is the
-   fallback for Windows 10 / composition-disabled systems. The design's tint is
-   applied on top of BOTH: it is the material's unifying layer, not a fallback
-   colour (the raw wallpaper otherwise makes the top and bottom read as two
-   different surfaces). */
-.mica{position:absolute;inset:0;pointer-events:none;z-index:0;overflow:hidden}
-.mica-wall{position:absolute;inset:-90px;background:var(--wall);background-attachment:fixed;
-  filter:blur(64px) saturate(.68) brightness(.9)}
-.mica-tint{position:absolute;inset:0;background:var(--mica-tint)}
-[data-material="mica"] .mica-wall{display:none}
 /* Top-lit hairline shared by floating surfaces: 1px gradient border that
    fades downward, replacing the uniform white ring. */
 .menu-popup::before,.panel::before,.transfer-window::before,.sftp-window::before,
@@ -361,15 +359,16 @@ body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
 /* Settings is a large supporting surface, not a transient flyout: per the
    Acrylic guidance it stays in the SAME material family as the window, rather
    than introducing a second coloured desktop mesh. One neutral in-app tint +
-   blur + fine noise over the same Mica; a single faint neutral specular is the
-   only light, so the page reads as a frosted version of the window. */
+   blur + fine noise over the same opaque Ink material; a single faint neutral
+   specular is the only light, so the page reads as a frosted version of the
+   window. */
 .settings-pane{position:absolute;top:0;left:0;right:0;bottom:0;display:none;flex-direction:column;
   background:
     url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/></filter><rect width='120' height='120' filter='url(%23n)' opacity='.045'/></svg>") 0 0/120px 120px repeat,
     radial-gradient(90% 70% at 16% -10%,rgba(255,255,255,.045),transparent 62%),
-    rgba(28,31,39,.80);
+    rgba(30,35,45,.94);
   -webkit-backdrop-filter:blur(40px) saturate(1.12) brightness(1.04);backdrop-filter:blur(40px) saturate(1.12) brightness(1.04);
-  box-shadow:0 18px 44px -14px rgba(2,4,10,.5);overflow:hidden;border-radius:12px}
+  box-shadow:0 24px 60px -12px rgba(0,0,0,.62),0 2px 10px rgba(0,0,0,.35);overflow:hidden;border-radius:12px}
 .settings-pane.active{display:flex}
 .settings-header{height:46px;display:flex;align-items:center;padding:0 16px;gap:10px;flex-shrink:0}
 .settings-header .back-btn{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text-2);transition:background 0.12s,color 0.12s;background:none;border:none}
@@ -1066,4 +1065,49 @@ button:active:not(:disabled),.tab:active,.menu-item:active,
 }
 button:disabled,.menu-item.disabled,.shortcut-edit-btn:disabled{
   opacity:0.45;pointer-events:none;
+}
+
+/* ── Round B: immediate pointer feedback ──
+   Hover/press feedback is a direct response, not a 120ms animation. Keep the
+   longer durations only for overlays, panels and toggles (state changes), and
+   give every clickable row/control an explicit pressed fill on top of the
+   shared button brightness. No layout, palette or material changes here. */
+:root{--motion-hover:.06s}
+
+.tab,.tab-close,.tab-scroll-btn,.menu-item,.settings-sidebar-item,
+.settings-quiet-action,.settings-primary-add,.accent-swatch,
+.ssh-mgr-row,.ssh-mgr-row::before,.ssh-mgr-server,.ssh-mgr-btn,.ssh-item,.ssh-item-btn,
+.ss-row,.dd-option,.dd-trigger,
+.auth-tab,.panel-tab,.form-section-add,.shortcut-edit-btn,
+#btn-menu,#btn-add-tab,.win-ctrl,
+button,input,select,textarea,
+.settings-card-control input,.settings-card-control select,
+.form-group input,.form-group select,.form-group textarea{
+  transition-duration:var(--motion-hover);
+}
+.toggle-switch{transition-duration:.12s}
+.toggle-switch::after{transition-duration:.12s}
+
+.settings-sidebar-item:active,.ssh-mgr-row:active,.ssh-item:active,
+.ss-row:active,.pal-item:active,.qc-item:active{
+  background:rgba(255,255,255,.09);
+}
+.menu-item:active,.dd-option:active{
+  background:rgba(var(--accent-rgb),.20);
+}
+.tab:active{
+  background:rgba(var(--accent-rgb),.12);
+}
+.settings-sidebar-item.active:active{
+  background:rgba(var(--accent-rgb),.20);
+}
+#btn-menu:active,#btn-add-tab:active{
+  background:rgba(255,255,255,.045);
+  color:var(--text-1);
+}
+.win-close:active{
+  background:#a02015;
+}
+.accent-swatch:active{
+  transform:scale(.96);
 }

@@ -258,9 +258,9 @@ function getTerminalTheme() {
 function applyTerminalScheme() {
     const theme = getTerminalTheme();
     document.documentElement.style.setProperty('--term-bg', theme.background);
-    // The v12 frame is a mica/acrylic material system: its surfaces are fixed by
-    // app.css and must not be re-derived from the terminal scheme background.
-    // Only the terminal canvas (--term-bg) follows the scheme.
+    // The v12 frame is an opaque Ink/acrylic material system: its surfaces are
+    // fixed by app.css and must not be re-derived from the terminal scheme
+    // background. Only the terminal canvas (--term-bg) follows the scheme.
     TabManager.tabs.forEach(t => {
         if (t.term) {
             // xterm caret must stay visible: the WebGL smooth-cursor adapter
@@ -321,8 +321,8 @@ function toggleStatusbar() {
 // ── v12 surface switches (persisted in appearance) ──
 // pane ring: off by default, matching the prototype's no-ring window state.
 // panel edge: the top-lit hairline on every floating surface, on by default.
-// sftp material: the dock uses Mica/acrylic; off falls back to the terminal
-// scheme's canvas color.
+// sftp material: the dock uses the opaque material/acrylic; off falls back to
+// the terminal scheme's canvas color.
 function applyChromeFlags() {
     const win = document.querySelector('.window');
     if (!win) return;
