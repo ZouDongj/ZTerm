@@ -110,7 +110,7 @@ const SFTP = {
         this._viewReq = null;
         this._refreshQueued = null;
         this._refreshInFlight = null;
-        document.getElementById('sftp-breadcrumb').innerHTML = '<span>/</span>';
+        document.getElementById('sftp-breadcrumb').innerHTML = `<span class="seg seg-root" title="/" aria-label="根目录">${SFTP_ROOT_ICON}</span>`;
         document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载中…</div>';
         // Non-modal dock: the terminal keeps the keyboard focus while the
         // panel is open (no focus move on open; close() still refocuses).
@@ -561,8 +561,10 @@ const SFTP = {
         const build = (hidden) => {
             el.innerHTML = '';
             const root = document.createElement('span');
-            root.className = 'seg';
-            root.textContent = '/';
+            root.className = 'seg seg-root';
+            root.innerHTML = SFTP_ROOT_ICON;
+            root.title = '/';
+            root.setAttribute('aria-label', '根目录');
             root.addEventListener('click', () => this.navigate('/'));
             el.appendChild(root);
             const addSep = () => {

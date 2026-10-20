@@ -81,8 +81,7 @@
     terminal: '<rect x="3" y="4" width="18" height="16" rx="3" opacity=".9"/>' +
       '<path d="M7.6 9 10.8 12l-3.2 3" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" opacity=".28"/>' +
       '<path d="M12.6 15h4.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".28"/>',
-    settings: ICONS.settings.replace('<circle cx="12" cy="12" r="3"/>', '') +
-      '<circle cx="12" cy="12" r="3.2" opacity=".28"/>',
+    settings: ICONS.settings,
     folder: ICONS.folder +
       '<path d="M3 9h18" fill="none" stroke="currentColor" stroke-width="1.6" opacity=".22"/>',
     file: ICONS.file +
