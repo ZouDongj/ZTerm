@@ -4884,7 +4884,14 @@ async fn finalize_upload_rename(
 ) -> Result<(), String> {
     // lstat (not stat): a dangling symlink must count as existing too, or the
     // rename onto it fails just the same.
-    if sftp.symlink_metadata(remote_final).await.is_ok() {
+    if let Ok(md) = sftp.symlink_metadata(remote_final).await {
+        // The backup-swap below is designed for FILES: renaming a DIRECTORY
+        // aside succeeds, but the final remove_file on it fails (SSH_FXP_REMOVE
+        // only takes files), leaving the user's directory moved away under a
+        // backup name (B-P2-02). Refuse up front; the caller cleans up tmp.
+        if md.is_dir() {
+            return Err(format!("remote path is a directory: {remote_final}"));
+        }
         // A stale backup from an earlier crashed run would block the rename
         // aside (rename cannot overwrite); clear it first.
         if sftp.symlink_metadata(remote_backup).await.is_ok() {
@@ -6832,6 +6839,33 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("dest.txt")).unwrap(), b"new-content");
         assert!(!dir.join("dest.txt.zterm-tmp-7").exists());
         assert!(!dir.join("dest.txt.zterm-bak-7").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn upload_finalize_refuses_a_directory_destination() {
+        // B-P2-02: the swap-aside is a file protocol — renaming a directory
+        // aside succeeds but the final remove_file on it fails, leaving the
+        // user's directory stranded under the backup name. Refuse up front.
+        let dir = config_test_dir("sftp-dir-dest");
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
+        // The mock maps lstat onto the real filesystem; create the directory
+        // directly (the mock implements no SFTP mkdir).
+        std::fs::create_dir(dir.join("destdir")).unwrap();
+        write_remote_file(&sftp, "destdir/keep.txt", b"keep").await;
+        write_remote_file(&sftp, "destdir.zterm-tmp-3", b"upload").await;
+        let err = finalize_upload_rename(
+            &sftp,
+            "destdir.zterm-tmp-3",
+            "destdir",
+            "destdir.zterm-bak-3",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("directory"), "error names the cause: {err}");
+        // The directory is untouched and nothing was renamed aside.
+        assert_eq!(std::fs::read(dir.join("destdir/keep.txt")).unwrap(), b"keep");
+        assert!(!dir.join("destdir.zterm-bak-3").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
