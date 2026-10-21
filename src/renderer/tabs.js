@@ -187,7 +187,10 @@ function _sshConnectWithCredentials(tab, pane) {
             followCwd, loginScripts: _getLoginScripts(tab, pane),
         }, token);
     };
-    if (credId) { send(credId); return; }
+    // A profile carrying stored credentials ALWAYS re-registers on connect:
+    // the profile may have been edited since the wrapper's handle was minted,
+    // and reusing that handle would keep reconnecting with the OLD password/
+    // key. The replaced handle is revoked below once nothing references it.
     const prof = pId ? (TabManager.sshProfiles || []).find(x => x.id === pId) : null;
     if (prof && (prof.encryptedPassword || prof.privateKeyPath)) {
         ipcRenderer.invoke('register-credential', {
@@ -196,22 +199,61 @@ function _sshConnectWithCredentials(tab, pane) {
         }).then(({ credId: newCredId }) => {
             // The credential round trip can outlive migrations/closures: the
             // ATTEMPT record (not the captured wrapper) owns the decision —
-            // never enqueue into a dead or replaced attempt. The handle
-            // itself is profile-derived and potentially shared; it is not
-            // revoked on this dead path.
-            if (!sshAttempts.ownerWants(token)) return;
+            // never enqueue into a dead or replaced attempt. Handles are
+            // minted fresh per registration (never deduped), so this orphan
+            // id cannot be shared: revoke it now, same policy as the restore
+            // path's late-registration cleanup.
+            if (!sshAttempts.ownerWants(token)) {
+                if (newCredId) ipcRenderer.send('revoke-credential', { credId: newCredId });
+                return;
+            }
             if (newCredId) {
                 const o = sshAttempts.ownerOf(token);
                 if (o) {
                     if (o._sshHost !== undefined || o._sshCredId !== undefined) o._sshCredId = newCredId;
                     else o._credId = newCredId;
                 }
+                // Rotate out the replaced handle — only when no other wrapper
+                // still references it (clone tabs / split inheritance share
+                // ids): revoking a shared handle would kill their reconnects.
+                // The owner already points at newCredId here, so the check
+                // measures only OTHER holders.
+                if (credId && credId !== newCredId
+                    && !_credIdStillReferenced(TabManager.tabs, credId, pane)) {
+                    ipcRenderer.send('revoke-credential', { credId });
+                }
             }
             send(newCredId);
         }).catch(() => { if (sshAttempts.ownerWants(token)) send(null); });
-    } else {
-        send(null);
+        return;
     }
+    if (prof) {
+        // The profile resolved but carries no credentials (never had any, or
+        // the user REMOVED them): a handle minted from this profile is stale
+        // — silently reconnecting with a deleted password is the same bug
+        // class as reconnecting with an edited one. Drop this wrapper's
+        // reference and connect bare; revoke the handle only once nothing
+        // else holds it.
+        if (credId) {
+            const o = pane || tab;
+            if (o._sshHost !== undefined || o._sshCredId !== undefined) {
+                if (o._sshCredId === credId) o._sshCredId = null;
+                // Inherited from the tab: leave tab._credId for the siblings;
+                // the reference check below keeps the handle alive for them.
+            } else {
+                o._credId = null;
+            }
+            if (!_credIdStillReferenced(TabManager.tabs, credId, pane)) {
+                ipcRenderer.send('revoke-credential', { credId });
+            }
+        }
+        send(null);
+        return;
+    }
+    // No profile (ad-hoc tab): keep the wrapper's existing handle (minted by
+    // an earlier registration or restored session), else connect bare.
+    if (credId) { send(credId); return; }
+    send(null);
 }
 
 // Pane header connection state — single source of truth shared by buildPane,

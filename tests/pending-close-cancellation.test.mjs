@@ -1318,6 +1318,105 @@ test('D3: credential continuation respects a cancelled unsent attempt', async ()
     credInv.resolve({ credId: 'c1' });
     await flushAsync();
     assert.equal(invOf(ctx, att), undefined, 'never invoked after the cancel');
-    // The profile-derived handle is potentially shared: never revoked here.
-    assert.equal(sendsOf(ctx, 'revoke-credential').length, 0);
+    // The orphaned handle is minted fresh per registration (never deduped),
+    // so it cannot be shared: it is revoked immediately, same policy as the
+    // restore path's late-registration cleanup.
+    assert.deepEqual(sendsOf(ctx, 'revoke-credential').map(s => s.payload.credId), ['c1'],
+        'the orphan handle is released exactly once');
+});
+
+test('D6: a profile whose credentials were REMOVED reconnects bare, dropping the stale handle', async () => {
+    // Review follow-up: rotation covered credential EDITS; deleting the
+    // password/key from the profile left the old handle in use until exit.
+    const ctx = loadVm();
+    ctx.TabManager.sshProfiles = [{ id: 'prof1', name: 'p', host: 'h', username: 'u' }];
+    const tab = {
+        id: 't_bare', name: 't_bare', type: 'ssh', host: 'h', user: 'u',
+        sshProfileId: 'prof1', _credId: 'cred_stale',
+        connected: false, tabId: null, term: null, fitAddon: null,
+    };
+    ctx.TabManager.tabs.push(tab);
+    ctx._sshConnectWithCredentials(tab, null);
+    await flushAsync();
+    assert.equal(ctx.__invokes.find(i => i.cmd === 'register-credential'), undefined,
+        'no registration without profile credentials');
+    const connectInv = invOf(ctx, tab._pendingAttempt);
+    assert.ok(connectInv, 'the connect is still enqueued');
+    assert.equal(connectInv.payload.profile.credentialId, null, 'connects without the stale handle');
+    assert.equal(tab._credId, null, 'the wrapper drops its stale reference');
+    assert.equal(sendsOf(ctx, 'revoke-credential', p => p.credId === 'cred_stale').length, 1,
+        'the stale handle is released exactly once');
+});
+
+test('D7: credential removal never revokes a handle another wrapper still holds', async () => {
+    const ctx = loadVm();
+    ctx.TabManager.sshProfiles = [{ id: 'prof1', name: 'p', host: 'h', username: 'u' }];
+    const sibling = {
+        id: 't_sib', name: 't_sib', type: 'ssh', host: 'h', user: 'u',
+        sshProfileId: 'prof1', _credId: 'cred_stale',
+        connected: false, tabId: null, term: null, fitAddon: null,
+    };
+    const tab = {
+        id: 't_bare2', name: 't_bare2', type: 'ssh', host: 'h', user: 'u',
+        sshProfileId: 'prof1', _credId: 'cred_stale',
+        connected: false, tabId: null, term: null, fitAddon: null,
+    };
+    ctx.TabManager.tabs.push(sibling, tab);
+    ctx._sshConnectWithCredentials(tab, null);
+    await flushAsync();
+    assert.equal(tab._credId, null);
+    assert.equal(sendsOf(ctx, 'revoke-credential', p => p.credId === 'cred_stale').length, 0,
+        'the sibling still holds the handle: no revoke');
+});
+
+test('D4: a credentialed profile re-registers on connect, rotating the stale handle', async () => {
+    // Regression: editing a profile's password used to leave reconnects
+    // sending the OLD credential handle forever (the credId short-circuit won
+    // over the profile lookup). The connect must register the CURRENT profile
+    // credentials, adopt the fresh handle, and release the replaced one.
+    const ctx = loadVm();
+    ctx.TabManager.sshProfiles = [{ id: 'prof1', name: 'p', host: 'h', username: 'u', encryptedPassword: 'enc_new' }];
+    const tab = {
+        id: 't_rot', name: 't_rot', type: 'ssh', host: 'h', user: 'u',
+        sshProfileId: 'prof1', _credId: 'cred_old',
+        connected: false, tabId: null, term: null, fitAddon: null,
+    };
+    ctx.TabManager.tabs.push(tab);
+    ctx._sshConnectWithCredentials(tab, null);
+    await flushAsync();
+    const credInv = ctx.__invokes.find(i => i.cmd === 'register-credential');
+    assert.ok(credInv, 'the existing handle must not short-circuit re-registration');
+    assert.equal(credInv.payload.encryptedPassword, 'enc_new', 'registers the CURRENT profile credential');
+    credInv.resolve({ credId: 'cred_new' });
+    await flushAsync();
+    assert.equal(tab._credId, 'cred_new', 'the wrapper adopts the fresh handle');
+    const att = tab._pendingAttempt;
+    const connectInv = invOf(ctx, att);
+    assert.ok(connectInv, 'connect enqueued after registration');
+    assert.equal(connectInv.payload.profile.credentialId, 'cred_new', 'the connect sends the fresh handle');
+    assert.equal(sendsOf(ctx, 'revoke-credential', p => p.credId === 'cred_old').length, 1,
+        'the replaced handle is released exactly once');
+});
+
+test('D5: rotation never revokes the replaced handle while another wrapper holds it', async () => {
+    const ctx = loadVm();
+    ctx.TabManager.sshProfiles = [{ id: 'prof1', name: 'p', host: 'h', username: 'u', encryptedPassword: 'enc_new' }];
+    const shared = {
+        id: 't_shared', name: 't_shared', type: 'ssh', host: 'h', user: 'u',
+        sshProfileId: 'prof1', _credId: 'cred_old',
+        connected: false, tabId: null, term: null, fitAddon: null,
+    };
+    const rotating = {
+        id: 't_rot2', name: 't_rot2', type: 'ssh', host: 'h', user: 'u',
+        sshProfileId: 'prof1', _credId: 'cred_old',
+        connected: false, tabId: null, term: null, fitAddon: null,
+    };
+    ctx.TabManager.tabs.push(shared, rotating);
+    ctx._sshConnectWithCredentials(rotating, null);
+    await flushAsync();
+    ctx.__invokes.find(i => i.cmd === 'register-credential').resolve({ credId: 'cred_new' });
+    await flushAsync();
+    assert.equal(rotating._credId, 'cred_new');
+    assert.equal(sendsOf(ctx, 'revoke-credential', p => p.credId === 'cred_old').length, 0,
+        'the sibling still reconnects through cred_old: no revoke');
 });
