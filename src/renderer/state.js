@@ -282,11 +282,24 @@ function updateAccentDot() {
     const input = document.getElementById('set-accent');
     const dot = document.getElementById('accent-dot');
     if (input && dot) dot.style.background = input.value;
-    // Sync swatch active states with current input value
+    // Sync swatch state with the current input value. Every accent path
+    // (swatch click, color picker, hex field) funnels through here, so this
+    // is the single sync point for all three faces of the radio state: the
+    // visible tick (.active), the exposed aria-checked, and the roving tab
+    // stop (one per radiogroup, on the checked swatch).
     const hex = input ? input.value : '';
-    document.querySelectorAll('.accent-swatch').forEach(sw => {
-        sw.classList.toggle('active', sw.getAttribute('data-color').toUpperCase() === hex.replace('#', '').toUpperCase());
+    const swatches = document.querySelectorAll('.accent-swatch');
+    let anyOn = false;
+    swatches.forEach(sw => {
+        const on = sw.getAttribute('data-color').toUpperCase() === hex.replace('#', '').toUpperCase();
+        sw.classList.toggle('active', on);
+        sw.setAttribute('aria-checked', on ? 'true' : 'false');
+        sw.setAttribute('tabindex', on ? '0' : '-1');
+        anyOn = anyOn || on;
     });
+    // A custom hex checks no preset: keep the group keyboard-reachable by
+    // leaving the tab stop on the first swatch.
+    if (!anyOn && swatches[0]) swatches[0].setAttribute('tabindex', '0');
     // Apply accent color to UI via CSS variable
     applyAccentColor(input ? input.value : '#61afef');
 }

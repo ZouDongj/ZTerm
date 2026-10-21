@@ -183,3 +183,76 @@ test('U-14: every dialog open resets the slider so its first placement is instan
     assert.equal(widthWrites[widthWrites.length - 1], '60px', 'then re-places once measurable');
 });
 
+// ── Accent VM (U-10/U-11): REAL color-utils.js + state.js + settings.js ────
+// state.js computes CONFIG_FILE from path/process at load; the persistence
+// tail of saveAppearance is out of scope here and stubbed after load.
+
+function loadAccentVm() {
+    const doc = mkDoc();
+    doc.documentElement = { style: { setProperty() {} } };
+    const origCreate = doc.createElement;
+    doc.createElement = (tag) => {
+        const el = origCreate(tag);
+        el.style.setProperty = (k, v) => { el.style[k] = v; };
+        return el;
+    };
+    const ctx = {
+        console,
+        setTimeout: () => 0,
+        requestAnimationFrame: (fn) => { fn(); return 0; },
+        document: doc,
+        path,
+        process: { env: { APPDATA: 'x' } },
+        ipcRenderer: { send() {}, once() {}, on() {}, removeListener() {}, invoke: () => new Promise(() => {}) },
+        TabManager: { tabs: [], sshProfiles: [], render() {} },
+        Icons: { iconSvg: () => 'svg' },
+        showToast() {},
+    };
+    ctx.window = ctx;
+    ctx.globalThis = ctx;
+    vm.createContext(ctx);
+    for (const f of ['color-utils.js', 'state.js', 'settings.js']) {
+        vm.runInContext(src(f), ctx, { filename: f });
+    }
+    vm.runInContext('saveAppearance = () => {}', ctx);
+    return ctx;
+}
+
+const swatchesOf = (ctx) => [...ctx.document.getElementById('accent-swatches').children];
+const checkedIdx = (ctx) => swatchesOf(ctx).findIndex(sw => sw.getAttribute('aria-checked') === 'true');
+const tabStopIdx = (ctx) => swatchesOf(ctx).findIndex(sw => sw.getAttribute('tabindex') === '0');
+
+test('U-10: the hex-field path moves aria-checked and the tab stop together with the tick', () => {
+    const ctx = loadAccentVm();
+    const input = ctx.document.getElementById('set-accent');
+    input.value = '#61afef';
+    ctx.renderAccentSwatches();
+    assert.equal(swatchesOf(ctx).length, 8);
+    assert.equal(checkedIdx(ctx), 0);
+    assert.equal(tabStopIdx(ctx), 0);
+
+    // The exact hex-field chain: onchange="updateAccentDot();saveAppearance()".
+    input.value = '#9CA3FF';
+    ctx.updateAccentDot();
+
+    assert.equal(checkedIdx(ctx), 1, 'aria-checked follows the hex-typed preset');
+    assert.equal(tabStopIdx(ctx), 1, 'roving tab stop follows too');
+    assert.equal(swatchesOf(ctx)[1].classList.contains('active'), true, 'visible tick agrees');
+    assert.equal(swatchesOf(ctx).filter(sw => sw.getAttribute('tabindex') === '0').length, 1,
+        'exactly one tab stop in the radiogroup');
+});
+
+test('U-10: a custom hex checks no preset but keeps the group keyboard-reachable', () => {
+    const ctx = loadAccentVm();
+    const input = ctx.document.getElementById('set-accent');
+    input.value = '#61afef';
+    ctx.renderAccentSwatches();
+
+    input.value = '#123456';
+    ctx.updateAccentDot();
+
+    assert.equal(checkedIdx(ctx), -1, 'no preset is checked');
+    assert.equal(swatchesOf(ctx).filter(sw => sw.classList.contains('active')).length, 0, 'no tick');
+    assert.equal(tabStopIdx(ctx), 0, 'the tab stop falls back to the first swatch');
+});
+

@@ -521,14 +521,9 @@ function confirmColorPicker() {
     const input = document.getElementById('set-accent');
     if (input) {
         input.value = hex;
+        // Swatch .active / aria-checked / tabindex sync lives in updateAccentDot.
         updateAccentDot();
         saveAppearance();
-        // Update swatch active states
-        document.querySelectorAll('.accent-swatch').forEach(sw => {
-            const on = sw.getAttribute('data-color').toUpperCase() === hex.replace('#', '').toUpperCase();
-            sw.classList.toggle('active', on);
-            sw.setAttribute('aria-checked', on ? 'true' : 'false');
-        });
     }
     closeColorPicker();
 }
@@ -623,14 +618,11 @@ function selectAccent(hex) {
     const input = document.getElementById('set-accent');
     if (input) {
         input.value = hex;
+        // updateAccentDot is the single sync point for swatch .active /
+        // aria-checked / roving tabindex (it also covers the picker and the
+        // hex field); nothing swatch-related is re-written here.
         updateAccentDot();
         saveAppearance();
-        // Update swatch active states
-        document.querySelectorAll('.accent-swatch').forEach(sw => {
-            const on = sw.getAttribute('data-color').toUpperCase() === hex.replace('#', '').toUpperCase();
-            sw.classList.toggle('active', on);
-            sw.setAttribute('aria-checked', on ? 'true' : 'false');
-        });
     }
 }
 
