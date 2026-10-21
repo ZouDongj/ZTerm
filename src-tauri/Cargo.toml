@@ -41,3 +41,10 @@ windows-core = "0.61"
 
 # portable-pty drives the local shell; output reaches the frontend over a Tauri Channel
 # russh 0.60 re-exports russh_keys as russh::key, so no separate russh-keys dependency
+
+
+[dev-dependencies]
+# Test-only: rand::rng() feeds PrivateKey::random for the throwaway host key of
+# the in-process SSH server (issue #29 SFTP channel tests). Same major version
+# russh's own tests use; rand_core 0.10's CryptoRng bound is satisfied by it.
+rand = "0.10"

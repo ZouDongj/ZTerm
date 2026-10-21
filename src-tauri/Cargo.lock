@@ -6431,6 +6431,7 @@ dependencies = [
  "arboard",
  "parking_lot",
  "portable-pty",
+ "rand 0.10.2",
  "regex",
  "russh",
  "russh-sftp",

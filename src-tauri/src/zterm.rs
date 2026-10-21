@@ -1545,17 +1545,251 @@ fn resolve_ssh_credential(
     (None, None)
 }
 
-async fn open_sftp_channel(
-    handle: &mut russh::client::Handle<SshHandler>,
-) -> Option<Arc<russh_sftp::client::SftpSession>> {
-    let channel = handle.channel_open_session().await.ok()?;
-    channel.request_subsystem(true, "sftp").await.ok()?;
+/// Which stage of SFTP channel establishment failed (issue #29). The panel
+/// toast names the stage so "the server has no SFTP subsystem" is
+/// distinguishable from "the server refused another channel".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SftpOpenStage {
+    /// channel_open_session failed (server channel limit / administratively prohibited)
+    Channel,
+    /// request_subsystem("sftp") failed (the server has no SFTP subsystem enabled)
+    Subsystem,
+    /// the SFTP protocol handshake failed on an opened channel
+    Handshake,
+}
+
+async fn open_sftp_channel_classified<H>(
+    handle: &russh::client::Handle<H>,
+) -> Result<Arc<russh_sftp::client::SftpSession>, (SftpOpenStage, String)>
+where
+    H: russh::client::Handler<Error = russh::Error>,
+{
+    // The channel open itself is also reply-bounded: a wedged connection
+    // would otherwise park this await forever (the handle has no internal
+    // timeout for it).
+    let mut channel = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        handle.channel_open_session(),
+    )
+    .await
+    {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => return Err((SftpOpenStage::Channel, format!("{e}"))),
+        Err(_) => {
+            return Err((
+                SftpOpenStage::Channel,
+                "no reply to the channel-open request within 10s".into(),
+            ))
+        }
+    };
+    // request_subsystem only SENDS the request — the reply is what tells
+    // whether the server has the subsystem at all. Wait for that reply so a
+    // server without SFTP reports Subsystem here instead of a confusing
+    // handshake failure on a dead channel (issue #29's exact scenario).
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| (SftpOpenStage::Subsystem, format!("{e}")))?;
+    let granted = match tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match channel.wait().await {
+                Some(russh::ChannelMsg::Success) => break true,
+                // Failure reply, channel EOF, anything terminal: not granted.
+                Some(russh::ChannelMsg::Failure) | None => break false,
+                // WindowAdjust and friends: keep waiting for the reply.
+                _ => {}
+            }
+        }
+    })
+    .await
+    {
+        Ok(g) => g,
+        Err(_) => {
+            // Explicit close: dropping a russh Channel without close leaves
+            // the server-side channel open until the connection dies, and
+            // repeated SFTP retries then pile up against MaxSessions.
+            let _ = channel.close().await;
+            return Err((
+                SftpOpenStage::Subsystem,
+                "no reply to the subsystem request within 10s".into(),
+            ));
+        }
+    };
+    if !granted {
+        let _ = channel.close().await;
+        return Err((
+            SftpOpenStage::Subsystem,
+            "the server rejected the \"sftp\" subsystem request".into(),
+        ));
+    }
     let stream = channel.into_stream();
     russh_sftp::client::SftpSession::new(stream)
         .await
-        .ok()
         .map(Arc::new)
+        .map_err(|e| (SftpOpenStage::Handshake, format!("{e}")))
 }
+
+fn sftp_open_message(stage: SftpOpenStage, detail: &str) -> String {
+    match stage {
+        SftpOpenStage::Channel => format!(
+            "SFTP channel refused or unavailable (a server channel limit such as MaxSessions, or a dropped connection): {detail}"
+        ),
+        SftpOpenStage::Subsystem => {
+            format!("SFTP subsystem not enabled on the server: {detail}")
+        }
+        SftpOpenStage::Handshake => format!("SFTP handshake failed: {detail}"),
+    }
+}
+
+async fn open_sftp_channel(
+    handle: &russh::client::Handle<SshHandler>,
+) -> Option<Arc<russh_sftp::client::SftpSession>> {
+    open_sftp_channel_classified(handle).await.ok()
+}
+
+/// Issue #29: the SFTP channels are opened once at connect; when the server
+/// had no SFTP subsystem then, `None` was cached forever and only an SSH
+/// reconnect could recover. ensure_sftp rebuilds the panel channel on demand:
+/// the open runs OUTSIDE the session-map lock (channel setup awaits the
+/// server), and the result is stored only when the session is still the same
+/// generation (Arc::ptr_eq on the handle) and still channel-less — a
+/// concurrent ensure that lost the race drops its channel (closed by Drop).
+async fn ensure_sftp(
+    state: &SessionMap,
+    tab_id: &str,
+) -> Result<Arc<russh_sftp::client::SftpSession>, String> {
+    let handle = {
+        let map = state.lock();
+        match map.get(tab_id) {
+            Some(SessionType::Ssh(s)) => match &s.sftp {
+                Some(existing) => return Ok(existing.clone()),
+                None => Arc::clone(&s.handle),
+            },
+            _ => return Err("SFTP not available (no SSH session)".into()),
+        }
+    };
+    let opened = open_sftp_channel_classified(&handle).await;
+    let mut map = state.lock();
+    match map.get_mut(tab_id) {
+        Some(SessionType::Ssh(s)) => {
+            if !Arc::ptr_eq(&s.handle, &handle) {
+                return Err("SFTP not available (session replaced)".into());
+            }
+            match opened {
+                Ok(new_channel) => match &s.sftp {
+                    Some(existing) => Ok(existing.clone()),
+                    None => {
+                        s.sftp = Some(new_channel.clone());
+                        Ok(new_channel)
+                    }
+                },
+                Err((stage, detail)) => Err(sftp_open_message(stage, &detail)),
+            }
+        }
+        _ => Err("SFTP not available (session closed)".into()),
+    }
+}
+
+/// B-P2-08: only a CHANNEL-stage refusal (server channel limit, e.g. a low
+/// MaxSessions) justifies sharing the panel channel; a subsystem or handshake
+/// failure would fail the panel channel identically.
+fn transfer_shares_panel_on(stage: SftpOpenStage) -> bool {
+    stage == SftpOpenStage::Channel
+}
+
+/// The transfer channel gets the same on-demand rebuild, plus the B-P2-08
+/// fallback: a low MaxSessions refuses the second channel (Channel stage
+/// only — a subsystem/handshake failure would fail the panel channel
+/// identically), and SFTP multiplexes requests by id, so the transfer can
+/// share the panel channel instead of failing.
+async fn ensure_sftp_transfer(
+    state: &SessionMap,
+    tab_id: &str,
+) -> Result<
+    (
+        Arc<russh_sftp::client::SftpSession>,
+        Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    ),
+    String,
+> {
+    enum Opened {
+        Ready(Arc<russh_sftp::client::SftpSession>),
+        Refused(String),
+        Gone,
+    }
+    let (handle, cancels) = {
+        let map = state.lock();
+        match map.get(tab_id) {
+            Some(SessionType::Ssh(s)) => match &s.sftp_transfer {
+                Some(existing) => return Ok((existing.clone(), s.transfer_cancels.clone())),
+                None => (Arc::clone(&s.handle), s.transfer_cancels.clone()),
+            },
+            _ => return Err("SFTP transfer not available (no SSH session)".into()),
+        }
+    };
+    let opened = open_sftp_channel_classified(&handle).await;
+    let outcome = {
+        let mut map = state.lock();
+        match map.get_mut(tab_id) {
+            Some(SessionType::Ssh(s)) => {
+                if !Arc::ptr_eq(&s.handle, &handle) {
+                    Opened::Gone
+                } else {
+                    match opened {
+                        Ok(new_channel) => {
+                            let chosen = match &s.sftp_transfer {
+                                Some(existing) => existing.clone(),
+                                None => {
+                                    s.sftp_transfer = Some(new_channel.clone());
+                                    new_channel
+                                }
+                            };
+                            Opened::Ready(chosen)
+                        }
+                        Err((stage, detail)) => {
+                            if transfer_shares_panel_on(stage) {
+                                Opened::Refused(sftp_open_message(stage, &detail))
+                            } else {
+                                return Err(sftp_open_message(stage, &detail));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => Opened::Gone,
+        }
+    };
+    match outcome {
+        Opened::Ready(sftp) => Ok((sftp, cancels)),
+        Opened::Gone => Err("SFTP transfer not available (session replaced)".into()),
+        Opened::Refused(transfer_err) => {
+            // The lock is released: ensure_sftp re-locks internally.
+            match ensure_sftp(state, tab_id).await {
+                Ok(shared) => {
+                    // Re-validate under a fresh lock: the session may have
+                    // been replaced while ensure_sftp awaited. The shared
+                    // channel must be the CURRENT session's panel channel,
+                    // and the cancel map must come from that same session —
+                    // the `cancels` captured above belongs to the generation
+                    // that opened the (refused) transfer attempt.
+                    let map = state.lock();
+                    match map.get(tab_id) {
+                        Some(SessionType::Ssh(s))
+                            if s.sftp
+                                .as_ref()
+                                .is_some_and(|cur| Arc::ptr_eq(cur, &shared)) =>
+                        {
+                            Ok((shared, s.transfer_cancels.clone()))
+                        }
+                        _ => Err(transfer_err),
+                    }
+                }
+                Err(_) => Err(transfer_err),
+            }
+        }
+    }
+}
+
 
 /// Fields of `username`'s /etc/passwd entry after the username itself:
 /// [password, uid, gid, gecos, home, shell].
@@ -2093,8 +2327,8 @@ pub async fn ssh_connect(
     let channel_id = channel.id();
 
     // Open SFTP channels (panel + transfer, independent from terminal channel)
-    let sftp = open_sftp_channel(&mut handle).await;
-    let sftp_transfer = open_sftp_channel(&mut handle).await;
+    let sftp = open_sftp_channel(&handle).await;
+    let sftp_transfer = open_sftp_channel(&handle).await;
 
     // FollowCwd: prefer RC wrapper (zero-typing injection via SFTP rc file)
     let mut exec_cmd = None;
@@ -4658,28 +4892,6 @@ pub fn revoke_credential(
 
 // ── SFTP commands ──
 
-fn find_sftp(tab_id: &str, state: &SessionMap) -> Option<Arc<russh_sftp::client::SftpSession>> {
-    let map = state.lock();
-    match map.get(tab_id) {
-        Some(SessionType::Ssh(s)) => s.sftp.clone(),
-        _ => None,
-    }
-}
-
-fn find_sftp_transfer(
-    tab_id: &str,
-    state: &SessionMap,
-) -> Option<(
-    Arc<russh_sftp::client::SftpSession>,
-    Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
-)> {
-    let map = state.lock();
-    match map.get(tab_id) {
-        Some(SessionType::Ssh(s)) => Some((s.sftp_transfer.clone()?, s.transfer_cancels.clone())),
-        _ => None,
-    }
-}
-
 #[tauri::command]
 pub async fn sftp_open(state: State<'_, SessionMap>, args: Vec<Value>) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
@@ -4692,7 +4904,7 @@ pub async fn sftp_open(state: State<'_, SessionMap>, args: Vec<Value>) -> Result
             _ => None,
         }
     };
-    let sftp = find_sftp(tab_id, &state).ok_or("SFTP not available")?;
+    let sftp = ensure_sftp(&state, tab_id).await?;
     let path = match tracked_cwd {
         Some(c) if !c.is_empty() => c,
         _ => sftp.canonicalize(".").await.unwrap_or_else(|_| "/".into()),
@@ -4729,7 +4941,7 @@ pub async fn sftp_readdir(state: State<'_, SessionMap>, args: Vec<Value>) -> Res
     let params = args.into_iter().next().unwrap_or(json!({}));
     let tab_id = params.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
     let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    let sftp = find_sftp(tab_id, &state).ok_or("SFTP not available")?;
+    let sftp = ensure_sftp(&state, tab_id).await?;
     match sftp.read_dir(path).await {
         Ok(entries) => {
             let mut files: Vec<Value> = Vec::new();
@@ -4770,7 +4982,7 @@ pub async fn sftp_mkdir(state: State<'_, SessionMap>, args: Vec<Value>) -> Resul
     if path.is_empty() {
         return Ok(json!({ "error": "missing path" }));
     }
-    let sftp = find_sftp(tab_id, &state).ok_or("SFTP not available")?;
+    let sftp = ensure_sftp(&state, tab_id).await?;
     match sftp.create_dir(path).await {
         Ok(_) => Ok(json!({ "ok": true })),
         Err(e) => Ok(json!({ "error": format!("{e}") })),
@@ -4800,7 +5012,7 @@ pub async fn sftp_download(
     let transfer_id_key = transfer_id_num.to_string();
 
     let (sftp, cancels) =
-        find_sftp_transfer(tab_id, &state).ok_or("SFTP transfer not available")?;
+        ensure_sftp_transfer(&state, tab_id).await?;
     let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let mut c = cancels.lock();
@@ -4980,7 +5192,7 @@ pub async fn sftp_upload(
     let transfer_id_key = transfer_id_num.to_string();
 
     let (sftp, cancels) =
-        find_sftp_transfer(tab_id, &state).ok_or("SFTP transfer not available")?;
+        ensure_sftp_transfer(&state, tab_id).await?;
     let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let mut c = cancels.lock();
@@ -6847,6 +7059,170 @@ mod tests {
             .unwrap();
         file.write_all(data).await.unwrap();
         file.shutdown().await.unwrap();
+    }
+
+    // ── In-process SSH server: SFTP channel establishment tests (issue #29) ──
+    // A full client↔server SSH session over a duplex stream: the client end
+    // uses russh's real connect/auth, the server end runs russh's real session
+    // loop with a handler that can (a) serve SFTP on request, (b) refuse the
+    // subsystem (server without SFTP enabled), or (c) refuse the session
+    // channel itself (channel limit, the B-P2-08 shape).
+
+    struct NoCheckClient;
+
+    impl russh::client::Handler for NoCheckClient {
+        type Error = russh::Error;
+        async fn check_server_key(
+            &mut self,
+            _key: &russh::keys::PublicKey,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+    }
+
+    struct SftpTestServer {
+        serve_sftp: bool,
+        allow_channel: bool,
+        root: PathBuf,
+        channels: HashMap<russh::ChannelId, russh::Channel<russh::server::Msg>>,
+    }
+
+    impl russh::server::Handler for SftpTestServer {
+        type Error = russh::Error;
+
+        async fn auth_password(
+            &mut self,
+            _user: &str,
+            _password: &str,
+        ) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: russh::Channel<russh::server::Msg>,
+            _session: &mut russh::server::Session,
+        ) -> Result<bool, Self::Error> {
+            if !self.allow_channel {
+                return Ok(false);
+            }
+            self.channels.insert(channel.id(), channel);
+            Ok(true)
+        }
+
+        async fn subsystem_request(
+            &mut self,
+            channel_id: russh::ChannelId,
+            name: &str,
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            if name == "sftp" && self.serve_sftp {
+                match self.channels.remove(&channel_id) {
+                    Some(ch) => {
+                        let root = self.root.clone();
+                        tokio::spawn(async move {
+                            let _ = russh_sftp::server::run(
+                                ch.into_stream(),
+                                TestSftpHandler::new(root, SftpFailures::default()),
+                            )
+                            .await;
+                        });
+                        session.channel_success(channel_id);
+                    }
+                    None => {
+                        session.channel_failure(channel_id);
+                    }
+                }
+            } else {
+                session.channel_failure(channel_id);
+            }
+            Ok(())
+        }
+    }
+
+    async fn ssh_test_handle(
+        serve_sftp: bool,
+        allow_channel: bool,
+        root: PathBuf,
+    ) -> russh::client::Handle<NoCheckClient> {
+        let host_key = russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::Algorithm::Ed25519,
+        )
+        .unwrap();
+        let server_config = Arc::new(russh::server::Config {
+            keys: vec![host_key],
+            methods: russh::MethodSet::from(&[russh::MethodKind::Password][..]),
+            ..Default::default()
+        });
+        let handler = SftpTestServer {
+            serve_sftp,
+            allow_channel,
+            root,
+            channels: HashMap::new(),
+        };
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            if let Ok(session) = russh::server::run_stream(server_config, server_side, handler).await
+            {
+                let _ = session.await;
+            }
+        });
+        let mut handle = russh::client::connect_stream(
+            Arc::new(russh::client::Config::default()),
+            client_side,
+            NoCheckClient,
+        )
+        .await
+        .unwrap();
+        let auth = handle.authenticate_password("u", "p").await.unwrap();
+        assert!(auth.success());
+        handle
+    }
+
+    #[tokio::test]
+    async fn sftp_channel_opens_against_an_sftp_enabled_server() {
+        let dir = config_test_dir("sftp-ensure-ok");
+        let handle = ssh_test_handle(true, true, dir.clone()).await;
+        let sftp = open_sftp_channel_classified(&handle).await.unwrap();
+        // A real operation over the established channel proves it end to end.
+        let md = sftp.symlink_metadata(".").await.unwrap();
+        assert!(md.is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sftp_channel_reports_subsystem_stage_when_the_server_lacks_sftp() {
+        // Issue #29's initial state: the server has no SFTP subsystem.
+        let dir = config_test_dir("sftp-ensure-nosubsys");
+        let handle = ssh_test_handle(false, true, dir.clone()).await;
+        let err = open_sftp_channel_classified(&handle).await.err().unwrap();
+        assert_eq!(err.0, SftpOpenStage::Subsystem);
+        let msg = sftp_open_message(err.0, &err.1);
+        assert!(
+            msg.contains("subsystem not enabled"),
+            "the toast names the cause: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sftp_channel_reports_channel_stage_when_the_server_refuses_channels() {
+        // B-P2-08's shape: a low MaxSessions refuses additional channels.
+        let dir = config_test_dir("sftp-ensure-nochan");
+        let handle = ssh_test_handle(true, false, dir.clone()).await;
+        let err = open_sftp_channel_classified(&handle).await.err().unwrap();
+        assert_eq!(err.0, SftpOpenStage::Channel);
+        let msg = sftp_open_message(err.0, &err.1);
+        assert!(msg.contains("channel refused"), "the toast names the cause: {msg}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transfer_fallback_only_applies_to_channel_refusals() {
+        assert!(transfer_shares_panel_on(SftpOpenStage::Channel));
+        assert!(!transfer_shares_panel_on(SftpOpenStage::Subsystem));
+        assert!(!transfer_shares_panel_on(SftpOpenStage::Handshake));
     }
 
     #[tokio::test]
