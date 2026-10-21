@@ -1439,6 +1439,26 @@ function setSSHAuth(value) {
     sel.value = value;
     updateAuthFields();
 }
+// Native file picker for the private key path: fills the input, manual typing
+// stays possible. Reuses the shared show-open-dialog invoke (single file). The
+// dialog is non-modal to the app: a busy flag blocks stacked dialogs, and a
+// late resolve is dropped when the edit overlay closed meanwhile (it would
+// otherwise land in a freshly opened form for a different profile).
+let _keyBrowseBusy = false;
+async function browseSshKeyPath() {
+    if (_keyBrowseBusy) return;
+    _keyBrowseBusy = true;
+    try {
+        const result = await ipcRenderer.invoke('show-open-dialog', { properties: ['openFile'] });
+        if (!result || result.canceled || !result.filePaths || !result.filePaths.length) return;
+        if (!document.getElementById('overlay-ssh-edit').classList.contains('open')) return;
+        document.getElementById('ssh-edit-keypath').value = result.filePaths[0];
+    } catch (e) {
+        showToast('无法打开文件选择框: ' + (e && e.message || e), true);
+    } finally {
+        _keyBrowseBusy = false;
+    }
+}
 function updateAuthFields() {
     const sel = document.getElementById('ssh-edit-auth');
     if (!sel) return;
@@ -1451,6 +1471,8 @@ function updateAuthFields() {
     if (pwdInput) pwdInput.disabled = isKey;
     const keyInput = document.getElementById('ssh-edit-keypath');
     if (keyInput) keyInput.disabled = !isKey;
+    const keyBrowse = document.getElementById('ssh-key-browse');
+    if (keyBrowse) keyBrowse.disabled = !isKey;
     _syncSSHAuthTabs();
 }
 

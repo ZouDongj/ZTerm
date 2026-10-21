@@ -2119,6 +2119,75 @@ async function main() {
       return { viewMode, editMode, saveShown, backToView, diag };
     })()`).catch(() => null);
     check('SSH 编辑：已配密码 view→修改→输入→失焦回退 回归', !!editPwdProbe && editPwdProbe.viewMode === true && editPwdProbe.editMode === true && editPwdProbe.saveShown === true && editPwdProbe.backToView === true, JSON.stringify(editPwdProbe));
+    // Key-auth browse button (F1): follows the auth toggle's disabled state;
+    // picking fills the keypath input, cancel leaves it untouched. The dialog
+    // invoke is stubbed so no native dialog ever appears.
+    const keyBrowseProbe = await cdp.eval(`(async () => {
+      const r = {};
+      const prev = ipcRenderer.invoke;
+      let dialogCalls = 0;
+      ipcRenderer.invoke = (cmd, args) => {
+        if (cmd === 'show-open-dialog') { dialogCalls++; return Promise.resolve(window.__keyBrowseMock); }
+        return prev(cmd, args);
+      };
+      try {
+        openSSHEdit(true);
+        const keyInput = document.getElementById('ssh-edit-keypath');
+        const btn = document.getElementById('ssh-key-browse');
+        r.initialDisabled = keyInput.disabled === true && btn.disabled === true; // password mode default
+        setSSHAuth('密钥');
+        r.keyModeEnabled = keyInput.disabled === false && btn.disabled === false;
+        window.__keyBrowseMock = { canceled: true, filePaths: [] };
+        keyInput.value = '';
+        btn.click();
+        await new Promise(rs => setTimeout(rs, 100));
+        r.cancelKeepsEmpty = keyInput.value === '';
+        window.__keyBrowseMock = { canceled: false, filePaths: ['C:/keys/e2e_id_rsa'] };
+        btn.click();
+        await new Promise(rs => setTimeout(rs, 100));
+        r.filled = keyInput.value;
+        setSSHAuth('密码');
+        r.restoredDisabled = keyInput.disabled === true && btn.disabled === true;
+        r.dialogCalls = dialogCalls;
+        // Busy guard: a second click while the dialog is pending must not open
+        // another one; resolving it then fills the input (overlay still open).
+        setSSHAuth('密钥');
+        let resolvePending;
+        window.__keyBrowseMock = null;
+        ipcRenderer.invoke = (cmd, args) => {
+          if (cmd === 'show-open-dialog') { dialogCalls++; return new Promise(res => { resolvePending = res; }); }
+          return prev(cmd, args);
+        };
+        const callsBefore = dialogCalls;
+        browseSshKeyPath();
+        browseSshKeyPath();
+        await new Promise(rs => setTimeout(rs, 50));
+        r.spamSingleDialog = dialogCalls === callsBefore + 1;
+        resolvePending({ canceled: false, filePaths: ['D:/keys/pending.pem'] });
+        await new Promise(rs => setTimeout(rs, 50));
+        r.pendingFilled = keyInput.value;
+        // Late resolve after the overlay closed must not write into the form.
+        closeOverlay('overlay-ssh-edit');
+        keyInput.value = 'sentinel';
+        browseSshKeyPath();
+        await new Promise(rs => setTimeout(rs, 50));
+        resolvePending({ canceled: false, filePaths: ['D:/keys/late.pem'] });
+        await new Promise(rs => setTimeout(rs, 50));
+        r.lateWriteDropped = keyInput.value === 'sentinel';
+        closeOverlay('overlay-ssh-edit');
+      } finally {
+        ipcRenderer.invoke = prev;
+        delete window.__keyBrowseMock;
+      }
+      return r;
+    })()`).catch(() => null);
+    check('SSH 密钥：浏览按钮回填私钥路径（取消不动字段，随认证方式联动禁用，连击/迟到写入被守卫）',
+      !!keyBrowseProbe && keyBrowseProbe.initialDisabled === true && keyBrowseProbe.keyModeEnabled === true &&
+      keyBrowseProbe.cancelKeepsEmpty === true && keyBrowseProbe.filled === 'C:/keys/e2e_id_rsa' &&
+      keyBrowseProbe.restoredDisabled === true && keyBrowseProbe.dialogCalls === 2 &&
+      keyBrowseProbe.spamSingleDialog === true && keyBrowseProbe.pendingFilled === 'D:/keys/pending.pem' &&
+      keyBrowseProbe.lateWriteDropped === true,
+      JSON.stringify(keyBrowseProbe));
     // Template flow (issue #5): the "添加连接" buttons open a small menu —
     // blank new, or new-from-template via a picker overlay that mirrors the
     // session selector. The prefill/save behavior (DPAPI ciphertext carried
