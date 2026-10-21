@@ -632,7 +632,10 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, attemptId, error }) => 
             tab._sshConnecting = false;
             tab._sshErrored = true;
         }
-        tab._sshReconnectNotice = false;
+        // Keep the reconnect notice armed across the whole automatic retry
+        // chain: a retry that eventually succeeds must toast "reconnected",
+        // not "connected". Only a terminal failure (_applySshFailed) or a
+        // user-visible disconnect clears the flag.
         TabManager.render();
         TabManager.updateStatus();
         // The discarded session no longer backs an SSH target: drop the dock

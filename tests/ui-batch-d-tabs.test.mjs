@@ -116,3 +116,65 @@ test('U-07: a pane dragged out of a split carries its flags onto the moved pane'
     assert.equal(np._sshConnecting, false);
 });
 
+// ── U-15 ────────────────────────────────────────────────────────────────────
+
+test('U-15: a retried manual reconnect still toasts "reconnected" on success', async () => {
+    const ctx = loadVm();
+    patchInvoke(ctx);
+    const toasts = captureToasts(ctx);
+    const keep = { id: 't_keep', name: 'keep', type: 'local', command: 'powershell.exe', args: [], connected: true };
+    const tab = { id: 't_rn', name: 'rn', type: 'ssh', host: 'h1', user: 'u1', connected: false, tabId: null, term: null, fitAddon: null };
+    ctx.TabManager.tabs.push(keep, tab);
+
+    ctx.TabManager.reconnectTab(tab.id);
+    assert.equal(tab._sshReconnectNotice, true, 'manual reconnect arms the notice');
+    ctx.__tq.advance(500); // pre-attempt window ends: attempt created + invoked
+    await flush();
+    const att1 = tab._pendingAttempt;
+    assert.ok(att1, 'first attempt in flight');
+
+    // Transient handshake failure → the auto-retry branch (ipc.js).
+    ctx.__emit('ssh-error', { tabId: null, attemptId: att1, error: 'connection reset by peer' });
+    assert.equal(tab._sshRetried, 1, 'retry budget spent');
+    assert.equal(tab._sshReconnectNotice, true,
+        'the notice must survive the whole retry chain (old code cleared it here)');
+
+    ctx.__tq.advance(2000); // first backoff elapses: replacement attempt
+    await flush();
+    const att2 = tab._pendingAttempt;
+    assert.ok(att2 && att2 !== att1, 'retry created a new attempt identity');
+
+    ctx.__emit('ssh-connecting', { tabId: 'ssh_2', attemptId: att2 });
+    ctx.__emit('ssh-connected', { tabId: 'ssh_2', attemptId: att2 });
+    assert.equal(tab.connected, true);
+    assert.equal(tab._sshReconnectNotice, false, 'the success consumed the notice');
+    assert.ok(toasts.some(t => t.m.startsWith('SSH 已重新连接')),
+        'eventual success toasts as a REconnect (old code: plain "SSH 已连接")');
+    assert.ok(!toasts.some(t => t.m.startsWith('SSH 已连接:')),
+        'no plain-connected toast for a reconnect cycle');
+});
+
+test('U-15 (guard): a terminal failure still clears the notice and never retries', async () => {
+    const ctx = loadVm();
+    const invokes = patchInvoke(ctx);
+    const toasts = captureToasts(ctx);
+    const tab = { id: 't_rg', name: 'rg', type: 'ssh', host: 'h1', user: 'u1', connected: false, tabId: null, term: null, fitAddon: null };
+    ctx.TabManager.tabs.push(tab);
+
+    ctx.TabManager.reconnectTab(tab.id);
+    ctx.__tq.advance(500);
+    await flush();
+    const att1 = tab._pendingAttempt;
+    assert.ok(att1);
+
+    // Deterministic failure (auth): no retry, the shared failure applier runs.
+    ctx.__emit('ssh-error', { tabId: null, attemptId: att1, error: 'authentication failed' });
+    assert.equal(tab._sshRetried || 0, 0, 'no retry budget spent on a deterministic error');
+    assert.equal(tab._sshReconnectNotice, false, 'terminal failure clears the notice');
+    assert.ok(toasts.some(t => t.isErr && t.m.startsWith('SSH 连接失败')), 'failure toast shown');
+
+    ctx.__tq.advance(15000); // well past every backoff step
+    await flush();
+    assert.equal(connects(invokes).length, 1, 'a deterministic failure never schedules a retry');
+});
+
