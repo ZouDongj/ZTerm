@@ -1039,6 +1039,11 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ssh-edit-panes{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:1fr}
 .ssh-edit-footer .btn-primary,.ssh-edit-footer .btn-outline{height:28px;border-radius:7px;padding:0 11px;font-size:11px}
 #ssh-tab-conn,#ssh-tab-scripts{min-height:300px}
+/* Keep the dialog usable at the 600×400 minimum window: cap the panel, let
+   the body scroll, and pin the footer to the visible bottom edge. */
+#overlay-ssh-edit .panel{max-height:calc(100vh - 24px)}
+#overlay-ssh-edit .ssh-edit-body{min-height:0;overflow-y:auto}
+#overlay-ssh-edit .ssh-edit-footer{position:sticky;bottom:0;background:rgb(22,25,31)}
 
 @keyframes tabFadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 

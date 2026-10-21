@@ -757,7 +757,7 @@
       <div class="panel-tab active" data-tab="conn" onclick="switchSSHTab('conn')">连接</div>
       <div class="panel-tab" data-tab="scripts" onclick="switchSSHTab('scripts')">登录脚本<span id="ls-tab-badge" class="panel-tab-badge"></span></div>
     </div>
-    <div class="ssh-edit-body" style="padding:0 20px 20px">
+    <div class="ssh-edit-body" style="padding:0 20px">
       <div class="ssh-edit-panes">
       <!-- Connection tab -->
       <div id="ssh-tab-conn" class="ssh-tab-panel active" style="flex-direction:column;gap:12px">
@@ -863,7 +863,7 @@
         <span class="form-section-add" onclick="addLoginScriptRow()" style="align-self:flex-start">+ 添加脚本</span>
       </div>
       </div>
-      <div class="ssh-edit-footer" style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      <div class="ssh-edit-footer" style="display:flex;gap:8px;justify-content:flex-end;padding:12px 0 20px">
         <button class="btn-outline" onclick="closeSSHEdit()">取消</button>
         <button class="btn-primary" id="ssh-edit-save-btn" onclick="saveSSHEdit()">保存</button>
       </div>
