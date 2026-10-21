@@ -256,3 +256,53 @@ test('U-10: a custom hex checks no preset but keeps the group keyboard-reachable
     assert.equal(tabStopIdx(ctx), 0, 'the tab stop falls back to the first swatch');
 });
 
+test('U-11: arrows/Home/End move and select; Space/Enter stay on the native click path', () => {
+    const ctx = loadAccentVm();
+    const input = ctx.document.getElementById('set-accent');
+    input.value = '#61afef';
+    ctx.renderAccentSwatches();
+    const container = ctx.document.getElementById('accent-swatches');
+    const sw = swatchesOf(ctx);
+
+    sw[0].focus();
+    container.dispatch('keydown', mkEvt({ key: 'ArrowRight' }));
+    assert.equal(ctx.document.activeElement, sw[1], 'arrow moves focus');
+    assert.equal(input.value.toUpperCase(), '#9CA3FF', 'arrow also selects');
+    assert.equal(checkedIdx(ctx), 1);
+    assert.equal(tabStopIdx(ctx), 1, 'tab stop follows the selection');
+
+    container.dispatch('keydown', mkEvt({ key: 'ArrowLeft' }));
+    container.dispatch('keydown', mkEvt({ key: 'ArrowLeft' }));
+    assert.equal(ctx.document.activeElement, sw[7], 'ArrowLeft wraps around the start');
+    assert.equal(input.value.toUpperCase(), '#87CEEB');
+
+    container.dispatch('keydown', mkEvt({ key: 'Home' }));
+    assert.equal(ctx.document.activeElement, sw[0]);
+    assert.equal(input.value.toUpperCase(), '#61AFEF');
+    container.dispatch('keydown', mkEvt({ key: 'End' }));
+    assert.equal(ctx.document.activeElement, sw[7]);
+
+    // Space/Enter must keep the native button activation (click →
+    // selectAccent): the radiogroup handler neither prevents the default nor
+    // changes the selection for them.
+    const before = input.value;
+    for (const key of [' ', 'Enter']) {
+        const ev = mkEvt({ key });
+        container.dispatch('keydown', ev);
+        assert.equal(ev.defaultPrevented, false, `${key} not intercepted`);
+        assert.equal(input.value, before, `${key} does not move the selection by itself`);
+    }
+});
+
+test('U-11 (control): a swatch click still selects and roves the tab stop', () => {
+    const ctx = loadAccentVm();
+    ctx.document.getElementById('set-accent').value = '#61afef';
+    ctx.renderAccentSwatches();
+    const sw = swatchesOf(ctx);
+
+    sw[2].click();
+
+    assert.equal(ctx.document.getElementById('set-accent').value, '#8BC4FF');
+    assert.equal(checkedIdx(ctx), 2);
+    assert.equal(tabStopIdx(ctx), 2);
+});

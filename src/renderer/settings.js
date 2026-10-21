@@ -634,6 +634,7 @@ function renderAccentSwatches() {
     container.setAttribute('role', 'radiogroup');
     container.setAttribute('aria-label', '强调色预设');
     container.innerHTML = '';
+    let anyOn = false;
     colors.forEach(c => {
         const sw = document.createElement('button');
         sw.type = 'button';
@@ -643,7 +644,6 @@ function renderAccentSwatches() {
         sw.setAttribute('data-color', c.replace('#', ''));
         sw.title = c;
         sw.setAttribute('role', 'radio');
-        sw.setAttribute('tabindex', '0');
         // WCAG relative luminance: pick the tick that stays visible on any
         // current or future preset (0.179 matches the shadcn recipe).
         const r = parseInt(c.slice(1, 3), 16) / 255;
@@ -654,10 +654,37 @@ function renderAccentSwatches() {
         sw.style.setProperty('--swatch-tick', lum > 0.179 ? '#111111' : '#ffffff');
         const on = c.toUpperCase() === current.toUpperCase();
         sw.setAttribute('aria-checked', on ? 'true' : 'false');
+        // Roving tabindex: one tab stop for the whole group, on the checked
+        // swatch (or the first when a custom hex checks nothing).
+        sw.setAttribute('tabindex', on ? '0' : '-1');
+        anyOn = anyOn || on;
         if (on) sw.classList.add('active');
         sw.onclick = () => selectAccent(c);
         container.appendChild(sw);
     });
+    if (!anyOn && container.children[0]) container.children[0].setAttribute('tabindex', '0');
+    // Radiogroup keyboard model: arrows/Home/End move AND select (the roving
+    // tab stop follows the selection via updateAccentDot). Space/Enter keep
+    // their native button activation (click → selectAccent). Assigned, not
+    // bound, so re-renders stay idempotent.
+    container.onkeydown = (e) => {
+        const swatches = [...container.querySelectorAll('.accent-swatch')];
+        if (!swatches.length) return;
+        let idx;
+        if (e.key === 'Home') idx = 0;
+        else if (e.key === 'End') idx = swatches.length - 1;
+        else if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+            const dir = (e.key === 'ArrowRight' || e.key === 'ArrowDown') ? 1 : -1;
+            const cur = swatches.indexOf(document.activeElement);
+            idx = (cur < 0 ? 0 : cur + dir + swatches.length) % swatches.length;
+        } else return;
+        e.preventDefault();
+        const target = swatches[idx];
+        target.focus();
+        // Route through the swatch's own click so keyboard selection shares
+        // the exact click path (canonical-case hex, single selection owner).
+        target.click();
+    };
 }
 
 // Font lists barely change while the app runs; cache them so each settings
