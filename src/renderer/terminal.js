@@ -373,7 +373,7 @@ function _buildTerminalOptions() {
         lineHeight: c.lineHeight || 1.125,
         allowTransparency: true,
         scrollback: c.scrollback ?? 10000,
-        minimumContrastRatio: c.minimumContrastRatio || 4,
+        minimumContrastRatio: c.minimumContrastRatio || 1,
         drawBoldTextInBrightColors: false,
         // The WebGL smooth-cursor adapter animates the real xterm caret, so
         // the theme caret color must stay visible (the overlay-era

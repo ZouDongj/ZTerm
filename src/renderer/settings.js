@@ -918,7 +918,7 @@ function saveAppearance() {
     const panelEdge = getToggle('toggle-panel-edge');
     const sftpMaterial = getToggle('toggle-sftp-material');
     const terminalScheme = document.getElementById('set-terminal-scheme')?.value || 'onedark';
-    const minimumContrastRatio = parseFloat(document.getElementById('set-contrast')?.value) || 4;
+    const minimumContrastRatio = parseFloat(document.getElementById('set-contrast')?.value) || 1;
 
     const config = { fontFamily, uiFont, uiFallbackFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, paneRing, panelEdge, sftpMaterial, terminalScheme, minimumContrastRatio, theme: 'dark' };
     _settingsConfig = { ..._settingsConfig, ...config };
