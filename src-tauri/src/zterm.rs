@@ -1344,6 +1344,18 @@ pub async fn pty_create(
         COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     );
 
+    // A local-session create has no other failure signal: the renderer claims
+    // a pty-created event by requestId, and a silent error return leaves the
+    // tab blank forever. Each failure below therefore announces itself with a
+    // spawnError payload (empty tabId: the session was never registered; the
+    // renderer claims by requestId alone) before the error return.
+    let emit_spawn_error = |app: &AppHandle, request_id: &str, msg: &str| {
+        let _ = app.emit(
+            "pty-created",
+            json!({ "tabId": "", "requestId": request_id, "spawnError": msg }),
+        );
+    };
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -1352,7 +1364,11 @@ pub async fn pty_create(
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|e| format!("openpty failed: {e}"))?;
+        .map_err(|e| {
+            let msg = format!("openpty failed: {e}");
+            emit_spawn_error(&app, &request_id, &msg);
+            msg
+        })?;
 
     let mut cmd = CommandBuilder::new(shell);
     for arg in &shell_args {
@@ -1368,15 +1384,33 @@ pub async fn pty_create(
     let child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| format!("spawn failed: {e}"))?;
+        .map_err(|e| {
+            // os error 267 ("The directory name is invalid") is the common
+            // case: the profile's startup directory no longer exists. Name
+            // the cwd so the user knows what to fix instead of a blank tab.
+            let msg = match &cwd {
+                Some(dir) => format!("spawn failed (cwd: {dir}): {e}"),
+                None => format!("spawn failed: {e}"),
+            };
+            emit_spawn_error(&app, &request_id, &msg);
+            msg
+        })?;
     let mut reader = pair
         .master
         .try_clone_reader()
-        .map_err(|e| format!("reader failed: {e}"))?;
+        .map_err(|e| {
+            let msg = format!("reader failed: {e}");
+            emit_spawn_error(&app, &request_id, &msg);
+            msg
+        })?;
     let writer = pair
         .master
         .take_writer()
-        .map_err(|e| format!("writer failed: {e}"))?;
+        .map_err(|e| {
+            let msg = format!("writer failed: {e}");
+            emit_spawn_error(&app, &request_id, &msg);
+            msg
+        })?;
 
     let loose = std::env::var("ZTERM_PTY_COALESCE")
         .map(|v| v.trim() == "loose")
