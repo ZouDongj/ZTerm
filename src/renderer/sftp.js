@@ -570,7 +570,7 @@ const SFTP = {
             const addSep = () => {
                 const sep = document.createElement('span');
                 sep.className = 'sep';
-                sep.textContent = '/';
+                sep.textContent = '›';
                 el.appendChild(sep);
             };
             if (hidden > 0 && parts.length > 1) {

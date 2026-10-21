@@ -219,7 +219,6 @@ body.tab-dragging{user-select:none}
 .tab:hover .tab-reconnect-normal,.tab-reconnect-normal:focus-visible{opacity:0.5;pointer-events:auto}
 .tab-reconnect-normal:hover{opacity:1!important;color:rgb(var(--accent-rgb))}
 .tab-reconnect-busy{opacity:0.72;pointer-events:none}
-.tab-reconnect-busy svg{animation:status-spin 0.8s linear infinite}
 #btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-2);cursor:pointer;font-size:16px;transition:all 0.12s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
 #btn-add-tab:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 
@@ -660,10 +659,9 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 /* Address field: one container for the breadcrumb AND the path editor
    (the input replaces the crumbs in place, seamlessly). Entry: single
    click on empty space / icon / "…" crumb, or double-click anywhere. */
-.sftp-pathbar{display:flex;align-items:center;gap:6px;height:28px;margin:0 18px 10px;padding:0 9px;background:rgba(255,255,255,0.045);border-radius:8px;flex-shrink:0;transition:box-shadow 0.12s}
-.sftp-pathbar:focus-within{box-shadow:inset 0 0 0 1.5px rgba(var(--accent-rgb),0.4)}
+.sftp-pathbar{display:flex;align-items:center;gap:6px;padding:6px 18px 10px;flex-shrink:0}
 .sftp-pathbar-icon{display:flex;align-items:center;color:var(--text-3);flex-shrink:0}
-.sftp-breadcrumb{display:flex;align-items:center;gap:2px;flex:1;min-width:0;font-family:"Cascadia Code",Consolas,monospace;font-size:11.5px;color:var(--text-2);overflow:hidden;white-space:nowrap;user-select:none}
+.sftp-breadcrumb{display:flex;align-items:center;gap:4px;flex:1;min-width:0;font-size:12px;color:var(--text-2);overflow:hidden;white-space:nowrap;user-select:none}
 .sftp-breadcrumb span{cursor:pointer;padding:2px 6px;border-radius:5px;transition:all 0.12s;flex-shrink:0}
 /* Overlong paths: middle segments collapse into a "…" crumb (root and the
    current directory stay visible); a still-overlong trailing segment ends
@@ -674,7 +672,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .sftp-breadcrumb span:hover{background:rgba(var(--accent-rgb),0.12);color:var(--text-1)}
 .sftp-breadcrumb .sep{color:var(--text-3);cursor:default;opacity:0.6}
 .sftp-breadcrumb .sep:hover{background:none;color:var(--text-3)}
-.sftp-breadcrumb .seg-root{display:flex;align-items:center;padding:2px 5px;color:var(--text-3)}
+.sftp-breadcrumb .seg-root{display:flex;align-items:center;padding:2px 6px;color:var(--text-3)}
 .sftp-breadcrumb .seg-root:hover{color:var(--text-1)}
 .sftp-breadcrumb .seg-root svg{display:block}
 .sftp-breadcrumb .more{color:var(--text-3)}
