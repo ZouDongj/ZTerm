@@ -45,3 +45,27 @@ test('U-03: search bar open state recenters from the dock reserve, no dead right
   assert.ok(!anim.includes('right'), 'no right transition remains');
 });
 
+// ── U-08: dock-plain + light terminal scheme ──
+
+test('U-08: light scheme keeps the dark dock material instead of the light canvas', () => {
+  const plain = ruleBody('.window.dock-plain .sftp-window');
+  assert.ok(plain.includes('background:var(--term-bg)'), 'plain dock still follows the scheme canvas');
+  const light = ruleBody('.window.dock-plain.scheme-light .sftp-window');
+  assert.ok(light.includes('background:var(--acrylic)'), 'light scheme falls back to the dark material');
+  assert.ok(light.includes('backdrop-filter:blur('), 'light scheme restores the material blur');
+});
+
+test('U-08: scheme-light marker derives from the COLORFGBG luminance test', () => {
+  assert.match(stateSrc, /classList\.toggle\('scheme-light', colorFgbgForBackground\(theme\.background\) === '0;15'\)/,
+    'applyTerminalScheme must derive the marker with the shared luminance test');
+  const schemesMatch = stateSrc.match(/const TERMINAL_SCHEMES = (\{[\s\S]*?\n\});/);
+  assert.ok(schemesMatch, 'TERMINAL_SCHEMES literal found in state.js');
+  const SCHEMES = vm.runInNewContext(`(${schemesMatch[1]})`);
+  for (const key of ['oneHalfLight', 'solarizedLight', 'tangoLight', 'vscodeLightModern']) {
+    assert.equal(colorFgbgForBackground(SCHEMES[key].background), '0;15', `${key} must be detected as light`);
+  }
+  for (const key of ['onedark', 'inkFamily', 'obsidian']) {
+    assert.equal(colorFgbgForBackground(SCHEMES[key].background), '15;0', `${key} must stay dark`);
+  }
+});
+

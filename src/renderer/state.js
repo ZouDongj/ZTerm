@@ -258,6 +258,12 @@ function getTerminalTheme() {
 function applyTerminalScheme() {
     const theme = getTerminalTheme();
     document.documentElement.style.setProperty('--term-bg', theme.background);
+    // Light-scheme marker for the plain SFTP dock (app.css `.dock-plain`):
+    // on a light canvas the white-alpha text ladder is unreadable, so the
+    // dock keeps the dark material there. Same WCAG luminance test that
+    // seeds COLORFGBG (color-utils.js); '0;15' means a light background.
+    const win = document.querySelector('.window');
+    if (win) win.classList.toggle('scheme-light', colorFgbgForBackground(theme.background) === '0;15');
     // The v12 frame is an opaque Ink/acrylic material system: its surfaces are
     // fixed by app.css and must not be re-derived from the terminal scheme
     // background. Only the terminal canvas (--term-bg) follows the scheme.

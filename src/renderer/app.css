@@ -79,6 +79,13 @@ body{
   -webkit-backdrop-filter:none;backdrop-filter:none;
   box-shadow:var(--shadow-pane)}
 .window.dock-plain .sftp-window::before{display:none}
+/* dock-plain on a light terminal scheme (marker set by applyTerminalScheme):
+   the white-alpha text ladder is unreadable on a light canvas and the app
+   chrome is dark-only, so the dock keeps the dark material surface instead of
+   following --term-bg. */
+.window.dock-plain.scheme-light .sftp-window{
+  background:var(--acrylic);
+  -webkit-backdrop-filter:blur(26px) saturate(1.45);backdrop-filter:blur(26px) saturate(1.45)}
 /* Startup animation: plays once after the window state is restored and shown (borrowing Tabby's approach: pure ease-out fade-in, no scaling) */
 .window.win-in{animation:zterm-window-in 0.4s ease-out}
 @keyframes zterm-window-in{from{opacity:0}to{opacity:1}}
