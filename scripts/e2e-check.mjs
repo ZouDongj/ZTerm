@@ -1506,6 +1506,145 @@ async function main() {
         sftpCoalesce.rows.includes('one.txt') && sftpCoalesce.rows.includes('two.txt'),
         JSON.stringify({ sftpCoalesceUps, sftpCoalesceFirst, sftpCoalesceFollowup, ...sftpCoalesce }));
 
+      // I) U-02 breadcrumb single-click guard (REAL mouse, CDP Input domain):
+      //    the root crumb's glyph is an SVG child whose className is an
+      //    SVGAnimatedString — the old class-word test (/\bseg\b/ on
+      //    String(target.className)) could never match it, so a real click
+      //    on the icon fell through to the bar's edit branch and opened the
+      //    path editor instead of navigating. The fix resolves the click
+      //    through closest('.seg') and makes the glyph pointer-transparent,
+      //    so the REAL hit target inside the icon is the .seg-root span.
+      //    Every click below is dispatched at the element's rendered
+      //    position — the defect only exists on the real event chain, so
+      //    calling handlers directly would prove nothing.
+      async function u02ClickAt(x, y, clickCount = 1) {
+        const seq = clickCount === 2
+          ? [['mousePressed', 1], ['mouseReleased', 1], ['mousePressed', 2], ['mouseReleased', 2]]
+          : [['mousePressed', 1], ['mouseReleased', 1]];
+        for (const [type, cc] of seq) {
+          await cdp.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: cc });
+        }
+        await sleep(200);
+      }
+      const u02EditorState = () => cdp.eval(`(() => ({
+        editor: !!document.querySelector('#sftp-breadcrumb input.sftp-path-input'),
+        pendingNav: window.__sftpGate.pending(c => c.cmd === 'sftp-readdir').length,
+      }))()`);
+      const u02CloseEditor = () => cdp.eval(`(() => {
+        const i = document.querySelector('#sftp-breadcrumb input.sftp-path-input');
+        if (i) i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        return !document.querySelector('#sftp-breadcrumb input.sftp-path-input');
+      })()`);
+      const u02Center = (sel) => cdp.eval(`(() => {
+        const el = document.querySelector(${JSON.stringify(sel)});
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 ? { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } : null;
+      })()`);
+      // Panel state after H): open on A at /srv/app — root + two segments +
+      // separators on screen, and a dry gate.
+      const u02Pre = await cdp.eval(`(() => ({
+        open: document.getElementById('overlay-sftp').classList.contains('open'),
+        path: SFTP._path,
+        seps: document.querySelectorAll('#sftp-breadcrumb .sep').length,
+        pending: window.__sftpGate.pending().length,
+      }))()`);
+      // Non-segment single clicks still open the editor: a separator, the
+      // "…" crumb (produced by the real overflow collapse) and blank bar
+      // space — none may start a navigation.
+      const sepPos = await u02Center('#sftp-breadcrumb .sep');
+      let afterSep = null, sepClosed = false;
+      if (sepPos) {
+        await u02ClickAt(sepPos.x, sepPos.y);
+        afterSep = await u02EditorState();
+        sepClosed = afterSep.editor ? await u02CloseEditor() : false;
+      }
+      const blankPos = await cdp.eval(`(() => {
+        const bar = document.getElementById('sftp-pathbar');
+        const bc = document.getElementById('sftp-breadcrumb');
+        if (!bar || !bc) return null;
+        const pr = bar.getBoundingClientRect(), cr = bc.getBoundingClientRect();
+        const x = Math.min(pr.right - 8, cr.right + 12);
+        return x > cr.right ? { x: Math.round(x), y: Math.round(pr.top + pr.height / 2) } : null;
+      })()`);
+      let afterBlank = null, blankClosed = false;
+      if (blankPos) {
+        await u02ClickAt(blankPos.x, blankPos.y);
+        afterBlank = await u02EditorState();
+        blankClosed = afterBlank.editor ? await u02CloseEditor() : false;
+      }
+      // Force the real overflow collapse to expose the "…" crumb.
+      const moreShrunk = await cdp.eval(`(() => {
+        const bc = document.getElementById('sftp-breadcrumb');
+        bc.style.maxWidth = '64px';
+        SFTP._renderBreadcrumb();
+        return !!bc.querySelector('.more');
+      })()`);
+      const morePos = moreShrunk ? await u02Center('#sftp-breadcrumb .more') : null;
+      let afterMore = null, moreClosed = false;
+      if (morePos) {
+        await u02ClickAt(morePos.x, morePos.y);
+        afterMore = await u02EditorState();
+        moreClosed = afterMore.editor ? await u02CloseEditor() : false;
+      }
+      await cdp.eval(`(() => { const bc = document.getElementById('sftp-breadcrumb'); bc.style.maxWidth = ''; SFTP._renderBreadcrumb(); return true; })()`);
+      check('SFTP 面包屑：分隔符/「…」/空白单击仍进入路径编辑（不导航，U-02 对照）',
+        u02Pre.open === true && u02Pre.path === '/srv/app' && u02Pre.seps >= 1 && u02Pre.pending === 0 &&
+        !!sepPos && !!afterSep && afterSep.editor === true && afterSep.pendingNav === 0 && sepClosed === true &&
+        !!blankPos && !!afterBlank && afterBlank.editor === true && afterBlank.pendingNav === 0 && blankClosed === true &&
+        moreShrunk === true && !!morePos && !!afterMore && afterMore.editor === true && afterMore.pendingNav === 0 && moreClosed === true,
+        JSON.stringify({ u02Pre, sepPos, afterSep, blankPos, afterBlank, moreShrunk, morePos, afterMore }));
+      // Double-click anywhere still edits: on the icon itself the gesture's
+      // first click starts the real navigation to /, and the dblclick entry
+      // must preempt it (the pending readdir goes stale) and open the editor.
+      const iconPosDbl = await u02Center('#sftp-breadcrumb .seg-root svg');
+      let afterDbl = null, dblNav = 0, dblClosed = false;
+      if (iconPosDbl) {
+        await u02ClickAt(iconPosDbl.x, iconPosDbl.y, 2);
+        afterDbl = await u02EditorState();
+        dblNav = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.path === '/').length`);
+        for (let i = 0; i < dblNav; i++) {
+          await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/', { files: [] })`);
+        }
+        dblClosed = afterDbl.editor ? await u02CloseEditor() : false;
+      }
+      check('SFTP 面包屑：根目录图标双击仍打开路径编辑器并抢占首次单击的导航',
+        !!iconPosDbl && !!afterDbl && afterDbl.editor === true && dblNav >= 1 && dblClosed === true,
+        JSON.stringify({ iconPosDbl, afterDbl, dblNav }));
+      // THE regression pin: a single real click on the root icon navigates
+      // to / and never opens the editor. Pre-fix the same click's real
+      // target was the SVG, the guard missed it, and the bar's edit branch
+      // preempted the just-started navigation — editor on screen and the
+      // listing never moved.
+      const iconPos = await u02Center('#sftp-breadcrumb .seg-root svg');
+      const iconHit = iconPos ? await cdp.eval(`(() => {
+        const el = document.elementFromPoint(${iconPos.x}, ${iconPos.y});
+        return el ? { tag: el.tagName, inSeg: !!el.closest('.seg') } : null;
+      })()`) : null;
+      let afterIcon = null;
+      if (iconPos) {
+        await u02ClickAt(iconPos.x, iconPos.y);
+        afterIcon = await cdp.eval(`(() => {
+          const nav = window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.path === '/')[0] || null;
+          return {
+            editor: !!document.querySelector('#sftp-breadcrumb input.sftp-path-input'),
+            nav: nav ? { tabId: nav.args.tabId, path: nav.args.path } : null,
+          };
+        })()`);
+        await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/', { files: [{ name: 'root-note.txt', isDir: false, size: 1, mtime: 0 }] })`);
+      }
+      await sleep(300);
+      const rootRendered = await cdp.eval(`(() => ({
+        path: SFTP._path,
+        seps: document.querySelectorAll('#sftp-breadcrumb .sep').length,
+        rows: [...document.querySelectorAll('#sftp-body .sftp-item-name')].map(e => e.textContent),
+      }))()`);
+      check('SFTP 面包屑：根目录图标真实单击导航到 / 且不打开路径编辑器（U-02）',
+        !!iconPos && !!iconHit && iconHit.inSeg === true && !!afterIcon &&
+        afterIcon.editor === false && !!afterIcon.nav && afterIcon.nav.tabId === A && afterIcon.nav.path === '/' &&
+        rootRendered.path === '/' && rootRendered.seps === 0 && rootRendered.rows.includes('root-note.txt'),
+        JSON.stringify({ iconPos, iconHit, afterIcon, rootRendered }));
+
       // Unexpected action rejections recorded by the gate fail the section
       // explicitly instead of dying as background console errors.
       const sftpGateErrors = await cdp.eval(`window.__sftpGate ? window.__sftpGate.errors.slice() : ['gate-missing']`);

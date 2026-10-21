@@ -287,6 +287,68 @@ test('single click on empty address-bar space opens the editor; segment clicks a
     assert.ok(input && input.value === '/srv/app', 'prefilled with the current path');
 });
 
+// U-02 regression: the root crumb's drive glyph is an SVG child of the .seg
+// span. An SVG element's className is an SVGAnimatedString (String() gives
+// "[object SVGAnimatedString]"), which the bar's former /\bseg\b/ class-word
+// guard could never match — the click fell through to the edit entry and
+// opened the path editor instead of navigating to /.
+test('single click on the root crumb SVG glyph navigates to / and never opens the editor', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+    const bar = vm.ctx.document.getElementById('sftp-pathbar');
+    const root = vm.els.breadcrumb.children.find(c => c.className === 'seg seg-root');
+    assert.ok(root, 'root crumb rendered');
+
+    // Fake-DOM modeling note: assigning innerHTML does not materialize the
+    // glyph's markup children; stage the SVG child by hand with the real
+    // bug's className shape (an SVGAnimatedString-like object).
+    const svg = vm.ctx.document.createElement('svg');
+    svg.className = { toString: () => '[object SVGAnimatedString]' };
+    root.appendChild(svg);
+
+    // Real event order for a click on the glyph: the crumb span's own click
+    // listener (navigate('/')) runs during the bubble at the span, then the
+    // bar's click handler at the bar.
+    root.dispatch('click', {});
+    bar.onclick({ target: svg });
+    assert.equal(vm.SFTP._editingPath, false, 'glyph click must not open the editor');
+    assert.ok(!vm.els.breadcrumb.children.some(c => c.tagName === 'INPUT'), 'no editor input mounted');
+    const nav = vm.pending('sftp-readdir', k => k.args.path === '/')[0];
+    assert.ok(nav, "glyph click navigates to '/'");
+    vm.settle(nav, { files: [] });
+    await vm.drain();
+    assert.equal(vm.SFTP._path, '/', "navigation to '/' completed");
+});
+
+test('after the closest guard, separators still edit and plain crumbs still navigate (controls)', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+    const bar = vm.ctx.document.getElementById('sftp-pathbar');
+
+    // A separator is a sibling of the segments: closest resolves no .seg and
+    // the single click still edits (Explorer/Dolphin convention).
+    const sep = vm.els.breadcrumb.children.find(c => c.className === 'sep');
+    assert.ok(sep, 'separator rendered');
+    bar.onclick({ target: sep });
+    assert.equal(vm.SFTP._editingPath, true, 'separator click still opens the editor');
+    // Fake-DOM modeling note: end the edit as existing tests do (clear the
+    // children a real DOM's innerHTML='' would have removed, then re-render).
+    vm.els.breadcrumb.children.length = 0;
+    vm.SFTP._renderBreadcrumb();
+
+    // A plain crumb click navigates its own path and never edits.
+    const seg = vm.els.breadcrumb.children.find(c => c.className === 'seg' && c.textContent === 'srv');
+    assert.ok(seg, 'parent segment rendered');
+    seg.dispatch('click', {});
+    bar.onclick({ target: seg });
+    assert.equal(vm.SFTP._editingPath, false, 'segment click never opens the editor');
+    const nav = vm.pending('sftp-readdir', k => k.args.path === '/srv')[0];
+    assert.ok(nav, 'segment click issued its navigation');
+    vm.settle(nav, { files: [] });
+    await vm.drain();
+    assert.equal(vm.SFTP._path, '/srv', 'segment navigation completed');
+});
+
 test('overlong paths collapse middle segments into a "…" crumb (root and current directory stay)', async () => {
     const vm = await loadSftpVm();
     await openOn(vm, 'sessA', '/a/bb/ccc/dddd', []);

@@ -589,9 +589,8 @@ const SFTP = {
         // crumb while the bar overflows. The guaranteed invariant is that
         // root and the current directory stay visible — a long directory
         // name can still ellipsize-fill the whole bar, so the edit entry
-        // never relies on empty space alone: the icon, separators and the
-        // "…" crumb are clickable non-segment space, and double-click works
-        // anywhere. The "…" crumb is deliberately not a segment: its click
+        // never relies on empty space alone: separators and the "…" crumb
+        // are clickable non-segment space, and double-click works anywhere. The "…" crumb is deliberately not a segment: its click
         // falls through to the bar's edit entry.
         let hidden = 0;
         while (hidden < parts.length - 1 && this._crumbOverflows(el)) {
@@ -614,19 +613,21 @@ const SFTP = {
             this._crumbRO.observe(el);
         }
         // Edit entries (Explorer/Dolphin convention): a single click on
-        // empty space — or the icon, a separator, the "…" crumb — edits the
-        // path; a double-click anywhere (segments included) edits too.
-        // Segment single clicks navigate and never reach the edit branch
-        // (.seg). Both entries route through _editPathPreempt so a
-        // navigation the gesture itself started is superseded first; the
-        // input also keeps the focus _editPath gives it because neither
-        // handler runs ahead of the press's default focus action (the
-        // tab-rename input works the same way).
+        // empty space — or a separator, the "…" crumb — edits the path; a
+        // double-click anywhere (segments included) edits too. Segment
+        // single clicks navigate and never reach the edit branch: closest
+        // resolves the click to its .seg wherever inside one it lands — the
+        // root glyph's SVG child included, whose SVGAnimatedString className
+        // a class-word test could never see. Both entries route through
+        // _editPathPreempt so a navigation the gesture itself started is
+        // superseded first; the input also keeps the focus _editPath gives
+        // it because neither handler runs ahead of the press's default
+        // focus action (the tab-rename input works the same way).
         const bar = document.getElementById('sftp-pathbar');
         if (bar) {
             bar.onclick = (e) => {
                 const t = e.target;
-                if (t && /\bseg\b/.test(String(t.className || ''))) return;
+                if (t && t.closest?.('.seg')) return;
                 this._editPathPreempt(this._path);
             };
             bar.ondblclick = () => this._editPathPreempt(this._path);
