@@ -999,6 +999,18 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .cust-combo .dd-option{padding:8px 12px;font-size:12px;color:var(--text-2);cursor:pointer;transition:background 0.12s;font-family:inherit}
 .cust-combo .dd-option:hover,.cust-combo .dd-option.active{background:rgba(var(--accent-rgb),0.1);color:var(--text-1)}
 .cust-combo .dd-option.create{color:#8fc1ee;border-top:1px solid rgba(255,255,255,0.05);margin-top:2px;padding-top:10px;font-style:italic}
+/* Font combobox (settings font fields): the cust-combo base is dialog-sized
+   (12px); inside settings cards it follows the field system (34px / 14px),
+   with the same dropdown chevron the cust-dropdown trigger carries. */
+.font-combo{width:100%;max-width:220px}
+.font-combo input{height:var(--field-height);font-size:var(--field-font-size);padding-right:30px;cursor:text}
+.font-combo::after{content:'';position:absolute;right:12px;top:50%;transform:translateY(-50%);width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid var(--text-3);pointer-events:none;transition:transform 0.2s}
+.font-combo:has(.dd-menu.open)::after{transform:translateY(-50%) rotate(180deg)}
+.font-combo .dd-menu{max-height:240px}
+.font-combo .dd-option{font-size:14px}
+.font-combo .dd-option.selected{background:rgba(var(--accent-rgb),0.16);color:var(--text-1);font-weight:500}
+.font-combo .dd-option.dd-more,.font-combo .dd-option.dd-none{color:var(--text-3);cursor:default;font-size:12px}
+.font-combo .dd-option.dd-more:hover,.font-combo .dd-option.dd-none:hover{background:none;color:var(--text-3)}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 
 /* ── Panel tabs (SSH edit etc.) ── */

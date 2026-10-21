@@ -3,6 +3,8 @@
 // ── Custom dropdown (replaces native <select class="styled-select">) ──
 function convertSelects() {
     document.querySelectorAll('select.styled-select').forEach(sel => {
+        // Font selects use the filterable combo instead of the plain dropdown.
+        if (sel.dataset.combo === 'font') { buildFontCombo(sel); return; }
         // Remove existing custom dropdown wrapper if present (so we can rebuild with new options)
         const existingWrapper = sel.parentNode && sel.parentNode.querySelector('.cust-dropdown');
         // Skip the rebuild when options + selection are unchanged: with ~1000
@@ -65,6 +67,209 @@ function convertSelects() {
         sel.style.display = 'none';
         sel.parentNode.insertBefore(wrapper, sel);
     });
+}
+
+// ── Font combobox (Tabby-style filterable input over the hidden select) ──
+// The four font selects (data-combo="font") keep the native <select> as their
+// data model — option filling (_buildFontSelects), value restore and the
+// saveAppearance reads are unchanged. The combo replaces only the
+// cust-dropdown presentation with an input that filters the option list, so
+// ~1000 system fonts stay navigable by typing. Free text is a legal value: it
+// becomes an extra option exactly like _buildFontSelects' missing-font one.
+
+// Resolve what a font combo should do with committed text (blur / Enter).
+// options: bare [{ value, label }] so the rule stays DOM-free and testable.
+// Returns { action: 'select', index } | { action: 'extra', value, label } |
+// { action: 'none' }.
+function _resolveFontCommit(options, text, selectId) {
+    const q = (text || '').trim();
+    if (!q) {
+        // Empty input selects the sentinel option: '' for the UI/fallback
+        // selects ('系统默认' / '无'), 'monospace' for the terminal font.
+        let idx = options.findIndex(o => o.value === '');
+        if (idx < 0) idx = options.findIndex(o => o.value === 'monospace');
+        return idx >= 0 ? { action: 'select', index: idx } : { action: 'none' };
+    }
+    let idx = options.findIndex(o => o.label === q);
+    if (idx < 0) {
+        const lq = q.toLowerCase();
+        idx = options.findIndex(o => o.label.toLowerCase() === lq);
+    }
+    if (idx >= 0) return { action: 'select', index: idx };
+    // Free text: a font that failed to enumerate, or one that only exists on
+    // the target machine. Mirror _buildFontSelects' extra-option rule,
+    // including the per-field CSS-family suffix.
+    const suffix = selectId === 'set-font' ? ',monospace' : selectId === 'set-ui-font' ? ',sans-serif' : '';
+    return { action: 'extra', value: suffix ? `'${q}'${suffix}` : q, label: q };
+}
+
+function _fontComboDisplay(sel) {
+    const opt = sel.options[sel.selectedIndex];
+    return opt ? opt.textContent : '';
+}
+
+function buildFontCombo(sel) {
+    const existing = sel.parentNode && sel.parentNode.querySelector('.font-combo');
+    if (existing) {
+        // Idempotent refresh (convertSelects runs after every option rebuild /
+        // value restore): sync the input with the programmatic value, but never
+        // clobber text the user is typing right now.
+        const input = existing.querySelector('input');
+        if (input && document.activeElement !== input) input.value = _fontComboDisplay(sel);
+        return;
+    }
+    const wrapper = document.createElement('div');
+    wrapper.className = 'cust-combo font-combo';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.placeholder = '输入以筛选字体';
+    input.value = _fontComboDisplay(sel);
+    const menu = document.createElement('div');
+    menu.className = 'dd-menu';
+    wrapper.appendChild(input);
+    wrapper.appendChild(menu);
+    sel.style.display = 'none';
+    sel.parentNode.insertBefore(wrapper, sel);
+
+    let activeIdx = -1;
+    // Render cap: the full system-font list is ~1000 entries; typing narrows
+    // it quickly, and re-rendering thousands of nodes per keystroke would
+    // stutter the input.
+    const CAP = 300;
+
+    function commitOption(index) {
+        const opt = sel.options[index];
+        if (!opt) return;
+        const changed = sel.selectedIndex !== index;
+        sel.selectedIndex = index;
+        input.value = opt.textContent;
+        menu.classList.remove('open');
+        if (changed) sel.dispatchEvent(new Event('change'));
+    }
+
+    function commitText() {
+        // Enumeration still in flight: no options to match or extend. Restore
+        // the display and leave the configured value untouched (a commit here
+        // would also defeat _fontSelectValue's empty-options guard).
+        if (sel.options.length === 0) { input.value = _fontComboDisplay(sel); return; }
+        const opts = Array.from(sel.options, o => ({ value: o.value, label: o.textContent }));
+        const r = _resolveFontCommit(opts, input.value, sel.id);
+        if (r.action === 'select') {
+            const changed = sel.selectedIndex !== r.index;
+            sel.selectedIndex = r.index;
+            input.value = sel.options[r.index].textContent;
+            if (changed) sel.dispatchEvent(new Event('change'));
+        } else if (r.action === 'extra') {
+            let opt = [...sel.options].find(o => o.value === r.value);
+            if (!opt) {
+                opt = document.createElement('option');
+                opt.value = r.value;
+                opt.textContent = r.label;
+                sel.appendChild(opt);
+            }
+            const changed = sel.selectedIndex !== opt.index;
+            sel.selectedIndex = opt.index;
+            input.value = opt.textContent;
+            if (changed) sel.dispatchEvent(new Event('change'));
+        } else {
+            input.value = _fontComboDisplay(sel);
+        }
+    }
+
+    function renderOptions(filter) {
+        const opts = Array.from(sel.options);
+        // Enumeration still in flight: no list to show, and the free-text hint
+        // would misread "not loaded yet" as "no such font".
+        if (opts.length === 0) { menu.classList.remove('open'); return; }
+        const q = (filter || '').trim().toLowerCase();
+        const matched = q ? opts.filter(o => o.textContent.toLowerCase().includes(q)) : opts;
+        menu.innerHTML = '';
+        matched.slice(0, CAP).forEach(o => {
+            const div = document.createElement('div');
+            div.className = 'dd-option' + (o.index === sel.selectedIndex ? ' selected' : '');
+            div.dataset.optIndex = o.index;
+            div.textContent = o.textContent;
+            // mousedown precedes the input's blur, so pick there; click answers
+            // the real-mouse path that follows it (idempotent no-op by then).
+            const pick = (e) => { e.preventDefault(); commitOption(o.index); };
+            div.addEventListener('mousedown', pick);
+            div.addEventListener('click', pick);
+            menu.appendChild(div);
+        });
+        if (matched.length > CAP) {
+            const more = document.createElement('div');
+            more.className = 'dd-option dd-more';
+            more.textContent = `…共 ${matched.length} 个匹配，继续输入以缩小范围`;
+            menu.appendChild(more);
+        }
+        if (matched.length === 0 && q) {
+            // Free text stays legal: say so instead of showing a dead menu.
+            const none = document.createElement('div');
+            none.className = 'dd-option dd-none';
+            none.textContent = `无匹配字体——将直接使用「${(filter || '').trim()}」`;
+            menu.appendChild(none);
+        }
+        if (matched.length > 0 || q) menu.classList.add('open');
+        else menu.classList.remove('open');
+        activeIdx = -1;
+    }
+
+    // Focus opens the FULL list (Tabby precedent): the current value doubles
+    // as the display text, not as a filter — typing narrows it from there.
+    input.addEventListener('focus', () => renderOptions(''));
+    input.addEventListener('input', () => renderOptions(input.value));
+    // After Esc closed the menu, clicking the still-focused input must reopen
+    // it (neither focus nor input fires in that case) — group-combo precedent.
+    input.addEventListener('mousedown', () => { if (!menu.classList.contains('open')) renderOptions(''); });
+    input.addEventListener('blur', () => {
+        // A keyboard highlight survives Tab/mouse-away: "↓ then leave" commits
+        // the highlighted option, matching native <select> arrow semantics.
+        const items = menu.classList.contains('open') ? [...menu.querySelectorAll('.dd-option[data-opt-index]')] : [];
+        if (activeIdx >= 0 && items[activeIdx]) commitOption(+items[activeIdx].dataset.optIndex);
+        else commitText();
+        setTimeout(() => menu.classList.remove('open'), 150);
+    });
+    input.addEventListener('keydown', (e) => {
+        // IME composition: let the candidate window own Enter/arrows/Esc.
+        if (e.isComposing || e.keyCode === 229) return;
+        const items = [...menu.querySelectorAll('.dd-option[data-opt-index]')];
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (!menu.classList.contains('open')) { renderOptions(input.value); return; }
+            if (!items.length) return;
+            activeIdx = e.key === 'ArrowDown'
+                ? Math.min(activeIdx + 1, items.length - 1)
+                : Math.max(activeIdx - 1, 0);
+            items.forEach((el, i) => el.classList.toggle('active', i === activeIdx));
+            if (items[activeIdx]) items[activeIdx].scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (menu.classList.contains('open') && activeIdx >= 0 && items[activeIdx]) {
+                commitOption(+items[activeIdx].dataset.optIndex);
+            } else {
+                commitText();
+                menu.classList.remove('open');
+            }
+        } else if (e.key === 'Escape') {
+            // Close only the menu; never the settings tab underneath.
+            e.stopPropagation();
+            menu.classList.remove('open');
+        }
+    });
+    // Mousedown anywhere inside the menu must not move focus out of the
+    // input: without this, pressing the menu's scrollbar (or a hint row) would
+    // blur the input and commit the half-typed filter text as a font name.
+    // Option picks already preventDefault on their own; this covers the rest.
+    menu.addEventListener('mousedown', (e) => e.preventDefault());
+    // Keep wheel scrolling inside the open menu from leaking to the settings
+    // page (same guard as the cust-dropdown menu).
+    menu.addEventListener('wheel', (e) => {
+        const isAtTop = menu.scrollTop <= 0 && e.deltaY < 0;
+        const isAtBottom = menu.scrollTop + menu.clientHeight >= menu.scrollHeight && e.deltaY > 0;
+        if (!isAtTop && !isAtBottom) e.stopPropagation();
+    }, { passive: false });
 }
 
 // Close custom dropdowns when clicking outside

@@ -932,6 +932,103 @@ async function main() {
       return el ? getComputedStyle(el).fontFamily : '(无 .btn-primary)';
     })()`);
     check('按钮字体跟随界面字体', btnFont.includes('Consolas'), `btn=${btnFont.slice(0, 50)}`);
+
+    // 11c-F2. Font comboboxes (Tabby-style filterable input over the hidden
+    // native select): the four font fields mount a .font-combo, typing filters
+    // the menu, click/Enter commits to the select + saveAppearance, free text
+    // becomes an extra option, empty input selects the sentinel, Esc closes
+    // only the menu. Runs while the follow toggle is off so all rows show.
+    await cdp.eval(`window.__e2eFontBackup = [_settingsConfig.fontFamily, _settingsConfig.fallbackFont, _settingsConfig.uiFont].join('|'); convertSelects(); 'sync'`);
+    const comboMounted = await cdp.eval(`(() => {
+      const ids = ['set-font', 'set-ui-font', 'set-ui-fallback-font', 'set-fallback-font'];
+      return ids.map(id => {
+        const sel = document.getElementById(id);
+        const w = sel && sel.parentNode.querySelector('.font-combo');
+        return { id, wrapper: !!w, hidden: !!sel && sel.style.display === 'none',
+                 shows: w ? w.querySelector('input').value : null };
+      });
+    })()`);
+    const mountedOk = Array.isArray(comboMounted) && comboMounted.every(r => r.wrapper && r.hidden);
+    check('字体过滤框：四个字段均挂载且原生 select 隐藏', mountedOk === true, JSON.stringify(comboMounted).slice(0, 200));
+    check('字体过滤框：输入框显示当前选中字体裸名', !!comboMounted && comboMounted[1].shows === 'Consolas', JSON.stringify(comboMounted && comboMounted[1]));
+    const filterProbe = await cdp.eval(`(() => {
+      const sel = document.getElementById('set-font');
+      const wrap = sel.parentNode.querySelector('.font-combo');
+      const input = wrap.querySelector('input');
+      input.value = 'consol';
+      input.dispatchEvent(new Event('input'));
+      const opts = [...wrap.querySelectorAll('.dd-option[data-opt-index]')].map(d => d.textContent);
+      return { open: wrap.querySelector('.dd-menu').classList.contains('open'),
+               count: opts.length, allMatch: opts.every(t => t.toLowerCase().includes('consol')) };
+    })()`);
+    check('字体过滤框：输入过滤菜单（忽略大小写子串）', !!filterProbe && filterProbe.open && filterProbe.count > 0 && filterProbe.allMatch, JSON.stringify(filterProbe));
+    const pickProbe = await cdp.eval(`(() => {
+      const sel = document.getElementById('set-font');
+      const wrap = sel.parentNode.querySelector('.font-combo');
+      const opt = [...wrap.querySelectorAll('.dd-option[data-opt-index]')].find(d => d.textContent === 'Consolas');
+      if (!opt) return { found: false };
+      opt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      return { found: true, after: sel.value, shows: wrap.querySelector('input').value,
+               menuClosed: !wrap.querySelector('.dd-menu').classList.contains('open'),
+               saved: _settingsConfig.fontFamily };
+    })()`);
+    check('字体过滤框：点击选项提交并保存', !!pickProbe && pickProbe.found && pickProbe.after === "'Consolas',monospace" && pickProbe.shows === 'Consolas' && pickProbe.menuClosed && pickProbe.saved === "'Consolas',monospace", JSON.stringify(pickProbe));
+    const kbProbe = await cdp.eval(`(() => {
+      const sel = document.getElementById('set-ui-font');
+      const wrap = sel.parentNode.querySelector('.font-combo');
+      const input = wrap.querySelector('input');
+      input.value = 'segoe ui';
+      input.dispatchEvent(new Event('input'));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      const label = sel.options[sel.selectedIndex].textContent;
+      return { value: sel.value, shows: input.value, saved: _settingsConfig.uiFont, label };
+    })()`);
+    // Enumeration order is undefined (registry order): pin the commit shape,
+    // not which 'segoe ui' variant happens to sort first.
+    check('字体过滤框：键盘 ↓+Enter 选中首个匹配', !!kbProbe && kbProbe.label.toLowerCase().includes('segoe ui') && kbProbe.value === `'${kbProbe.label}',sans-serif` && kbProbe.shows === kbProbe.label && kbProbe.saved === kbProbe.value, JSON.stringify(kbProbe));
+    const freeProbe = await cdp.eval(`(() => {
+      const sel = document.getElementById('set-fallback-font');
+      const wrap = sel.parentNode.querySelector('.font-combo');
+      const input = wrap.querySelector('input');
+      input.value = 'NoSuch Font XYZ';
+      input.dispatchEvent(new Event('input'));
+      const noneHint = wrap.querySelector('.dd-option.dd-none') ? wrap.querySelector('.dd-option.dd-none').textContent : null;
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return { noneHint, value: sel.value, extraText: sel.options[sel.selectedIndex].textContent, saved: _settingsConfig.fallbackFont };
+    })()`);
+    check('字体过滤框：自由文本生成 extra 选项并选中（裸名）', !!freeProbe && freeProbe.value === 'NoSuch Font XYZ' && freeProbe.extraText === 'NoSuch Font XYZ' && freeProbe.saved === 'NoSuch Font XYZ' && /无匹配/.test(freeProbe.noneHint || ''), JSON.stringify(freeProbe));
+    const emptyProbe = await cdp.eval(`(() => {
+      const sel = document.getElementById('set-ui-font');
+      const wrap = sel.parentNode.querySelector('.font-combo');
+      const input = wrap.querySelector('input');
+      input.value = '';
+      input.dispatchEvent(new Event('input'));
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return { value: sel.value, shows: input.value, saved: _settingsConfig.uiFont };
+    })()`);
+    check('字体过滤框：空输入选中哨兵（系统默认）', !!emptyProbe && emptyProbe.value === '' && emptyProbe.shows === '系统默认' && emptyProbe.saved === '', JSON.stringify(emptyProbe));
+    const fontEscProbe = await cdp.eval(`(() => {
+      const sel = document.getElementById('set-font');
+      const wrap = sel.parentNode.querySelector('.font-combo');
+      const input = wrap.querySelector('input');
+      input.dispatchEvent(new Event('focus'));
+      const openBefore = wrap.querySelector('.dd-menu').classList.contains('open');
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      return { openBefore,
+               openAfter: wrap.querySelector('.dd-menu').classList.contains('open'),
+               settingsStillOpen: !!document.querySelector('.settings-pane.active') };
+    })()`);
+    check('字体过滤框：Esc 只关菜单不关设置页', !!fontEscProbe && fontEscProbe.openBefore && !fontEscProbe.openAfter && fontEscProbe.settingsStillOpen, JSON.stringify(fontEscProbe));
+    // Restore the fonts captured before this section (set-font was switched to
+    // Consolas, fallback to the fake font, uiFont went through Segoe UI + '').
+    await cdp.eval(`(() => {
+      const parts = window.__e2eFontBackup.split('|');
+      const setBack = (id, v) => { const s = document.getElementById(id); if (![...s.options].some(o => o.value === v)) { const opt = document.createElement('option'); opt.value = v; opt.textContent = v; s.appendChild(opt); } s.value = v; };
+      setBack('set-font', parts[0]); setBack('set-fallback-font', parts[1]); setBack('set-ui-font', parts[2]);
+      saveAppearance();
+      return 'restored:' + _settingsConfig.fontFamily;
+    })()`);
     // Restore the default (follow on)
     await cdp.eval(`_settingsConfig.uiFollowTerminal = true; syncUiFollowUI(); applyUiFont(); closeSettingsTab()`);
     await sleep(500);
@@ -957,11 +1054,13 @@ async function main() {
     const fontCacheProbe = await cdp.eval(`({
       calls: window.__e2eFontCalls,
       options: document.getElementById('set-font')?.options.length || 0,
-      wrapper: !!document.querySelector('#set-font')?.parentNode?.querySelector('.cust-dropdown')
+      wrapper: document.querySelector('#set-font')?.parentNode?.querySelectorAll('.font-combo').length === 1
     })`).catch(() => null);
     check('设置页字体列表缓存：二次打开不重复枚举', !!fontCacheProbe && fontCacheProbe.calls === 1 && fontCacheProbe.options > 0 && fontCacheProbe.wrapper === true, JSON.stringify(fontCacheProbe));
     const convGuard = await cdp.eval(`(() => {
-      const sel = document.getElementById('set-font');
+      // The font selects are font-combos now; the signature guard is exercised
+      // on the terminal-scheme select, which still converts to a cust-dropdown.
+      const sel = document.getElementById('set-terminal-scheme');
       const origIdx = sel.selectedIndex;
       const w1 = sel.parentNode.querySelector('.cust-dropdown');
       convertSelects();
