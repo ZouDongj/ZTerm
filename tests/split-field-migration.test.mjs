@@ -64,6 +64,9 @@ function loadTabsVm() {
         createTermWrap: () => ({ wrap: fakeEl(), inner: fakeEl() }),
         setupWrapResizeObserver() {}, _scheduleSettleResize() {},
         _sshConnectWithCredentials() {}, saveConfig() {},
+        // ipc.js boundary: split-owner-regressions.test.mjs covers the real
+        // aggregation; these tests assert migration provenance only.
+        _aggregateSplitConnected() {},
     };
     ctx.globalThis = ctx;
     vm.createContext(ctx);

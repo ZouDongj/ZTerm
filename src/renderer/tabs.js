@@ -2531,6 +2531,10 @@ const TabManager = {
         }
         this._updateTabName(st);
         this._updateTabName(nt);
+        // The source kept its remaining panes: re-aggregate its tab-level
+        // connected flag (B-P2-09). The collapsed branch re-synced via
+        // adoptPaneFieldsIntoTab, where the helper early-returns anyway.
+        _aggregateSplitConnected(st);
         this.render();
         this.switchTo(nt.id);
         this.updateStatus();
@@ -2774,6 +2778,11 @@ const TabManager = {
         const sw = document.getElementById('wrap_' + sourceTabId);
         if (sw && sourceTabId !== targetTabId) sw.remove();
         if (sc) sc();
+        // Structural moves changed both tabs' pane sets: re-aggregate the
+        // tab-level connected flags from the panes (B-P2-09). Removed or
+        // collapsed source tabs early-return inside the helper.
+        if (sourceTab && this.tabs.includes(sourceTab)) _aggregateSplitConnected(sourceTab);
+        _aggregateSplitConnected(targetTab);
         this._renderSplit(targetTab);
         if (this.activeId !== targetTab.id) this.switchTo(targetTab.id);
         this._updateTabName(targetTab);

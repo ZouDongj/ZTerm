@@ -604,6 +604,47 @@ test('C: _exitSplit keeps syncing the connection state (existing regression guar
     assert.equal(tab.connected, false);
 });
 
+test('C: drag into an all-dead split target re-aggregates the target flag (B-P2-09)', () => {
+    const ctx = loadVm();
+    // Source split: p1 dead, p2 (focused, the one that moves) alive.
+    const { tab: src, p1, p2 } = wiredSplitTab(ctx, 't_c7s', 'local_1', 'local_2');
+    p1.connected = false;
+    p2.connected = true;
+    // Target split with both panes disconnected: its tab flag starts false.
+    const { tab: tgt, p1: q1, p2: q2 } = wiredSplitTab(ctx, 't_c7t', 'local_3', 'local_4');
+    q1.connected = false;
+    q2.connected = false;
+    tgt.connected = false;
+
+    ctx.TabManager._moveTerminalToTab(src.id, tgt.id, 'r', null);
+    // Old code: no _aggregateSplitConnected on the target — the tab kept
+    // showing disconnected after gaining a live pane.
+    assert.equal(tgt.connected, true, 'target tab reads alive after gaining a live pane');
+    // The source collapsed onto its dead survivor (adoption path, unchanged).
+    assert.equal(src.connected, false, 'source follows its dead survivor');
+});
+
+test('C: extract from a 3-pane split re-aggregates the remaining source tab (B-P2-09)', () => {
+    const ctx = loadVm();
+    const { tab, p1, p2 } = wiredSplitTab(ctx, 't_c8', 'local_1', 'local_2');
+    // Add a third pane (wired like ipc.js does once the backend arrives).
+    ctx.TabManager.addPaneRelativeTo(tab, 'b');
+    const p3 = ctx.getAllPanes(tab)[2];
+    p3.tabId = 'local_3';
+    ctx.wireTerminalToPane(tab, p3);
+    // Only the extracted pane is alive; the two remaining are dead.
+    p1.connected = true;
+    p2.connected = false;
+    p3.connected = false;
+
+    ctx.TabManager._extractPaneToTab(tab.id, p1.id);
+    // Old code: the source stayed split (2 panes left) and kept its stale
+    // container-level connected=true.
+    assert.equal(tab.connected, false, 'remaining split tab re-aggregates to offline');
+    const nt = ctx.TabManager.tabs.find(t => t !== tab && t.term === p1.term);
+    assert.equal(nt.connected, true, 'extracted tab carries the live session');
+});
+
 // ═══ D. Async paste validates the session generation ═══
 
 function startPaste(ctx, term) {
