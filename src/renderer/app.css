@@ -1034,8 +1034,6 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .auth-tab.active{color:var(--text-1)}
 .auth-tab-slider{position:absolute;top:2px;bottom:2px;left:2px;width:0;border-radius:7px;background:rgba(255,255,255,.09);box-shadow:0 1px 3px rgba(0,0,0,.25);transition:left .22s var(--ease),width .22s var(--ease);pointer-events:none}
 .auth-native{display:none!important}
-/* Inactive auth branch stays present (constant dialog height) but dims. */
-.auth-dim{opacity:.42;pointer-events:none}
 .ssh-tab-panel{grid-area:1/1;display:flex;flex-direction:column;visibility:hidden;opacity:0;pointer-events:none;transition:opacity 0.18s var(--ease),visibility 0.18s;min-width:0}
 .ssh-tab-panel.active{visibility:visible;opacity:1;pointer-events:auto}
 .ssh-edit-panes{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:1fr}

@@ -2468,19 +2468,20 @@ async function main() {
         user: document.getElementById('ssh-edit-user').value,
         auth: document.getElementById('ssh-edit-auth').value,
         keypath: document.getElementById('ssh-edit-keypath').value,
-        pwdRowDim: document.getElementById('ssh-pwd-field').classList.contains('auth-dim')
+        pwdRowHidden: document.getElementById('ssh-pwd-field').style.display === 'none' &&
+          document.getElementById('ssh-pwd-row').style.display !== 'none'
       };
       closeOverlay('overlay-ssh-edit');
       return r2;
     })()`).catch(() => null);
-    check('模板选择：管理浮层入口+键盘导航 Enter 选中（" 副本"后缀/keypath 携带/密码行置灰）', !!tplKeyProbe &&
+    check('模板选择：管理浮层入口+键盘导航 Enter 选中（" 副本"后缀/keypath 携带/密码字段隐藏且备注行保留）', !!tplKeyProbe &&
       tplKeyProbe.menuOpen === true && tplKeyProbe.pickerOpen === true && tplKeyProbe.mgrClosed === true &&
       tplKeyProbe.sel === 'ssh_e2essh2' && tplKeyProbe.actDesc === 'ssh-tpl-opt-ssh_e2essh2' &&
       tplKeyProbe.editTitle === '从模板新建 SSH 连接' &&
       tplKeyProbe.name === '构建机 副本' && tplKeyProbe.host === 'builder.example.com' &&
       String(tplKeyProbe.port) === '2222' && tplKeyProbe.user === 'ci' &&
       tplKeyProbe.auth === '密钥' && tplKeyProbe.keypath === 'C:/keys/ci' &&
-      tplKeyProbe.pwdRowDim === true,
+      tplKeyProbe.pwdRowHidden === true,
       JSON.stringify(tplKeyProbe));
     // Picker Esc closes only the picker and restores focus to the invoking
     // add button (opener restore, same contract as the session selector).

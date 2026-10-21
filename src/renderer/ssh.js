@@ -799,6 +799,10 @@ function _cancelPasswordEdit() {
 }
 
 async function _savePasswordInline() {
+    // Inline save is a password-branch action only; key auth never persists a
+    // password here (the branch is hidden, this is the logic-level guard).
+    const authSel = document.getElementById('ssh-edit-auth');
+    if (authSel && authSel.value === '密钥') return;
     const password = document.getElementById('ssh-edit-password').value;
     if (!password || !_editingSSHId) return;
     try {
@@ -1463,16 +1467,30 @@ function updateAuthFields() {
     const sel = document.getElementById('ssh-edit-auth');
     if (!sel) return;
     const isKey = sel.value === '密钥';
+    // The inactive branch is hidden outright (pre-v12 behavior): the dimmed
+    // variant stayed in the tab order, so keyboard/Enter could still edit and
+    // even save a password inline while the profile was on key auth. Only the
+    // password form-group hides — the note sharing the row is auth-independent
+    // and stays visible/editable under key auth.
     const pwdField = document.getElementById('ssh-pwd-field');
-    if (pwdField) pwdField.classList.toggle('auth-dim', isKey);
-    const keyGroup = document.getElementById('ssh-key-row')?.querySelector('.form-group');
-    if (keyGroup) keyGroup.classList.toggle('auth-dim', !isKey);
+    if (pwdField) pwdField.style.display = isKey ? 'none' : '';
+    const keyRow = document.getElementById('ssh-key-row');
+    if (keyRow) keyRow.style.display = isKey ? '' : 'none';
+    // Belt-and-braces inertness in case a later restyle re-shows the row.
     const pwdInput = document.getElementById('ssh-edit-password');
     if (pwdInput) pwdInput.disabled = isKey;
     const keyInput = document.getElementById('ssh-edit-keypath');
     if (keyInput) keyInput.disabled = !isKey;
     const keyBrowse = document.getElementById('ssh-key-browse');
     if (keyBrowse) keyBrowse.disabled = !isKey;
+    // A revealed or typed plaintext must not survive the switch to key auth
+    // in readable form. Mask (do not clear): the value is never persisted
+    // under key auth, and clearing would destroy it on an accidental toggle.
+    if (isKey && pwdInput) {
+        pwdInput.type = 'password';
+        const eyeBtn = document.getElementById('ssh-pwd-inline-eye');
+        if (eyeBtn) { eyeBtn.classList.remove('active'); eyeBtn.title = '显示密码'; }
+    }
     _syncSSHAuthTabs();
 }
 
