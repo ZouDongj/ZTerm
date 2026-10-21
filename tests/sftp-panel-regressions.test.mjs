@@ -298,8 +298,8 @@ test('overlong paths collapse middle segments into a "…" crumb (root and curre
     // final build is the last 7 nodes (real DOM: the only 7).
     const last = vm.els.breadcrumb.children.slice(-7);
     const texts = Array.from(last, c => c.textContent);
-    assert.deepEqual(texts, ['/', '/', '…', '/', 'ccc', '/', 'dddd'],
-        `root, "…" and the two trailing segments remain: ${JSON.stringify(texts)}`);
+    assert.deepEqual(texts, ['', '›', '…', '›', 'ccc', '›', 'dddd'],
+        `root glyph, "…" and the two trailing segments remain: ${JSON.stringify(texts)}`);
     const more = last.find(c => c.className === 'more');
     assert.equal(more.title, '/a/bb', 'tooltip names the deepest collapsed ancestor');
 
@@ -319,7 +319,7 @@ test('overlong paths collapse middle segments into a "…" crumb (root and curre
     vm.SFTP._crumbOverflows = () => true;
     vm.SFTP._renderBreadcrumb();
     const tail = vm.els.breadcrumb.children.slice(-5);
-    assert.deepEqual(Array.from(tail, c => c.textContent), ['/', '/', '…', '/', 'dddd'],
+    assert.deepEqual(Array.from(tail, c => c.textContent), ['', '›', '…', '›', 'dddd'],
         'the current directory always survives the collapse');
     assert.equal(tail.find(c => c.className === 'more').title, '/a/bb/ccc',
         'the collapsed range now reaches one level up');

@@ -17,10 +17,10 @@ function normalizeRemotePath(p) {
     return segs.length ? '/' + segs.join('/') : '/';
 }
 
-// SFTP pathbar leading glyph: the prototype uses a hard-drive for the remote
-// filesystem root and a folder elsewhere. The filled hard-drive keeps the
-// v12 object-icon treatment while the folder falls back to the line glyph at
-// this 13px size.
+// Breadcrumb root crumb: a filled hard drive marks the remote filesystem root
+// (the click-to-root affordance). It is the only leading glyph on the row —
+// the pathbar no longer carries a separate icon — so the row reads as one
+// inline line: drive, then chevron-separated directory segments.
 const SFTP_ROOT_ICON = '<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" stroke="none"><path d="M13.85 7.85 11.9 3.73v-.01A1.2 1.2 0 0 0 10.75 3h-5.5a1.2 1.2 0 0 0-1.13.72L2.15 7.86Q2 8.16 2 8.5v2A1.5 1.5 0 0 0 3.5 12h9a1.5 1.5 0 0 0 1.5-1.5v-2q0-.33-.15-.65M5.25 4h5.5a.24.24 0 0 1 .23.14L12.34 7H3.66l1.36-2.86A.24.24 0 0 1 5.25 4M13 10.5a.5.5 0 0 1-.5.5h-9a.5.5 0 0 1-.5-.5v-2a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 .5.5zm-1-1a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0"/></svg>';
 
 // ── SFTP Panel ──
@@ -547,13 +547,6 @@ const SFTP = {
         const el = document.getElementById('sftp-breadcrumb');
         el.innerHTML = '';
         this._editingPath = false; // any listing render ends an in-progress path edit
-        // The leading glyph describes the filesystem position, not the
-        // current folder: root is a hard drive, everything else a folder.
-        const pathIcon = document.getElementById('sftp-path-icon');
-        if (pathIcon) {
-            pathIcon.innerHTML = this._path === '/' ? SFTP_ROOT_ICON
-                : (typeof Icons !== 'undefined' ? Icons.iconSvg('folder', 13) : '');
-        }
         const parts = this._path.split('/').filter(Boolean);
         const paths = [];
         let current = '';
