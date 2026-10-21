@@ -127,3 +127,59 @@ test('U-04 (control): under password auth the inline save still persists', async
     assert.equal(ctx.TabManager.sshProfiles[0].encryptedPassword, 'enc1');
 });
 
+// ── U-14: auth slider first-frame suppression ───────────────────────────────
+
+test('U-14: the auth slider skips unmeasurable writes and places the first frame without transition', () => {
+    const ctx = loadSshVm();
+    const [pwTab, keyTab] = buildAuthTabs(ctx);
+    const slider = ctx.document.getElementById('ssh-auth-slider');
+    const transitionWrites = [];
+    Object.defineProperty(slider.style, 'transition', {
+        get() { return this._t; },
+        set(v) { transitionWrites.push(v); this._t = v; },
+        configurable: true,
+    });
+
+    // The fake DOM has no layout — elements are unmeasurable exactly like the
+    // real display:none overlay at dialog-open time.
+    ctx.setSSHAuth('密钥');
+    assert.ok(!slider.style.width, 'no zero-measure write while the dialog is hidden');
+
+    // Once painted, the first measurable sync places instantly.
+    pwTab.offsetLeft = 3; pwTab.offsetWidth = 60;
+    keyTab.offsetLeft = 65; keyTab.offsetWidth = 60;
+    ctx._syncSSHAuthTabs();
+    assert.equal(slider.style.width, '60px');
+    assert.equal(slider.style.left, '65px');
+    assert.deepEqual(transitionWrites, ['none', ''], 'transitions off → place → flush → restore');
+    assert.equal(slider.style.transition, '', 'transition restored afterwards');
+
+    // A genuine auth switch still takes the animated path.
+    ctx.setSSHAuth('密码');
+    assert.equal(slider.style.left, '3px');
+    assert.equal(transitionWrites.length, 2, 'animated path never touches the transition property');
+});
+
+test('U-14: every dialog open resets the slider so its first placement is instant again', () => {
+    const ctx = loadSshVm();
+    const [pwTab, keyTab] = buildAuthTabs(ctx);
+    pwTab.offsetLeft = 3; pwTab.offsetWidth = 60;
+    keyTab.offsetLeft = 65; keyTab.offsetWidth = 60;
+    const slider = ctx.document.getElementById('ssh-auth-slider');
+    ctx.document.getElementById('ssh-edit-auth').value = '密码';
+    ctx._syncSSHAuthTabs();
+    assert.equal(slider.style.width, '60px', 'slider carries a stale placement from the last open');
+
+    const widthWrites = [];
+    Object.defineProperty(slider.style, 'width', {
+        get() { return this._w; },
+        set(v) { widthWrites.push(v); this._w = v; },
+        configurable: true,
+    });
+    ctx.openSSHEdit(true);
+    ctx.__advance(200); // openSSHEdit's deferred slider/select/focus pass
+
+    assert.equal(widthWrites[0], '', 'open clears the stale inline placement first');
+    assert.equal(widthWrites[widthWrites.length - 1], '60px', 'then re-places once measurable');
+});
+

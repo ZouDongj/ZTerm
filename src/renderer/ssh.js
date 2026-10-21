@@ -1201,6 +1201,10 @@ function openSSHEdit(isNew, profileId) {
     document.getElementById('ssh-edit-auth').selectedIndex = 0;
     document.getElementById('ssh-edit-followcwd').classList.remove('on');
     document.getElementById('ssh-edit-clearonconnect').classList.add('on');
+    // Clear the auth slider's inline placement so the first measurable sync of
+    // this open is treated as a first placement (placed without transition).
+    const authSlider = document.getElementById('ssh-auth-slider');
+    if (authSlider) { authSlider.style.left = ''; authSlider.style.width = ''; }
     updateAuthFields();
 
     // Reset to connection tab
@@ -1432,10 +1436,25 @@ function _syncSSHAuthTabs() {
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
     });
     const active = tabs.querySelector('.auth-tab.active');
-    if (active) {
+    if (!active) return;
+    // The overlay is display:none while the dialog opens; measuring then
+    // yields 0, and the first real write would animate the pill growing in
+    // from zero width. Skip unmeasurable writes and place the first
+    // measurable one with transitions off (same first-frame suppression idiom
+    // as _initTabSlider); openSSHEdit resets the inline width on every open
+    // so the first placement of each open is instant. Only genuine auth-tab
+    // switches animate.
+    if (!active.offsetWidth) return;
+    if (!slider.style.width) {
+        slider.style.transition = 'none';
         slider.style.left = active.offsetLeft + 'px';
         slider.style.width = active.offsetWidth + 'px';
+        void slider.offsetWidth; // force the style flush before restoring
+        slider.style.transition = '';
+        return;
     }
+    slider.style.left = active.offsetLeft + 'px';
+    slider.style.width = active.offsetWidth + 'px';
 }
 function setSSHAuth(value) {
     const sel = document.getElementById('ssh-edit-auth');
