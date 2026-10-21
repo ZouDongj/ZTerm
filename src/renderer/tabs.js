@@ -1462,7 +1462,7 @@ const TabManager = {
                 // In split mode the tab label shows no reconnect button; each pane reconnects via its own pane header
                 if (t.type === 'ssh' && !t.splitRoot) {
                     if (t._sshConnecting) {
-                        inner += `<button type="button" class="tab-reconnect tab-reconnect-busy" title="正在重连" onclick="event.stopPropagation()">${Icons.iconSvg('rotate-cw', 12)}</button>`;
+                        inner += `<button type="button" class="tab-reconnect tab-reconnect-busy" title="正在重连" onclick="event.stopPropagation()" ondblclick="event.stopPropagation()">${Icons.iconSvg('rotate-cw', 12)}</button>`;
                     } else {
                         const rcClass = t.connected ? 'tab-reconnect-normal' : 'tab-reconnect';
                         const rcTitle = t.connected ? '强制重连' : '重新连接';
