@@ -5,9 +5,19 @@
 // always loads the module first (renderer.html script order).
 const _sshAttempts = (typeof sshAttempts !== 'undefined') ? sshAttempts : null;
 
-// Update the pane status dot DOM (TabManager.render() does not repaint pane headers, so it must be updated manually)
+// Update the pane's connected flag and sync its header DOM. TabManager.render()
+// repaints the tab strip but NEVER pane headers (a header is built once per pane
+// node in buildPane), so this manual sync is the only path that keeps a live
+// pane header truthful: the dot class AND the reconnect button follow the
+// pane's state flags together through _refreshPaneHeaderState (tabs.js).
 function _updatePaneDot(pane, connected) {
     pane.connected = connected;
+    if (typeof _refreshPaneHeaderState === 'function') {
+        _refreshPaneHeaderState(pane);
+        return;
+    }
+    // Inline fallback for partial harnesses loading only this file (tabs.js,
+    // which owns the pane header markup, is absent): dot-class patch only.
     const state = pane._sshConnecting ? 'connecting'
         : pane._sshErrored ? 'error'
         : (connected ? 'connected' : 'disconnected');
@@ -390,6 +400,9 @@ function _applySshConnecting(attemptId, tabId) {
             pane.term.write('\x1b[33mConnecting to ' + (pane._sshHost || tab.host || pane.name || tab.name) + '...\x1b[0m\r\n');
             _syncFitAndReportSize(tab, pane);
         }
+        // Pane headers do not repaint on render() (see _updatePaneDot): sync
+        // the dot to the connecting state and drop any stale reconnect button.
+        if (typeof _refreshPaneHeaderState === 'function') _refreshPaneHeaderState(pane);
         TabManager.render();
         return true;
     }

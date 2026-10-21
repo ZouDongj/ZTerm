@@ -979,7 +979,228 @@ async function main() {
     await cdp.eval(`(() => { ipcRenderer.invoke = window.__e2ePrevInvokeFonts; closeSettingsTab(); return 'restored'; })()`).catch(() => null);
     await sleep(300);
 
+    // 11e. Split-pane header connection state (U-01/U-06): pane headers are
+    //      built once per pane node and render() never repaints them, so the
+    //      header dot AND the pane-reconnect button must follow the pane's
+    //      SSH lifecycle through _refreshPaneHeaderState. The old code baked
+    //      the button into freshly built headers only — a pane that
+    //      disconnected after its node existed never gained the button, a
+    //      reconnect never dropped it, and _applySshConnecting left a stale
+    //      dot. Everything here is the real lifecycle: only the ssh-connect
+    //      invoke is stubbed, and ONLY for the fixture profile
+    //      (host 'stub.invalid'), so no dial ever leaves the renderer and the
+    //      section-11 retry loop against 127.0.0.1:1 keeps its real behavior.
+    //      Events travel the real Tauri channel into ipc.js, the attempt
+    //      registry applies connecting/connected through the rpc applier, and
+    //      the assertions read the real DOM.
+    await cdp.eval(`(() => {
+      window.__sshStubPrev = ipcRenderer.invoke;
+      window.__sshStub = { calls: 0 };
+      ipcRenderer.invoke = (cmd, args) => {
+        if (cmd === 'ssh-connect' && args && args.profile && args.profile.host === 'stub.invalid') {
+          window.__sshStub.calls++;
+          return Promise.resolve({ tabId: 'e2e-ssh-stub-' + window.__sshStub.calls });
+        }
+        return window.__sshStubPrev(cmd, args);
+      };
+      TabManager.sshProfiles = TabManager.sshProfiles || [];
+      TabManager.sshProfiles.push({
+        id: 'e2e-ssh-stub', name: 'E2E SSH Stub', type: 'ssh', host: 'stub.invalid', port: 22,
+        username: 'e2e', password: '', encryptedPassword: '', privateKeyPath: '',
+      });
+      connectSSHProfile('e2e-ssh-stub');
+      return 'armed';
+    })()`);
+    try {
+      await waitForValue(cdp, `(() => {
+        const t = TabManager.tabs.find(x => x.host === 'stub.invalid');
+        return !!(t && t.term && t.tabId && t.connected === true);
+      })()`, true, 15000);
+      const SSHT = JSON.stringify(await cdp.eval(`TabManager.tabs.find(x => x.host === 'stub.invalid').id`));
+      // Control: the NON-split SSH tab keeps its tab-strip reconnect entry
+      // through the same lifecycle (render()'s inline button, !splitRoot
+      // gate) — disconnected offers 重新连接, the connecting phase shows the
+      // busy entry, connected keeps the force variant. No pane button may
+      // exist anywhere while unsplit. __TAURI__.event.emit delivers through
+      // the backend (a round trip), so each read must wait for the handler
+      // to run — reading synchronously after emit would see the old DOM.
+      const stripRead = () => cdp.eval(`(() => {
+        const t = TabManager.tabs.find(x => x.id === ${SSHT});
+        // All three strip variants: disconnected/busy carry the base
+        // tab-reconnect token, connected renders tab-reconnect-normal only.
+        const el = document.querySelector('.tab[data-tab="' + t.id + '"] .tab-reconnect, .tab[data-tab="' + t.id + '"] .tab-reconnect-normal');
+        return {
+          connected: t.connected, connecting: t._sshConnecting === true,
+          btn: !!el, busy: !!(el && el.classList.contains('tab-reconnect-busy')),
+          normal: !!(el && el.classList.contains('tab-reconnect-normal')), title: el ? el.title : null,
+          paneBtn: !!document.querySelector('.pane-reconnect'),
+        };
+      })()`);
+      await cdp.eval(`window.__TAURI__.event.emit('ssh-disconnected', { tabId: TabManager.tabs.find(x => x.id === ${SSHT}).tabId, reason: 'e2e fixture' })`);
+      await sleep(300);
+      const stripDisc = await stripRead();
+      await cdp.eval(`window.__TAURI__.event.emit('ssh-connecting', { tabId: TabManager.tabs.find(x => x.id === ${SSHT}).tabId })`);
+      await sleep(300);
+      const stripConnecting = await stripRead();
+      await cdp.eval(`window.__TAURI__.event.emit('ssh-connected', { tabId: TabManager.tabs.find(x => x.id === ${SSHT}).tabId })`);
+      await sleep(300);
+      const stripConnected = await stripRead();
+      check('SSH 标签条重连按钮随生命周期保持（非分屏对照，U-01）',
+        stripDisc.connected === false && stripDisc.btn === true && stripDisc.busy === false && stripDisc.title === '重新连接' &&
+        stripConnecting.connecting === true && stripConnecting.btn === true && stripConnecting.busy === true &&
+        stripConnected.connected === true && stripConnected.btn === true && stripConnected.normal === true && stripConnected.title === '强制重连' &&
+        stripDisc.paneBtn === false,
+        JSON.stringify({ stripDisc, stripConnecting, stripConnected }));
+      // Split the connected SSH tab: both panes start connected (the new
+      // pane's own stubbed connect applies through the real rpc applier).
+      await cdp.eval(`(() => { TabManager.switchTo(${SSHT}); TabManager.splitHorizontal(); return true; })()`);
+      await waitForValue(cdp, `(() => {
+        const t = TabManager.tabs.find(x => x.id === ${SSHT});
+        if (!t || !t.splitRoot) return false;
+        const panes = getAllPanes(t);
+        if (panes.length !== 2 || !panes.every(p => p.type === 'ssh' && p.term && p.tabId)) return false;
+        return panes.every(p => {
+          const h = document.querySelector('.split-pane[data-pane="' + p.id + '"] .pane-header');
+          const dot = h && h.querySelector('.dot');
+          return !!dot && dot.className === 'dot connected' && !h.querySelector('.pane-reconnect');
+        });
+      })()`, true, 15000);
+      const paneInfo = await cdp.eval(`(() => {
+        const t = TabManager.tabs.find(x => x.id === ${SSHT});
+        const panes = getAllPanes(t);
+        return { ids: panes.map(p => p.id), tabIds: panes.map(p => p.tabId) };
+      })()`);
+      const PA = JSON.stringify(paneInfo.ids[0]);
+      const PB = JSON.stringify(paneInfo.ids[1]);
+      const PAT = JSON.stringify(paneInfo.tabIds[0]);
+      const paneHeaderState = () => cdp.eval(`(() => {
+        const read = (pid) => {
+          const h = document.querySelector('.split-pane[data-pane="' + pid + '"] .pane-header');
+          const dot = h && h.querySelector('.dot');
+          const btn = h && h.querySelector('.pane-reconnect');
+          return { dot: dot ? dot.className : null, btn: !!btn, title: btn ? btn.title : null };
+        };
+        const t = TabManager.tabs.find(x => x.id === ${SSHT});
+        return {
+          a: read(${PA}), b: read(${PB}),
+          stripBtn: !!document.querySelector('.tab[data-tab="' + t.id + '"] .tab-reconnect, .tab[data-tab="' + t.id + '"] .tab-reconnect-normal'),
+        };
+      })()`);
+      // U-01 pin: ssh-disconnected on a LIVE pane node must add the pane
+      // header's reconnect button and flip its dot — the exact transition
+      // the baked-in button could not serve. The sibling pane and the tab
+      // strip (split gate) must stay untouched.
+      await cdp.eval(`window.__TAURI__.event.emit('ssh-disconnected', { tabId: ${PAT}, reason: 'e2e fixture' })`);
+      await sleep(300);
+      const paneDisc = await paneHeaderState();
+      check('分屏 SSH pane 断开后头部出现「重新连接」按钮且 dot 变 disconnected（U-01/U-06）',
+        paneDisc.a.dot === 'dot disconnected' && paneDisc.a.btn === true && paneDisc.a.title === '重新连接' &&
+        paneDisc.b.dot === 'dot connected' && paneDisc.b.btn === false &&
+        paneDisc.stripBtn === false,
+        JSON.stringify(paneDisc));
+      // U-06 pin: the connecting transition must drop the stale button and
+      // show the busy dot (the old _applySshConnecting never synced the
+      // header at all).
+      await cdp.eval(`window.__TAURI__.event.emit('ssh-connecting', { tabId: ${PAT} })`);
+      await sleep(300);
+      const paneConn = await paneHeaderState();
+      check('分屏 SSH pane 重连中 dot 变 connecting 且按钮消失（U-06）',
+        paneConn.a.dot === 'dot connecting' && paneConn.a.btn === false &&
+        paneConn.b.dot === 'dot connected' && paneConn.b.btn === false,
+        JSON.stringify(paneConn));
+      // Connected: dot connected, button never (re)appears for a live pane.
+      await cdp.eval(`window.__TAURI__.event.emit('ssh-connected', { tabId: ${PAT} })`);
+      await sleep(300);
+      const paneLive = await paneHeaderState();
+      check('分屏 SSH pane 连接成功 dot 变 connected 且无重连按钮',
+        paneLive.a.dot === 'dot connected' && paneLive.a.btn === false &&
+        paneLive.b.dot === 'dot connected' && paneLive.b.btn === false,
+        JSON.stringify(paneLive));
+      // Local panes never offer reconnect: pty-exit on a local split pane
+      // still runs the same state sync (the dot must flip) but the button is
+      // gated to SSH panes — this pins the guard, not a no-op.
+      const phTab = await cdp.eval(`TabManager.createTab({ name: 'E2E-PANEEXIT', type: 'local' })`);
+      const PH = JSON.stringify(phTab);
+      await waitForValue(cdp, `(() => { const t = TabManager.tabs.find(x => x.id === ${PH}); return !!(t && t.term && t.tabId); })()`, true, 15000);
+      await cdp.eval(`(() => { TabManager.switchTo(${PH}); TabManager.splitHorizontal(); return true; })()`);
+      await waitForValue(cdp, `getAllPanes(TabManager.tabs.find(x => x.id === ${PH})).filter(p => p.term && p.tabId).length`, 2, 15000);
+      const phPane = await cdp.eval(`(() => {
+        const panes = getAllPanes(TabManager.tabs.find(x => x.id === ${PH}));
+        return { tabId: panes[0].tabId, id: panes[0].id };
+      })()`);
+      await cdp.eval(`window.__TAURI__.event.emit('pty-exit', { tabId: ${JSON.stringify(phPane.tabId)} })`);
+      await sleep(300);
+      const localExit = await cdp.eval(`(() => {
+        const h = document.querySelector('.split-pane[data-pane="' + ${JSON.stringify(phPane.id)} + '"] .pane-header');
+        const dot = h && h.querySelector('.dot');
+        return { dot: dot ? dot.className : null, btn: !!h.querySelector('.pane-reconnect') };
+      })()`);
+      check('local 分屏 pane 退出后 dot 变 disconnected 但不出现 pane 重连按钮',
+        localExit.dot === 'dot disconnected' && localExit.btn === false,
+        JSON.stringify(localExit));
+      // Unwind: close both fixture tabs, drop the stub profile, and restore
+      // the unwrapped invoke — verified, mirroring the SFTP gate discipline.
+      const hdrCleanup = await cdp.eval(`(() => {
+        const r = {};
+        try {
+          try { TabManager.closeTab(${SSHT}); } catch (e) { r.sshCloseErr = String(e && e.message || e); }
+          const lt = TabManager.tabs.find(x => x.name === 'E2E-PANEEXIT');
+          try { if (lt) TabManager.closeTab(lt.id); } catch (e) { r.localCloseErr = String(e && e.message || e); }
+          TabManager.sshProfiles = (TabManager.sshProfiles || []).filter(p => p.id !== 'e2e-ssh-stub');
+          r.profileGone = !(TabManager.sshProfiles || []).some(p => p.id === 'e2e-ssh-stub');
+        } catch (e) { r.err = String(e && e.message || e); }
+        ipcRenderer.invoke = window.__sshStubPrev;
+        r.invokeRestored = ipcRenderer.invoke === window.__sshStubPrev;
+        r.stubCalls = window.__sshStub.calls;
+        return r;
+      })()`).catch(e => ({ evalError: String(e && e.message || e) }));
+      await sleep(900); // let the staggered tab removals settle
+      const hdrResidual = await cdp.eval(`(() => ({
+        sshGone: !TabManager.tabs.some(x => x.id === ${SSHT}),
+        localGone: !TabManager.tabs.some(x => x.name === 'E2E-PANEEXIT'),
+        paneBtns: document.querySelectorAll('.pane-reconnect').length,
+      }))()`).catch(() => null);
+      await cdp.eval(`(() => { delete window.__sshStub; delete window.__sshStubPrev; return true; })()`).catch(() => null);
+      check('U-01/U-06 fixture 清理：stub invoke 恢复、标签与 profile 移除',
+        !!hdrCleanup && hdrCleanup.invokeRestored === true && hdrCleanup.profileGone === true &&
+        !hdrCleanup.evalError && !hdrCleanup.sshCloseErr && !hdrCleanup.localCloseErr && hdrCleanup.stubCalls >= 2 &&
+        !!hdrResidual && hdrResidual.sshGone === true && hdrResidual.localGone === true && hdrResidual.paneBtns === 0,
+        JSON.stringify({ hdrCleanup, hdrResidual }));
+    } finally {
+      // Restore the page even when a check above throws, so section 12+ sees
+      // an unwrapped invoke and no half-torn fixture.
+      await cdp.eval(`(() => {
+        if (window.__sshStubPrev) ipcRenderer.invoke = window.__sshStubPrev;
+        const t = TabManager.tabs.find(x => x.host === 'stub.invalid');
+        if (t) { try { TabManager.closeTab(t.id); } catch (e) {} }
+        const lt = TabManager.tabs.find(x => x.name === 'E2E-PANEEXIT');
+        if (lt) { try { TabManager.closeTab(lt.id); } catch (e) {} }
+        TabManager.sshProfiles = (TabManager.sshProfiles || []).filter(p => p.id !== 'e2e-ssh-stub');
+        delete window.__sshStub; delete window.__sshStubPrev;
+        return true;
+      })()`).catch(() => null);
+      await sleep(400);
+    }
+
     // 12. SFTP panel: open → panel visible → close
+    // Section 11 leaves a real retry chain (backoff 2s/5s/10s) running against
+    // 127.0.0.1:1: every ssh-error landing in the retry branch calls
+    // SFTP.updateTarget() (ipc.js), which re-reads the ACTIVE tab and suspends
+    // a dock bound to anything else — including this section's artificial
+    // 'e2e-dummy-tab' binding. The product behavior is by design (the dock
+    // follows the active SSH pane); the artificial binding is what makes the
+    // window observable. Exhaust the chain deterministically: bump the retry
+    // token so scheduled retries no-op at fire time, and exhaust the budget so
+    // an arriving in-flight error takes the terminal branch (no updateTarget,
+    // no new attempt).
+    await cdp.eval(`(() => {
+      for (const t of TabManager.tabs) {
+        t._sshRetryToken = (t._sshRetryToken || 0) + 1;
+        t._sshRetried = 99;
+      }
+      return true;
+    })()`);
+    await sleep(300); // let an in-flight attempt's terminal error land before the window
     await cdp.eval(`SFTP.open('e2e-dummy-tab')`);
     await sleep(800);
     const sftpOpen = await cdp.eval(`document.getElementById('overlay-sftp').classList.contains('open')`);
@@ -2342,13 +2563,22 @@ async function main() {
       window.__linkClick = (needle, ctrl) => {
         const p = locate(needle);
         if (!p) return Promise.resolve('not-found');
+        // Same re-arm discipline as __linkHover: xterm re-evaluates hover only
+        // on a buffer-cell change, and a resize/activation may have cleared
+        // the current link since the last move — move off the link first,
+        // then back on, then press. Without the detour a repeated click on
+        // the same cell is not guaranteed to re-arm the link.
+        const corner = { bubbles: true, cancelable: true, button: 0, ctrlKey: !!ctrl, clientX: p.r.left + 2, clientY: p.r.top + 2 };
         const opts = { bubbles: true, cancelable: true, button: 0, ctrlKey: !!ctrl, clientX: p.px, clientY: p.py };
-        p.screen.dispatchEvent(new MouseEvent('mousemove', opts));
+        p.screen.dispatchEvent(new MouseEvent('mousemove', corner));
         return new Promise(res => setTimeout(() => {
-          p.screen.dispatchEvent(new MouseEvent('mousedown', opts));
-          p.screen.dispatchEvent(new MouseEvent('mouseup', opts));
-          res('click@' + p.row + ':' + p.col);
-        }, 200));
+          p.screen.dispatchEvent(new MouseEvent('mousemove', opts));
+          setTimeout(() => {
+            p.screen.dispatchEvent(new MouseEvent('mousedown', opts));
+            p.screen.dispatchEvent(new MouseEvent('mouseup', opts));
+            res('click@' + p.row + ':' + p.col);
+          }, 200);
+        }, 60));
       };
       const tab = TabManager.tabs.find(t => t.type === 'local');
       TabManager.switchTo(tab.id);

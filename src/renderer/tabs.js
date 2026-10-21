@@ -214,6 +214,57 @@ function _sshConnectWithCredentials(tab, pane) {
     }
 }
 
+// Pane header connection state — single source of truth shared by buildPane,
+// the _renderSplit node-reuse branch and the ipc.js SSH lifecycle paths. Same
+// predicate family as pane-fields.js paneConnectedState: an explicit
+// connected === false always wins; the tabId fallback only covers a legacy
+// local wrapper that never recorded a state.
+function _paneDotClass(pane) {
+    return pane._sshConnecting ? 'connecting'
+        : pane._sshErrored ? 'error'
+        : ((pane.connected !== false && (pane.connected || !!pane.tabId)) ? 'connected' : 'disconnected');
+}
+
+// Only a disconnected SSH pane offers reconnecting; a live session does not
+// need a force-reconnect entry in the pane header, and a pane still inside a
+// connect attempt shows the busy dot instead.
+function _paneReconnectWanted(pane) {
+    return pane.type === 'ssh' && pane.connected === false && !pane._sshConnecting;
+}
+
+// Sync ONE pane's header (dot class + reconnect button) to the pane's current
+// state flags. TabManager.render() repaints the tab strip but never pane
+// headers: a header is built once per pane node in buildPane, so every state
+// transition (the ipc.js SSH lifecycle paths and _reconnectPane, reaching this
+// helper directly or via _updatePaneDot) and every split render (buildPane /
+// the node-reuse branch of _renderSplit) must route through here for the
+// header to stay
+// truthful for the node's whole lifetime.
+function _refreshPaneHeaderState(pane) {
+    const paneEl = document.querySelector('.split-pane[data-pane="' + pane.id + '"]');
+    const hdr = paneEl && paneEl.querySelector('.pane-header');
+    if (!hdr) return;
+    const dot = hdr.querySelector('.dot');
+    if (dot) dot.className = 'dot ' + _paneDotClass(pane);
+    const btn = hdr.querySelector('.pane-reconnect');
+    if (!_paneReconnectWanted(pane)) {
+        if (btn) btn.remove();
+        return;
+    }
+    if (btn) return;
+    // The click target needs the OWNING tab's id: a pane node only exists
+    // while the pane sits in some tab's split tree, so resolve it there.
+    const tab = TabManager.tabs.find(t => t.splitRoot && getAllPanes(t).some(p => p === pane));
+    if (!tab) return;
+    const b = document.createElement('button');
+    b.className = 'pane-reconnect';
+    b.title = '重新连接';
+    b.onclick = (e) => { e.stopPropagation(); TabManager._reconnectPane(tab.id, pane.id); b.blur(); };
+    b.innerHTML = Icons.iconSvg('rotate-cw', 12);
+    const label = hdr.querySelector('.label');
+    hdr.insertBefore(b, label ? label.nextSibling : null);
+}
+
 // ── Tab Manager ──
 const TabManager = {
     tabs: [],
@@ -1712,18 +1763,15 @@ const TabManager = {
             el.setAttribute('data-pane', pane.id);
             el.onmousedown = () => { if (!tab._maximizedPaneId) this._focusPane(tab, pane.id); };
             // Pane drag-reorder uses a Tabby-style drop-zone layer (rendered at _onPaneDragStart); panes carry no drop listeners of their own
-            const dc = pane._sshConnecting ? 'connecting'
-                : pane._sshErrored ? 'error'
-                : ((pane.connected !== false && (pane.connected || !!pane.tabId)) ? 'connected' : 'disconnected');
+            const dc = _paneDotClass(pane);
             const showDot = _settingsConfig.showStatusDot !== false;
             const hdr = document.createElement('div');
             hdr.className = 'pane-header';
-            // Only a disconnected SSH pane offers reconnecting; a live session
-            // does not need a force-reconnect entry in the pane header.
-            const reconnectPaneBtn = pane.type === 'ssh' && pane.connected === false && !pane._sshConnecting ? '<button title="重新连接" onclick="event.stopPropagation();TabManager._reconnectPane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('rotate-cw', 12) + '</button>' : '';
+            // The reconnect button is NOT baked here: _refreshPaneHeaderState
+            // owns its lifecycle (one creation path keeps the button in sync
+            // with the pane's state flags for the node's whole lifetime).
             hdr.innerHTML = (showDot ? '<span class="dot ' + dc + '"></span>' : '') +
                 '<span class="label">' + escHtml(pane.name || tab.name) + '</span>' +
-                reconnectPaneBtn +
                 '<button title="extract" onclick="event.stopPropagation();TabManager._extractPaneToTab(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('external-link', 12) + '</button>' +
                 '<button title="maximize" onclick="event.stopPropagation();TabManager._maximizePane(\'' + tab.id + '\',\'' + pane.id + '\')">' + Icons.iconSvg('maximize', 13) + '</button>' +
                 '<button title="close" onclick="event.stopPropagation();TabManager._closePane(\'' + tab.id + '\',\'' + pane.id + '\');this.blur()">' + Icons.iconSvg('x', 13) + '</button>';
@@ -1755,16 +1803,17 @@ const TabManager = {
             if (el) {
                 existing.delete(p.id);
                 el.classList.remove('pane-exit'); // a pane mid-fade-out re-entering the tree is revived
-                // Reused node: refresh the connection-status dot (state may have changed with the tree)
-                const dc = p._sshConnecting ? 'connecting'
-                    : p._sshErrored ? 'error'
-                    : ((p.connected !== false && (p.connected || !!p.tabId)) ? 'connected' : 'disconnected');
-                const dot = el.querySelector('.dot');
-                if (dot) dot.className = 'dot ' + dc;
+                // Reused node: resync the header state (dot class + reconnect
+                // button may have changed since the node was built)
+                _refreshPaneHeaderState(p);
                 return;
             }
             el = buildPane(p);
             rootEl.appendChild(el);
+            // The fresh header ships without the reconnect button; the state
+            // sync adds it when the pane's flags call for it (e.g. a split
+            // created while the session is down).
+            _refreshPaneHeaderState(p);
             const body = document.getElementById('pane-body_' + p.id);
             if (body && p.term) {
                 if (body._resizeObserver) body._resizeObserver.disconnect();
