@@ -265,6 +265,14 @@ export class RealTerm {
     }
     scrollLines(n) { this._scrolls.push(n); }
     scrollToBottom() {}
+    // xterm paste: fires the data event as user input. The host-side extras
+    // (bracketed-paste wrapping, scroll-on-input) live in real xterm; the
+    // model records the call so tests can pin that delivery went through
+    // paste() at all.
+    paste(data) {
+        (this._pastes = this._pastes || []).push(data);
+        this._dataSubs.slice().forEach(cb => cb(data));
+    }
     registerMarker(offset) {
         const m = { line: this.buffer.active.cursorY + offset, disposed: false, dispose() { this.disposed = true; } };
         this._markers.push(m);

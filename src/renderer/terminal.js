@@ -511,7 +511,14 @@ async function _pasteFromClipboardInto(term) {
         if (!resolved) return;
         if ((resolved.owner.tabId ?? null) !== startBackend) return;
         if (resolved.owner._sessionFailed === true) return;
-        _sendPaneInput(resolved.tab, resolved.owner, text);
+        // Deliver through xterm's paste path (its onData fires into
+        // _sendInputForTerm, the same event-time owner resolution keyboard
+        // input uses): scrolls the viewport to the bottom like a keystroke
+        // and wraps the payload in bracketed-paste markers when the
+        // application enabled mode 2004 — parity with Windows Terminal /
+        // WezTerm hosts. The guards above already validated the owner, and
+        // the send-time resolution repeats them at delivery.
+        term.paste(text);
     } catch(e) {}
 }
 
