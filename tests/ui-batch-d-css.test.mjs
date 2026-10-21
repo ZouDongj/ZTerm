@@ -69,3 +69,15 @@ test('U-08: scheme-light marker derives from the COLORFGBG luminance test', () =
   }
 });
 
+// ── U-12: SFTP path editor keeps field chrome, no layout jump ──
+
+test('U-12: pathbar is pinned and the editor keeps the 20px field box', () => {
+  assert.ok(ruleBody('.sftp-pathbar').includes('min-height:36px'), 'address row keeps the crumb-mode height');
+  const input = ruleBody('.sftp-path-input');
+  for (const decl of ['height:20px', 'border-radius:10px', 'background:var(--field-bg)', 'font-size:12px']) {
+    assert.ok(input.includes(decl), `path input missing ${decl}`);
+  }
+  assert.equal(ruleBody('.sftp-path-input:focus').trim(), 'box-shadow:var(--field-focus)',
+    'inset field ring replaces the global outer ring');
+});
+
