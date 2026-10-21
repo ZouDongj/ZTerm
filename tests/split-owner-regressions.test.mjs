@@ -178,6 +178,13 @@ class FakeTerminal {
         this._resizeSubs.push(cb);
         return { dispose: () => { const i = this._resizeSubs.indexOf(cb); if (i >= 0) this._resizeSubs.splice(i, 1); } };
     }
+    // xterm paste: fires the data event as user input (same model as
+    // tests/helpers/renderer-vm.mjs RealTerm.paste; the call is recorded so
+    // tests can pin that delivery went through paste()).
+    paste(data) {
+        (this._pastes = this._pastes || []).push(data);
+        this._dataSubs.slice().forEach(cb => cb(data));
+    }
     onSelectionChange() { return { dispose() {} }; }
     onBell() { return { dispose() {} }; }
     attachCustomKeyEventHandler() {}
