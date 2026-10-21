@@ -13,6 +13,8 @@
 //   command/args               → '' / [] for SSH; pane._command / pane._args for local
 //   _credId                    → pane._sshCredId wins, tab._credId kept when the pane has none
 //   connected                  → paneConnectedState(pane) — the adopted session's state
+//   _sessionFailed             → pane._sessionFailed (known-failed liveness marker)
+//   _sshConnecting/_sshErrored → pane flags (busy ring / error dot follow the session)
 //
 // NOT handled here (each caller owns them): term/fitAddon, tabId,
 // _ptyRequestId, _smoothCursor, name, _toolName, onData disposal/rebind, DOM

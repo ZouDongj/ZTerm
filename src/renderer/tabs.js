@@ -1685,6 +1685,11 @@ const TabManager = {
             // session and must survive the tab→pane promotion — a pending
             // paste would otherwise deliver into healthy siblings.
             existing._sessionFailed = tab._sessionFailed === true;
+            // Same transfer for the visual connection flags: a still-connecting
+            // or errored session must keep its busy ring / error dot on the
+            // pane (pane-fields.js adoptPaneFieldsIntoTab does the reverse).
+            existing._sshConnecting = tab._sshConnecting === true;
+            existing._sshErrored = tab._sshErrored === true;
             // The stored tool-provided name travels with the terminal onto its
             // new pane wrapper — the split branch of resolveTabDisplayName only reads pane slots.
             if (tab._toolName !== undefined) { existing._toolName = tab._toolName; delete tab._toolName; }
@@ -2606,7 +2611,7 @@ const TabManager = {
         const anchorIsContainer = !!(anchorNode && anchorNode.orientation);
         if (anchorIsContainer && !getParentOf(targetTab, anchorNode)) return;
         const dropAnchor = anchorIsContainer ? anchorNode : focusedPane;
-        let mt = null, mf = null, mid = null, sc = null, msc = null, mconn = false, mfailed = false;
+        let mt = null, mf = null, mid = null, sc = null, msc = null, mconn = false, mfailed = false, mconnecting = false, merrored = false;
         let paneName = sourceTab.name, paneType = sourceTab.type || 'local';
         let toolName = sourceTab._toolName;
         // The wrapper whose in-flight SSH attempt must follow the moved
@@ -2634,6 +2639,8 @@ const TabManager = {
             // (or still-connecting) pane must not read as online on arrival
             mconn = paneConnectedState(focused);
             mfailed = focused._sessionFailed === true;
+            mconnecting = focused._sshConnecting === true;
+            merrored = focused._sshErrored === true;
             // Dispose the dragged pane's onData listener immediately: otherwise after np is rebound below, the term
             // would hold two listeners (the old pane's + np's) and every keypress would fire twice
             if (focused._onDataDisp) { focused._onDataDisp.dispose(); focused._onDataDisp = null; }
@@ -2728,6 +2735,8 @@ const TabManager = {
             // which a single tab carries directly)
             mconn = paneConnectedState(sourceTab);
             mfailed = sourceTab._sessionFailed === true;
+            mconnecting = sourceTab._sshConnecting === true;
+            merrored = sourceTab._sshErrored === true;
             const idx = this.tabs.indexOf(sourceTab);
             sc = () => {
                 this.tabs.splice(idx, 1);
@@ -2755,6 +2764,10 @@ const TabManager = {
             // Same transfer rule as the first-split promotion: the target's
             // existing session keeps its liveness marker on the fp pane.
             fp._sessionFailed = targetTab._sessionFailed === true;
+            // The target's visual connection flags follow its session onto fp
+            // as well (same rule as the liveness marker above).
+            fp._sshConnecting = targetTab._sshConnecting === true;
+            fp._sshErrored = targetTab._sshErrored === true;
             // The terminal moves from targetTab onto the fp pane, so onData must use fp.tabId
             // (targetTab.tabId is about to be cleared; the rebind resolves the owner at send time)
             if (targetTab._onDataDisp) { targetTab._onDataDisp.dispose(); targetTab._onDataDisp = null; }
@@ -2788,6 +2801,10 @@ const TabManager = {
             // Known-failed liveness marker travels with the moved session
             // (ipc.js owns its lifecycle; see the ssh-error/pty-exit handlers)
             _sessionFailed: mfailed,
+            // Visual connection flags (busy ring / error dot) travel with the
+            // moved session too — same rule as the liveness marker above.
+            _sshConnecting: mconnecting,
+            _sshErrored: merrored,
             _sshHost: sshHost, _sshPort: sshPort, _sshUser: sshUser,
             _sshCredId: sshCredId, _sshProfileId: sshProfileId,
             // From the MOVED session (paneCommand/paneArgs), not the source

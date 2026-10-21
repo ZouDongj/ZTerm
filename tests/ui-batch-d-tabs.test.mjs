@@ -71,3 +71,48 @@ test('U-05: the busy rule beats the hover/active reveal (pointer-events stay non
         'the plainer .tab:hover/.tab.active .tab-reconnect rule must not re-enable pointer events on the busy variant');
 });
 
+// ── U-07 ────────────────────────────────────────────────────────────────────
+
+test('U-07: first-split promotion carries the connecting/errored flags onto the pane', () => {
+    const ctx = loadVm();
+    const { p1 } = wiredSplitTab(ctx, 't_fs', 'ssh_1', null, 'ssh_2', null,
+        { type: 'ssh', host: 'h', user: 'u', connected: false, _sshConnecting: true });
+    assert.equal(p1._sshConnecting, true, 'busy ring survives the tab→pane promotion');
+    assert.equal(p1._sshErrored, false, 'booleanized like _sessionFailed / adoptPaneFieldsIntoTab');
+});
+
+test('U-07: a single tab dragged onto another tab carries the flags onto the new pane', () => {
+    const ctx = loadVm();
+    const src = wiredTab(ctx, 't_mv', 'ssh_7', null, { type: 'ssh', host: 'h', user: 'u', connected: false, _sshErrored: true });
+    const tgt = wiredTab(ctx, 't_tg', 'local_9');
+    ctx.TabManager._moveTerminalToTab(src.id, tgt.id, 'r', null);
+    const np = ctx.getAllPanes(tgt).find(p => p.tabId === 'ssh_7');
+    assert.ok(np, 'moved session present on the target split');
+    assert.equal(np._sshErrored, true, 'error dot survives the move');
+    assert.equal(np._sshConnecting, false);
+});
+
+test('U-07: the target tab\'s own session keeps its flags on the promoted fp pane', () => {
+    const ctx = loadVm();
+    const tgt = wiredTab(ctx, 't_tp', 'ssh_8', null, { type: 'ssh', host: 'h', user: 'u', connected: false, _sshConnecting: true });
+    const src = wiredTab(ctx, 't_ds', 'local_5');
+    ctx.TabManager._moveTerminalToTab(src.id, tgt.id, 'r', null);
+    const fp = ctx.getAllPanes(tgt).find(p => p.tabId === 'ssh_8');
+    assert.ok(fp, 'target session promoted onto fp');
+    assert.equal(fp._sshConnecting, true, 'busy ring survives the target-side promotion');
+    assert.equal(fp._sshErrored, false);
+});
+
+test('U-07: a pane dragged out of a split carries its flags onto the moved pane', () => {
+    const ctx = loadVm();
+    const { tab: src, p2 } = wiredSplitTab(ctx, 't_ms', 'ssh_A', null, 'ssh_B', null,
+        { type: 'ssh', host: 'h', user: 'u', connected: true });
+    p2._sshErrored = true; // the focused (dragged) pane's session failed earlier
+    const tgt = wiredTab(ctx, 't_dt', 'local_6');
+    ctx.TabManager._moveTerminalToTab(src.id, tgt.id, 't', null);
+    const np = ctx.getAllPanes(tgt).find(p => p.tabId === 'ssh_B');
+    assert.ok(np, 'dragged pane present on the target split');
+    assert.equal(np._sshErrored, true, 'error dot follows the dragged session');
+    assert.equal(np._sshConnecting, false);
+});
+
