@@ -73,7 +73,7 @@
   };
 
   // Filled two-tone glyphs for objects (terminals, hosts, folders, files,
-  // settings, search): the base shape carries the accent and the inner
+  // search): the base shape carries the accent and the inner
   // details are drawn in the same currentColor at low alpha, so they read as
   // darker grooves on dark chrome without hardcoding a background colour.
   // Thin-line glyphs stay for micro controls (chevrons, close, + at 11px).
@@ -81,7 +81,6 @@
     terminal: '<rect x="3" y="4" width="18" height="16" rx="3" opacity=".9"/>' +
       '<path d="M7.6 9 10.8 12l-3.2 3" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" opacity=".28"/>' +
       '<path d="M12.6 15h4.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".28"/>',
-    settings: ICONS.settings,
     folder: ICONS.folder +
       '<path d="M3 9h18" fill="none" stroke="currentColor" stroke-width="1.6" opacity=".22"/>',
     file: ICONS.file +
@@ -118,9 +117,6 @@
   // the filled treatment from 14px up; below that the line version stays
   // legible. Unknown names return '' so callers can embed the result directly
   // without breaking markup.
-  // A few glyphs carry too much interior detail to survive a filled rendering
-  // at the 14px tab-strip size; they switch to duotone one step later.
-  const DUOTONE_MIN = { settings: 16 };
 
   // Purpose-drawn small glyphs (16-unit grid, full opacity, no downscaled
   // 24-grid detail). The settings gear is six teeth, tip r6.55 / valley r5.80,
@@ -146,7 +142,7 @@
       return '<svg width="' + size + '" height="' + size + '" viewBox="' + small.viewBox + '" fill="none" stroke="currentColor" stroke-width="' + small.stroke + '" stroke-linecap="round" stroke-linejoin="round">' + small.body + '</svg>';
     }
     const duo = DUOTONE_ICONS[name];
-    if (duo && size >= (DUOTONE_MIN[name] || 14)) {
+    if (duo && size >= 14) {
       return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="currentColor" stroke="none">' + duo + '</svg>';
     }
     const filled = FILLED_ICONS[name];

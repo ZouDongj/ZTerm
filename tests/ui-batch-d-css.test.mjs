@@ -99,3 +99,14 @@ test('U-18: pal-item/qc-item selectors are gone; v3 items keep press feedback', 
   assert.match(css, /\.v3-item:active/, 'v3 items keep the shared pressed brightness');
 });
 
+// ── U-19: settings gear never renders as a filled duotone ──
+
+test('U-19: settings renders the stroke gear at every size', () => {
+  assert.equal(DUOTONE_ICONS.settings, undefined, 'settings must not be in the duotone registry');
+  for (const size of [14, 16, 20, 24]) {
+    const svg = iconSvg('settings', size);
+    assert.ok(svg.includes('fill="none"'), `settings ${size}px stays a stroke glyph`);
+    assert.ok(svg.includes('stroke="currentColor"'), `settings ${size}px inherits text color`);
+    assert.ok(!svg.includes('fill="currentColor"'), `settings ${size}px never fills the hub`);
+  }
+});
