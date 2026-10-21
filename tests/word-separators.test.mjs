@@ -75,6 +75,10 @@ function buildOptions(config) {
         _clampFontWeight: (v, dflt) => parseInt(v, 10) || parseInt(dflt, 10),
         _getAccentColor: () => '#61afef',
         getTerminalTheme: () => ({}),
+        // Font governance (font-governance.js) is out of scope here: the
+        // chain passes through ungoverned and no enumeration is kicked.
+        _governTerminalFontChain: (family) => family,
+        _ensureFontGovernanceKick() {},
     };
     context.window = context;
     vm.createContext(context);

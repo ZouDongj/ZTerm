@@ -349,20 +349,69 @@ function createTermWrap(tab) {
     return { wrap, inner };
 }
 
+// Font-stack governance (N1 Phase 1): run the chain through the resolver in
+// font-governance.js (non-Mono NF families swap to their installed Mono
+// counterparts). The enumeration cache is cold for the first terminal at
+// startup; that terminal gets the raw chain here and is re-governed when the
+// list arrives (see _ensureFontGovernanceKick), while later terminals resolve
+// synchronously from the warm cache.
+function _governTerminalFontChain(chain) {
+    if (typeof governTerminalFontFamily !== 'function') return chain;
+    return governTerminalFontFamily(chain);
+}
+
+let _fontGovernanceKickStarted = false;
+function _ensureFontGovernanceKick() {
+    if (_fontGovernanceKickStarted) return;
+    if (typeof getSystemFonts !== 'function' || typeof TabManager === 'undefined') return;
+    _fontGovernanceKickStarted = true;
+    try {
+        getSystemFonts().then(fonts => {
+            if (!fonts) {
+                // Enumeration failed: allow a later terminal create to retry
+                // instead of latching governance off for the whole session.
+                _fontGovernanceKickStarted = false;
+                return;
+            }
+            const c = _settingsConfig;
+            const governed = _governTerminalFontChain(_normalizeFontFamily(
+                c.fontFamily || '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace',
+                c.fallbackFont
+            ));
+            // Same hot-apply pattern as saveAppearance: assign through the options
+            // setter so existing terminals re-measure and repaint in place.
+            TabManager.tabs.forEach(t => {
+                if (t.term && t.term.options.fontFamily !== governed) t.term.options.fontFamily = governed;
+                if (t.splitRoot && typeof getAllPanes === 'function') {
+                    getAllPanes(t).forEach(p => {
+                        if (p.term && p.term.options.fontFamily !== governed) p.term.options.fontFamily = governed;
+                    });
+                }
+            });
+        });
+    } catch (e) {
+        // Never let the governance kick break terminal creation.
+        _fontGovernanceKickStarted = false;
+    }
+}
+
 function _buildTerminalOptions() {
     const c = _settingsConfig;
-    const fontFamily = _normalizeFontFamily(
+    _ensureFontGovernanceKick();
+    const fontFamily = _governTerminalFontChain(_normalizeFontFamily(
         c.fontFamily || '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace',
         c.fallbackFont
-    );
+    ));
     const accentColor = _getAccentColor();
     const terminalTheme = getTerminalTheme();
     // Rendering defaults follow the user's Tabby terminal: same extracted
-    // bundles, JetBrainsMonoNL NF 16px, weight 400/600, Tabby's linePadding=1
-    // (=> lineHeight 1.125, cell height 23px) and allowTransparency=true,
-    // which switches the glyph atlas to an alpha canvas and therefore to
-    // grayscale anti-aliasing (Tabby does not use LCD subpixel AA; confirmed
-    // by pixel-level A/B comparison).
+    // bundles, JetBrainsMonoNL NF 16px (the default names the non-Mono variant
+    // because it is the commonly installed one; the font-governance resolver
+    // upgrades the chain to the Mono counterpart when present), weight 400/600,
+    // Tabby's linePadding=1 (=> lineHeight 1.125, cell height 23px) and
+    // allowTransparency=true, which switches the glyph atlas to an alpha canvas
+    // and therefore to grayscale anti-aliasing (Tabby does not use LCD subpixel
+    // AA; confirmed by pixel-level A/B comparison).
     const options = {
         cursorBlink: c.cursorBlink === true,
         cursorStyle: c.cursor || 'bar',

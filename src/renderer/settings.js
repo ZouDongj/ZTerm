@@ -687,31 +687,20 @@ function renderAccentSwatches() {
     };
 }
 
-// Font lists barely change while the app runs; cache them so each settings
+// Font lists barely change while the app runs; the enumeration cache lives in
+// font-governance.js (getSystemFonts/peekSystemFonts, loaded before this file)
+// and is shared with the terminal font-chain governance, so each settings
 // visit does not re-enumerate fonts and rebuild thousands of <option> nodes.
-let _systemFontsCache = null;
-// The tab-activation path and the page-switch path both call populateFontList
-// on open; share one in-flight enumeration so the pair cannot race the cache.
-let _systemFontsPromise = null;
-
 function populateFontList() {
-    if (_systemFontsCache) {
-        _buildFontSelects(_systemFontsCache);
+    const cached = typeof peekSystemFonts === 'function' ? peekSystemFonts() : null;
+    if (cached) {
+        _buildFontSelects(cached);
         return;
     }
-    if (!_systemFontsPromise) {
-        // Fetch all system fonts from main process (fontmanager-redux). On
-        // failure reset the promise so the next settings visit retries the
-        // enumeration instead of latching a rejected promise forever.
-        _systemFontsPromise = ipcRenderer.invoke('get-system-fonts').then(fonts => {
-            _systemFontsCache = fonts && fonts.length > 0 ? fonts : ['monospace'];
-            return _systemFontsCache;
-        }, () => {
-            _systemFontsPromise = null;
-            return null;
-        });
-    }
-    _systemFontsPromise.then(fonts => { if (fonts) _buildFontSelects(fonts); });
+    if (typeof getSystemFonts !== 'function') return;
+    // On failure the shared getter resets itself, so the next settings visit
+    // retries the enumeration instead of latching a rejected promise forever.
+    getSystemFonts().then(fonts => { if (fonts) _buildFontSelects(fonts); });
 }
 
 // Split from populateFontList so the cached path can rebuild synchronously.
@@ -826,6 +815,9 @@ function _buildFontSelects(allFonts) {
 
         // Re-convert selects to custom dropdowns with new options
         setTimeout(convertSelects, 50);
+        // The hint depends on the enumerated list — refresh it whenever the
+        // options are (re)built, including the async enumeration arrival.
+        _updateNfMonoHint();
     }
 }
 
@@ -872,6 +864,26 @@ function _fontSelectValue(id, fallback) {
     const el = document.getElementById(id);
     if (!el || el.options.length === 0) return fallback || '';
     return el.value;
+}
+
+// NF Mono hint under the terminal-font field: when the chosen family is a
+// Nerd Font NON-Mono variant whose Mono counterpart is installed, suggest the
+// swap (non-Mono NF icons measure 1.19-1.88x the cell width and overprint or
+// truncate in the WebGL atlas). Informational only — no warning styling, and
+// the UI-font fields never get the hint.
+function _updateNfMonoHint() {
+    const hint = document.getElementById('set-font-nf-hint');
+    if (!hint) return;
+    const installed = typeof peekSystemFonts === 'function' ? peekSystemFonts() : null;
+    const mono = installed && typeof suggestNfMonoCounterpart === 'function'
+        ? suggestNfMonoCounterpart(_fontSelectValue('set-font', _settingsConfig.fontFamily), installed)
+        : null;
+    if (mono) {
+        hint.textContent = `当前为非等宽版 Nerd Font，图标可能超宽溢出；建议改用已安装的等宽版「${mono}」`;
+        hint.style.display = '';
+    } else {
+        hint.style.display = 'none';
+    }
 }
 
 // Font-weight validation: a number 1-1000 (xterm accepts only a number 1-1000 or 'normal'/'bold'/'100'..'900'
@@ -924,6 +936,7 @@ function saveAppearance() {
     _settingsConfig = { ..._settingsConfig, ...config };
     persistSettings();
     applyUiFont();
+    _updateNfMonoHint();
 
     // Apply animations setting
     const winEl = document.querySelector('.window');
@@ -938,7 +951,16 @@ function saveAppearance() {
 
     // Apply font settings to existing terminals
     // Must use the same quote normalization as startup, otherwise an unquoted monospace becomes a CSS generic keyword and changes CJK fallback
-    const appliedFontFamily = fontFamily ? _normalizeFontFamily(fontFamily, fallbackFont) : '';
+    // Governance (font-governance.js) swaps non-Mono NF families for their
+    // installed Mono counterparts — the same chain terminal init applies, so a
+    // settings save cannot reintroduce the ungoverned form. With a cold
+    // enumeration cache the chain passes through unchanged and terminal.js's
+    // governance kick re-applies the governed form when the list arrives.
+    const appliedFontFamily = fontFamily
+        ? (typeof governTerminalFontFamily === 'function'
+            ? governTerminalFontFamily(_normalizeFontFamily(fontFamily, fallbackFont))
+            : _normalizeFontFamily(fontFamily, fallbackFont))
+        : '';
     TabManager.tabs.forEach(t => {
         if (t.term) {
             if (appliedFontFamily) t.term.options.fontFamily = appliedFontFamily;
