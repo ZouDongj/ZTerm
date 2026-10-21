@@ -721,6 +721,11 @@ const TabManager = {
                     });
                 }
             });
+            // Restore is complete (even the empty-restore fallback above): only
+            // now may saveConfig persist lastTabs. A quit/periodic save landing
+            // before this point would write the still-empty tab list over the
+            // user's saved session, wiping it.
+            this._restored = true;
             this.render();
             if (this.tabs.length > 0) {
                 this.switchTo(this.tabs[0].id);

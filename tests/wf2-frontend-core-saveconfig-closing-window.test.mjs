@@ -23,7 +23,9 @@ async function savedTabs(tabs, closingTabs) {
     const invokes = [];
     const context = {
         console,
-        TabManager: { tabs, _closingTabs: closingTabs },
+        // _restored: the profiles restore has completed (the normal state by
+        // the time any save fires); the pre-restore guard is tested separately.
+        TabManager: { tabs, _closingTabs: closingTabs, _restored: true },
         _settingsConfig: {},
         serializeSplitNode: () => ({ serialized: true }),
         ipcRenderer: { invoke: async (cmd, payload) => { invokes.push({ cmd, payload }); } },

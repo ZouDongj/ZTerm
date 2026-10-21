@@ -21,7 +21,9 @@ function fixture(tabs, settingsConfig = {}) {
     const invokes = [];
     const context = {
         console,
-        TabManager: { tabs },
+        // _restored: the profiles restore has completed (the normal state by
+        // the time any save fires); the pre-restore guard has its own test.
+        TabManager: { tabs, _restored: true },
         _settingsConfig: settingsConfig,
         serializeSplitNode: () => ({ serialized: true }),
         ipcRenderer: { invoke: async (cmd, payload) => { invokes.push({ cmd, payload }); } },
@@ -96,4 +98,14 @@ test('(guard) split tabs never persist content, even with the setting on', async
     }];
     const entries = await savedEntries(tabs, { restoreLocalContent: true });
     assert.equal(entries[0].content, '');
+});
+
+test('(guard) before the profiles restore completes, saveConfig persists nothing', async () => {
+    // Regression: a periodic/quit-time save landing during startup used to
+    // write the still-empty tab list over the user's saved lastTabs, wiping
+    // the session. The restore sets TabManager._restored only when done.
+    const f = fixture([{ id: 't1', name: 'shell', type: 'local', command: 'powershell.exe', args: [] }]);
+    f.context.TabManager._restored = false;
+    await f.context.saveConfig();
+    assert.equal(f.invokes.length, 0, 'no save-last-tabs may be issued pre-restore');
 });

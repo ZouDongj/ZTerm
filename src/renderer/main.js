@@ -101,6 +101,11 @@ _disableFormEnhancements(document);
 // ── Save / Periodic ──
 // Returns a Promise: the quit flow must wait for the save to hit disk, so this cannot be fire-and-forget
 function saveConfig() {
+    // Never persist lastTabs before the profiles restore finished: the tab
+    // list is still empty then, and a save (periodic tick or quit racing the
+    // restore) would wipe the user's saved session. Settings saves go through
+    // their own commands, so skipping here loses nothing.
+    if (!TabManager._restored) return Promise.resolve();
     const tabs = TabManager.tabs
         .filter(t => t.type !== 'settings')
         // A tab inside its close window (backend already destroyed, DOM entry
