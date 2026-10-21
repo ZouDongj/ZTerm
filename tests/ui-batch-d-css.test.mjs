@@ -91,3 +91,11 @@ test('U-13: titlebar height and transfer flyout share --titlebar-h', () => {
   assert.ok(!/top\s*:\s*42px/.test(flyout), 'stale 42px anchor removed');
 });
 
+// ── U-18: dead pressed-state selectors ──
+
+test('U-18: pal-item/qc-item selectors are gone; v3 items keep press feedback', () => {
+  assert.ok(!css.includes('.pal-item'), 'no .pal-item selector remains');
+  assert.ok(!css.includes('.qc-item'), 'no .qc-item selector remains');
+  assert.match(css, /\.v3-item:active/, 'v3 items keep the shared pressed brightness');
+});
+

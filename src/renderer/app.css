@@ -1142,7 +1142,7 @@ button,input,select,textarea,
 .toggle-switch::after{transition-duration:.12s}
 
 .settings-sidebar-item:active,.ssh-mgr-row:active,.ssh-item:active,
-.ss-row:active,.pal-item:active,.qc-item:active{
+.ss-row:active{
   background:rgba(255,255,255,.09);
 }
 .menu-item:active,.dd-option:active{
