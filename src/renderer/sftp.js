@@ -163,7 +163,7 @@ const SFTP = {
                 // request was in flight (isOpen gates both), so a request whose
                 // panel is no longer visible must not surface its obsolete error.
                 if (seq !== SFTP._reqSeq || this._tabId !== myTab || !SFTP.isOpen) return;
-                showToast('无法打开 SFTP: ' + (e?.message || '会话不可用'), true);
+                showToast('无法打开 SFTP: ' + (e && e.message || e || '会话不可用'), true);
                 document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载失败</div>';
                 return;
             }
@@ -452,7 +452,7 @@ const SFTP = {
                 // same ownership check as successes: a superseded request's rejection must be silent.
                 if (seq === SFTP._reqSeq && this._tabId === myTab && SFTP.isOpen) {
                     if (opts && opts.follow && this._isPinned(myTab)) { this._dropFollow(); return; }
-                    this._navFailed(e?.message || '会话不可用', opts);
+                    this._navFailed((e && e.message || e || '会话不可用'), opts);
                 }
                 return;
             }
@@ -818,7 +818,7 @@ const SFTP = {
             transferResult = await ipcRenderer.invoke('sftp-download', { tabId: owner.tabId, remotePath, localPath: result.filePath, transferId: tid });
         } catch (e) {
             TransferManager.cancel(tid);
-            showToast('下载失败: ' + (e?.message || '会话不可用'), true);
+            showToast('下载失败: ' + (e && e.message || e || '会话不可用'), true);
             return;
         }
         const { error, total } = transferResult;
@@ -851,7 +851,7 @@ const SFTP = {
             transferResult = await ipcRenderer.invoke('sftp-upload', { tabId: owner.tabId, localPath, remotePath, transferId: tid });
         } catch (e) {
             TransferManager.cancel(tid);
-            showToast('上传失败: ' + (e?.message || '会话不可用'), true);
+            showToast('上传失败: ' + (e && e.message || e || '会话不可用'), true);
             return;
         }
         const { error } = transferResult;
@@ -1010,7 +1010,7 @@ const SFTP = {
             try {
                 result = await ipcRenderer.invoke('sftp-mkdir', { tabId: snap.tabId, path });
             } catch (e) {
-                showToast('创建失败: ' + (e?.message || '会话不可用'), true);
+                showToast('创建失败: ' + (e && e.message || e || '会话不可用'), true);
                 return;
             }
             const { error } = result;
