@@ -7,6 +7,7 @@
      when Windows is in light app mode. */
   color-scheme:dark;
   --accent-rgb:97,175,239;--accent:rgb(var(--accent-rgb));--accent-contrast:#10161d;--term-bg:#282c34;
+  --titlebar-h:46px;
   /* Text ladder: pure white never used; 92/62/40 keeps a calm hierarchy */
   --t1:rgba(255,255,255,.92);--t2:rgba(255,255,255,.62);--t3:rgba(255,255,255,.40);
   --text-1:var(--t1);--text-2:var(--t2);--text-3:var(--t3);
@@ -117,7 +118,7 @@ body.no-animations .startup-splash .cell{transition:none}
    space above and below the 28px tab is equal (9px each) and the pane top
    still starts at 46px. Left padding matches the 12px pane margin so the
    first tab's left edge aligns with the terminal pane. */
-.titlebar{height:46px;background:transparent;display:flex;align-items:center;padding:0 0 0 12px;flex-shrink:0;position:relative;z-index:12}
+.titlebar{height:var(--titlebar-h);background:transparent;display:flex;align-items:center;padding:0 0 0 12px;flex-shrink:0;position:relative;z-index:12}
 /* Tauri frameless drag region */
 [data-tauri-drag-region]{-webkit-app-region:drag}
 #tabbar{display:flex;align-items:center;gap:2px;flex:1;overflow:hidden;min-width:0;padding-right:48px;contain:layout style;will-change:transform}#tabbar *{-webkit-app-region:no-drag}/* padding-right mirrors TAB_STRIP_RIGHT_RESERVE in tabstrip-layout.js: permanent breathing room before the SFTP/transfer/window-control cluster; the empty stretch stays a window-drag area */
@@ -757,7 +758,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 /* Transfer flyout: anchored below the top-bar button (position set inline),
    grouped-by-session collapsible list. pointer-events:auto re-enables hits
    on the flyout over the click-transparent #transfer-panel layer. */
-.transfer-window{position:absolute;top:42px;background:var(--acrylic);border-radius:12px;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(26px) saturate(1.45);backdrop-filter:blur(26px) saturate(1.45);overflow:hidden;width:360px;max-height:min(440px, calc(100vh - 60px));display:flex;flex-direction:column;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1);pointer-events:auto}
+.transfer-window{position:absolute;top:var(--titlebar-h);background:var(--acrylic);border-radius:12px;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(26px) saturate(1.45);backdrop-filter:blur(26px) saturate(1.45);overflow:hidden;width:360px;max-height:min(440px, calc(100vh - 60px));display:flex;flex-direction:column;animation:panelIn 0.2s cubic-bezier(0.05,0.7,0.1,1);pointer-events:auto}
 .transfer-header{display:flex;align-items:center;gap:6px;padding:10px 10px 6px 14px;flex-shrink:0}
 .transfer-header h2{font-size:10.5px;color:var(--text-3);font-weight:600;letter-spacing:0.8px;margin:0}
 .transfer-header-count{min-width:16px;padding:1px 7px;border-radius:7px;background:rgba(255,255,255,0.08);color:var(--text-3);font-size:10px;text-align:center;font-variant-numeric:tabular-nums}

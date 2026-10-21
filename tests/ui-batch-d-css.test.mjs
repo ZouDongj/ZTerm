@@ -81,3 +81,13 @@ test('U-12: pathbar is pinned and the editor keeps the 20px field box', () => {
     'inset field ring replaces the global outer ring');
 });
 
+// ── U-13: transfer flyout anchors below the titlebar token ──
+
+test('U-13: titlebar height and transfer flyout share --titlebar-h', () => {
+  assert.match(css, /--titlebar-h\s*:\s*46px/, 'titlebar height token exists');
+  assert.ok(ruleBody('.titlebar').includes('height:var(--titlebar-h)'), 'titlebar consumes the token');
+  const flyout = ruleBody('.transfer-window');
+  assert.ok(flyout.includes('top:var(--titlebar-h)'), 'flyout anchors to the token');
+  assert.ok(!/top\s*:\s*42px/.test(flyout), 'stale 42px anchor removed');
+});
+
