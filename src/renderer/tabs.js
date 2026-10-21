@@ -3047,10 +3047,18 @@ const TabManager = {
             el.querySelector('.dh-action').textContent = action;
             el.dataset.key = key;
         }
+        // A fresh show must not fly in from the last drag's geometry: the
+        // .drop-hint transition animates left/top/width/height, so write the
+        // new rect with transitions suppressed, flush, then re-enable them
+        // before .show fades the opacity in. Re-targeting within one drag
+        // (already shown) keeps the slide.
+        const fresh = !el.classList.contains('show');
+        if (fresh) el.style.transition = 'none';
         el.style.left = rect.left + 'px';
         el.style.top = rect.top + 'px';
         el.style.width = rect.width + 'px';
         el.style.height = rect.height + 'px';
+        if (fresh) { void el.offsetWidth; el.style.transition = ''; }
         el.classList.add('show');
     },
 

@@ -178,3 +178,38 @@ test('U-15 (guard): a terminal failure still clears the notice and never retries
     assert.equal(connects(invokes).length, 1, 'a deterministic failure never schedules a retry');
 });
 
+// ── U-16 ────────────────────────────────────────────────────────────────────
+
+test('U-16: a fresh drop hint appears in place; re-targeting still slides', () => {
+    const ctx = loadVm();
+    const T = ctx.TabManager;
+    // Pre-build #drop-hint with the inner nodes _showDropHint updates (the
+    // fake DOM never parses innerHTML, so the creation branch cannot run).
+    const dh = ctx.document.createElement('div');
+    dh.id = 'drop-hint';
+    dh.className = 'drop-hint';
+    const dhInner = ctx.document.createElement('div'); dhInner.className = 'dh';
+    const nameEl = ctx.document.createElement('span'); nameEl.className = 'dh-name';
+    const actEl = ctx.document.createElement('b'); actEl.className = 'dh-action';
+    dhInner.appendChild(nameEl); dhInner.appendChild(actEl); dh.appendChild(dhInner);
+    ctx.document.body.appendChild(dh);
+    // Record every style write so the transition value in effect at each
+    // geometry write is observable.
+    const writes = [];
+    dh.style = new Proxy({}, { set(t, k, v) { writes.push([k, v]); t[k] = v; return true; } });
+
+    T._showDropHint({ left: 10, top: 20, width: 100, height: 50 }, 'alpha', '左侧分屏');
+    assert.ok(dh.classList.contains('show'), 'hint shown');
+    const ti = writes.findIndex(w => w[0] === 'transition' && w[1] === 'none');
+    const li = writes.findIndex(w => w[0] === 'left');
+    assert.ok(ti !== -1 && li !== -1 && ti < li,
+        'geometry is written with transitions suppressed on a fresh show (old code animated the fly-in)');
+    assert.equal(dh.style.transition, '', 'inline suppression removed; stylesheet transition live again');
+
+    // Re-targeting inside the SAME drag (hint already shown) keeps the slide.
+    writes.length = 0;
+    T._showDropHint({ left: 400, top: 20, width: 100, height: 50 }, 'alpha', '左侧分屏');
+    assert.equal(dh.style.left, '400px', 're-target applied');
+    assert.ok(!writes.some(w => w[0] === 'transition'),
+        'no suppression while already visible — the 0.18s slide still animates');
+});
