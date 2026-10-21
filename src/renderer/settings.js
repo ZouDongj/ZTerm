@@ -404,7 +404,7 @@ function loadSettingsIntoForm() {
     const cursorEl = document.getElementById('set-cursor');
     if (cursorEl) cursorEl.value = config.cursor || 'bar';
     const sbEl = document.getElementById('set-scrollback');
-    if (sbEl) sbEl.value = config.scrollback || 10000;
+    if (sbEl) sbEl.value = config.scrollback ?? 10000;
     const bellEl = document.getElementById('set-bell');
     if (bellEl) bellEl.value = config.bell || 'off';
     const blinkEl = document.getElementById('set-blink');

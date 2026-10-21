@@ -112,6 +112,11 @@ function loadSettingsVm({ openDropdowns = [] } = {}) {
         _normalizeWordSeparators: (v) => (typeof v === 'string' && v ? v : ''),
         _clampFontWeight: (v, dflt) => parseInt(v, 10) || parseInt(dflt, 10),
         showToast: (msg, isError) => toasts.push({ msg, isError }),
+        // Only referenced by loadSettingsIntoForm; stubbed so the form-fill
+        // path is drivable without state.js / utils.js.
+        setToggle() {},
+        populateTerminalSchemeSelect() {},
+        _firstFontName: (f) => f || '',
     };
     context.window = context;
     vm.createContext(context);
@@ -206,6 +211,15 @@ test('saveTerminal：回滚行数 0 与正常值照常落盘且无提示', () =>
     vm1.run('saveTerminal()');
     assert.equal(vm1.terminalPayload().scrollback, 2000);
     assert.equal(vm1.toasts.length, 0);
+});
+
+test('loadSettingsIntoForm：scrollback 0 回填为 0 而非默认 10000（B-P2-13）', () => {
+    const vm1 = loadSettingsVm();
+    vm1.context._settingsConfig = { scrollback: 0 };
+    vm1.run('loadSettingsIntoForm()');
+    // `??` keeps the legitimate 0; the old `|| 10000` displayed the default
+    // and the next save persisted it over the user's 0.
+    assert.strictEqual(vm1.els.get('set-scrollback').value, 0);
 });
 
 // ── T11: Escape closes only an open custom dropdown ─────────────────────────

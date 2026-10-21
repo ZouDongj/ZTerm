@@ -372,7 +372,7 @@ function _buildTerminalOptions() {
         fontWeightBold: _clampFontWeight(c.fontWeightBold, '600'),
         lineHeight: c.lineHeight || 1.125,
         allowTransparency: true,
-        scrollback: c.scrollback || 10000,
+        scrollback: c.scrollback ?? 10000,
         minimumContrastRatio: c.minimumContrastRatio || 4,
         drawBoldTextInBrightColors: false,
         // The WebGL smooth-cursor adapter animates the real xterm caret, so
