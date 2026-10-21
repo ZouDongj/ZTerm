@@ -49,6 +49,39 @@ test('comboFromEvent 空 key 且无 code', () => {
     assert.equal(comboFromEvent(ev({ key: '' })), '');
 });
 
+// ── B-P2-14: physical letter keys are layout-independent ──
+
+test('comboFromEvent 非拉丁布局：物理字母键以 e.code 命中拉丁绑定', () => {
+    // Cyrillic layout: the physical C key reports e.key='с' (U+0441).
+    assert.equal(comboFromEvent(ev({ ctrlKey: true, key: 'с', code: 'KeyC' })), 'Ctrl+C');
+    // Greek layout: physical V reports 'ω'.
+    assert.equal(comboFromEvent(ev({ ctrlKey: true, shiftKey: true, key: 'ω', code: 'KeyV' })), 'Ctrl+Shift+V');
+});
+
+test('comboFromEvent 拉丁布局录制逐字节不变（存量绑定兼容）', () => {
+    // Same physical key on a Latin layout: the produced combo must be
+    // identical to the pre-fix e.key path so existing bindings keep matching.
+    assert.equal(comboFromEvent(ev({ ctrlKey: true, shiftKey: true, key: 'n', code: 'KeyN' })), 'Ctrl+Shift+N');
+    assert.equal(comboFromEvent(ev({ ctrlKey: true, key: 'N', code: 'KeyN', shiftKey: true })), 'Ctrl+Shift+N');
+    // No code (synthetic/legacy events): unchanged fallback to e.key.
+    assert.equal(comboFromEvent(ev({ ctrlKey: true, key: 't' })), 'Ctrl+T');
+});
+
+test('comboFromEvent Shift 层字符与数字保持 e.key（布局表达真实字符）', () => {
+    // AZERTY: Shift+Digit2 would report a different e.key; digits must not be
+    // remapped through e.code.
+    assert.equal(comboFromEvent(ev({ ctrlKey: true, shiftKey: true, key: '@', code: 'Digit2' })), 'Ctrl+Shift+@');
+    // Punctuation likewise (Ctrl+, is a default binding).
+    assert.equal(comboFromEvent(ev({ ctrlKey: true, key: ',', code: 'Comma' })), 'Ctrl+,');
+});
+
+test('browserAcceleratorDenied 非拉丁布局物理 J 键仍命中 ctrl+j', () => {
+    assert.equal(browserAcceleratorDenied(ev({ ctrlKey: true, key: 'й', code: 'KeyJ' })), true);
+    // Latin layout unchanged.
+    assert.equal(browserAcceleratorDenied(ev({ ctrlKey: true, key: 'j', code: 'KeyJ' })), true);
+    assert.equal(browserAcceleratorDenied(ev({ ctrlKey: true, key: 'h', code: 'KeyH' })), false);
+});
+
 // ── comboDisplay ──
 
 test('comboDisplay 方向键转箭头符号', () => {

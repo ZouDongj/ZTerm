@@ -14,13 +14,26 @@ function comboFromEvent(e) {
     if (e.metaKey) parts.push('Win');
     if (e.altKey) parts.push('Alt');
     if (e.shiftKey) parts.push('Shift');
-    let key = e.key;
-    if (!key || key === 'Dead' || key === 'Unidentified') {
-        const m = e.code && e.code.match(/^(?:Key|Digit)(\w)$/);
-        key = m ? m[1] : (e.code || '');
+    // Physical letter keys are layout-independent: on a Cyrillic/Greek layout
+    // the physical C key reports e.key='с', which never matches the Latin
+    // default bindings — and a combo recorded under one layout breaks after a
+    // layout switch. Prefer e.code for KeyA-KeyZ (B-P2-14). Latin-layout
+    // recordings are byte-identical to the old e.key path, so existing
+    // bindings keep matching; digits stay on e.key because their Shift layer
+    // differs per layout (AZERTY) and e.key carries the real character.
+    const codeLetter = e.code && e.code.match(/^Key([A-Z])$/);
+    let key;
+    if (codeLetter) {
+        key = codeLetter[1];
+    } else {
+        key = e.key;
+        if (!key || key === 'Dead' || key === 'Unidentified') {
+            const m = e.code && e.code.match(/^(?:Key|Digit)(\w)$/);
+            key = m ? m[1] : (e.code || '');
+        }
+        if (key === ' ') key = 'Space';
+        else if (key.length === 1) key = key.toUpperCase();
     }
-    if (key === ' ') key = 'Space';
-    else if (key.length === 1) key = key.toUpperCase();
     parts.push(key);
     return parts.join('+');
 }
@@ -48,8 +61,12 @@ const BROWSER_ACCELERATOR_DENYLIST = new Set(['ctrl+j']);
 
 function browserAcceleratorDenied(e) {
     if (!e || e.isComposing || e.keyCode === 229) return false;
+    // Same layout-independence rule as comboFromEvent: the physical J key
+    // reports e.key='й' on a Cyrillic layout, and the denylist is Latin.
+    const codeLetter = e.code && e.code.match(/^Key([A-Z])$/);
+    const key = codeLetter ? codeLetter[1].toLowerCase() : (e.key || '').toLowerCase();
     const combo = (e.ctrlKey ? 'ctrl+' : '') + (e.altKey ? 'alt+' : '') +
-        (e.shiftKey ? 'shift+' : '') + (e.metaKey ? 'meta+' : '') + (e.key || '').toLowerCase();
+        (e.shiftKey ? 'shift+' : '') + (e.metaKey ? 'meta+' : '') + key;
     return BROWSER_ACCELERATOR_DENYLIST.has(combo);
 }
 
