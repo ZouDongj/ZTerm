@@ -640,11 +640,15 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .main.sftp-open .term-wrap{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 12px)}
 .main.sftp-open .settings-pane{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 12px)}
 .main.sftp-open .split-root{width:calc(100% - min(var(--sftp-width,320px), calc(100% - 240px)) - 12px)}
-.main.sftp-open .search-bar{right:calc(min(var(--sftp-width,320px), calc(100% - 240px)) + 20px)}
+/* The bar is pinned by left+width (centered via translateX(-50%)), so the
+   open state must move `left` — a `right` offset would be dead. It recenters
+   in the terminal area left of the dock using the same dock reserve as
+   .term-wrap/.settings-pane/.split-root, and shrinks on narrow windows. */
+.main.sftp-open .search-bar{left:calc((100% - (min(var(--sftp-width,320px), calc(100% - 240px)) + 12px)) / 2);width:min(520px,calc(100% - (min(var(--sftp-width,320px), calc(100% - 240px)) + 12px) - 24px))}
 .main.sftp-animating .sftp-dock{transition:clip-path 0.18s ease}
 .main.sftp-animating .term-wrap{transition:right 0.18s ease,background 0.25s}
 .main.sftp-animating .split-root{transition:width 0.18s ease}
-.main.sftp-animating .search-bar{transition:right 0.18s ease}
+.main.sftp-animating .search-bar{transition:left 0.18s ease,width 0.18s ease}
 .sftp-resize{position:absolute;left:0;top:0;bottom:0;width:12px;cursor:ew-resize;z-index:7;display:flex;align-items:center;justify-content:center}
 .sftp-resize::after{content:"";width:2px;height:36px;border-radius:8px;background:rgba(255,255,255,0.12);transition:background-color 100ms ease}
 .sftp-resize:hover::after,.sftp-resize.dragging::after,.sftp-resize:focus-visible::after{background:rgb(var(--accent-rgb))}
