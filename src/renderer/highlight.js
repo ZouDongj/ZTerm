@@ -26,10 +26,16 @@ function clearAlternateScreen(tabId) {
 
 function loadHighlightRules() {
     ipcRenderer.once('highlight-rules', (event, { rules, settings }) => {
-        _highlightRules = rules || [];
         _highlightSettings = settings || { highlightEnabled: true, highlightAlternateDisable: true };
-        // First launch: create default rules
-        if (_highlightRules.length === 0) {
+        // Contract with get_highlight_rules (zterm.rs): a config WITHOUT the
+        // highlightRules key delivers a null/absent rules field (true first
+        // launch), while an explicitly saved list — including an EMPTY one —
+        // arrives as an array. The empty array is authoritative: the user
+        // deleted every rule, and that choice must survive a restart (P2-04).
+        if (Array.isArray(rules)) {
+            _highlightRules = rules;
+        } else {
+            // First launch: create default rules
             _highlightRules = [
                 { id: 'hl_1', text: 'ERROR', enabled: true, isRegExp: false, isCaseSensitive: false, foreground: true, foregroundColor: '#e06c75', background: false, backgroundColor: '', bold: true, italic: false, underline: false },
                 { id: 'hl_2', text: 'WARN', enabled: true, isRegExp: false, isCaseSensitive: false, foreground: true, foregroundColor: '#e5c07b', background: false, backgroundColor: '', bold: false, italic: false, underline: false },

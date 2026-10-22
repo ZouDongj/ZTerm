@@ -3393,7 +3393,17 @@ pub fn save_quick_commands(args: Vec<Value>) -> Result<Value, String> {
 pub fn get_highlight_rules(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
     let _ = args;
     let config = load_config();
-    let rules = config.get("highlightRules").cloned().unwrap_or(json!([]));
+    let _ = app.emit("highlight-rules", highlight_rules_payload(&config));
+    Ok(json!({ "ok": true }))
+}
+
+/// Build the `highlight-rules` event payload. Same absent-vs-empty contract
+/// as get_quick_commands: `rules` is null when the highlightRules key was
+/// never saved (first run — the renderer seeds defaults) and the stored value
+/// otherwise, so an explicitly cleared list ([]) stays distinguishable from a
+/// never-saved one. Split from get_highlight_rules for unit testing.
+fn highlight_rules_payload(config: &Value) -> Value {
+    let rules = config.get("highlightRules").cloned().unwrap_or(Value::Null);
     let enabled = config
         .get("highlightEnabled")
         .and_then(|v| v.as_bool())
@@ -3402,11 +3412,7 @@ pub fn get_highlight_rules(app: AppHandle, args: Vec<Value>) -> Result<Value, St
         .get("highlightAlternateDisable")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
-    let _ = app.emit(
-        "highlight-rules",
-        json!({ "rules": rules, "settings": { "highlightEnabled": enabled, "highlightAlternateDisable": alt_disable } }),
-    );
-    Ok(json!({ "ok": true }))
+    json!({ "rules": rules, "settings": { "highlightEnabled": enabled, "highlightAlternateDisable": alt_disable } })
 }
 
 #[tauri::command]
@@ -9518,5 +9524,26 @@ mod tests {
         let err = data_dir_suppressed_error().expect("suppressed config must block the switch");
         assert_eq!(err["code"], json!("config-unreadable"));
         CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn highlight_rules_payload_distinguishes_absent_from_empty() {
+        // Never saved: null (the renderer seeds its defaults on null).
+        let p = highlight_rules_payload(&json!({}));
+        assert!(p["rules"].is_null(), "absent key must emit null: {p}");
+        assert_eq!(p["settings"]["highlightEnabled"], json!(true));
+        assert_eq!(p["settings"]["highlightAlternateDisable"], json!(true));
+        // Explicitly cleared: [] is a real value and survives.
+        let p = highlight_rules_payload(&json!({
+            "highlightRules": [],
+            "highlightEnabled": false,
+            "highlightAlternateDisable": false
+        }));
+        assert_eq!(p["rules"], json!([]));
+        assert_eq!(p["settings"]["highlightEnabled"], json!(false));
+        assert_eq!(p["settings"]["highlightAlternateDisable"], json!(false));
+        // Saved rules pass through untouched.
+        let p = highlight_rules_payload(&json!({ "highlightRules": [{ "regex": "error" }] }));
+        assert_eq!(p["rules"], json!([{ "regex": "error" }]));
     }
 }
