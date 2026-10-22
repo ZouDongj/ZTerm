@@ -504,3 +504,12 @@ test('T26: a split pane whose disconnect flip has not landed yet does not go dea
     assert.equal(vm.SFTP._sessionDead, false, 'only connected === false confirms dead');
     assert.equal(vm.SFTP._files.length, 1, 'listing intact');
 });
+
+// ── 4a: mid-session channel rebuild notice ──────────────────────────────────
+
+test('4a: a successful backend channel rebuild surfaces a toast', async () => {
+    const vm = await loadSftpVm();
+    vm.emit('sftp-channel-rebuilt', { tabId: 'sessA' });
+    assert.ok(vm.toasts.some(t => t.msg === 'SFTP 通道已断开，已自动重建'),
+        `rebuild toast shown: ${JSON.stringify(vm.toasts.map(t => t.msg))}`);
+});
