@@ -5488,6 +5488,64 @@ async fn finalize_upload_rename(
     Ok(())
 }
 
+/// sftp_upload's init phase, split out for unit testing (same precedent as
+/// finalize_upload_rename): validates the local source, then creates the
+/// remote `.zterm-tmp-<id>` the transfer loop writes into. A failure AFTER
+/// the temp was created — the local open erroring, or a dropped link losing
+/// the open reply — removes it best-effort (the transfer loop's error path
+/// does the same), so an init failure never orphans an empty temp file on
+/// the server.
+async fn prepare_upload(
+    sftp: &russh_sftp::client::SftpSession,
+    local_path: &str,
+    remote_path: &str,
+    transfer_id_num: u64,
+) -> Result<
+    (
+        std::fs::Metadata,
+        String,
+        russh_sftp::client::fs::File,
+        tokio::fs::File,
+    ),
+    String,
+> {
+    use russh_sftp::protocol::OpenFlags;
+    // Reject local directories (drag-drop upload only checks synchronously in the frontend; this is the backstop, matching the Electron version's behavior)
+    let local_meta = tokio::fs::metadata(local_path)
+        .await
+        .map_err(|e| format!("stat: {e}"))?;
+    if local_meta.is_dir() {
+        return Err("暂不支持上传文件夹".to_string());
+    }
+    // Write to a remote temp file first and rename on success — on cancel/failure
+    // the remote temp file is deleted, so no partial file remains (and TRUNCATE never clobbers an existing same-name file)
+    let tmp_remote = format!("{}.zterm-tmp-{}", remote_path, transfer_id_num);
+    let opened: Result<_, String> = async {
+        let file = sftp
+            .open_with_flags(
+                &tmp_remote,
+                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            )
+            .await
+            .map_err(|e| format!("open: {e}"))?;
+        let local = tokio::fs::File::open(local_path)
+            .await
+            .map_err(|e| format!("open: {e}"))?;
+        Ok((file, local))
+    }
+    .await;
+    match opened {
+        Ok((file, local)) => Ok((local_meta, tmp_remote, file, local)),
+        Err(e) => {
+            // The remote open may already have created the temp server-side
+            // (a lost reply leaves the client no handle but the file exists):
+            // remove it best-effort so a failed init never orphans it.
+            let _ = sftp.remove_file(&tmp_remote).await;
+            Err(e)
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn sftp_upload(
     app: AppHandle,
@@ -5523,31 +5581,7 @@ pub async fn sftp_upload(
     // uploads of one destination cannot collide on it.
     let remote_backup = format!("{}.zterm-bak-{}", remote_path, transfer_id_num);
     // Clean up the cancel registry when init fails
-    let init_result: Result<_, String> = async {
-        use russh_sftp::protocol::OpenFlags;
-        // Reject local directories (drag-drop upload only checks synchronously in the frontend; this is the backstop, matching the Electron version's behavior)
-        let local_meta = tokio::fs::metadata(local_path)
-            .await
-            .map_err(|e| format!("stat: {e}"))?;
-        if local_meta.is_dir() {
-            return Err("暂不支持上传文件夹".to_string());
-        }
-        // Write to a remote temp file first and rename on success — on cancel/failure
-        // the remote temp file is deleted, so no partial file remains (and TRUNCATE never clobbers an existing same-name file)
-        let tmp_remote = format!("{}.zterm-tmp-{}", remote_path, transfer_id_num);
-        let file = sftp
-            .open_with_flags(
-                &tmp_remote,
-                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-            )
-            .await
-            .map_err(|e| format!("open: {e}"))?;
-        let local = tokio::fs::File::open(local_path)
-            .await
-            .map_err(|e| format!("open: {e}"))?;
-        Ok::<_, String>((local_meta, tmp_remote, file, local))
-    }
-    .await;
+    let init_result = prepare_upload(&sftp, local_path, remote_path, transfer_id_num).await;
     let (local_meta, tmp_remote, mut file, mut local) = match init_result {
         Ok(v) => v,
         Err(e) => {
@@ -7203,11 +7237,13 @@ mod tests {
 
     // Failure injection shared with the handler task: arms specific rename
     // sources / remove targets to fail, so finalize's recovery paths can be
-    // exercised deterministically.
+    // exercised deterministically. `opens` fails AFTER the file is created
+    // server-side — the dropped-reply shape of an init dying mid-open.
     #[derive(Clone, Default)]
     struct SftpFailures {
         renames: Arc<Mutex<Vec<String>>>,
         removes: Arc<Mutex<Vec<String>>>,
+        opens: Arc<Mutex<Vec<String>>>,
     }
 
     impl SftpFailures {
@@ -7217,6 +7253,14 @@ mod tests {
 
         fn fail_removes_for(&self, filename: &str) {
             self.removes.lock().push(filename.to_string());
+        }
+
+        fn fail_opens_for(&self, filename: &str) {
+            self.opens.lock().push(filename.to_string());
+        }
+
+        fn blocks_open(&self, filename: &str) -> bool {
+            self.opens.lock().iter().any(|p| p == filename)
         }
 
         fn blocks_rename(&self, oldpath: &str) -> bool {
@@ -7276,6 +7320,12 @@ mod tests {
             let file = std::fs::OpenOptions::from(pflags)
                 .open(self.path(&filename))
                 .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
+            if self.failures.blocks_open(&filename) {
+                // The file now EXISTS server-side but the reply is a failure
+                // (a dropped link mid-init loses the reply the same way) —
+                // the client holds no handle for the created file.
+                return Err(russh_sftp::protocol::StatusCode::Failure);
+            }
             self.next_handle += 1;
             let handle = format!("h{}", self.next_handle);
             self.handles.insert(handle.clone(), file);
@@ -7753,6 +7803,46 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("dest.txt")).unwrap(), b"new");
         assert!(!dir.join("dest.txt.zterm-tmp-7").exists());
         assert!(!dir.join("dest.txt.zterm-bak-7").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn upload_init_failure_removes_the_remote_temp() {
+        // The open reply is lost after the server already created the temp
+        // file (a link dropping mid-init): prepare_upload must run the same
+        // best-effort temp removal as the transfer loop's error path, so the
+        // server is never left with an orphaned empty `.zterm-tmp-<id>`.
+        let dir = config_test_dir("sftp-init-cleanup");
+        let (sftp, failures) = test_sftp_session(dir.clone()).await;
+        let local = dir.join("local.bin");
+        std::fs::write(&local, b"data").unwrap();
+        failures.fail_opens_for("dest.txt.zterm-tmp-7");
+        let err = match prepare_upload(&sftp, local.to_str().unwrap(), "dest.txt", 7).await {
+            Ok(_) => panic!("the injected open failure must fail init"),
+            Err(e) => e,
+        };
+        assert!(err.starts_with("open:"), "unexpected error: {err}");
+        assert!(
+            !dir.join("dest.txt.zterm-tmp-7").exists(),
+            "init failure must not orphan the remote temp file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn upload_init_rejects_a_directory_without_touching_the_remote() {
+        // The directory rejection happens before the temp name is even
+        // computed: no remote temp is created and nothing is removed.
+        let dir = config_test_dir("sftp-init-dir");
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
+        let local_dir = dir.join("srcdir");
+        std::fs::create_dir(&local_dir).unwrap();
+        let err = match prepare_upload(&sftp, local_dir.to_str().unwrap(), "dest.txt", 3).await {
+            Ok(_) => panic!("a directory source must fail init"),
+            Err(e) => e,
+        };
+        assert!(err.contains("上传文件夹"), "unexpected error: {err}");
+        assert!(!dir.join("dest.txt.zterm-tmp-3").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
