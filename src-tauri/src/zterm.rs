@@ -1875,6 +1875,195 @@ async fn ensure_sftp_transfer(
     }
 }
 
+/// true when an SFTP op's failure proves the CHANNEL died mid-session
+/// (transport level: I/O, EOF, request timeout, the session task gone). A
+/// Status or Limited reply proves the opposite — the server answered on this
+/// channel — so those never trigger a rebuild.
+fn sftp_channel_died(e: &russh_sftp::client::error::Error) -> bool {
+    !matches!(
+        e,
+        russh_sftp::client::error::Error::Status(_) | russh_sftp::client::error::Error::Limited(_)
+    )
+}
+
+/// One SFTP op's failure, classified for the mid-session rebuild: only a
+/// transport-level failure (see sftp_channel_died) justifies rebuilding the
+/// channel; server-side refusals and local/validation failures would fail
+/// identically on a fresh channel.
+struct SftpOpFailure {
+    channel_dead: bool,
+    message: String,
+}
+
+impl SftpOpFailure {
+    fn sftp(e: russh_sftp::client::error::Error) -> Self {
+        Self {
+            channel_dead: sftp_channel_died(&e),
+            message: format!("{e}"),
+        }
+    }
+
+    /// Same classification with the step prefix the transfer errors carry.
+    fn sftp_step(step: &str, e: russh_sftp::client::error::Error) -> Self {
+        Self {
+            channel_dead: sftp_channel_died(&e),
+            message: format!("{step}: {e}"),
+        }
+    }
+
+    /// A failure no fresh channel can fix (validation, local fs).
+    fn other(message: String) -> Self {
+        Self {
+            channel_dead: false,
+            message,
+        }
+    }
+}
+
+/// Outcome of one SFTP op run with the mid-session rebuild (4a).
+enum SftpOpOutcome<T> {
+    /// The op succeeded; the bool marks that the channel was rebuilt first.
+    Done(T, bool),
+    /// The op itself failed — reported through the json `error` field.
+    Failed(String),
+    /// No channel could be ensured or rebuilt — reported as the invoke error.
+    NoChannel(String),
+}
+
+/// Run `op` on the cached channel; when its failure proves the channel died
+/// mid-session (a server restarting its SFTP subsystem kills an ESTABLISHED
+/// channel — issue #29's lazy rebuild covered only a channel that never
+/// established), evict it, rebuild once via `reopen` and retry the op once
+/// on the fresh channel.
+async fn run_sftp_op_with_rebuild<T, F, Fut, R, RFut>(
+    cached: Arc<russh_sftp::client::SftpSession>,
+    evict: impl FnOnce(),
+    reopen: R,
+    op: F,
+) -> SftpOpOutcome<T>
+where
+    F: Fn(Arc<russh_sftp::client::SftpSession>) -> Fut,
+    Fut: std::future::Future<Output = Result<T, SftpOpFailure>>,
+    R: FnOnce() -> RFut,
+    RFut: std::future::Future<Output = Result<Arc<russh_sftp::client::SftpSession>, String>>,
+{
+    let first = match op(cached.clone()).await {
+        Ok(v) => return SftpOpOutcome::Done(v, false),
+        Err(e) => e,
+    };
+    if !first.channel_dead {
+        return SftpOpOutcome::Failed(first.message);
+    }
+    evict();
+    let fresh = match reopen().await {
+        Ok(s) => s,
+        Err(m) => return SftpOpOutcome::NoChannel(m),
+    };
+    match op(fresh).await {
+        Ok(v) => SftpOpOutcome::Done(v, true),
+        Err(e) => SftpOpOutcome::Failed(e.message),
+    }
+}
+
+/// Evict the dead channel from the session's caches, guarded by identity
+/// (a reconnect may already have replaced the session — only the channel
+/// that proved dead may be evicted). The next ensure_* reopens on demand.
+fn forget_dead_sftp_channel(
+    state: &SessionMap,
+    tab_id: &str,
+    dead: &Arc<russh_sftp::client::SftpSession>,
+) {
+    if let Some(SessionType::Ssh(s)) = state.lock().get_mut(tab_id) {
+        if s.sftp.as_ref().is_some_and(|c| Arc::ptr_eq(c, dead)) {
+            s.sftp = None;
+        }
+        if s.sftp_transfer.as_ref().is_some_and(|c| Arc::ptr_eq(c, dead)) {
+            s.sftp_transfer = None;
+        }
+    }
+}
+
+/// Panel-channel ops (sftp_open / sftp_readdir / sftp_mkdir) with the
+/// mid-session rebuild: the ensure failure keeps its invoke-error surface
+/// and the op failure keeps its json `error` surface.
+async fn panel_sftp_op<T, F, Fut>(
+    state: &SessionMap,
+    tab_id: &str,
+    op: F,
+) -> SftpOpOutcome<T>
+where
+    F: Fn(Arc<russh_sftp::client::SftpSession>) -> Fut,
+    Fut: std::future::Future<Output = Result<T, SftpOpFailure>>,
+{
+    let cached = match ensure_sftp(state, tab_id).await {
+        Ok(s) => s,
+        Err(m) => return SftpOpOutcome::NoChannel(m),
+    };
+    let dead = cached.clone();
+    run_sftp_op_with_rebuild(
+        cached,
+        || forget_dead_sftp_channel(state, tab_id, &dead),
+        || ensure_sftp(state, tab_id),
+        op,
+    )
+    .await
+}
+
+/// Transfer init with one rebuild on mid-session channel death (4a): when
+/// the init proves the cached channel died, evict it, rebuild once via
+/// ensure_sftp_transfer and retry the init on the fresh channel — no byte
+/// has moved at init, so the retry cannot duplicate transfer state. The
+/// cancel registration moves onto the session generation that serves the
+/// retry, and the returned channel/cancels are the ones the transfer must
+/// use. A rebuild failure keeps the ensure error surface (invoke error).
+#[allow(clippy::too_many_arguments)]
+async fn transfer_init_with_rebuild<T, F, Fut>(
+    app: &AppHandle,
+    state: &SessionMap,
+    tab_id: &str,
+    transfer_id_key: &str,
+    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+    sftp: Arc<russh_sftp::client::SftpSession>,
+    cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    init: F,
+) -> Result<
+    (
+        Arc<russh_sftp::client::SftpSession>,
+        Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+        Result<T, SftpOpFailure>,
+    ),
+    String,
+>
+where
+    F: Fn(Arc<russh_sftp::client::SftpSession>) -> Fut,
+    Fut: std::future::Future<Output = Result<T, SftpOpFailure>>,
+{
+    let first = init(sftp.clone()).await;
+    match &first {
+        Err(e) if e.channel_dead => {}
+        _ => return Ok((sftp, cancels, first)),
+    }
+    forget_dead_sftp_channel(state, tab_id, &sftp);
+    match ensure_sftp_transfer(state, tab_id).await {
+        Ok((rebuilt, rebuilt_cancels)) => {
+            // Move the cancel registration onto the session generation that
+            // actually serves the retry.
+            cancels.lock().remove(transfer_id_key);
+            rebuilt_cancels
+                .lock()
+                .insert(transfer_id_key.to_string(), cancelled.clone());
+            let retry = init(rebuilt.clone()).await;
+            if retry.is_ok() {
+                let _ = app.emit("sftp-channel-rebuilt", json!({ "tabId": tab_id }));
+            }
+            Ok((rebuilt, rebuilt_cancels, retry))
+        }
+        Err(m) => {
+            cancels.lock().remove(transfer_id_key);
+            Err(m)
+        }
+    }
+}
 
 /// Fields of `username`'s /etc/passwd entry after the username itself:
 /// [password, uid, gid, gecos, home, shell].
@@ -5169,8 +5358,43 @@ pub fn revoke_credential(
 
 // ── SFTP commands ──
 
+/// The panel's directory listing rows (sftp_open / sftp_readdir share the shape).
+fn sftp_dir_files_json(entries: russh_sftp::client::fs::ReadDir) -> Vec<Value> {
+    let mut files: Vec<Value> = Vec::new();
+    for e in entries {
+        let name = e.file_name();
+        let meta = e.metadata();
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        files.push(json!({
+            "name": name,
+            "isDir": e.file_type().is_dir(),
+            "isLink": e.file_type().is_symlink(),
+            "size": meta.len(),
+            "mtime": mtime,
+            "mode": 0,
+        }));
+    }
+    files
+}
+
+/// Emit the panel's channel-rebuilt notice after a mid-session recovery (4a).
+fn emit_sftp_channel_rebuilt(app: &AppHandle, tab_id: &str, rebuilt: bool) {
+    if rebuilt {
+        let _ = app.emit("sftp-channel-rebuilt", json!({ "tabId": tab_id }));
+    }
+}
+
 #[tauri::command]
-pub async fn sftp_open(state: State<'_, SessionMap>, args: Vec<Value>) -> Result<Value, String> {
+pub async fn sftp_open(
+    app: AppHandle,
+    state: State<'_, SessionMap>,
+    args: Vec<Value>,
+) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
     let tab_id = params.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
     // Initial path: prefer the SSH session's tracked cwd (OSC 7), else the home directory
@@ -5181,73 +5405,64 @@ pub async fn sftp_open(state: State<'_, SessionMap>, args: Vec<Value>) -> Result
             _ => None,
         }
     };
-    let sftp = ensure_sftp(&state, tab_id).await?;
-    let path = match tracked_cwd {
-        Some(c) if !c.is_empty() => c,
-        _ => sftp.canonicalize(".").await.unwrap_or_else(|_| "/".into()),
-    };
-    match sftp.read_dir(&path).await {
-        Ok(entries) => {
-            let mut files: Vec<Value> = Vec::new();
-            for e in entries {
-                let name = e.file_name();
-                let meta = e.metadata();
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                files.push(json!({
-                    "name": name,
-                    "isDir": e.file_type().is_dir(),
-                    "isLink": e.file_type().is_symlink(),
-                    "size": meta.len(),
-                    "mtime": mtime,
-                    "mode": 0,
-                }));
-            }
-            Ok(json!({ "path": path, "files": files }))
+    match panel_sftp_op(&state, tab_id, move |sftp| {
+        let tracked_cwd = tracked_cwd.clone();
+        async move {
+            let path = match tracked_cwd {
+                Some(c) if !c.is_empty() => c,
+                _ => sftp.canonicalize(".").await.unwrap_or_else(|_| "/".into()),
+            };
+            sftp.read_dir(&path)
+                .await
+                .map(|entries| (path, entries))
+                .map_err(SftpOpFailure::sftp)
         }
-        Err(e) => Ok(json!({ "error": format!("{e}") })),
+    })
+    .await
+    {
+        SftpOpOutcome::Done((path, entries), rebuilt) => {
+            emit_sftp_channel_rebuilt(&app, tab_id, rebuilt);
+            Ok(json!({ "path": path, "files": sftp_dir_files_json(entries) }))
+        }
+        SftpOpOutcome::Failed(m) => Ok(json!({ "error": m })),
+        SftpOpOutcome::NoChannel(m) => Err(m),
     }
 }
 
 #[tauri::command]
-pub async fn sftp_readdir(state: State<'_, SessionMap>, args: Vec<Value>) -> Result<Value, String> {
+pub async fn sftp_readdir(
+    app: AppHandle,
+    state: State<'_, SessionMap>,
+    args: Vec<Value>,
+) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
     let tab_id = params.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
-    let path = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    let sftp = ensure_sftp(&state, tab_id).await?;
-    match sftp.read_dir(path).await {
-        Ok(entries) => {
-            let mut files: Vec<Value> = Vec::new();
-            for e in entries {
-                let name = e.file_name();
-                let meta = e.metadata();
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                files.push(json!({
-                    "name": name,
-                    "isDir": e.file_type().is_dir(),
-                    "isLink": e.file_type().is_symlink(),
-                    "size": meta.len(),
-                    "mtime": mtime,
-                    "mode": 0,
-                }));
-            }
-            Ok(json!({ "files": files }))
+    let path = params
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or(".")
+        .to_string();
+    match panel_sftp_op(&state, tab_id, move |sftp| {
+        let path = path.clone();
+        async move { sftp.read_dir(path).await.map_err(SftpOpFailure::sftp) }
+    })
+    .await
+    {
+        SftpOpOutcome::Done(entries, rebuilt) => {
+            emit_sftp_channel_rebuilt(&app, tab_id, rebuilt);
+            Ok(json!({ "files": sftp_dir_files_json(entries) }))
         }
-        Err(e) => Ok(json!({ "error": format!("{e}") })),
+        SftpOpOutcome::Failed(m) => Ok(json!({ "error": m })),
+        SftpOpOutcome::NoChannel(m) => Err(m),
     }
 }
 
 #[tauri::command]
-pub async fn sftp_mkdir(state: State<'_, SessionMap>, args: Vec<Value>) -> Result<Value, String> {
+pub async fn sftp_mkdir(
+    app: AppHandle,
+    state: State<'_, SessionMap>,
+    args: Vec<Value>,
+) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
     let tab_id = params.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
     let path = params
@@ -5259,10 +5474,18 @@ pub async fn sftp_mkdir(state: State<'_, SessionMap>, args: Vec<Value>) -> Resul
     if path.is_empty() {
         return Ok(json!({ "error": "missing path" }));
     }
-    let sftp = ensure_sftp(&state, tab_id).await?;
-    match sftp.create_dir(path).await {
-        Ok(_) => Ok(json!({ "ok": true })),
-        Err(e) => Ok(json!({ "error": format!("{e}") })),
+    match panel_sftp_op(&state, tab_id, move |sftp| {
+        let path = path.clone();
+        async move { sftp.create_dir(path).await.map_err(SftpOpFailure::sftp) }
+    })
+    .await
+    {
+        SftpOpOutcome::Done(_, rebuilt) => {
+            emit_sftp_channel_rebuilt(&app, tab_id, rebuilt);
+            Ok(json!({ "ok": true }))
+        }
+        SftpOpOutcome::Failed(m) => Ok(json!({ "error": m })),
+        SftpOpOutcome::NoChannel(m) => Err(m),
     }
 }
 
@@ -5334,30 +5557,40 @@ pub async fn sftp_download(
 
     // Clean up the cancel registry when init (opening remote/local files) fails,
     // so dead entries don't accumulate over a long run
-    let init_result: Result<_, String> = async {
+    let init = |s: Arc<russh_sftp::client::SftpSession>| async move {
         use russh_sftp::protocol::OpenFlags;
-        let file = sftp
+        let file = s
             .open_with_flags(remote_path, OpenFlags::READ)
             .await
-            .map_err(|e| format!("open: {e}"))?;
+            .map_err(|e| SftpOpFailure::sftp_step("open", e))?;
         let metadata = file
             .metadata()
             .await
-            .map_err(|e| format!("metadata: {e}"))?;
+            .map_err(|e| SftpOpFailure::sftp_step("metadata", e))?;
         // Write to a local temp file first and rename on success — on cancel/failure
         // the temp file is deleted, so a partial file never masquerades as complete
         let tmp_local = format!("{}.zterm-tmp-{}", local_path, transfer_id_num);
         let local = tokio::fs::File::create(&tmp_local)
             .await
-            .map_err(|e| format!("create: {e}"))?;
-        Ok::<_, String>((file, metadata, tmp_local, local))
-    }
-    .await;
+            .map_err(|e| SftpOpFailure::other(format!("create: {e}")))?;
+        Ok((file, metadata, tmp_local, local))
+    };
+    let (_sftp, cancels, init_result) = transfer_init_with_rebuild(
+        &app,
+        &state,
+        tab_id,
+        &transfer_id_key,
+        &cancelled,
+        sftp,
+        cancels,
+        init,
+    )
+    .await?;
     let (mut file, metadata, tmp_local, mut local) = match init_result {
         Ok(v) => v,
         Err(e) => {
             cancels.lock().remove(&transfer_id_key);
-            return Ok(json!({ "error": e }));
+            return Ok(json!({ "error": e.message }));
         }
     };
     let total = metadata.len();
@@ -5494,7 +5727,8 @@ async fn finalize_upload_rename(
 /// the temp was created — the local open erroring, or a dropped link losing
 /// the open reply — removes it best-effort (the transfer loop's error path
 /// does the same), so an init failure never orphans an empty temp file on
-/// the server.
+/// the server. Failures are classified for the mid-session rebuild (4a):
+/// only a transport-level remote-open failure is channel_dead.
 async fn prepare_upload(
     sftp: &russh_sftp::client::SftpSession,
     local_path: &str,
@@ -5507,30 +5741,30 @@ async fn prepare_upload(
         russh_sftp::client::fs::File,
         tokio::fs::File,
     ),
-    String,
+    SftpOpFailure,
 > {
     use russh_sftp::protocol::OpenFlags;
     // Reject local directories (drag-drop upload only checks synchronously in the frontend; this is the backstop, matching the Electron version's behavior)
     let local_meta = tokio::fs::metadata(local_path)
         .await
-        .map_err(|e| format!("stat: {e}"))?;
+        .map_err(|e| SftpOpFailure::other(format!("stat: {e}")))?;
     if local_meta.is_dir() {
-        return Err("暂不支持上传文件夹".to_string());
+        return Err(SftpOpFailure::other("暂不支持上传文件夹".to_string()));
     }
     // Write to a remote temp file first and rename on success — on cancel/failure
     // the remote temp file is deleted, so no partial file remains (and TRUNCATE never clobbers an existing same-name file)
     let tmp_remote = format!("{}.zterm-tmp-{}", remote_path, transfer_id_num);
-    let opened: Result<_, String> = async {
+    let opened: Result<_, SftpOpFailure> = async {
         let file = sftp
             .open_with_flags(
                 &tmp_remote,
                 OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
             )
             .await
-            .map_err(|e| format!("open: {e}"))?;
+            .map_err(|e| SftpOpFailure::sftp_step("open", e))?;
         let local = tokio::fs::File::open(local_path)
             .await
-            .map_err(|e| format!("open: {e}"))?;
+            .map_err(|e| SftpOpFailure::other(format!("open: {e}")))?;
         Ok((file, local))
     }
     .await;
@@ -5581,12 +5815,22 @@ pub async fn sftp_upload(
     // uploads of one destination cannot collide on it.
     let remote_backup = format!("{}.zterm-bak-{}", remote_path, transfer_id_num);
     // Clean up the cancel registry when init fails
-    let init_result = prepare_upload(&sftp, local_path, remote_path, transfer_id_num).await;
+    let (sftp, cancels, init_result) = transfer_init_with_rebuild(
+        &app,
+        &state,
+        tab_id,
+        &transfer_id_key,
+        &cancelled,
+        sftp,
+        cancels,
+        |s| async move { prepare_upload(&s, local_path, remote_path, transfer_id_num).await },
+    )
+    .await?;
     let (local_meta, tmp_remote, mut file, mut local) = match init_result {
         Ok(v) => v,
         Err(e) => {
             cancels.lock().remove(&transfer_id_key);
-            return Ok(json!({ "error": e }));
+            return Ok(json!({ "error": e.message }));
         }
     };
     let total = local_meta.len();
@@ -7821,7 +8065,7 @@ mod tests {
             Ok(_) => panic!("the injected open failure must fail init"),
             Err(e) => e,
         };
-        assert!(err.starts_with("open:"), "unexpected error: {err}");
+        assert!(err.message.starts_with("open:"), "unexpected error: {}", err.message);
         assert!(
             !dir.join("dest.txt.zterm-tmp-7").exists(),
             "init failure must not orphan the remote temp file"
@@ -7841,8 +8085,142 @@ mod tests {
             Ok(_) => panic!("a directory source must fail init"),
             Err(e) => e,
         };
-        assert!(err.contains("上传文件夹"), "unexpected error: {err}");
+        assert!(err.message.contains("上传文件夹"), "unexpected error: {}", err.message);
+        assert!(!err.channel_dead, "a local validation failure is not a dead channel");
         assert!(!dir.join("dest.txt.zterm-tmp-3").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Mid-session SFTP channel death (4a) ──
+
+    /// An SFTP session whose channel is already dead (closed here, which is
+    /// how a server-killed channel surfaces to the client): every op fails
+    /// at the transport level — the mid-session-death shape (a server
+    /// restarting its SFTP subsystem kills the channel without closing the
+    /// SSH session).
+    async fn dead_sftp_session(root: PathBuf) -> russh_sftp::client::SftpSession {
+        let (session, _failures) = test_sftp_session(root).await;
+        session.close().await.unwrap();
+        // Bound the dead-channel wait (the request timeout defaults to 10s).
+        session.set_timeout(1);
+        session
+    }
+
+    #[test]
+    fn sftp_channel_death_classification() {
+        use russh_sftp::client::error::Error;
+        // A Status or Limited reply proves the server answered on this
+        // channel: alive, never rebuilt.
+        let status = russh_sftp::protocol::Status {
+            id: 0,
+            status_code: russh_sftp::protocol::StatusCode::NoSuchFile,
+            error_message: "no such file".to_string(),
+            language_tag: String::new(),
+        };
+        assert!(!sftp_channel_died(&Error::Status(status)));
+        assert!(!sftp_channel_died(&Error::Limited("read limit reached".into())));
+        // Transport-level failures: the channel is dead.
+        assert!(sftp_channel_died(&Error::Timeout));
+        assert!(sftp_channel_died(&Error::IO("broken pipe".into())));
+        assert!(sftp_channel_died(&Error::UnexpectedBehavior(
+            "session closed".into()
+        )));
+    }
+
+    #[tokio::test]
+    async fn sftp_op_rebuilds_a_dead_channel_and_retries_once() {
+        let dir = config_test_dir("sftp-mid-session-rebuild");
+        std::fs::write(dir.join("f.txt"), b"x").unwrap();
+        let dead = Arc::new(dead_sftp_session(dir.clone()).await);
+        let evicted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reopens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let evict = {
+            let evicted = evicted.clone();
+            move || evicted.store(true, std::sync::atomic::Ordering::Relaxed)
+        };
+        let reopen = {
+            let reopens = reopens.clone();
+            let root = dir.clone();
+            move || {
+                let reopens = reopens.clone();
+                let root = root.clone();
+                async move {
+                    reopens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let (s, _failures) = test_sftp_session(root).await;
+                    Ok::<_, String>(Arc::new(s))
+                }
+            }
+        };
+        let outcome = run_sftp_op_with_rebuild(dead, evict, reopen, |sftp| async move {
+            sftp.symlink_metadata("f.txt").await.map_err(SftpOpFailure::sftp)
+        })
+        .await;
+        match outcome {
+            SftpOpOutcome::Done(md, rebuilt) => {
+                assert!(rebuilt, "the dead channel must be rebuilt");
+                assert!(!md.is_dir(), "the retried op read the real entry");
+            }
+            _ => panic!("the retried op must succeed on the rebuilt channel"),
+        }
+        assert!(
+            evicted.load(std::sync::atomic::Ordering::Relaxed),
+            "the dead channel is evicted"
+        );
+        assert_eq!(
+            reopens.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "exactly one rebuild"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sftp_op_status_failure_never_rebuilds() {
+        // A server-side refusal (here: lstat of a missing path) is a Status
+        // reply — the channel demonstrably answered, so nothing is rebuilt.
+        let dir = config_test_dir("sftp-status-no-rebuild");
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
+        let reopens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reopen = {
+            let reopens = reopens.clone();
+            move || {
+                let reopens = reopens.clone();
+                async move {
+                    reopens.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Err("must not be called".to_string())
+                }
+            }
+        };
+        let outcome = run_sftp_op_with_rebuild(
+            Arc::new(sftp),
+            || panic!("a Status failure must not evict the channel"),
+            reopen,
+            |s| async move { s.symlink_metadata("missing.txt").await.map_err(SftpOpFailure::sftp) },
+        )
+        .await;
+        match outcome {
+            SftpOpOutcome::Failed(m) => assert!(!m.is_empty()),
+            _ => panic!("a Status failure surfaces as the op error"),
+        }
+        assert_eq!(reopens.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sftp_op_reports_no_channel_when_the_rebuild_fails() {
+        let dir = config_test_dir("sftp-rebuild-fails");
+        let dead = Arc::new(dead_sftp_session(dir.clone()).await);
+        let outcome = run_sftp_op_with_rebuild(
+            dead,
+            || {},
+            || async { Err("SFTP subsystem not enabled on the server".to_string()) },
+            |sftp| async move { sftp.symlink_metadata(".").await.map_err(SftpOpFailure::sftp) },
+        )
+        .await;
+        match outcome {
+            SftpOpOutcome::NoChannel(m) => assert!(m.contains("subsystem")),
+            _ => panic!("a failed rebuild surfaces as NoChannel"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

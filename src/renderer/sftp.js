@@ -1419,6 +1419,14 @@ ipcRenderer.on('sftp-cwd-changed', (event, { tabId, cwd } = {}) => {
     }
 });
 
+// Mid-session channel death recovery: an established SFTP channel killed on
+// the server (e.g. a subsystem restart) is rebuilt on demand and the failed
+// op retried once; the backend emits this after a successful rebuild so the
+// recovery is visible like the reconnect toasts.
+ipcRenderer.on('sftp-channel-rebuilt', () => {
+    showToast('SFTP 通道已断开，已自动重建');
+});
+
 // SFTP session death: a mid-session disconnect leaves the panel bound to a
 // dead backend id — every command would reject with "会话不可用" while the
 // listing still showed the dead session's files. When the disconnect reason
