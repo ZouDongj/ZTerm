@@ -17,9 +17,6 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "resources": {
-      "../src/assets/fonts": "assets/fonts"
-    },
     "icon": [
       "../build/icon.ico"
     ],
