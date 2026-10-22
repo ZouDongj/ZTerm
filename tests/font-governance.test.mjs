@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import vm from 'node:vm';
-import { loadVm, wiredTab } from './helpers/renderer-vm.mjs';
+import { loadVm, wiredTab, wiredSplitTab } from './helpers/renderer-vm.mjs';
 
 const require = createRequire(import.meta.url);
 const { governTerminalFontChain, suggestNfMonoCounterpart } = require('../src/renderer/font-governance.js');
@@ -215,4 +215,23 @@ test('terminals keep the raw chain when enumeration yields no NF Mono counterpar
     assert.equal(tab.term.options.fontFamily, '"JetBrainsMonoNL NF", monospace');
     const opts = ctx._buildTerminalOptions();
     assert.equal(opts.fontFamily, '"JetBrainsMonoNL NF", monospace');
+});
+
+// The kick's split branch: assigning through term.options re-measures and
+// reflows the terminal in place, and the enumeration typically arrives AFTER
+// the first terminals are wired, so every pane of an already-split tab must
+// be reached by the arrival propagation — a pane missed here keeps rendering
+// on the ungoverned (non-Mono NF) chain for the whole session.
+test('the governance kick re-applies the governed chain to every pane of a split tab', async () => {
+    const ctx = loadVm();
+    ctx._settingsConfig.fontFamily = '"JetBrainsMonoNL NF", monospace';
+    ctx.ipcRenderer.invoke = (cmd) => cmd === 'get-system-fonts'
+        ? Promise.resolve(['JetBrainsMonoNL NFM'])
+        : new Promise(() => {});
+    const { tab, p1, p2 } = wiredSplitTab(ctx, 't1', 'b1', null, 'b2', null);
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    const governed = '"JetBrainsMonoNL NFM", monospace';
+    assert.equal(p1.term.options.fontFamily, governed, 'the original tab terminal (now pane 1) is re-governed');
+    assert.equal(p2.term.options.fontFamily, governed, 'the later-wired pane is re-governed');
+    assert.ok(tab.splitRoot, 'the tab is still split at fire time');
 });
