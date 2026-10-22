@@ -1814,11 +1814,16 @@ fn passwd_login_shell(passwd: &str, username: &str) -> Option<String> {
 /// The followCwd typed-injection script (fallback when the RC wrapper is
 /// unavailable). Single source for the reader's inject task and for history
 /// cleanup: every line is a marker the cleanup removes by exact match.
-const TYPED_CWD_INJECT_SCRIPT: &str = " setopt HIST_IGNORE_SPACE 2>/dev/null; set +o history 2>/dev/null\n\
+/// History is suspended only around the probe: the first line saves the
+/// previous state (zsh HIST_IGNORE_SPACE / bash `set -o history`) and the
+/// line after the marker restores it, so the session keeps recording the
+/// user's own commands (P2-07 — the pre-fix script never re-enabled history).
+const TYPED_CWD_INJECT_SCRIPT: &str = " if [ -n \"$ZSH_VERSION\" ]; then _zt_hio=${options[hist_ignore_space]:-off}; setopt HIST_IGNORE_SPACE 2>/dev/null; else set +o history 2>/dev/null; fi\n\
      stty -echo\n\
      _zt_cwd() { printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }\n\
      if [ -n \"$ZSH_VERSION\" ]; then precmd_functions+=(_zt_cwd); else PROMPT_COMMAND=\"_zt_cwd;${PROMPT_COMMAND}\"; fi\n\
      echo ZTERM_INJECTED\n\
+     if [ -n \"$ZSH_VERSION\" ]; then [ \"$_zt_hio\" = off ] && unsetopt HIST_IGNORE_SPACE 2>/dev/null; unset _zt_hio; else set -o history 2>/dev/null; fi\n\
      stty echo\n";
 
 /// Command lines of the legacy typed injection (pre-Rust backend variant):
@@ -8965,5 +8970,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r["error"], json!("missing path"));
+    }
+
+    #[test]
+    fn typed_inject_script_suspends_then_restores_history() {
+        // P2-07: history is disabled only around the probe and restored right
+        // after the marker, so the session keeps recording the user's commands.
+        let marker = TYPED_CWD_INJECT_SCRIPT
+            .find("echo ZTERM_INJECTED")
+            .expect("marker line");
+        let disable = TYPED_CWD_INJECT_SCRIPT
+            .find("set +o history")
+            .expect("bash history suspend");
+        assert!(
+            disable < marker,
+            "history must be suspended before the marker"
+        );
+        let restore = TYPED_CWD_INJECT_SCRIPT
+            .find("set -o history")
+            .expect("bash history restore");
+        assert!(restore > marker, "history must be restored after the marker");
+        // The zsh idiom restores HIST_IGNORE_SPACE in the same step.
+        let zsh_restore = TYPED_CWD_INJECT_SCRIPT
+            .find("unsetopt HIST_IGNORE_SPACE")
+            .expect("zsh history restore");
+        assert!(zsh_restore > marker);
+        // The first line starts with a space (history-ignore marker); later
+        // lines rely on the just-set HIST_IGNORE_SPACE / disabled history and
+        // on clean_history_artifacts' exact-match cleanup.
+        assert!(TYPED_CWD_INJECT_SCRIPT.starts_with(' '));
+    }
+
+    #[test]
+    fn typed_inject_script_leaves_history_on_e2e() {
+        // Feed the real script to an interactive bash (skipped when no bash on
+        // this machine): after the probe, `set -o` must report history on —
+        // the pre-fix script left it off for the rest of the session (P2-07).
+        let bash = [
+            "bash",
+            "D:/Program Files/Git/bin/bash.exe",
+            "C:/Program Files/Git/bin/bash.exe",
+        ]
+        .iter()
+        .find(|p| {
+            std::process::Command::new(p)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        });
+        let Some(bash) = bash else {
+            eprintln!("skip: no bash on this machine");
+            return;
+        };
+        let mut child = std::process::Command::new(bash)
+            .arg("--noprofile")
+            .arg("--norc")
+            .arg("-i")
+            .env("TERM", "dumb")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            // stty on a pipe complains "not a tty": noise, not failure.
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn bash");
+        use std::io::Write;
+        let mut input = TYPED_CWD_INJECT_SCRIPT.to_string();
+        // awk prints an unambiguous sentinel (the shell's own OSC7 prompt hooks
+        // glue bare output onto escape sequences, so a plain grep line is not
+        // reliably line-anchored).
+        input.push_str("set -o | awk '$1==\"history\"{print \"HISTORY_IS_\" $2}'\nexit\n");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .expect("feed stdin");
+        let out = child.wait_with_output().expect("wait bash");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("ZTERM_INJECTED"),
+            "script did not run to the marker: {}",
+            text.escape_debug().take(300).collect::<String>()
+        );
+        assert!(
+            text.contains("HISTORY_IS_on"),
+            "history must be on after the probe: {}",
+            text.escape_debug().take(300).collect::<String>()
+        );
+        assert!(
+            !text.contains("HISTORY_IS_off"),
+            "history was left off after the probe"
+        );
     }
 }
