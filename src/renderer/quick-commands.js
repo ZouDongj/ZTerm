@@ -389,6 +389,7 @@ function startRenameQCGroup(btn) {
         btn.style.color = '';
         // Restore the original onclick (the HTML attribute overridden by startRenameQCGroup)
         btn.onclick = null;
+        btn.onmousedown = null;
         if (originalOnClick) btn.setAttribute('onclick', originalOnClick);
 
         if (save && newName && newName !== oldName) {
@@ -402,6 +403,13 @@ function startRenameQCGroup(btn) {
     };
 
     btn.onclick = (e) => { e.stopPropagation(); finish(true); };
+    // Block the mousedown focus shift (mirrors the SSH group rename):
+    // otherwise the press first blurs the input — committing through the blur
+    // path — and the arriving click lands on the just-restored pencil handler,
+    // re-entering edit mode. Most visible with an UNCHANGED name: finish(true)
+    // then saves nothing and skips the re-render, so the same button takes the
+    // click and the row drops straight back into editing.
+    btn.onmousedown = (e) => e.preventDefault();
     input.addEventListener('blur', () => finish(true));
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); input.blur(); }

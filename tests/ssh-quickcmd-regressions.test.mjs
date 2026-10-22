@@ -493,6 +493,68 @@ test('P2-05 (control): a healthy local tab still receives the command', () => {
     assert.equal(ctx.__toasts.length, 0, 'no toast on the success path');
 });
 
+// ── P3-05: QC group rename with an unchanged name exits edit mode ──────────
+
+// Stage one group header exactly as _qcGroupHtml paints it.
+function stageQcGroup(ctx, gname) {
+    const doc = ctx.document;
+    const header = doc.createElement('div');
+    header.className = 'ssh-mgr-group-title';
+    header.setAttribute('data-group', gname);
+    const span = doc.createElement('span');
+    span.className = 'group-name-text';
+    span.textContent = gname;
+    const btn = doc.createElement('button');
+    btn.className = 'group-rename';
+    btn.setAttribute('onclick', 'event.stopPropagation();startRenameQCGroup(this)');
+    header.appendChild(span);
+    header.appendChild(btn);
+    doc.body.appendChild(header);
+    return { header, btn };
+}
+
+const qcSavesOf = (ctx) => ctx.__sends.filter(s => s.cmd === 'save-quick-commands');
+
+test('P3-05: confirming an unchanged QC group name exits edit mode without re-entry', () => {
+    const ctx = loadQcVm();
+    loadQc(ctx);
+    const { header, btn } = stageQcGroup(ctx, 'Ops');
+    ctx.startRenameQCGroup(btn);
+    const input = header.querySelector('input');
+    assert.ok(input, 'rename input staged');
+
+    // Real press sequence: mousedown (guarded — the input keeps focus), then
+    // the click commits through the finish closure.
+    const md = mkEvt();
+    btn.dispatch('mousedown', md);
+    assert.equal(md.defaultPrevented, true, 'mousedown default prevented so the input keeps focus');
+    assert.equal(ctx.document.activeElement, input, 'focus stayed in the rename input');
+    btn.dispatch('click', mkEvt());
+
+    assert.equal(qcSavesOf(ctx).length, 0, 'unchanged name saves nothing');
+    assert.equal(header.querySelector('input'), null, 'edit mode exited — no re-entry input');
+    assert.equal(header.querySelector('.group-name-text').textContent, 'Ops', 'name restored');
+    assert.equal(btn.onclick, null, 'finish closure cleared');
+    assert.equal(btn.onmousedown, null, 'mousedown guard cleared');
+    assert.equal(btn.getAttribute('onclick'), 'event.stopPropagation();startRenameQCGroup(this)',
+        'pencil attribute handler restored for the next rename');
+});
+
+test('P3-05: a changed name still commits through the guarded confirm button', () => {
+    const ctx = loadQcVm();
+    loadQc(ctx);
+    const { header, btn } = stageQcGroup(ctx, 'Ops');
+    ctx.startRenameQCGroup(btn);
+    const input = header.querySelector('input');
+    input.value = 'Renamed';
+
+    btn.dispatch('mousedown', mkEvt());
+    btn.dispatch('click', mkEvt());
+
+    assert.equal(qcSavesOf(ctx).length, 1, 'changed name commits exactly once');
+    assert.deepEqual([...qcSavesOf(ctx)[0].payload.map(c => c.group)], ['Renamed']);
+    assert.equal(header.querySelector('input'), null, 'edit mode exited');
+});
 
 // ── P3-01 (review follow-up): the group rename persist had the same defects
 // P3-01 removed from save/delete — memory mutated before the write, failure
