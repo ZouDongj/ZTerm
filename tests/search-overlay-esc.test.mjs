@@ -234,3 +234,12 @@ test('P3-04: Esc closes the tab context menu through the shared layer stack', ()
     assert.ok(!ctx.hasModalLayer(), 'stack empty again');
 });
 
+test('P3-03: the search nav buttons never move focus off the input (mousedown preventDefault)', () => {
+    const html = fs.readFileSync(new URL('../src/renderer.html', import.meta.url), 'utf8');
+    for (const onclick of ['searchPrev()', 'searchNext()']) {
+        const tag = html.match(new RegExp(`<button[^>]*onclick="${onclick.replace(/[()]/g, '\\$&')}"[^>]*>`));
+        assert.ok(tag, `the ${onclick} button exists`);
+        assert.ok(tag[0].includes('onmousedown="event.preventDefault()"'),
+            `${onclick} prevents the default mousedown focus move, so focus stays in the input`);
+    }
+});
