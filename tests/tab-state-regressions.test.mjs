@@ -259,5 +259,74 @@ test('P2-04: a missing highlightRules key (true first launch) seeds and persists
     assert.deepEqual(Array.from(saves[0].payload.rules, r => r.text), ['ERROR', 'WARN', 'INFO']);
 });
 
+// ── P3-15: the caret follows the scheme, never a hardcoded white ───────────
 
+const lum = (hex) => {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+        .map((v) => (v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+const contrast = (a, b) => {
+    const la = lum(a), lb = lum(b);
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+};
 
+// state.js is a browser global script; load the REAL file (plus the real
+// color-utils.js luminance it derives the caret from) in a mini VM.
+function loadThemeVm() {
+    const ctx = {
+        console,
+        path: { join: (...a) => a.join('/') },
+        process: { env: {} },
+        _getAccentColorAlpha: (a) => `rgba(97,175,239,${a})`,
+    };
+    ctx.window = ctx;
+    ctx.globalThis = ctx;
+    vm.createContext(ctx);
+    vm.runInContext(read('src/renderer/color-utils.js'), ctx, { filename: 'color-utils.js' });
+    vm.runInContext(read('src/renderer/state.js'), ctx, { filename: 'state.js' });
+    return ctx;
+}
+
+test('P3-15: light schemes derive the caret from the scheme foreground', () => {
+    const ctx = loadThemeVm();
+    for (const key of ['solarizedLight', 'tangoLight', 'oneHalfLight', 'vscodeLightModern']) {
+        vm.runInContext(`_settingsConfig.terminalScheme = '${key}'`, ctx);
+        // Old code hardcoded cursor: '#ffffff' — nearly invisible on a light canvas.
+        const theme = vm.runInContext('getTerminalTheme()', ctx);
+        const scheme = vm.runInContext(`TERMINAL_SCHEMES['${key}']`, ctx);
+        assert.equal(theme.cursor, scheme.foreground, `${key}: the caret is the scheme foreground, not white`);
+        assert.ok(contrast(theme.cursor, theme.background) >= 3,
+            `${key}: caret contrast ${contrast(theme.cursor, theme.background).toFixed(2)} >= 3`);
+    }
+});
+
+test('P3-15: dark schemes keep the historical white caret', () => {
+    const ctx = loadThemeVm();
+    for (const key of ['onedark', 'inkFamily', 'obsidian', 'solarized', 'campbellPowershell']) {
+        vm.runInContext(`_settingsConfig.terminalScheme = '${key}'`, ctx);
+        assert.equal(vm.runInContext('getTerminalTheme()', ctx).cursor, '#ffffff',
+            `${key}: dark-canvas caret unchanged`);
+    }
+});
+
+test('P3-15: every scheme yields a caret with >= 3:1 contrast on its own canvas', () => {
+    const ctx = loadThemeVm();
+    const keys = vm.runInContext('Object.keys(TERMINAL_SCHEMES)', ctx);
+    for (const key of keys) {
+        vm.runInContext(`_settingsConfig.terminalScheme = '${key}'`, ctx);
+        const theme = vm.runInContext('getTerminalTheme()', ctx);
+        assert.ok(contrast(theme.cursor, theme.background) >= 3,
+            `${key}: caret contrast ${contrast(theme.cursor, theme.background).toFixed(2)} < 3`);
+    }
+});
+
+test('P3-15: _buildTerminalOptions falls back to the scheme foreground, never to white-on-white', () => {
+    const ctx = loadVm(); // REAL terminal.js; getTerminalTheme staged per case
+    ctx.getTerminalTheme = () => ({ foreground: '#111111', background: '#eeeeee' }); // no cursor key
+    // Old code: cursor: terminalTheme.cursor || '#ffffff' — white on a light canvas.
+    assert.equal(ctx._buildTerminalOptions().theme.cursor, '#111111',
+        'a theme without a caret color falls back to its foreground');
+    ctx.getTerminalTheme = () => ({ cursor: '#123456', foreground: '#111111', background: '#eeeeee' });
+    assert.equal(ctx._buildTerminalOptions().theme.cursor, '#123456', 'an explicit caret color wins');
+});

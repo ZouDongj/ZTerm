@@ -4,7 +4,9 @@ let CONFIG_FILE = path.join(process.env.APPDATA || process.env.HOME, 'ZTerm', 'c
 // ── PTY output → terminal (shared by PTY and SSH) ──
 const ptyBuffers = {};
 // ── Terminal color schemes ──
-// Cursor stays pure white and selection follows the accent color (app-wide); schemes only define background/foreground/16 colors
+// The caret follows the scheme (white on dark canvases, the scheme's dark
+// foreground on light ones — see _cursorColorForScheme); selection follows
+// the accent color (app-wide); schemes only define background/foreground/16 colors
 const TERMINAL_SCHEMES = {
     onedark: {
         name: 'One Dark Pro',
@@ -241,10 +243,19 @@ function getTerminalScheme() {
     return TERMINAL_SCHEMES[key] || TERMINAL_SCHEMES.onedark;
 }
 
+// Caret color for a scheme: a white caret is invisible on a light canvas, so
+// light schemes derive it from their (dark) foreground; dark schemes keep the
+// historical white. Same WCAG luminance test that seeds COLORFGBG
+// (color-utils.js): '0;15' means a light background.
+function _cursorColorForScheme(s) {
+    if (colorFgbgForBackground(s.background) === '0;15') return s.foreground || '#000000';
+    return '#ffffff';
+}
+
 function getTerminalTheme() {
     const s = getTerminalScheme();
     return {
-        background: s.background, foreground: s.foreground, cursor: '#ffffff',
+        background: s.background, foreground: s.foreground, cursor: _cursorColorForScheme(s),
         selectionBackground: _getAccentColorAlpha(0.3),
         black:s.black, red:s.red, green:s.green, yellow:s.yellow,
         blue:s.blue, magenta:s.magenta, cyan:s.cyan, white:s.white,

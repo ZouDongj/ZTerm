@@ -427,7 +427,9 @@ function _buildTerminalOptions() {
         // The WebGL smooth-cursor adapter animates the real xterm caret, so
         // the theme caret color must stay visible (the overlay-era
         // transparent-cursor hack would render the animated caret invisible).
-        theme: { ...terminalTheme, cursor: terminalTheme.cursor || '#ffffff' },
+        // The foreground fallback keeps the caret contrast-safe if a scheme
+        // ever ships without a derived caret color (P3-15).
+        theme: { ...terminalTheme, cursor: terminalTheme.cursor || terminalTheme.foreground || '#ffffff' },
         allowProposedApi: true,
         customGlyphs: true,
         overviewRuler: { width: 6 },
