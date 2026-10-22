@@ -3677,6 +3677,13 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
         .get("force")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // Switching the data dir writes the in-memory config into the new
+    // location; while persistence is suppressed that in-memory config is
+    // factory defaults (the real one failed to parse), so the switch would
+    // overwrite the target with defaults as if they were the user's settings.
+    if let Some(err) = data_dir_suppressed_error() {
+        return Ok(err);
+    }
     let anchor_dir = PathBuf::from(
         std::env::var("APPDATA")
             .or_else(|_| std::env::var("HOME"))
@@ -3761,6 +3768,23 @@ fn data_dir_conflict_error(target_config: &std::path::Path) -> Option<Value> {
                 target_config.display()
             ),
             "code": "target-config-exists"
+        }))
+    } else {
+        None
+    }
+}
+
+/// A data-dir switch while persistence is suppressed would write factory
+/// defaults (the real config failed to parse at startup, so load_config fell
+/// back) into the target directory as if they were the user's settings.
+/// Returns the command's error payload with a stable code the renderer can
+/// surface, or None when switching is allowed. Split from set_data_dir for
+/// unit testing.
+fn data_dir_suppressed_error() -> Option<Value> {
+    if CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst) {
+        Some(json!({
+            "error": "the current config is unreadable; refusing to switch the data directory because factory defaults would be written as if they were your settings",
+            "code": "config-unreadable"
         }))
     } else {
         None
@@ -9481,5 +9505,18 @@ mod tests {
         let legacy = format!("tauri:{}", base64_encode_bytes("plainpw".as_bytes()));
         let cred = credential_from_encrypted(&legacy, "").expect("legacy plaintext");
         assert_eq!(cred.password.as_deref(), Some("plainpw"));
+    }
+
+    #[test]
+    fn data_dir_suppressed_error_tracks_persist_suppression() {
+        // CONFIG_PERSIST_SUPPRESSED is process-global: serialize against the
+        // other tests that flip it, and restore it before exiting.
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(data_dir_suppressed_error().is_none());
+        CONFIG_PERSIST_SUPPRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = data_dir_suppressed_error().expect("suppressed config must block the switch");
+        assert_eq!(err["code"], json!("config-unreadable"));
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
