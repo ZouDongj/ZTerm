@@ -379,8 +379,11 @@ function _ensureFontGovernanceKick() {
             // enumeration arrives; an explicitly configured chain renders
             // verbatim, so there is nothing to re-apply. (getSystemFonts still
             // ran: the enumeration cache warms for the settings pickers and
-            // for a later switch back to a default chain.)
-            if (!isDefaultTerminalFontFamily(_settingsConfig.fontFamily)) return;
+            // for a later switch back to a default chain.) A stale
+            // font-governance module without the new export degrades to
+            // governed, matching _buildTerminalOptions.
+            if (typeof isDefaultTerminalFontFamily === 'function'
+                && !isDefaultTerminalFontFamily(_settingsConfig.fontFamily)) return;
             const c = _settingsConfig;
             const governed = _governTerminalFontChain(_normalizeFontFamily(
                 c.fontFamily || '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace',
