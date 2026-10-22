@@ -2014,6 +2014,29 @@ where
     .await
 }
 
+/// Move a transfer's cancel registration from the dead channel's registry
+/// onto the one owned by the session generation that serves the rebuilt
+/// channel, so a cancel issued after the rebuild still reaches this
+/// transfer. No-op-safe when both registries are the same map.
+fn migrate_cancel_registration(
+    from: &Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    to: &Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    transfer_id_key: &str,
+    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    from.lock().remove(transfer_id_key);
+    to.lock().insert(transfer_id_key.to_string(), cancelled.clone());
+}
+
+/// Drop a transfer's cancel registration outright: the rebuild failed and
+/// nothing will serve this transfer, so the registry must not keep it.
+fn clear_cancel_registration(
+    cancels: &Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    transfer_id_key: &str,
+) {
+    cancels.lock().remove(transfer_id_key);
+}
+
 /// Transfer init with one rebuild on mid-session channel death (4a): when
 /// the init proves the cached channel died, evict it, rebuild once via
 /// ensure_sftp_transfer and retry the init on the fresh channel — no byte
@@ -2053,10 +2076,7 @@ where
         Ok((rebuilt, rebuilt_cancels)) => {
             // Move the cancel registration onto the session generation that
             // actually serves the retry.
-            cancels.lock().remove(transfer_id_key);
-            rebuilt_cancels
-                .lock()
-                .insert(transfer_id_key.to_string(), cancelled.clone());
+            migrate_cancel_registration(&cancels, &rebuilt_cancels, transfer_id_key, cancelled);
             let retry = init(rebuilt.clone()).await;
             if retry.is_ok() {
                 let _ = app.emit("sftp-channel-rebuilt", json!({ "tabId": tab_id }));
@@ -2064,7 +2084,7 @@ where
             Ok((rebuilt, rebuilt_cancels, retry))
         }
         Err(m) => {
-            cancels.lock().remove(transfer_id_key);
+            clear_cancel_registration(&cancels, transfer_id_key);
             Err(m)
         }
     }
@@ -8133,6 +8153,43 @@ mod tests {
         assert!(sftp_channel_died(&Error::UnexpectedBehavior(
             "session closed".into()
         )));
+    }
+
+    #[test]
+    fn transfer_init_rebuild_migrates_the_cancel_registration() {
+        let old: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let new: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        old.lock().insert("t-1".to_string(), flag.clone());
+        migrate_cancel_registration(&old, &new, "t-1", &flag);
+        assert!(
+            !old.lock().contains_key("t-1"),
+            "the dead channel's registry must not keep the transfer"
+        );
+        assert!(
+            new.lock()
+                .get("t-1")
+                .is_some_and(|f| Arc::ptr_eq(f, &flag)),
+            "the rebuilt generation's registry must hold the same flag"
+        );
+        // Same-map migration (session generation unchanged) keeps the entry.
+        migrate_cancel_registration(&new, &new, "t-1", &flag);
+        assert!(new.lock().get("t-1").is_some_and(|f| Arc::ptr_eq(f, &flag)));
+    }
+
+    #[test]
+    fn transfer_init_rebuild_failure_clears_the_cancel_registration() {
+        let cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cancels.lock().insert("t-1".to_string(), flag);
+        clear_cancel_registration(&cancels, "t-1");
+        assert!(
+            !cancels.lock().contains_key("t-1"),
+            "a failed rebuild must not leave the transfer registered"
+        );
     }
 
     #[tokio::test]
