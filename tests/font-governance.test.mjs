@@ -6,14 +6,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import vm from 'node:vm';
 import { loadVm, wiredTab, wiredSplitTab } from './helpers/renderer-vm.mjs';
 
 const require = createRequire(import.meta.url);
-const { governTerminalFontChain, suggestNfMonoCounterpart } = require('../src/renderer/font-governance.js');
+const { governTerminalFontChain, suggestNfMonoCounterpart, BUNDLED_NF_MONO_FAMILY } = require('../src/renderer/font-governance.js');
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, '..');
@@ -203,7 +203,7 @@ test('a terminal created before the enumeration completes is re-governed when th
     assert.equal(opts.fontFamily, '"JetBrainsMonoNL NFM", monospace');
 });
 
-test('terminals keep the raw chain when enumeration yields no NF Mono counterpart', async () => {
+test('a machine without an installed NF Mono is governed onto the bundled family', async () => {
     const ctx = loadVm();
     ctx._settingsConfig.fontFamily = '"JetBrainsMonoNL NF", monospace';
     ctx.ipcRenderer.invoke = (cmd) => cmd === 'get-system-fonts'
@@ -211,10 +211,48 @@ test('terminals keep the raw chain when enumeration yields no NF Mono counterpar
         : new Promise(() => {});
     const tab = wiredTab(ctx, 't1', 'b1');
     await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
-    // The arrival propagation assigns the (unchanged) chain — no swap happened.
-    assert.equal(tab.term.options.fontFamily, '"JetBrainsMonoNL NF", monospace');
+    // The vendored JetBrainsMonoNL NFM faces (registered as document fonts at
+    // startup) are reported alongside the OS enumeration, so the resolver
+    // always has an NF Mono counterpart to swap to.
+    assert.equal(tab.term.options.fontFamily, '"JetBrainsMonoNL NFM", monospace');
     const opts = ctx._buildTerminalOptions();
-    assert.equal(opts.fontFamily, '"JetBrainsMonoNL NF", monospace');
+    assert.equal(opts.fontFamily, '"JetBrainsMonoNL NFM", monospace');
+});
+
+test('getSystemFonts appends the bundled NF Mono family exactly once', async () => {
+    const ctx = loadVm();
+    ctx.ipcRenderer.invoke = (cmd) => cmd === 'get-system-fonts'
+        ? Promise.resolve(['Cascadia Mono'])
+        : new Promise(() => {});
+    const fonts = await ctx.getSystemFonts();
+    assert.ok(fonts.includes('JetBrainsMonoNL NFM'), 'bundled family reported when the OS lacks it');
+    assert.equal(fonts[0], 'Cascadia Mono', 'OS families keep their order up front');
+
+    const ctx2 = loadVm();
+    ctx2.ipcRenderer.invoke = (cmd) => cmd === 'get-system-fonts'
+        ? Promise.resolve(['JetBrainsMonoNL NFM', 'Cascadia Mono'])
+        : new Promise(() => {});
+    const fonts2 = await ctx2.getSystemFonts();
+    assert.equal(fonts2.filter(f => f === 'JetBrainsMonoNL NFM').length, 1,
+        'no duplicate when the OS already has the family installed');
+});
+
+// The @font-face registration in main.js and the enumeration injection here
+// must agree on one family spelling, or the governed chain would name a
+// family no document font provides. main.js references the exported constant
+// rather than restating the string; this test pins both ends.
+test('the bundled @font-face family matches the governance chain', () => {
+    assert.equal(BUNDLED_NF_MONO_FAMILY, 'JetBrainsMonoNL NFM');
+    // The resolver's first Mono candidate for the default chain family.
+    const governed = governTerminalFontChain('"JetBrainsMonoNL NF", monospace', [BUNDLED_NF_MONO_FAMILY]);
+    assert.equal(governed, '"' + BUNDLED_NF_MONO_FAMILY + '", monospace');
+    const mainSrc = readFileSync(path.join(root, 'src/renderer/main.js'), 'utf8');
+    assert.ok(/new FontFace\(BUNDLED_NF_MONO_FAMILY,/.test(mainSrc),
+        'main.js registers the vendored faces under the shared constant');
+    // Every registered weight file must exist under src/assets/fonts/.
+    for (const m of mainSrc.matchAll(/assets\/fonts\/(JetBrainsMonoNLNerdFontMono-[A-Za-z]+\.ttf)/g)) {
+        assert.ok(existsSync(path.join(root, 'src/assets/fonts', m[1])), m[1] + ' is vendored');
+    }
 });
 
 // The kick's split branch: assigning through term.options re-measures and

@@ -137,6 +137,16 @@ let _systemFontsCache = null;
 // enumeration; share one in-flight invocation so they cannot double-fetch.
 let _systemFontsPromise = null;
 
+// The JetBrainsMonoNL Nerd Font Mono faces vendored under src/assets/fonts/
+// are registered as document fonts at startup (main.js), so from the
+// renderer's perspective this family is always available even when the OS
+// has no Nerd Font Mono installed. Reporting it alongside the real
+// enumeration lets the governance resolver pick the Mono swap on such
+// machines; the name must match the @font-face registration exactly (it is
+// also the first Mono candidate _nfMonoCandidates derives for the default
+// 'JetBrainsMonoNL NF' chain, and the legacy family name inside the TTFs).
+const BUNDLED_NF_MONO_FAMILY = 'JetBrainsMonoNL NFM';
+
 function peekSystemFonts() {
     return _systemFontsCache;
 }
@@ -144,11 +154,16 @@ function peekSystemFonts() {
 // Returns a Promise of the family-name array ('monospace' fallback when the
 // enumeration comes back empty), or null on failure. A failure resets the
 // promise so the next caller retries instead of latching a rejection forever.
+// The bundled NF Mono family is appended when the OS enumeration lacks it —
+// it is renderable via the vendored document fonts, so hiding it from the
+// resolver would leave clean machines on the ungoverned chain.
 function getSystemFonts() {
     if (_systemFontsCache) return Promise.resolve(_systemFontsCache);
     if (!_systemFontsPromise) {
         _systemFontsPromise = ipcRenderer.invoke('get-system-fonts').then(fonts => {
-            _systemFontsCache = fonts && fonts.length > 0 ? fonts : ['monospace'];
+            const list = fonts && fonts.length > 0 ? fonts.slice() : ['monospace'];
+            if (!_findInstalledFont(list, BUNDLED_NF_MONO_FAMILY)) list.push(BUNDLED_NF_MONO_FAMILY);
+            _systemFontsCache = list;
             return _systemFontsCache;
         }, () => {
             _systemFontsPromise = null;
@@ -168,5 +183,5 @@ function governTerminalFontFamily(normalizedChain) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { governTerminalFontChain, suggestNfMonoCounterpart, peekSystemFonts, getSystemFonts, governTerminalFontFamily };
+    module.exports = { governTerminalFontChain, suggestNfMonoCounterpart, peekSystemFonts, getSystemFonts, governTerminalFontFamily, BUNDLED_NF_MONO_FAMILY };
 }

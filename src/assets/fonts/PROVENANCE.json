@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "source": "Nerd Fonts GitHub release v3.5.1, JetBrainsMono family, NoLigatures Mono variant, verbatim TTF files",
+  "files": {
+    "JetBrainsMonoNLNerdFontMono-Regular.ttf": {
+      "url": "https://raw.githubusercontent.com/ryanoasis/nerd-fonts/v3.5.1/patched-fonts/JetBrainsMono/NoLigatures/JetBrainsMonoNLNerdFontMono-Regular.ttf",
+      "sha256": "d9a80146bbf2ff23b187316a3e82ee2a2ceab8220267fe09ac150ca46ab2c3bd"
+    },
+    "JetBrainsMonoNLNerdFontMono-SemiBold.ttf": {
+      "url": "https://raw.githubusercontent.com/ryanoasis/nerd-fonts/v3.5.1/patched-fonts/JetBrainsMono/NoLigatures/JetBrainsMonoNLNerdFontMono-SemiBold.ttf",
+      "sha256": "1aa9684d0157dfad4bcfdcff6cde8f4c86b0929437502892dfa643901f8b878c"
+    },
+    "JetBrainsMonoNLNerdFontMono-Bold.ttf": {
+      "url": "https://raw.githubusercontent.com/ryanoasis/nerd-fonts/v3.5.1/patched-fonts/JetBrainsMono/NoLigatures/JetBrainsMonoNLNerdFontMono-Bold.ttf",
+      "sha256": "f799fc4b215c7b7254bf6cee51c0bce122ac684b53b46fd3cb83d408a0ccf385"
+    }
+  },
+  "licenseUrl": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/v2.304/OFL.txt",
+  "license": "SIL Open Font License 1.1 (upstream JetBrains Mono 2.304; Nerd Fonts patches keep the original license). See LICENSE.",
+  "internalFamilyName": "JetBrainsMonoNL NFM (name table IDs 1/16 of the Regular and Bold faces; the SemiBold face carries legacy family 'JetBrainsMonoNL NFM SemiBold' and typographic family 'JetBrainsMonoNL NFM')",
+  "note": "Registered as document fonts under the family name 'JetBrainsMonoNL NFM' (see main.js), matching the governance chain's first Nerd Font Mono candidate in font-governance.js."
+}

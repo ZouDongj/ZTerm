@@ -244,11 +244,33 @@ function armSplashHide() {
     // font fetches overlap the settings-load IPC chain instead of serializing
     // ahead of it. The catch is attached at creation so a font failure can
     // never surface as an unhandled rejection before the await below.
-    const fontPreload = Promise.all([
+    //
+    // The vendored JetBrainsMonoNL Nerd Font Mono faces (src/assets/fonts/,
+    // SIL OFL-1.1, see PROVENANCE.json there) are registered as document fonts
+    // under BUNDLED_NF_MONO_FAMILY — the exact family the font-governance
+    // resolver swaps the default chain to — so a machine without any Nerd
+    // Font Mono installed still renders the governed chain. Registration is
+    // best-effort: a missing/corrupt file must not break startup.
+    const fontLoads = [
         document.fonts.load('400 16px "JetBrainsMonoNL NF"', 'Study Z'),
         document.fonts.load('600 16px "JetBrainsMonoNL NF"', 'Study Z'),
         document.fonts.load('400 16px "HarmonyOS Sans SC"', '中文'),
-    ]).catch(() => { /* missing fonts fall back silently */ });
+    ];
+    if (typeof BUNDLED_NF_MONO_FAMILY !== 'undefined' && typeof FontFace === 'function') {
+        try {
+            for (const [file, weight] of [
+                ['JetBrainsMonoNLNerdFontMono-Regular.ttf', '400'],
+                ['JetBrainsMonoNLNerdFontMono-SemiBold.ttf', '600'],
+                ['JetBrainsMonoNLNerdFontMono-Bold.ttf', '700'],
+            ]) {
+                const face = new FontFace(BUNDLED_NF_MONO_FAMILY,
+                    `url('assets/fonts/${file}') format('truetype')`, { style: 'normal', weight });
+                document.fonts.add(face);
+                fontLoads.push(face.load());
+            }
+        } catch (e) { /* a failed registration falls back to system fonts */ }
+    }
+    const fontPreload = Promise.all(fontLoads).catch(() => { /* missing fonts fall back silently */ });
     // The data directory is resolved by the main process (packaged builds default to <install dir>/data; a user-defined pointer is supported)
     try {
         const info = await ipcRenderer.invoke('get-data-dir-info');
