@@ -123,25 +123,35 @@ function qcRun(id) {
 
 function executeQuickCommand(cmd) {
     const tab = TabManager.getActive();
-    if (!tab) return;
     // Insert command text into terminal (user can edit before pressing Enter)
     // "Auto-execute trailing Enter" toggle: when off, strip one trailing newline (inject the command text only, no auto-execute)
     let text = cmd.command;
     if (!_settingsConfig.qcAutoEnter) {
         text = stripTrailingNewline(text);
     }
-    if (tab.splitRoot) {
-        const focused = getAllPanes(tab).find(p => p.focused);
-        if (focused && focused.tabId) {
-            focused._smoothCursor?._adapter?.noteInput?.(text);
-            ipcRenderer.send('pty-input', { tabId: focused.tabId, data: text });
-            setTimeout(() => focused.term && focused.term.focus(), 50);
+    // Deliver only to a LIVE terminal target. The settings tab carries no
+    // session and a still-connecting SSH tab/pane has no backend id yet —
+    // both used to fall through silently while the panel had already closed,
+    // so the command looked executed. Reject with a toast instead.
+    if (tab && tab.type !== 'settings') {
+        if (tab.splitRoot) {
+            const focused = getAllPanes(tab).find(p => p.focused);
+            if (focused && focused.tabId) {
+                focused._smoothCursor?._adapter?.noteInput?.(text);
+                ipcRenderer.send('pty-input', { tabId: focused.tabId, data: text });
+                setTimeout(() => focused.term && focused.term.focus(), 50);
+                return;
+            }
+        } else if (tab.tabId) {
+            tab._smoothCursor?._adapter?.noteInput?.(text);
+            ipcRenderer.send('pty-input', { tabId: tab.tabId, data: text });
+            setTimeout(() => tab.term && tab.term.focus(), 50);
+            return;
         }
-    } else if (tab.tabId) {
-        tab._smoothCursor?._adapter?.noteInput?.(text);
-        ipcRenderer.send('pty-input', { tabId: tab.tabId, data: text });
-        setTimeout(() => tab.term && tab.term.focus(), 50);
+        showToast('终端尚未连接完成，快捷命令未执行', true);
+        return;
     }
+    showToast('当前标签页没有运行中的终端，无法执行快捷命令', true);
 }
 
 // Global "auto-execute trailing Enter" toggle (top of Settings -> Quick Commands page)

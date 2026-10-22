@@ -415,9 +415,83 @@ test('P3-02 (control): a healthy registration still connects with the fresh hand
     assert.equal(tab._credId, 'cred_new', 'wrapper rotated to the fresh handle');
 });
 
+// ── P2-05: quick command without a live terminal target ────────────────────
 
+const QC = [{ id: '1', name: 'a', command: 'htop', group: 'Ops' }];
 
+function loadQc(ctx) {
+    runIn(ctx, '_qcCommands = ' + JSON.stringify(QC));
+}
 
+const ptyInputsOf = (ctx) => ctx.__sends.filter(s => s.cmd === 'pty-input');
+
+test('P2-05: a quick command on the settings tab is rejected with a toast', () => {
+    const ctx = loadQcVm();
+    loadQc(ctx);
+    ctx.TabManager.getActive = () => ({ id: 'settings', type: 'settings' });
+
+    ctx.executeQuickCommand(QC[0]);
+
+    assert.equal(ptyInputsOf(ctx).length, 0, 'nothing injected');
+    const errToasts = ctx.__toasts.filter(t => t.isError);
+    assert.equal(errToasts.length, 1, 'one rejection toast');
+    assert.match(errToasts[0].msg, /没有运行中的终端/);
+});
+
+test('P2-05: a quick command on a still-connecting SSH tab is rejected with a toast', () => {
+    const ctx = loadQcVm();
+    loadQc(ctx);
+    // Connecting SSH tab: no backend tabId yet (assigned by ssh-connecting).
+    ctx.TabManager.getActive = () => ({ id: 't1', type: 'ssh', host: 'h', tabId: null });
+
+    ctx.executeQuickCommand(QC[0]);
+
+    assert.equal(ptyInputsOf(ctx).length, 0, 'nothing injected into a session without a backend id');
+    const errToasts = ctx.__toasts.filter(t => t.isError);
+    assert.equal(errToasts.length, 1);
+    assert.match(errToasts[0].msg, /尚未连接完成/);
+});
+
+test('P2-05: a quick command on a split tab whose focused pane is still connecting is rejected', () => {
+    const ctx = loadQcVm();
+    loadQc(ctx);
+    ctx.TabManager.getActive = () => ({ id: 't1', type: 'ssh', splitRoot: {} });
+    ctx.getAllPanes = () => [{ focused: true, tabId: null }, { focused: false, tabId: 'ok' }];
+
+    ctx.executeQuickCommand(QC[0]);
+
+    assert.equal(ptyInputsOf(ctx).length, 0, 'not silently rerouted to a sibling pane either');
+    assert.equal(ctx.__toasts.filter(t => t.isError).length, 1);
+});
+
+test('P2-05: qcRun still closes the panel on the rejection path', () => {
+    const ctx = loadQcVm();
+    loadQc(ctx);
+    const overlay = ctx.document.getElementById('overlay-qc');
+    overlay.className = 'overlay open';
+    ctx._refocusActiveTerminal = () => {};
+    ctx.TabManager.getActive = () => ({ id: 'settings', type: 'settings' });
+
+    ctx.qcRun('1');
+
+    assert.equal(overlay.classList.contains('open'), false, 'panel close behavior unchanged');
+    assert.equal(ctx.__toasts.filter(t => t.isError).length, 1, 'rejection toast shown');
+});
+
+test('P2-05 (control): a healthy local tab still receives the command', () => {
+    const ctx = loadQcVm();
+    loadQc(ctx);
+    const term = { focus() {} };
+    ctx.TabManager.getActive = () => ({ id: 't1', type: 'local', tabId: 'pty_1', term });
+
+    ctx.executeQuickCommand(QC[0]);
+
+    const inputs = ptyInputsOf(ctx);
+    assert.equal(inputs.length, 1, 'command injected');
+    assert.equal(inputs[0].payload.tabId, 'pty_1');
+    assert.equal(inputs[0].payload.data, 'htop');
+    assert.equal(ctx.__toasts.length, 0, 'no toast on the success path');
+});
 
 
 // ── P3-01 (review follow-up): the group rename persist had the same defects
