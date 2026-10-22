@@ -55,6 +55,18 @@ test('U-08: light scheme keeps the dark dock material instead of the light canva
   assert.ok(light.includes('backdrop-filter:blur('), 'light scheme restores the material blur');
 });
 
+test('U-08: the light-scheme plain dock carries a 1px left hairline against the gutter', () => {
+  // The plain rule drops the ::before ring; on a light scheme the dark dock
+  // sits next to the dark 12px gutter, so only that configuration adds the
+  // separator back. Dark schemes keep the seamless merge with the canvas.
+  const light = ruleBody('.window.dock-plain.scheme-light .sftp-window');
+  assert.ok(light.includes('inset 1px 0 0 var(--stroke)'),
+    'left-edge hairline from the shared stroke token');
+  assert.ok(light.includes('var(--shadow-pane)'), 'depth shadow kept alongside the hairline');
+  const plain = ruleBody('.window.dock-plain .sftp-window');
+  assert.ok(!plain.includes('--stroke'), 'dark-scheme plain dock stays seamless');
+});
+
 test('U-08: scheme-light marker derives from the COLORFGBG luminance test', () => {
   assert.match(stateSrc, /classList\.toggle\('scheme-light', colorFgbgForBackground\(theme\.background\) === '0;15'\)/,
     'applyTerminalScheme must derive the marker with the shared luminance test');
