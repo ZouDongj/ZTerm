@@ -10,6 +10,14 @@ use serde_json::json;
 use std::sync::Arc;
 use tauri::Emitter;
 
+/// Last-resort cap on the graceful-quit wait. Shutdown is completion-driven:
+/// the renderer answers app-before-quit with quit-ready as soon as its final
+/// save lands (see quit_ready, which exits immediately), so this timer only
+/// fires when the renderer is hung or already gone. Sized so a slow final
+/// save (large scrollback payloads on a busy disk) still finishes; the
+/// previous fixed 3s abandoned such saves mid-write.
+const QUIT_FORCE_EXIT_SECS: u64 = 15;
+
 #[tokio::main]
 async fn main() {
     let session_map: zterm::SessionMap =
@@ -185,7 +193,9 @@ async fn main() {
                     if !quit_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
                         let _ = handle.emit("app-before-quit", json!({}));
                         std::thread::spawn(|| {
-                            std::thread::sleep(std::time::Duration::from_secs(3));
+                            std::thread::sleep(std::time::Duration::from_secs(
+                                QUIT_FORCE_EXIT_SECS,
+                            ));
                             std::process::exit(0);
                         });
                     }
