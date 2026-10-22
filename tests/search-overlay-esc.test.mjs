@@ -330,3 +330,67 @@ test('P3-03: the search nav buttons never move focus off the input (mousedown pr
             `${onclick} prevents the default mousedown focus move, so focus stays in the input`);
     }
 });
+
+// P3-03 behavioral counterpart of the attribute pin above: build the buttons
+// from the REAL page markup (inline attribute handlers compiled in the VM, as
+// the page's parser compiles them), then run a full press — mousedown plus
+// the platform's default focus move (suppressed only when the handler
+// prevents it), then click — and assert focus NEVER leaves the search input
+// while the click still navigates.
+function realNavButton(ctx, html, onclickCode) {
+    const tag = html.match(new RegExp(`<button[^>]*onclick="${onclickCode.replace(/[()]/g, '\\$&')}"[^>]*>`));
+    assert.ok(tag, `the ${onclickCode} button exists in renderer.html`);
+    const attr = (name) => {
+        const m = tag[0].match(new RegExp(`${name}="([^"]*)"`));
+        return m ? m[1] : null;
+    };
+    const btn = ctx.document.createElement('button');
+    const md = attr('onmousedown');
+    if (md) btn.addEventListener('mousedown', vm.runInContext(`(function (event) { ${md} })`, ctx));
+    btn.addEventListener('click', vm.runInContext(`(function (event) { ${attr('onclick')} })`, ctx));
+    ctx.document.getElementById('search-bar').appendChild(btn);
+    return btn;
+}
+
+// Full press sequence with the platform default action modeled: mousedown on
+// a button moves focus to it unless a handler prevents the default.
+function pressWithPlatformDefault(btn) {
+    const md = mkEvt();
+    btn.dispatch('mousedown', md);
+    if (!md.defaultPrevented) btn.focus();
+    btn.dispatch('click', mkEvt());
+    return md;
+}
+
+test('P3-03 (behavior): clicking a nav button keeps focus in the search input and still navigates', () => {
+    const ctx = loadVm();
+    const html = fs.readFileSync(new URL('../src/renderer.html', import.meta.url), 'utf8');
+    openSearchedFoo(ctx, TEXT_A);
+    const input = ctx.__searchInput;
+    assert.equal(ctx.document.activeElement, input, 'staged: focus in the search input');
+
+    const next = realNavButton(ctx, html, 'searchNext()');
+    const md = pressWithPlatformDefault(next);
+    assert.equal(md.defaultPrevented, true, 'the guard from the page markup ran');
+    assert.equal(ctx.document.activeElement, input,
+        'focus stayed in the search input — Esc and typed keys keep reaching it after the click');
+    assert.equal(ctx.__searchCount.textContent, '2/2', 'the click still navigated to the next match');
+
+    const prev = realNavButton(ctx, html, 'searchPrev()');
+    pressWithPlatformDefault(prev);
+    assert.equal(ctx.document.activeElement, input, 'searchPrev() click also keeps focus');
+    assert.equal(ctx.__searchCount.textContent, '1/2', 'navigation moved back');
+});
+
+test('P3-03 (control): without the guard the platform default moves focus to the button', () => {
+    const ctx = loadVm();
+    openSearchedFoo(ctx, TEXT_A);
+    const input = ctx.__searchInput;
+    assert.equal(ctx.document.activeElement, input, 'staged: focus in the search input');
+
+    const bare = ctx.document.createElement('button'); // no onmousedown guard
+    ctx.document.getElementById('search-bar').appendChild(bare);
+    pressWithPlatformDefault(bare);
+    assert.equal(ctx.document.activeElement, bare,
+        'the harness models the platform mousedown focus move — the behavioral pin above is not vacuous');
+});
