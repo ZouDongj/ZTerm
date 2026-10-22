@@ -679,9 +679,12 @@ function startRenameGroup(btn, oldName) {
 
         if (save && newName && newName !== oldName) {
             const profiles = TabManager.sshProfiles || [];
+            // The default group is stored as '' but displayed (and passed
+            // here via data-group) as '默认': match on the display name or
+            // renaming the default group hits nothing.
             let changed = false;
             profiles.forEach(p => {
-                if (p.group === oldName) { p.group = newName; changed = true; }
+                if ((p.group || '默认') === oldName) { p.group = newName; changed = true; }
             });
             if (changed) {
                 TabManager.sshProfiles = profiles;
