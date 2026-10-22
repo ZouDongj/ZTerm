@@ -1129,6 +1129,28 @@ const TabManager = {
                     if (this._closingTabs.has(el.getAttribute('data-tab'))) return;
                     _slideStripTab(el, -dx, 'forwards');
                 });
+                // The add/menu buttons are flex siblings AFTER the viewport
+                // (app.css #tab-viewport keeps them outside the clip), so the
+                // collapsing slot shifts them exactly like the follower tabs
+                // — but they are not in the capture/re-hold/FLIP system above
+                // and used to teleport at doRemove, one beat late. Slide them
+                // along now (same curve; a rapid close chains off the
+                // in-flight hold via _slideStripTab). The render that removes
+                // the last dying tab cancels the hold in the same task the
+                // layout shifts. Skip the states where the viewport width is
+                // pinned to the availability and a close does not move the
+                // buttons: overflow always stays clamped, and sharing
+                // recomputes the widths at the removal unless the close
+                // deferral is holding them (pointer over the strip).
+                const bar = document.getElementById('tabbar');
+                const buttonsStay = bar && (bar.classList.contains('tabbar-overflow')
+                    || (bar.classList.contains('tabbar-sharing') && !this._deferStripRelayout));
+                if (!buttonsStay) {
+                    for (const btnId of ['btn-add-tab', 'btn-menu']) {
+                        const btn = document.getElementById(btnId);
+                        if (btn && typeof btn.animate === 'function') _slideStripTab(btn, -dx, 'forwards');
+                    }
+                }
             }
         }
         // Compute the next tab BEFORE splice (after splice, the old idx+1 occupies idx).
@@ -1573,6 +1595,20 @@ const TabManager = {
         this._relayout(false);
         this._reholdStripSlides(vp, prevRects);
         this._applyStripFlip(vp, prevRects);
+        // Settle the add/menu buttons' close slide: closeTab holds them in a
+        // forwards-filled transform while the dying slot fades, and the
+        // render whose splice removed the LAST dying tab collapses the slot
+        // — cancelling the hold in the same task lands the layout shift and
+        // the transform reset on the same frame. Renders inside a close
+        // burst keep the hold: further dying slots are still owed. The
+        // buttons are mounted once (never rebuilt here), so their WAAPI
+        // holds survive every rebuild until this cancel.
+        if (this._closingTabs.size === 0) {
+            const addBtn = document.getElementById('btn-add-tab');
+            const menuBtn = document.getElementById('btn-menu');
+            if (addBtn) _cancelStripSlides(addBtn);
+            if (menuBtn) _cancelStripSlides(menuBtn);
+        }
     },
 
     // A render rebuilds every strip element, discarding in-flight close-tab

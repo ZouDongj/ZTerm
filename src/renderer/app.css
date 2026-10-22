@@ -238,7 +238,10 @@ body.tab-dragging{user-select:none}
    !important because .tab-reconnect:hover{opacity:1!important} would
    otherwise brighten the spinner on hover. */
 .tab-reconnect-busy,.tab:hover .tab-reconnect-busy,.tab.active .tab-reconnect-busy,.tab-reconnect-busy:focus-visible{opacity:0.72!important;pointer-events:none}
-#btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-2);cursor:pointer;font-size:16px;transition:all 0.12s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
+/* transition must stay off transform: closeTab holds a WAAPI slide on this
+   button while the dying tab's slot fades, and cancelling that hold must land
+   on the same frame the slot collapses — `all` would glide the reset. */
+#btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-2);cursor:pointer;font-size:16px;transition:background 0.12s,color 0.12s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
 #btn-add-tab:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 
 /* Window control buttons (registry SVG icons, 12px — Segoe MDL2 font glyphs
@@ -531,8 +534,9 @@ body.hide-statusbar .statusbar{height:0;opacity:0;pointer-events:none}
 .about-name{font-size:20px;color:var(--text-1);font-weight:600}
 .about-ver{font-size:13px;color:var(--text-2);margin-top:4px}
 
-/* Menu button */
-#btn-menu{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;transition:all 0.12s;margin-right:2px;flex-shrink:0;-webkit-app-region:no-drag;user-select:none}
+/* Menu button. transition stays off transform for the same reason as
+   #btn-add-tab: the WAAPI close-slide hold must zero in one frame. */
+#btn-menu{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-3);cursor:pointer;transition:background 0.12s,color 0.12s;margin-right:2px;flex-shrink:0;-webkit-app-region:no-drag;user-select:none}
 #btn-menu:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 
 /* Menu popup */
