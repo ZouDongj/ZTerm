@@ -17,6 +17,6 @@
   },
   "licenseUrl": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/v2.304/OFL.txt",
   "license": "SIL Open Font License 1.1 (upstream JetBrains Mono 2.304; Nerd Fonts patches keep the original license). See LICENSE.",
-  "internalFamilyName": "JetBrainsMonoNL NFM (name table IDs 1/16 of the Regular and Bold faces; the SemiBold face carries legacy family 'JetBrainsMonoNL NFM SemiBold' and typographic family 'JetBrainsMonoNL NFM')",
+  "internalFamilyName": "name table measured 2026-10-22: ID 1 (legacy family) is 'JetBrainsMonoNL NFM' on Regular/Bold and 'JetBrainsMonoNL NFM SemiBold' on SemiBold; ID 16 (typographic family) is 'JetBrainsMonoNL Nerd Font Mono' on all three faces",
   "note": "Registered as document fonts under the family name 'JetBrainsMonoNL NFM' (see main.js), matching the governance chain's first Nerd Font Mono candidate in font-governance.js."
 }
