@@ -257,18 +257,21 @@ function armSplashHide() {
         document.fonts.load('400 16px "HarmonyOS Sans SC"', '中文'),
     ];
     if (typeof BUNDLED_NF_MONO_FAMILY !== 'undefined' && typeof FontFace === 'function') {
-        try {
-            for (const [file, weight] of [
-                ['JetBrainsMonoNLNerdFontMono-Regular.ttf', '400'],
-                ['JetBrainsMonoNLNerdFontMono-SemiBold.ttf', '600'],
-                ['JetBrainsMonoNLNerdFontMono-Bold.ttf', '700'],
-            ]) {
+        for (const [file, weight] of [
+            ['JetBrainsMonoNLNerdFontMono-Regular.ttf', '400'],
+            ['JetBrainsMonoNLNerdFontMono-SemiBold.ttf', '600'],
+            ['JetBrainsMonoNLNerdFontMono-Bold.ttf', '700'],
+        ]) {
+            // Per-weight try/catch: one bad file must not skip the rest.
+            try {
                 const face = new FontFace(BUNDLED_NF_MONO_FAMILY,
                     `url('assets/fonts/${file}') format('truetype')`, { style: 'normal', weight });
                 document.fonts.add(face);
                 fontLoads.push(face.load());
+            } catch (e) {
+                console.warn('bundled font registration failed:', file, e);
             }
-        } catch (e) { /* a failed registration falls back to system fonts */ }
+        }
     }
     const fontPreload = Promise.all(fontLoads).catch(() => { /* missing fonts fall back silently */ });
     // The data directory is resolved by the main process (packaged builds default to <install dir>/data; a user-defined pointer is supported)
