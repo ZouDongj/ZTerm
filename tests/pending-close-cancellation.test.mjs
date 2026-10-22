@@ -1058,7 +1058,10 @@ test('T6 timer expiry then legitimate late success still claims', async () => {
     const att = tab._pendingAttempt;
     // B queued behind: the fallback must release the SLOT so B proceeds...
     const tabB = await pendingSshTab(ctx, 't_t6b', {}, false); // queued behind A
-    ctx.__tq.advance(20000); // the 20s fallback fires for A's slot only
+    // Read the real constant out of the VM: the fallback must outlast the
+    // backend establishment budget (SSH_CONNECT_TIMEOUT + SSH_ESTABLISH_TIMEOUT).
+    const slotFallbackMs = vm.runInContext('SSH_CONNECT_SLOT_FALLBACK_MS', ctx);
+    ctx.__tq.advance(slotFallbackMs); // the slot fallback fires for A's slot only
     await flushAsync();
     assert.ok(invOf(ctx, tabB._pendingAttempt), 'fallback released the slot; B proceeds');
     // ...but A's attempt is still alive and addressable.
@@ -1219,7 +1222,7 @@ test('D2: moving a claimed pane transfers its attempt; closing it releases the q
 
     // Closing the moved pane must release S's queue slot at once: Q starts
     // after Promise flushing — WITHOUT settling S's invocation and WITHOUT
-    // the 20s fallback.
+    // the slot fallback.
     ctx.TabManager._closePane(tTgt.id, moved.id);
     await flushAsync();
     model.consume(ctx);

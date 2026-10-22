@@ -3,7 +3,8 @@
 // _sshConnectChain serial queue in the shared renderer VM
 // (tests/helpers/renderer-vm.mjs); ipcRenderer.invoke is replaced by a
 // recording deferred whose promise never settles, so an uncancelled queue
-// slot would hold the replacement for the full 20s fallback — exactly the
+// slot would hold the replacement for the full slot fallback
+// (SSH_CONNECT_SLOT_FALLBACK_MS) — exactly the
 // stall the old code produced (terminal already disposed, blank content
 // area). The old code only cancelled when a backend id was already claimed
 // (closeTab's pre-claim cancel, tabs.js closeTab, was the existing contract).
@@ -53,7 +54,7 @@ test('reconnectTab on a pending (pre-claim) SSH tab cancels the attempt and free
     const att2 = tab._pendingAttempt;
     assert.ok(att2 && att2 !== att1, 'replacement attempt created with a NEW identity');
     assert.ok(connectSent(invokes, att2),
-        'replacement invocation sent at once (cancelled slot released; no 20s stall)');
+        'replacement invocation sent at once (cancelled slot released; no slot-fallback stall)');
 });
 
 test('_reconnectPane on a pending (pre-claim) SSH pane cancels the attempt and frees the queue slot', async () => {

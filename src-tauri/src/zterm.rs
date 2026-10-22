@@ -516,6 +516,9 @@ pub fn ssh_client_config() -> russh::client::Config {
 const SSH_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Shared deadline for everything after the handshake: auth, the session
 /// channel, the PTY request, the SFTP channels and the shell start (P3-08).
+/// Together with SSH_CONNECT_TIMEOUT this bounds a whole connect attempt;
+/// the renderer's queue-slot fallback (SSH_CONNECT_SLOT_FALLBACK_MS in
+/// tabs.js) derives from that sum plus slack — bump it when these change.
 const SSH_ESTABLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Per-step cap for the best-effort SFTP opens and the followCwd SFTP prep
 /// inside the establishment budget: one stalled SFTP subsystem degrades to

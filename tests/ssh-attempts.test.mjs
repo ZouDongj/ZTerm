@@ -145,7 +145,7 @@ test('slot fallback (timer path) releases the slot only; a late success still ro
     const token = SshAttempts.createAttempt(owner);
     let released = 0;
     SshAttempts.armSlot(token, () => { released += 1; });
-    SshAttempts.releaseSlot(token); // what the 20s fallback calls
+    SshAttempts.releaseSlot(token); // what the slot fallback calls
     assert.equal(released, 1);
     assert.equal(SshAttempts.ownerWants(token), true, 'attempt still wanted/addressable');
     assert.equal(SshAttempts.ownerOf(token), owner);

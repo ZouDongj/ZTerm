@@ -82,6 +82,17 @@ function _ptyCreatePayload(shell, args, cwd, requestId) {
 // and nothing is keyed by a display address.
 let _sshConnectChain = Promise.resolve();
 
+// Queue-slot fallback ceiling for one ssh-connect invocation, derived from
+// the backend establishment budget (P3-08, zterm.rs): SSH_CONNECT_TIMEOUT
+// (30s) bounds the TCP connect + handshake and SSH_ESTABLISH_TIMEOUT (30s)
+// everything after it, so a legitimate attempt always settles within 60s of
+// starting. The fallback exists for pathological non-settlement ONLY and
+// must outlast that sum plus slack — firing earlier would release the slot
+// mid-establishment and admit a second concurrent handshake into strict
+// sshd configs. (Host-key-mismatch dialog time pauses the backend deadline,
+// so user thinking time is intentionally outside this budget.)
+const SSH_CONNECT_SLOT_FALLBACK_MS = (30 + 30 + 15) * 1000;
+
 function _enqueueSshConnect(profile, token) {
     // Rust's early validation (missing host/username/attemptId) rejects the
     // invocation WITHOUT emitting ssh-error — no event will ever settle this
@@ -109,7 +120,7 @@ function _enqueueSshConnect(profile, token) {
         // Fallback for pathological non-settlement ONLY: it releases the
         // queue slot but never retires the attempt — a legitimate late
         // result still routes (the record stays addressable/cancellable).
-        const timer = setTimeout(finish, 20000);
+        const timer = setTimeout(finish, SSH_CONNECT_SLOT_FALLBACK_MS);
         sshAttempts.armSlot(token, finish);
         // The invocation is now actually in flight: from here a cancellation
         // keeps the record addressable for its own late settlement. Before
@@ -1288,7 +1299,8 @@ const TabManager = {
         // re-claim the pending reconnect window nor hold the queue. Pre-claim
         // (no backend id yet) the token alone still identifies the attempt —
         // cancelling it releases the queue slot at once instead of leaving
-        // the replacement queued behind the old invocation for up to 20s.
+        // the replacement queued behind the old invocation until the slot
+        // fallback (SSH_CONNECT_SLOT_FALLBACK_MS) fires.
         _cancelSshAttemptOf(tab, tab.tabId, 'ssh-disconnect');
         if (_clearOnConnect(tab, null)) {
             if (tab.term) { try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(tab.term); tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
