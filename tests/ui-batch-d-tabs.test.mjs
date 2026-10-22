@@ -61,7 +61,7 @@ test('U-05: the busy reconnect button stops double-click propagation (no rename)
         'dblclick must not bubble into the rename gesture (old code lacked the guard)');
 });
 
-test('U-05: the busy rule beats the hover/active reveal (pointer-events stay none)', () => {
+test('U-05: the busy rule beats the hover/active/focus reveal (pointer-events stay none)', () => {
     const css = readFileSync(new URL('../src/renderer/app.css', import.meta.url), 'utf8');
     // Rules are brace-terminated; the fix's comment block carries no braces.
     const rule = css.split('}').map(r => r.trim()).find(r => r.includes('.tab-reconnect-busy'));
@@ -69,6 +69,16 @@ test('U-05: the busy rule beats the hover/active reveal (pointer-events stay non
     assert.ok(rule.includes('pointer-events:none'), 'busy spinner stays inert');
     assert.ok(rule.includes('.tab:hover .tab-reconnect-busy') && rule.includes('.tab.active .tab-reconnect-busy'),
         'the plainer .tab:hover/.tab.active .tab-reconnect rule must not re-enable pointer events on the busy variant');
+    // The busy button still carries the .tab-reconnect class, so keyboard focus
+    // matches .tab-reconnect:focus-visible (0,2,0 — same specificity as
+    // .tab-reconnect-busy:focus-visible, which therefore must be listed
+    // explicitly and come later in the sheet to win the tie).
+    assert.ok(rule.includes('.tab-reconnect-busy:focus-visible'),
+        'keyboard focus must not re-enable pointer events on the busy variant');
+    const busyIdx = css.indexOf('.tab-reconnect-busy:focus-visible');
+    const revealIdx = css.indexOf('.tab-reconnect:focus-visible');
+    assert.ok(revealIdx > 0 && busyIdx > revealIdx,
+        'the busy :focus-visible selector must come after the reveal rule to win the equal-specificity tie');
 });
 
 // ── U-07 ────────────────────────────────────────────────────────────────────
