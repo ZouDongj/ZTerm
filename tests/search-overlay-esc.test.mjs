@@ -219,4 +219,18 @@ function openSearchedFoo(ctx, content) {
 
 
 
+test('P3-04: Esc closes the tab context menu through the shared layer stack', () => {
+    const ctx = loadVm();
+    const esc = injectEscStack(ctx);
+    wiredTab(ctx, 't_a', 'local_a', TEXT_A);
+    ctx.TabManager.switchTo('t_a');
+    ctx.TabManager.showTabContextMenu({ clientX: 10, clientY: 10, preventDefault() {} }, 't_a');
+    assert.ok(ctx.document.getElementById('tab-context-menu'), 'staged: menu open');
+    assert.ok(ctx.hasModalLayer(), 'the menu registered in the modal layer stack');
+
+    const ev = esc({ key: 'Escape', target: ctx.document.body });
+    assert.ok(ev.defaultPrevented && ev.propagationStopped, 'Esc consumed by the layer branch');
+    assert.equal(ctx.document.getElementById('tab-context-menu'), null, 'menu removed');
+    assert.ok(!ctx.hasModalLayer(), 'stack empty again');
+});
 

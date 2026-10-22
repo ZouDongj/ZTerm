@@ -3531,10 +3531,14 @@ const TabManager = {
         const y = Math.min(e.clientY, window.innerHeight - items.length * 34 - 12);
         menu.style.left = x + 'px';
         menu.style.top = y + 'px';
+        // The menu is not an .overlay: register it so Escape peels it through
+        // the shared modal layer stack (and global shortcuts stay blocked).
+        if (typeof pushModalLayer === 'function') pushModalLayer('tab-context-menu', () => this._hideTabContextMenu());
         setTimeout(() => document.addEventListener('click', this._hideTabContextMenuBound = () => this._hideTabContextMenu(), { once: true }), 0);
     },
 
     _hideTabContextMenu() {
+        if (typeof removeModalLayer === 'function') removeModalLayer('tab-context-menu');
         const menu = document.getElementById('tab-context-menu');
         if (menu) menu.remove();
     },
