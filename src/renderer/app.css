@@ -1067,7 +1067,12 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
    the body scroll, and pin the footer to the visible bottom edge. */
 #overlay-ssh-edit .panel{max-height:calc(100vh - 24px)}
 #overlay-ssh-edit .ssh-edit-body{min-height:0;overflow-y:auto}
-#overlay-ssh-edit .ssh-edit-footer{position:sticky;bottom:0;background:rgb(22,25,31)}
+/* Seam cover: the sticky edge is computed from the fractional scroll offset
+   (wheel/trackpad, fractional DPR), so the footer's top edge can rasterize
+   between device pixels and let a <=1px sliver of the scrolling content
+   through. A 1px same-color shadow above the border box keeps the seam
+   covered; box-shadow does not affect layout. */
+#overlay-ssh-edit .ssh-edit-footer{position:sticky;bottom:0;background:rgb(22,25,31);box-shadow:0 -1px 0 rgb(22,25,31)}
 
 @keyframes tabFadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 

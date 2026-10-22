@@ -22,7 +22,8 @@
 // measurable placement goes transitions off → place → flush → restore.
 //
 // CSS-geometry-only parts are NOT covered here: the U-09 short-window panel
-// cap/scroll/sticky footer and the U-17 34px segmented-control baseline are
+// cap/scroll/sticky footer (stylesheet contract pinned in
+// ui-batch-d-css.test.mjs) and the U-17 34px segmented-control baseline are
 // pure app.css rules with no VM-observable logic.
 import { readFileSync } from 'node:fs';
 import path from 'node:path';

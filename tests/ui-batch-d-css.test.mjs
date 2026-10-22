@@ -1,4 +1,4 @@
-// UI batch D regressions — U-03/U-08/U-12/U-13/U-18/U-19 from
+// UI batch D regressions — U-03/U-08/U-09/U-12/U-13/U-18/U-19 from
 // dev/docs/reviews/ui-batch-consolidated-2026-10-21.md.
 // Pure-CSS items assert the stylesheet contract (token exists, dead selector
 // gone, open-state rule derives from the dock reserve); U-08 also checks the
@@ -79,6 +79,19 @@ test('U-08: scheme-light marker derives from the COLORFGBG luminance test', () =
   for (const key of ['onedark', 'inkFamily', 'obsidian']) {
     assert.equal(colorFgbgForBackground(SCHEMES[key].background), '15;0', `${key} must stay dark`);
   }
+});
+
+// ── U-09: sticky footer's 1px seam cover ──
+
+test('U-09: the sticky SSH edit footer carries a 1px same-color seam cover', () => {
+  const footer = ruleBody('#overlay-ssh-edit .ssh-edit-footer');
+  assert.ok(footer.includes('position:sticky'), 'footer stays sticky');
+  assert.ok(footer.includes('background:rgb(22,25,31)'), 'footer keeps its opaque base');
+  // Fractional scroll offsets / fractional DPR can rasterize the sticky edge
+  // between device pixels, opening a <=1px sliver of scrolled content above
+  // the footer. The 1px same-color shadow above the border box keeps the seam
+  // covered without changing layout.
+  assert.ok(footer.includes('box-shadow:0 -1px 0 rgb(22,25,31)'), '1px seam cover above the footer');
 });
 
 // ── U-12: SFTP path editor keeps field chrome, no layout jump ──
