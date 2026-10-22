@@ -5038,6 +5038,42 @@ pub fn encrypt_password(app: AppHandle, args: Vec<Value>) -> Result<Value, Strin
     Ok(json!({ "encrypted": encrypted }))
 }
 
+/// What register_credential stores for the given encrypted fields. A stored
+/// password that cannot be decrypted (DPAPI is bound to the Windows
+/// user/machine that encrypted it — e.g. the config was copied to another
+/// user) must NOT register an empty-password credential: authentication would
+/// fail as if the password were wrong while the UI believed it was saved
+/// (P3-02). Returns the error payload instead, with a stable kind the
+/// renderer keys on to tell decrypt failure apart from no-credential (the
+/// message also matches /decrypt/i for message-based callers).
+/// Split from the command for unit testing.
+fn credential_from_encrypted(encrypted_pwd: &str, key_path: &str) -> Result<Credential, Value> {
+    let password = if !encrypted_pwd.is_empty() {
+        match decrypt_password_value(encrypted_pwd) {
+            Some(p) => Some(p),
+            None => {
+                return Err(json!({
+                    "error": "the stored password could not be decrypted on this Windows user/machine; re-enter the password",
+                    "kind": "credential-decrypt-failed",
+                    "errorKind": "credential-decrypt-failed",
+                    "code": "credential-decrypt-failed"
+                }));
+            }
+        }
+    } else {
+        None
+    };
+    let private_key_path = if !key_path.is_empty() {
+        Some(key_path.to_string())
+    } else {
+        None
+    };
+    Ok(Credential {
+        password,
+        private_key_path,
+    })
+}
+
 #[tauri::command]
 pub fn register_credential(
     cred_state: State<'_, CredentialStore>,
@@ -5053,32 +5089,22 @@ pub fn register_credential(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    let credential = match credential_from_encrypted(encrypted_pwd, key_path) {
+        Ok(c) => c,
+        // Decrypt failure: nothing is registered (payload-level error, the
+        // shape the existing { credId, error } callers already read).
+        Err(payload) => return Ok(payload),
+    };
+
     static CRED_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let cred_id = format!(
         "cred_{}",
         CRED_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     );
 
-    let password = if !encrypted_pwd.is_empty() {
-        decrypt_password_value(&encrypted_pwd)
-    } else {
-        None
-    };
-    let private_key_path = if !key_path.is_empty() {
-        Some(key_path.to_string())
-    } else {
-        None
-    };
-
     {
         let mut store = cred_state.lock();
-        store.insert(
-            cred_id.clone(),
-            Credential {
-                password,
-                private_key_path,
-            },
-        );
+        store.insert(cred_id.clone(), credential);
     }
 
     Ok(json!({ "credId": cred_id }))
@@ -9418,5 +9444,42 @@ mod tests {
             "the flag is set even when the entry never drains"
         );
         assert!(!cancels.lock().is_empty());
+    }
+
+    #[test]
+    fn credential_from_encrypted_key_only_registers_without_password() {
+        let cred = credential_from_encrypted("", "C:/keys/id_ed25519").expect("key-only");
+        assert!(cred.password.is_none());
+        assert_eq!(cred.private_key_path.as_deref(), Some("C:/keys/id_ed25519"));
+        // Neither field: a credential with no secret at all (agent auth).
+        let cred = credential_from_encrypted("", "").expect("empty");
+        assert!(cred.password.is_none() && cred.private_key_path.is_none());
+    }
+
+    #[test]
+    fn credential_from_encrypted_decrypt_failure_returns_distinct_error() {
+        let err = match credential_from_encrypted("dpapi:!!!invalid!!!", "") {
+            Ok(_) => panic!("an undecryptable password must not become an empty one"),
+            Err(e) => e,
+        };
+        assert_eq!(err["kind"], json!("credential-decrypt-failed"));
+        assert_eq!(err["errorKind"], json!("credential-decrypt-failed"));
+        assert_eq!(err["code"], json!("credential-decrypt-failed"));
+        let msg = err["error"].as_str().unwrap().to_lowercase();
+        assert!(msg.contains("decrypt"), "message must name the cause: {msg}");
+        assert!(err.get("credId").is_none(), "no credential id on failure");
+    }
+
+    #[test]
+    fn credential_from_encrypted_decrypts_dpapi_and_legacy_plaintext() {
+        // DPAPI roundtrip (same user/machine, so decrypt succeeds).
+        let cipher = dpapi_encrypt("s3cret-密码").expect("dpapi encrypt");
+        let enc = format!("dpapi:{}", base64_encode_bytes(&cipher));
+        let cred = credential_from_encrypted(&enc, "").expect("dpapi decrypt");
+        assert_eq!(cred.password.as_deref(), Some("s3cret-密码"));
+        // Early-Tauri plaintext base64 still decrypts (migration path).
+        let legacy = format!("tauri:{}", base64_encode_bytes("plainpw".as_bytes()));
+        let cred = credential_from_encrypted(&legacy, "").expect("legacy plaintext");
+        assert_eq!(cred.password.as_deref(), Some("plainpw"));
     }
 }

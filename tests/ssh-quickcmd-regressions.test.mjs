@@ -270,9 +270,150 @@ test('P3-01: a failed inline password save does not mutate the in-memory ciphert
     assert.ok(!ctx.__toasts.some(t => t.msg === '密码已保存'), 'no success toast');
 });
 
+// ── P3-02: undecryptable stored credential (frontend half) ─────────────────
+// Backend contract (implemented concurrently in Rust): register-credential
+// refuses an undecryptable stored password with errorKind
+// 'credential-decrypt-failed' (or a decrypt-flavored error string on older
+// builds) and mints no empty-password handle. The frontend matches both
+// shapes tolerantly.
 
+function stageConnectProfile(ctx, registerResult) {
+    ctx.TabManager.sshProfiles = [{ id: 'p1', name: 'n', host: 'h', username: 'u', encryptedPassword: 'enc' }];
+    const created = [];
+    ctx.TabManager.createTab = (t) => created.push(t);
+    ctx.ipcRenderer.invoke = (cmd) => {
+        if (cmd !== 'register-credential') return new Promise(() => {});
+        return 'reject' in registerResult
+            ? Promise.reject(registerResult.reject)
+            : Promise.resolve(registerResult.resolve);
+    };
+    return created;
+}
 
+test('P3-02: connectSSHProfile surfaces the decrypt refusal specifically (errorKind shape)', async () => {
+    const ctx = loadSshVm();
+    const created = stageConnectProfile(ctx, {
+        resolve: { credId: null, error: 'credential decrypt failed', errorKind: 'credential-decrypt-failed' },
+    });
 
+    ctx.connectSSHProfile('p1');
+    await flush(); await flush();
+
+    assert.equal(created.length, 0, 'no tab created on the refusal');
+    const errToasts = ctx.__toasts.filter(t => t.isError);
+    assert.equal(errToasts.length, 1, 'one error toast');
+    assert.match(errToasts[0].msg, /无法在此计算机上解密/, 'specific decrypt message, not generic 凭据注册失败');
+});
+
+test('P3-02: the message-only refusal shape (older backend) is matched too', async () => {
+    const ctx = loadSshVm();
+    const created = stageConnectProfile(ctx, {
+        resolve: { credId: null, error: 'Password decrypt failed: DPAPI error 0x8009000b' },
+    });
+
+    ctx.connectSSHProfile('p1');
+    await flush(); await flush();
+
+    assert.equal(created.length, 0, 'no tab created on the refusal');
+    const errToasts = ctx.__toasts.filter(t => t.isError);
+    assert.equal(errToasts.length, 1);
+    assert.match(errToasts[0].msg, /无法在此计算机上解密/);
+});
+
+test('P3-02: a decrypt-flavored invoke rejection is matched; other rejections stay generic', async () => {
+    const ctx = loadSshVm();
+    const created = stageConnectProfile(ctx, { reject: new Error('credential decrypt failed') });
+
+    ctx.connectSSHProfile('p1');
+    await flush(); await flush();
+
+    assert.equal(created.length, 0);
+    assert.match(ctx.__toasts.filter(t => t.isError).map(t => t.msg).join('\n'), /无法在此计算机上解密/);
+
+    const ctx2 = loadSshVm();
+    const created2 = stageConnectProfile(ctx2, { reject: new Error('ipc down') });
+    ctx2.connectSSHProfile('p1');
+    await flush(); await flush();
+    assert.equal(created2.length, 0);
+    const msgs = ctx2.__toasts.filter(t => t.isError).map(t => t.msg);
+    assert.equal(msgs.length, 1);
+    assert.match(msgs[0], /凭据注册失败/, 'non-decrypt rejection keeps the generic toast');
+});
+
+test('P3-02 (control): a generic registration error keeps the existing toast', async () => {
+    const ctx = loadSshVm();
+    const created = stageConnectProfile(ctx, { resolve: { credId: null, error: 'store full' } });
+
+    ctx.connectSSHProfile('p1');
+    await flush(); await flush();
+
+    assert.equal(created.length, 0);
+    const msgs = ctx.__toasts.filter(t => t.isError).map(t => t.msg);
+    assert.deepEqual(msgs, ['凭据注册失败: store full']);
+});
+
+// The connect path (tabs.js _sshConnectWithCredentials) through the REAL
+// tabs.js + ipc.js + ssh-attempts.js: the refusal must fail the attempt with
+// the specific reason, never connect bare into a generic auth failure.
+function patchInvokeDeferred(ctx) {
+    const invokes = [];
+    ctx.ipcRenderer.invoke = (cmd, payload) => {
+        const rec = { cmd, payload };
+        rec.promise = new Promise((res, rej) => { rec.resolve = res; rec.reject = rej; });
+        invokes.push(rec);
+        return rec.promise;
+    };
+    return invokes;
+}
+
+function stagePendingSshTab(ctx) {
+    ctx.TabManager.sshProfiles = [{ id: 'prof1', name: 'p', host: 'h', username: 'u', encryptedPassword: 'enc' }];
+    const tab = {
+        id: 't_ssh', name: 't_ssh', type: 'ssh', host: 'h', port: 22, user: 'u',
+        sshProfileId: 'prof1', connected: false, tabId: null, term: null, fitAddon: null,
+    };
+    ctx.TabManager.tabs.push(tab);
+    return tab;
+}
+
+test('P3-02: the connect path fails with the specific reason instead of a bare connect', async () => {
+    const ctx = loadVm();
+    const invokes = patchInvokeDeferred(ctx);
+    const toasts = [];
+    ctx.showToast = (msg, isError) => toasts.push({ msg, isError });
+    const tab = stagePendingSshTab(ctx);
+
+    ctx._sshConnectWithCredentials(tab, null);
+    const reg = invokes.find(i => i.cmd === 'register-credential');
+    assert.ok(reg, 'credential registration invoked');
+
+    reg.resolve({ credId: null, error: 'credential decrypt failed', errorKind: 'credential-decrypt-failed' });
+    await flush(); await flush();
+
+    assert.ok(!invokes.some(i => i.cmd === 'ssh-connect'),
+        'no bare connect into a generic auth failure');
+    assert.equal(tab._sshErrored, true, 'the stored credential is not treated as healthy');
+    assert.equal(tab.connected, false);
+    assert.ok(toasts.some(t => t.isError && /无法在此计算机上解密/.test(t.msg)),
+        'the specific decrypt reason surfaced');
+});
+
+test('P3-02 (control): a healthy registration still connects with the fresh handle', async () => {
+    const ctx = loadVm();
+    const invokes = patchInvokeDeferred(ctx);
+    ctx.showToast = () => {};
+    const tab = stagePendingSshTab(ctx);
+
+    ctx._sshConnectWithCredentials(tab, null);
+    const reg = invokes.find(i => i.cmd === 'register-credential');
+    reg.resolve({ credId: 'cred_new' });
+    await flush(); await flush();
+
+    const conn = invokes.find(i => i.cmd === 'ssh-connect');
+    assert.ok(conn, 'connect enqueued');
+    assert.equal(conn.payload.profile.credentialId, 'cred_new', 'fresh handle used');
+    assert.equal(tab._credId, 'cred_new', 'wrapper rotated to the fresh handle');
+});
 
 
 
@@ -306,6 +447,68 @@ test('P3-01: a failed group rename keeps memory and toasts the failure', async (
     assert.ok(!ctx.__toasts.some(t => t.msg === '分组已重命名'), 'no success toast on failure');
 });
 
+// ── P3-02 (review follow-up): the session-RESTORE credential registration
+// (single SSH tab) failed safe but silently — a decrypt refusal left a gray
+// tab with no reason. It now flags the error state and says why ───────────
+
+function stageRestoreVm() {
+    const ctx = loadVm();
+    let profilesFn = null;
+    ctx.ipcRenderer.once = (ch, fn) => { if (ch === 'profiles') profilesFn = fn; };
+    const toasts = [];
+    ctx.showToast = (msg, isError) => toasts.push({ msg, isError });
+    const invokes = [];
+    ctx.ipcRenderer.invoke = (cmd, payload) => {
+        if (cmd === 'get-local-shells') return Promise.resolve([]);
+        const rec = { cmd, payload };
+        rec.promise = new Promise((res, rej) => { rec.resolve = res; rec.reject = rej; });
+        invokes.push(rec);
+        return rec.promise;
+    };
+    ctx.TabManager.init();
+    return { ctx, invokes, toasts, getProfilesFn: () => profilesFn };
+}
+
+const SSH_RESTORE_PROFILES = [{ id: 'prof1', name: 'p', host: 'h', username: 'u', encryptedPassword: 'enc' }];
+const SSH_RESTORE_TABS = [{ name: 'box', type: 'ssh', host: 'h', port: 22, user: 'u', sshProfileId: 'prof1' }];
+
+test('P3-02: a decrypt refusal at session restore flags the tab errored with the specific reason', async () => {
+    const { ctx, invokes, toasts, getProfilesFn } = stageRestoreVm();
+    assert.ok(getProfilesFn(), 'profiles restore handler registered');
+    const done = getProfilesFn()({}, {
+        profiles: [], sshProfiles: SSH_RESTORE_PROFILES, lastTabs: SSH_RESTORE_TABS,
+    });
+    await flush();
+    const reg = invokes.find(i => i.cmd === 'register-credential');
+    assert.ok(reg, 'restore registers the stored credential');
+
+    reg.resolve({ credId: null, error: 'credential decrypt failed', errorKind: 'credential-decrypt-failed' });
+    await done; await flush(); await flush();
+
+    const tab = ctx.TabManager.tabs.find(t => t.type === 'ssh');
+    assert.ok(tab, 'ssh tab restored');
+    assert.equal(tab.connected, false);
+    assert.equal(tab._sshErrored, true, 'the stored credential is not treated as healthy');
+    assert.ok(!invokes.some(i => i.cmd === 'ssh-connect'), 'no bare connect on the refusal');
+    assert.ok(toasts.some(t => t.isError && /无法在此计算机上解密/.test(t.msg)),
+        'the specific decrypt reason surfaced at restore');
+});
+
+test('P3-02 (guard): a non-decrypt registration failure at restore stays a plain disconnected tab', async () => {
+    const { ctx, invokes, toasts, getProfilesFn } = stageRestoreVm();
+    const done = getProfilesFn()({}, {
+        profiles: [], sshProfiles: SSH_RESTORE_PROFILES, lastTabs: SSH_RESTORE_TABS,
+    });
+    await flush();
+    invokes.find(i => i.cmd === 'register-credential')
+        .resolve({ credId: null, error: 'credential store full' });
+    await done; await flush(); await flush();
+
+    const tab = ctx.TabManager.tabs.find(t => t.type === 'ssh');
+    assert.equal(tab.connected, false);
+    assert.ok(!tab._sshErrored, 'no error flag for a generic failure');
+    assert.equal(toasts.filter(t => t.isError).length, 0, 'no decrypt toast');
+});
 
 // ── P3-08 (review follow-up): the new establishment-timeout wording must
 // stay inside ipc.js's transient-failure classifier, or tarpit/slow-network

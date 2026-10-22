@@ -342,6 +342,22 @@ function clearSessionSearch() {
     search.focus();
 }
 
+// ── Undecryptable stored credential ──
+// The backend distinguishes "credential exists but DPAPI decrypt failed"
+// (the config was copied from another Windows user/machine; DPAPI keys are
+// per-user) from "no credential": register-credential then carries errorKind
+// 'credential-decrypt-failed' (older builds only a decrypt-flavored error
+// string) and mints NO empty-password handle. Match both shapes tolerantly —
+// this case must surface a specific reason, not a generic auth/registration
+// failure, and the stored credential must not be treated as healthy.
+function _isCredentialDecryptFailure(res, err) {
+    const kind = res && (res.errorKind || res.kind);
+    if (kind === 'credential-decrypt-failed') return true;
+    const msg = String((res && res.error) || (err && err.message) || err || '');
+    return /decrypt|解密/i.test(msg);
+}
+const _CRED_DECRYPT_FAIL_MSG = '已保存的密码无法在此计算机上解密，请编辑该连接并重新输入密码';
+
 function selectSession(sessionId) {
     const items = getSessionItems();
     const item = items.find(i => i.id === sessionId);
@@ -357,7 +373,12 @@ function selectSession(sessionId) {
             ipcRenderer.invoke('register-credential', {
                 encryptedPassword: p.encryptedPassword || '',
                 privateKeyPath: p.privateKeyPath || '',
-            }).then(({ credId, error }) => {
+            }).then((res) => {
+                const { credId, error } = res || {};
+                if (_isCredentialDecryptFailure(res)) {
+                    showToast(_CRED_DECRYPT_FAIL_MSG, true);
+                    return;
+                }
                 if (error || !credId) {
                     showToast('凭据注册失败: ' + (error || 'unknown'), true);
                     return;
@@ -367,6 +388,9 @@ function selectSession(sessionId) {
                     host: p.host, port: p.port, user: p.username,
                     credId, sshProfileId: p.id,
                 });
+            }).catch((e) => {
+                if (_isCredentialDecryptFailure(null, e)) showToast(_CRED_DECRYPT_FAIL_MSG, true);
+                else showToast('凭据注册失败: ' + ((e && e.message) || e || 'unknown'), true);
             });
         } else {
             TabManager.createTab({
@@ -1705,7 +1729,12 @@ function connectSSHProfile(profileId) {
         ipcRenderer.invoke('register-credential', {
             encryptedPassword: p.encryptedPassword || '',
             privateKeyPath: p.privateKeyPath || '',
-        }).then(({ credId, error }) => {
+        }).then((res) => {
+            const { credId, error } = res || {};
+            if (_isCredentialDecryptFailure(res)) {
+                showToast(_CRED_DECRYPT_FAIL_MSG, true);
+                return;
+            }
             if (error || !credId) {
                 showToast('凭据注册失败: ' + (error || 'unknown'), true);
                 return;
@@ -1715,6 +1744,9 @@ function connectSSHProfile(profileId) {
                 host: p.host, port: p.port, user: p.username,
                 credId, sshProfileId: p.id,
             });
+        }).catch((e) => {
+            if (_isCredentialDecryptFailure(null, e)) showToast(_CRED_DECRYPT_FAIL_MSG, true);
+            else showToast('凭据注册失败: ' + ((e && e.message) || e || 'unknown'), true);
         });
     } else {
         TabManager.createTab({

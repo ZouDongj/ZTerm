@@ -196,7 +196,26 @@ function _sshConnectWithCredentials(tab, pane) {
         ipcRenderer.invoke('register-credential', {
             encryptedPassword: prof.encryptedPassword || '',
             privateKeyPath: prof.privateKeyPath || '',
-        }).then(({ credId: newCredId }) => {
+        }).then((res) => {
+            const { credId: newCredId } = res || {};
+            // The backend REFUSES registration when the stored password no
+            // longer decrypts on this machine/user (errorKind
+            // 'credential-decrypt-failed', or a decrypt-flavored error string
+            // on older backends) and mints no empty-password handle. That is
+            // not "no credential": fail the attempt with the specific reason
+            // instead of connecting bare into a generic auth failure. The
+            // matcher is inlined (not ssh.js's _isCredentialDecryptFailure):
+            // tabs.js loads before ssh.js, and test VMs load tabs.js alone.
+            const regErr = String((res && res.error) || '');
+            if (res && (res.errorKind === 'credential-decrypt-failed' || res.kind === 'credential-decrypt-failed'
+                || /decrypt|解密/i.test(regErr))) {
+                if (newCredId) ipcRenderer.send('revoke-credential', { credId: newCredId });
+                if (sshAttempts.ownerWants(token)) {
+                    sshAttempts.onRpcTerminal(token, 'failed', null,
+                        '已保存的密码无法在此计算机上解密，请编辑该连接并重新输入密码');
+                }
+                return;
+            }
             // The credential round trip can outlive migrations/closures: the
             // ATTEMPT record (not the captured wrapper) owns the decision —
             // never enqueue into a dead or replaced attempt. Handles are
@@ -224,7 +243,17 @@ function _sshConnectWithCredentials(tab, pane) {
                 }
             }
             send(newCredId);
-        }).catch(() => { if (sshAttempts.ownerWants(token)) send(null); });
+        }).catch((e) => {
+            if (!sshAttempts.ownerWants(token)) return;
+            // The same refusal surfacing as an invoke rejection (message
+            // match): fail with the specific reason instead of a bare connect.
+            if (/decrypt|解密/i.test(String((e && e.message) || e || ''))) {
+                sshAttempts.onRpcTerminal(token, 'failed', null,
+                    '已保存的密码无法在此计算机上解密，请编辑该连接并重新输入密码');
+            } else {
+                send(null);
+            }
+        });
         return;
     }
     if (prof) {
@@ -702,6 +731,26 @@ const TabManager = {
                 .filter(t => t && typeof t === 'object' && t.type !== 'settings');
             if (tabsToRestore.length === 0) tabsToRestore.push(getDefaultLocalProfile());
 
+            // A failed restore-time credential registration must not leave a
+            // silent dead tab. A decrypt refusal (the stored ciphertext is
+            // unreadable on this machine/user — the backend mints no handle
+            // and answers kind 'credential-decrypt-failed') is not "no
+            // credential": flag the error state (red dot + reconnect
+            // affordance) and say why; a manual reconnect re-registers and
+            // reports the same reason into the terminal. The matcher mirrors
+            // _sshConnectWithCredentials' (tabs.js loads before ssh.js, and
+            // test VMs load tabs.js alone).
+            const failRestoreRegistration = (reTab, errorText, errKind) => {
+                reTab.connected = false;
+                if (errKind === 'credential-decrypt-failed' || /decrypt|解密/i.test(String(errorText || ''))) {
+                    reTab._sshErrored = true;
+                    if (typeof showToast === 'function') {
+                        showToast('已保存的密码无法在此计算机上解密，请编辑该连接并重新输入密码', true);
+                    }
+                }
+                this.render();
+            };
+
             tabsToRestore.forEach(t => {
                 // Tabs with split data go through the full restore path
                 if (t.splitRoot) {
@@ -744,7 +793,7 @@ const TabManager = {
                     ipcRenderer.invoke('register-credential', {
                         encryptedPassword: sshOpts._encryptedPwd,
                         privateKeyPath: sshOpts.privateKey,
-                    }).then(({ credId, error }) => {
+                    }).then(({ credId, error, errorKind, kind }) => {
                         const reTab = this.tabs.find(x => x.id === capturedId);
                         if (!reTab || reTab.connected) {
                             // The registration outlived its consumer (the tab
@@ -754,12 +803,16 @@ const TabManager = {
                             return;
                         }
                         if (error || !credId) {
-                            reTab.connected = false;
-                            this.render();
+                            failRestoreRegistration(reTab, error, errorKind || kind);
                             return;
                         }
                         reTab._credId = credId;
                         _sshConnectWithCredentials(reTab, null);
+                    }).catch((e) => {
+                        const reTab = this.tabs.find(x => x.id === capturedId);
+                        if (reTab && !reTab.connected) {
+                            failRestoreRegistration(reTab, (e && e.message) || e, null);
+                        }
                     });
                 }
             });
