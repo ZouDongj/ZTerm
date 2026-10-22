@@ -21,9 +21,10 @@
 //                has been applied — idempotently, by whichever of the event
 //                channel or the invocation result arrives FIRST
 // A record retires (owner cleared, moved to the finished map) only when BOTH
-// the rpc and ui sides reached a terminal state. The 20s slot fallback
-// releases the queue slot ONLY: the record stays addressable, cancellable
-// and able to route a legitimate late success.
+// the rpc and ui sides reached a terminal state. The slot fallback timer
+// (SSH_CONNECT_SLOT_FALLBACK_MS in tabs.js) releases the queue slot ONLY:
+// the record stays addressable, cancellable and able to route a legitimate
+// late success.
 //
 // Pure registry: no IPC, no DOM. The UI application of an rpc terminal state
 // is injected by ipc.js through setRpcApplier so both channels share ONE
@@ -195,7 +196,7 @@ const SshAttempts = (() => {
     // Queue integration: armSlot registers the slot's release fn and returns
     // an idempotent settle(). Release happens exactly once, from whichever
     // comes first: the invocation terminal, a matched cancelAttempt, or the
-    // 20s fallback timer. Releasing the slot never retires the attempt.
+    // slot fallback timer. Releasing the slot never retires the attempt.
     function armSlot(token, releaseFn) {
         const r = record(token);
         const settle = () => releaseSlot(token);
