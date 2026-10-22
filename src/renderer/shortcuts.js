@@ -870,6 +870,16 @@ document.addEventListener('keydown', e => {
         if (sshAddMenu && sshAddMenu.classList.contains('open')) {
             return;
         }
+        // Non-.overlay modal layers (color picker, tab context menu) stack
+        // above real overlays (a picker opens over the highlight edit layer),
+        // so Esc peels the topmost layer before the overlay branch below.
+        // This check precedes the menu popup on purpose: the popup is NOT on
+        // the modal stack, and with a menu plus a modal layer both open, LIFO
+        // means the topmost layer pops first — not the menu underneath it.
+        if (typeof popModalLayer === 'function' && popModalLayer()) {
+            e.preventDefault(); e.stopPropagation();
+            return;
+        }
         const menuPopup = document.getElementById('menu-popup');
         if (menuPopup && menuPopup.classList.contains('open')) {
             // Full close, same as the backdrop click path: clearing only the
@@ -877,13 +887,6 @@ document.addEventListener('keydown', e => {
             // body.menu-open behind — the invisible backdrop (z-index 299)
             // would then swallow the next click.
             closeMenuPopup();
-            e.preventDefault(); e.stopPropagation();
-            return;
-        }
-        // Non-.overlay modal layers (color picker, tab context menu) stack
-        // above real overlays (a picker opens over the highlight edit layer),
-        // so Esc peels the topmost layer before the overlay branch below.
-        if (typeof popModalLayer === 'function' && popModalLayer()) {
             e.preventDefault(); e.stopPropagation();
             return;
         }

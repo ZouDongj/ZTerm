@@ -12,6 +12,11 @@
 // staged through the REAL toggleMenuPopup(); faked is only the environment
 // (auto-vivifying document from the manager seam + a listener registry so the
 // capture-phase keydown dispatcher is drivable).
+//
+// Follow-up: the menu popup is not on the shared modal layer stack, and the
+// popup branch used to run BEFORE popModalLayer() — with a menu and a modal
+// layer both open, Esc closed the menu instead of the topmost layer (LIFO
+// violation). The layer check now precedes the popup branch.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -137,4 +142,23 @@ test('(order) menu and overlay both open: first Esc closes only the menu, second
     const esc2 = f.keydown({ target: ESC_TARGET });
     assert.ok(esc2.defaultPrevented, 'second Esc consumed by the overlay branch');
     assert.equal(f.ctx.__overlayCloses, 1, 'overlay closed on the second Esc');
+});
+
+test('(order) menu and a modal layer both open: Esc pops the topmost layer first (LIFO), menu second', () => {
+    const f = fixture();
+    f.openMenu();
+    // The menu popup is NOT on the modal layer stack; stage a stack that has
+    // one layer on top of it (fixture seam: utils.js is not loaded here).
+    let popped = 0;
+    f.ctx.popModalLayer = () => { popped++; return true; };
+
+    const esc1 = f.keydown({ target: ESC_TARGET });
+    assert.ok(esc1.defaultPrevented, 'first Esc consumed by the modal-layer branch');
+    assert.equal(popped, 1, 'the topmost modal layer pops before the menu');
+    assert.ok(f.popup().classList.contains('open'), 'the menu underneath survives the first Esc');
+
+    f.ctx.popModalLayer = () => false; // layer popped, stack drained
+    const esc2 = f.keydown({ target: ESC_TARGET });
+    assert.ok(esc2.defaultPrevented, 'second Esc reaches the menu branch');
+    assert.ok(allClosed(f), 'menu fully closed on the second Esc');
 });
