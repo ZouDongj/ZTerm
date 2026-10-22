@@ -235,8 +235,41 @@ function openSearchedFoo(ctx, content) {
     assert.equal(ctx.__searchCount.textContent, '1/2', 'staged: first foo match selected');
 }
 
+test('P2-06: Enter before the debounce fires searches the NEW term from the top', () => {
+    const ctx = loadVm();
+    openSearchedFoo(ctx, TEXT_A);
+    type(ctx, 'bar');
+    ctx.__tq.advance(50); // still inside the 200ms debounce window
+    ctx.onSearchKey({ key: 'Enter', preventDefault() {} });
+    assert.equal(ctx.__searchCount.textContent, '1/2',
+        'the first bar match is selected, not the one below the stale foo anchor');
+    assert.equal(ctx.TabManager.getActive().term.getSelection(), 'bar');
+    ctx.__tq.advance(300);
+    assert.equal(ctx.__searchCount.textContent, '1/2', 'the cancelled typed scan never bumps the match');
+});
 
+test('P2-06: Shift+Enter after an edit also restarts from the top', () => {
+    const ctx = loadVm();
+    openSearchedFoo(ctx, TEXT_B);
+    type(ctx, 'bar');
+    ctx.__tq.advance(50);
+    ctx.onSearchKey({ key: 'Enter', shiftKey: true, preventDefault() {} });
+    assert.equal(ctx.__searchCount.textContent, '1/2',
+        'an edited query starts at the first match even for Shift+Enter');
+});
 
+test('P2-06 (control): an unchanged query keeps Enter navigation advancing', () => {
+    const ctx = loadVm();
+    wiredTab(ctx, 't_a', 'local_a', TEXT_A);
+    ctx.TabManager.switchTo('t_a');
+    ctx.openSearch();
+    ctx.__tq.advance(60);
+    type(ctx, 'bar');
+    ctx.__tq.advance(250); // debounce settled: bar searched, first match selected
+    assert.equal(ctx.__searchCount.textContent, '1/2', 'staged: first bar match');
+    ctx.onSearchKey({ key: 'Enter', preventDefault() {} });
+    assert.equal(ctx.__searchCount.textContent, '2/2', 'Enter still advances to the next match');
+});
 
 test('P3-14: maximized pane — Esc in the search input closes the bar, keeps the pane maximized', () => {
     const ctx = loadVm();

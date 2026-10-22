@@ -1431,15 +1431,23 @@ function _navigateSearch(direction) {
     const target = _getActiveSearchTarget();
     if (!target || !query) { _resetActiveSearch(); return; }
     const ownerChanged = _adoptSearchOwner(target.term);
+    // Enter can beat the 200ms typing debounce, so compare the last EXECUTED
+    // query here rather than trusting the debounce to have run: an edited
+    // query restarts from the top like doSearch — anchoring the new term on
+    // the previous query's selection would skip every match above it.
+    const queryChanged = _searchLastQuery !== query;
+    if (queryChanged) _clearSearchOwnedSelection(target.term);
+    _searchLastQuery = query;
     // A fresh owner always STARTS a search rather than navigating: its addon
     // has no cached term, and findPrevious from the viewport bottom would
     // land on the LAST match — findNext from the top matches every other
-    // fresh start (openSearch → type → Enter).
+    // fresh start (openSearch → type → Enter). An edited query restarts the
+    // same way, including from Shift+Enter.
     // Same synchronous find window as doSearch: the placed match selection is
     // search-owned and must not reach the clipboard.
     _searchPlacingSelection = true;
     try {
-        if (ownerChanged || direction > 0) target.addon.findNext(query, _searchOptions());
+        if (ownerChanged || queryChanged || direction > 0) target.addon.findNext(query, _searchOptions());
         else target.addon.findPrevious(query, _searchOptions());
     } finally {
         _searchPlacingSelection = false;
