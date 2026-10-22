@@ -354,7 +354,9 @@ function createTermWrap(tab) {
 // counterparts). The enumeration cache is cold for the first terminal at
 // startup; that terminal gets the raw chain here and is re-governed when the
 // list arrives (see _ensureFontGovernanceKick), while later terminals resolve
-// synchronously from the warm cache.
+// synchronously from the warm cache. Scope: only the built-in default chains
+// are governed (isDefaultTerminalFontFamily); a user-configured chain renders
+// verbatim.
 function _governTerminalFontChain(chain) {
     if (typeof governTerminalFontFamily !== 'function') return chain;
     return governTerminalFontFamily(chain);
@@ -373,6 +375,12 @@ function _ensureFontGovernanceKick() {
                 _fontGovernanceKickStarted = false;
                 return;
             }
+            // The kick exists to apply the default-chain governance once the
+            // enumeration arrives; an explicitly configured chain renders
+            // verbatim, so there is nothing to re-apply. (getSystemFonts still
+            // ran: the enumeration cache warms for the settings pickers and
+            // for a later switch back to a default chain.)
+            if (!isDefaultTerminalFontFamily(_settingsConfig.fontFamily)) return;
             const c = _settingsConfig;
             const governed = _governTerminalFontChain(_normalizeFontFamily(
                 c.fontFamily || '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace',
@@ -398,10 +406,17 @@ function _ensureFontGovernanceKick() {
 function _buildTerminalOptions() {
     const c = _settingsConfig;
     _ensureFontGovernanceKick();
-    const fontFamily = _governTerminalFontChain(_normalizeFontFamily(
+    // Governance remediates the built-in default chains only; an explicitly
+    // configured chain is the user's choice and renders verbatim. A missing
+    // font-governance module degrades to governed, where the same guard inside
+    // _governTerminalFontChain then passes the chain through unchanged.
+    const normalizedFontFamily = _normalizeFontFamily(
         c.fontFamily || '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace',
         c.fallbackFont
-    ));
+    );
+    const fontFamily = (typeof isDefaultTerminalFontFamily !== 'function' || isDefaultTerminalFontFamily(c.fontFamily))
+        ? _governTerminalFontChain(normalizedFontFamily)
+        : normalizedFontFamily;
     const accentColor = _getAccentColor();
     const terminalTheme = getTerminalTheme();
     // Rendering defaults follow the user's Tabby terminal: same extracted

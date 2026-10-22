@@ -956,15 +956,19 @@ function saveAppearance() {
 
     // Apply font settings to existing terminals
     // Must use the same quote normalization as startup, otherwise an unquoted monospace becomes a CSS generic keyword and changes CJK fallback
-    // Governance (font-governance.js) swaps non-Mono NF families for their
-    // installed Mono counterparts — the same chain terminal init applies, so a
-    // settings save cannot reintroduce the ungoverned form. With a cold
-    // enumeration cache the chain passes through unchanged and terminal.js's
-    // governance kick re-applies the governed form when the list arrives.
+    // Governance (font-governance.js) remediates only the built-in default
+    // chains (non-Mono NF swap / NF Mono append); an explicitly configured
+    // chain hot-applies verbatim — the same scope terminal init applies, so a
+    // settings save cannot reintroduce a rewrite the user did not choose. With
+    // a cold enumeration cache a governed chain passes through unchanged and
+    // terminal.js's governance kick re-applies the governed form when the list
+    // arrives.
+    const normalizedFontFamily = _normalizeFontFamily(fontFamily, fallbackFont);
     const appliedFontFamily = fontFamily
-        ? (typeof governTerminalFontFamily === 'function'
-            ? governTerminalFontFamily(_normalizeFontFamily(fontFamily, fallbackFont))
-            : _normalizeFontFamily(fontFamily, fallbackFont))
+        ? ((typeof governTerminalFontFamily === 'function'
+            && (typeof isDefaultTerminalFontFamily !== 'function' || isDefaultTerminalFontFamily(fontFamily)))
+            ? governTerminalFontFamily(normalizedFontFamily)
+            : normalizedFontFamily)
         : '';
     TabManager.tabs.forEach(t => {
         if (t.term) {

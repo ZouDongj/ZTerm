@@ -4,9 +4,11 @@
 // background boundaries). The pure resolver below rewrites a fontFamily chain
 // so Nerd Font references land on the Mono variant (icons constrained to one
 // cell) whenever that variant is installed; it never reorders the user's
-// explicit non-NF families and never drops entries. The module also owns the
-// shared system-font enumeration cache used by both terminal init and the
-// settings font pickers.
+// explicit non-NF families and never drops entries. Governance is scoped to
+// the built-in default chains (and an unset fontFamily): every call site gates
+// on isDefaultTerminalFontFamily, so a user-configured chain renders verbatim.
+// The module also owns the shared system-font enumeration cache used by both
+// terminal init and the settings font pickers.
 // No DOM dependency at load time; browser global + CommonJS dual export,
 // node:test-able (same pattern as color-utils.js).
 
@@ -59,6 +61,31 @@ function _nfMonoCandidates(name) {
     // Both naming forms are tried regardless of the source form: which of the
     // two a Nerd Fonts release ships under varies by family and version.
     return [stem + ' NFM', stem + ' Nerd Font Mono'];
+}
+
+// ── Governance scope: built-in default chains only ──
+// The renderer's built-in default terminal font chain. terminal.js falls back
+// to it when the config carries no fontFamily, and the loadSettings failure
+// default in settings.js restates it verbatim (pinned by
+// font-governance.test.mjs).
+const DEFAULT_TERMINAL_FONT_FAMILY = '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace';
+// src-tauri default_config()'s appearance.fontFamily: the backend merges the
+// user config over its defaults, so a machine whose user never picked a font
+// loads THIS chain, not the renderer default. It is a built-in default rather
+// than a user choice — clean machines rely on the NF Mono append for icons.
+const BACKEND_DEFAULT_FONT_FAMILY = '"JetBrains Mono","Cascadia Code",Consolas,monospace';
+
+// Governance remediates the built-in defaults; it must never rewrite a chain
+// the user configured. "Unset" alone cannot make that call: saveAppearance
+// persists the font select's current value on ANY appearance save, and the
+// select round-trips the configured chain unchanged, so the default chain
+// lands in the config as an explicit-looking value after a settings visit
+// that never touched the font field. Only equality with a built-in default
+// (or an unset/blank value) means "no explicit choice".
+function isDefaultTerminalFontFamily(fontFamily) {
+    if (typeof fontFamily !== 'string' || !fontFamily.trim()) return true;
+    const v = fontFamily.trim();
+    return v === DEFAULT_TERMINAL_FONT_FAMILY || v === BACKEND_DEFAULT_FONT_FAMILY;
 }
 
 // Given a CSS font-family chain string and the list of installed families,
@@ -183,5 +210,5 @@ function governTerminalFontFamily(normalizedChain) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { governTerminalFontChain, suggestNfMonoCounterpart, peekSystemFonts, getSystemFonts, governTerminalFontFamily, BUNDLED_NF_MONO_FAMILY };
+    module.exports = { governTerminalFontChain, suggestNfMonoCounterpart, peekSystemFonts, getSystemFonts, governTerminalFontFamily, BUNDLED_NF_MONO_FAMILY, DEFAULT_TERMINAL_FONT_FAMILY, BACKEND_DEFAULT_FONT_FAMILY, isDefaultTerminalFontFamily };
 }
