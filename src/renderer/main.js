@@ -239,13 +239,16 @@ function armSplashHide() {
     // Preload terminal fonts before any terminal opens: xterm measures cell
     // size at open() time, and a first frame on the fallback font would both
     // flash and poison the measurement until the next resize (Tabby parity).
-    try {
-        await Promise.all([
-            document.fonts.load('400 16px "JetBrainsMonoNL NF"', 'Study Z'),
-            document.fonts.load('600 16px "JetBrainsMonoNL NF"', 'Study Z'),
-            document.fonts.load('400 16px "HarmonyOS Sans SC"', '中文'),
-        ]);
-    } catch(e) { /* missing fonts fall back silently */ }
+    // The loads start immediately but are awaited only just before
+    // TabManager.init() — the first point a terminal can be created — so the
+    // font fetches overlap the settings-load IPC chain instead of serializing
+    // ahead of it. The catch is attached at creation so a font failure can
+    // never surface as an unhandled rejection before the await below.
+    const fontPreload = Promise.all([
+        document.fonts.load('400 16px "JetBrainsMonoNL NF"', 'Study Z'),
+        document.fonts.load('600 16px "JetBrainsMonoNL NF"', 'Study Z'),
+        document.fonts.load('400 16px "HarmonyOS Sans SC"', '中文'),
+    ]).catch(() => { /* missing fonts fall back silently */ });
     // The data directory is resolved by the main process (packaged builds default to <install dir>/data; a user-defined pointer is supported)
     try {
         const info = await ipcRenderer.invoke('get-data-dir-info');
@@ -265,6 +268,9 @@ function armSplashHide() {
         // The splash lives outside .window, so sibling selectors cannot reach it: mirror the anchor onto body (app.css depends on it)
         document.body.classList.add('no-animations');
     }
+    // The font preload must land before the first terminal measures its cells;
+    // everything above this await does not create terminals.
+    await fontPreload;
     TabManager.init();
     startSplashLoader();
     armSplashHide();
