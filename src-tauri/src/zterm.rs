@@ -1878,11 +1878,16 @@ async fn ensure_sftp_transfer(
 /// true when an SFTP op's failure proves the CHANNEL died mid-session
 /// (transport level: I/O, EOF, request timeout, the session task gone). A
 /// Status or Limited reply proves the opposite — the server answered on this
-/// channel — so those never trigger a rebuild.
+/// channel — and so does UnexpectedPacket: russh-sftp raises it only AFTER a
+/// packet arrived whose type did not match the pending request, i.e. the
+/// transport demonstrably carried a reply (a dead channel yields Timeout /
+/// UnexpectedBehavior / IO / EOF instead). These never trigger a rebuild.
 fn sftp_channel_died(e: &russh_sftp::client::error::Error) -> bool {
     !matches!(
         e,
-        russh_sftp::client::error::Error::Status(_) | russh_sftp::client::error::Error::Limited(_)
+        russh_sftp::client::error::Error::Status(_)
+            | russh_sftp::client::error::Error::Limited(_)
+            | russh_sftp::client::error::Error::UnexpectedPacket
     )
 }
 
@@ -8119,6 +8124,9 @@ mod tests {
         };
         assert!(!sftp_channel_died(&Error::Status(status)));
         assert!(!sftp_channel_died(&Error::Limited("read limit reached".into())));
+        // An unexpected packet still proves a packet ARRIVED on this channel:
+        // alive, never rebuilt.
+        assert!(!sftp_channel_died(&Error::UnexpectedPacket));
         // Transport-level failures: the channel is dead.
         assert!(sftp_channel_died(&Error::Timeout));
         assert!(sftp_channel_died(&Error::IO("broken pipe".into())));
