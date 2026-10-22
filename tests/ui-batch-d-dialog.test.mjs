@@ -21,6 +21,12 @@
 // from zero width; unmeasurable writes are now skipped and the first
 // measurable placement goes transitions off → place → flush → restore.
 //
+// Auth-switch row geometry: the U-04 fix hid the password form-group but
+// showed a second grid row for key auth, so switching auth jumped the dialog
+// height by a full row (66px measured). The key form-group now shares
+// #ssh-pwd-row with the password field — pinned below by a markup-structure
+// test plus a VM visibility-swap test.
+//
 // CSS-geometry-only parts are NOT covered here: the U-09 short-window panel
 // cap/scroll/sticky footer (stylesheet contract pinned in
 // ui-batch-d-css.test.mjs) and the U-17 34px segmented-control baseline are
@@ -33,6 +39,22 @@ import assert from 'node:assert/strict';
 import { loadSshVm, mkDoc, mkEvt, runIn } from './helpers/manager-vm.mjs';
 
 const src = f => readFileSync(new URL(`../src/renderer/${f}`, import.meta.url), 'utf8');
+const pageHtml = readFileSync(new URL('../src/renderer.html', import.meta.url), 'utf8');
+
+// Extract the balanced <div>…</div> block whose open tag carries id="<id>".
+function divBlock(html, id) {
+    const start = html.indexOf(`id="${id}"`);
+    assert.notEqual(start, -1, `#${id} exists in renderer.html`);
+    const tagStart = html.lastIndexOf('<div', start);
+    const re = /<div\b|<\/div>/g;
+    re.lastIndex = tagStart;
+    let depth = 0, m;
+    while ((m = re.exec(html))) {
+        depth += m[0] === '</div>' ? -1 : 1;
+        if (depth === 0) return html.slice(tagStart, re.lastIndex);
+    }
+    assert.fail(`#${id} block never closes`);
+}
 
 // The segmented control's two tabs as the real markup has them
 // (renderer.html #ssh-auth-tabs); the harness only auto-vivifies by-id
@@ -126,6 +148,44 @@ test('U-04 (control): under password auth the inline save still persists', async
 
     assert.deepEqual(calls.map(c => c.cmd), ['encrypt-password', 'save-ssh-profiles']);
     assert.equal(ctx.TabManager.sshProfiles[0].encryptedPassword, 'enc1');
+});
+
+// ── Auth-switch row geometry (height-stable dialog) ─────────────────────────
+// Regression introduced by the U-04 fix (3d69fc2): key mode hid only the
+// password form-group but showed a SECOND grid row (the standalone
+// #ssh-key-row form-row) underneath, so switching 密码↔密钥 moved the dialog
+// height by a full row (66px measured). The key form-group now lives inside
+// #ssh-pwd-row as a sibling of the password field: exactly one of the two is
+// visible per mode, the note always keeps the second cell, and both modes
+// render the same single grid row.
+
+test('the key field is a sibling of the password field inside #ssh-pwd-row', () => {
+    const row = divBlock(pageHtml, 'ssh-pwd-row');
+    const keyTag = row.match(/<div class="form-group" id="ssh-key-row"[^>]*>/);
+    assert.ok(keyTag, 'the key form-group keeps id="ssh-key-row" after the move');
+    assert.ok(keyTag[0].includes('display:none'), 'key branch starts hidden (password is the default auth)');
+    assert.ok(!keyTag[0].includes('grid-column'), 'single grid cell — no full-width span');
+    const order = ['id="ssh-pwd-field"', 'id="ssh-key-row"', 'id="ssh-edit-note"']
+        .map(marker => row.indexOf(marker));
+    assert.ok(order.every(i => i >= 0), 'password field, key field and note all live in the same row');
+    assert.ok(order[0] < order[1] && order[1] < order[2],
+        'grid order keeps [password|key][note] in both modes');
+    assert.ok(!pageHtml.includes('<div class="form-row" id="ssh-key-row"'),
+        'the standalone key form-row is gone — it was the second row that jumped the dialog height');
+});
+
+test('both auth modes show exactly one credential branch inside the same row', () => {
+    const ctx = loadSshVm();
+    buildAuthTabs(ctx);
+    for (const auth of ['密码', '密钥']) {
+        ctx.setSSHAuth(auth);
+        const pwdShown = ctx.document.getElementById('ssh-pwd-field').style.display !== 'none';
+        const keyShown = ctx.document.getElementById('ssh-key-row').style.display !== 'none';
+        assert.notEqual(pwdShown, keyShown,
+            `${auth}: exactly one credential branch occupies the row's first cell`);
+        assert.notEqual(ctx.document.getElementById('ssh-pwd-row').style.display, 'none',
+            `${auth}: the shared row itself never hides (the note is auth-independent)`);
+    }
 });
 
 // ── U-14: auth slider first-frame suppression ───────────────────────────────

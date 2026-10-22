@@ -1524,9 +1524,11 @@ function updateAuthFields() {
     const isKey = sel.value === '密钥';
     // The inactive branch is hidden outright (pre-v12 behavior): the dimmed
     // variant stayed in the tab order, so keyboard/Enter could still edit and
-    // even save a password inline while the profile was on key auth. Only the
-    // password form-group hides — the note sharing the row is auth-independent
-    // and stays visible/editable under key auth.
+    // even save a password inline while the profile was on key auth. The two
+    // credential branches are siblings inside #ssh-pwd-row and swap visibility
+    // in place — the note sharing the row is auth-independent and stays
+    // visible/editable, so the row count (and the dialog height) is identical
+    // in both modes.
     const pwdField = document.getElementById('ssh-pwd-field');
     if (pwdField) pwdField.style.display = isKey ? 'none' : '';
     const keyRow = document.getElementById('ssh-key-row');
