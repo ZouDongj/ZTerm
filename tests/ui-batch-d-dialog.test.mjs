@@ -188,6 +188,36 @@ test('both auth modes show exactly one credential branch inside the same row', (
     }
 });
 
+// ── View-mode password field leaves no dead flex item ───────────────────────
+// _renderPasswordField('view') used to hide only the input; the empty wrapper
+// div stayed a flex item of the form-group and kept costing the 5px column
+// gap under the status row. The wrapper (#ssh-pwd-input-wrap) now hides with
+// the branch and comes back in edit mode.
+
+test('the password input wrapper carries an id around the input and its inline buttons', () => {
+    const wrap = divBlock(pageHtml, 'ssh-pwd-input-wrap');
+    assert.ok(wrap.includes('id="ssh-edit-password"'), 'wrapper contains the password input');
+    for (const id of ['ssh-pwd-inline-eye', 'ssh-pwd-inline-save', 'ssh-pwd-inline-cancel']) {
+        assert.ok(wrap.includes(`id="${id}"`), `wrapper contains #${id}`);
+    }
+});
+
+test('view mode hides the password wrapper outright; edit mode restores it', () => {
+    const ctx = loadSshVm();
+    const wrap = ctx.document.getElementById('ssh-pwd-input-wrap');
+    const input = ctx.document.getElementById('ssh-edit-password');
+
+    ctx._renderPasswordField('view');
+    assert.equal(ctx.document.getElementById('ssh-pwd-status').style.display, 'flex', 'status row shown');
+    assert.equal(wrap.style.display, 'none',
+        'wrapper display:none — the form-group column gap gets no dead second item');
+    assert.equal(input.style.display, 'none', 'input stays hidden as a second layer');
+
+    ctx._renderPasswordField('edit');
+    assert.equal(wrap.style.display, '', 'edit mode restores the wrapper');
+    assert.equal(input.style.display, '', 'edit mode restores the input');
+});
+
 // ── U-14: auth slider first-frame suppression ───────────────────────────────
 
 test('U-14: the auth slider skips unmeasurable writes and places the first frame without transition', () => {

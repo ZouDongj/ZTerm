@@ -774,12 +774,17 @@ function _editingProfileHasPassword() {
 
 function _renderPasswordField(mode) {
     const statusEl = document.getElementById('ssh-pwd-status');
+    const wrapEl = document.getElementById('ssh-pwd-input-wrap');
     const inputEl = document.getElementById('ssh-edit-password');
     const saveBtn = document.getElementById('ssh-pwd-inline-save');
     const cancelBtn = document.getElementById('ssh-pwd-inline-cancel');
     const eyeBtn = document.getElementById('ssh-pwd-inline-eye');
     if (mode === 'view') {
         statusEl.style.display = 'flex';
+        // Hide the whole input wrapper, not just the input: with every child
+        // hidden the wrapper is still a flex item of the form-group, so the
+        // column gap (5px) kept a dead slot under the status row.
+        if (wrapEl) wrapEl.style.display = 'none';
         inputEl.style.display = 'none';
         [saveBtn, cancelBtn, eyeBtn].forEach(b => { if (b) b.classList.remove('show'); });
         if (eyeBtn) { eyeBtn.classList.remove('active'); eyeBtn.title = '显示密码'; }
@@ -787,6 +792,7 @@ function _renderPasswordField(mode) {
         inputEl.type = 'password';
     } else {
         statusEl.style.display = 'none';
+        if (wrapEl) wrapEl.style.display = '';
         inputEl.style.display = '';
         inputEl.type = 'password';
         if (eyeBtn) { eyeBtn.classList.remove('active'); eyeBtn.title = '显示密码'; }
