@@ -1459,6 +1459,9 @@ pub async fn pty_create(
     if let Some(v) = colorfgbg {
         cmd.env("COLORFGBG", v);
     }
+    // The renderer (xterm.js) draws 24-bit color; advertise it so truecolor-
+    // aware TUI apps (which key on COLORTERM) enable their direct-color paths.
+    cmd.env("COLORTERM", "truecolor");
 
     let child = pair
         .slave
@@ -1901,6 +1904,7 @@ const TYPED_CWD_INJECT_SCRIPT: &str = " if [ -n \"$ZSH_VERSION\" ]; then _zt_hio
      stty -echo\n\
      _zt_cwd() { printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }\n\
      if [ -n \"$ZSH_VERSION\" ]; then precmd_functions+=(_zt_cwd); else PROMPT_COMMAND=\"_zt_cwd;${PROMPT_COMMAND}\"; fi\n\
+     export COLORTERM=truecolor\n\
      echo ZTERM_INJECTED\n\
      if [ -n \"$ZSH_VERSION\" ]; then [ \"$_zt_hio\" = off ] && unsetopt HIST_IGNORE_SPACE 2>/dev/null; unset _zt_hio; else set -o history 2>/dev/null; fi\n\
      stty echo\n";
@@ -2063,6 +2067,7 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
              {{ [ -f ~/.bash_profile ] && . ~/.bash_profile; }} || {{ [ -f ~/.bash_login ] && . ~/.bash_login; }} || {{ [ -f ~/.profile ] && . ~/.profile; }} || {{ [ -f ~/.bashrc ] && . ~/.bashrc; }}\n\
              _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }}\n\
              PROMPT_COMMAND=\"_zt_cwd;${{PROMPT_COMMAND}}\"\n\
+             export COLORTERM=truecolor\n\
              rm -f {}\n",
             rc_path
         );
@@ -2088,6 +2093,7 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
             "[ -f ~/.zshrc ] && . ~/.zshrc\n\
              _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }}\n\
              precmd_functions+=(_zt_cwd)\n\
+             export COLORTERM=truecolor\n\
              if [ -n \"$HISTFILE\" ] && [ \"${{HISTFILE#{dir}/}}\" != \"$HISTFILE\" ]; then export HISTFILE=\"$HOME/.zsh_history\"; fi\n"
         );
         // The temp dir is removed by .zlogin, the LAST file zsh reads: removing
@@ -2476,6 +2482,12 @@ pub async fn ssh_connect(
     })?;
 
     let channel_id = channel.id();
+
+    // Advertise 24-bit color to the remote side. SSH set_env only lands when
+    // the server's AcceptEnv lists COLORTERM (most don't) — fire-and-forget
+    // here; the bash/zsh login wrappers below export it authoritatively, and
+    // shells without a wrapper (fish & co.) rely on this alone.
+    let _ = channel.set_env(false, "COLORTERM", "truecolor").await;
 
     // Open SFTP channels (panel + transfer, independent from terminal channel).
     // Best-effort under a per-step sub-deadline: a tarpitted SFTP subsystem
@@ -8664,6 +8676,29 @@ mod tests {
         );
         // An HISTFILE the user set elsewhere keeps its value (guard only
         // matches the temp-dir prefix); an unset HISTFILE stays unset.
+    }
+
+    #[test]
+    fn truecolor_is_advertised_on_every_remote_shell_path() {
+        // xterm.js renders 24-bit color, so every way a remote shell can
+        // start must see COLORTERM=truecolor: the bash rc wrapper, the zsh
+        // ZDOTDIR wrapper, and the typed-injection fallback. Shells with no
+        // wrapper (fish & co.) rely on the SSH set_env instead (not covered
+        // here — needs a live channel). Placed after profile sourcing so the
+        // advertisement wins over stale inherited values.
+        let (files, _) = cwd_wrapper_files("/bin/bash", "t").expect("bash wrapper");
+        let rc = String::from_utf8_lossy(&files[0].1);
+        assert!(rc.contains("export COLORTERM=truecolor"), "bash rc: {rc}");
+
+        let (files, _) = cwd_wrapper_files("/bin/zsh", "t").expect("zsh wrapper");
+        let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
+        let text = String::from_utf8_lossy(&zshrc.1);
+        assert!(text.contains("export COLORTERM=truecolor"), "zsh .zshrc: {text}");
+
+        assert!(
+            TYPED_CWD_INJECT_SCRIPT.contains("export COLORTERM=truecolor"),
+            "typed injection fallback"
+        );
     }
 
     #[test]
