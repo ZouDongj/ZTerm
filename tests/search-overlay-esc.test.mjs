@@ -141,7 +141,28 @@ test('P2-15: closeAllOverlays also drains registered layers (no modal opens unde
     assert.ok(f.doc.getElementById('overlay-confirm').classList.contains('open'), 'the new overlay opened');
 });
 
+test('P3-14: Esc targeting the search input does NOT restore the maximized pane', () => {
+    const maximizeCalls = [];
+    const tab = { id: 't_sp', splitRoot: {}, _maximizedPaneId: 'p2' };
+    const f = keyboardFixture({
+        TabManager: { tabs: [tab], getActive: () => tab, _maximizePane: (...a) => maximizeCalls.push(a) },
+    });
+    const ev = f.keydown({ key: 'Escape', target: SEARCH_INPUT_TARGET });
+    assert.equal(maximizeCalls.length, 0, 'the pane is not restored while a form field owns Esc');
+    assert.equal(ev.defaultPrevented, false, 'the keydown is left for the input handler (closeSearch)');
+    assert.equal(ev.propagationStopped, false, 'capture does not stop the descent to the input');
+});
 
+test('P3-14 (control): Esc from the terminal still restores the maximized pane', () => {
+    const maximizeCalls = [];
+    const tab = { id: 't_sp', splitRoot: {}, _maximizedPaneId: 'p2' };
+    const f = keyboardFixture({
+        TabManager: { tabs: [tab], getActive: () => tab, _maximizePane: (...a) => maximizeCalls.push(a) },
+    });
+    const ev = f.keydown({ key: 'Escape', target: TERM_TARGET });
+    assert.deepEqual(maximizeCalls, [['t_sp', 'p2']], 'restore fired with the maximized pane');
+    assert.ok(ev.defaultPrevented && ev.propagationStopped, 'the Esc is consumed');
+});
 
 test('(control) nothing open, terminal focused: Esc still passes through to xterm', () => {
     const f = keyboardFixture();
@@ -217,7 +238,40 @@ function openSearchedFoo(ctx, content) {
 
 
 
+test('P3-14: maximized pane — Esc in the search input closes the bar, keeps the pane maximized', () => {
+    const ctx = loadVm();
+    const esc = injectEscStack(ctx);
+    const { tab, p2 } = wiredSplitTab(ctx, 't_sp', 'local_1', TEXT_A, 'local_2', TEXT_B);
+    ctx.TabManager.switchTo('t_sp');
+    ctx.TabManager._maximizePane('t_sp', p2.id);
+    assert.equal(tab._maximizedPaneId, p2.id, 'staged: pane maximized');
+    ctx.openSearch();
+    ctx.__tq.advance(60); // focus lands in the search input
 
+    const ev = esc({ key: 'Escape', target: ctx.__searchInput });
+    assert.equal(ev.defaultPrevented, false, 'the capture dispatcher leaves Esc to the search input');
+    assert.equal(ev.propagationStopped, false);
+    assert.equal(tab._maximizedPaneId, p2.id, 'the pane is NOT restored');
+    // Page contract: the input's inline onkeydown="onSearchKey(event)" runs
+    // only because capture did not consume the key.
+    ctx.onSearchKey(ev);
+    assert.ok(!ctx.document.getElementById('search-bar').classList.contains('open'), 'the search bar closed');
+});
+
+test('P3-14 (control): maximized pane — Esc from the terminal restores the pane', () => {
+    const ctx = loadVm();
+    const esc = injectEscStack(ctx);
+    const { tab, p2 } = wiredSplitTab(ctx, 't_sp', 'local_1', TEXT_A, 'local_2', TEXT_B);
+    ctx.TabManager.switchTo('t_sp');
+    ctx.TabManager._maximizePane('t_sp', p2.id);
+
+    const ev = esc({
+        key: 'Escape',
+        target: { tagName: 'TEXTAREA', classList: { contains: c => c === 'xterm-helper-textarea' } },
+    });
+    assert.ok(ev.defaultPrevented && ev.propagationStopped, 'Esc consumed by the maximized branch');
+    assert.equal(tab._maximizedPaneId, null, 'the pane is restored');
+});
 
 test('P3-04: Esc closes the tab context menu through the shared layer stack', () => {
     const ctx = loadVm();

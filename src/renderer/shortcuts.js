@@ -832,6 +832,13 @@ document.addEventListener('keydown', e => {
     if (browserAcceleratorDenied(e)) e.preventDefault();
 }, true);
 
+// True when the event target is a form field that owns its keys; xterm's
+// helper textarea IS the terminal, so it does not count.
+function _isFormFieldTarget(t) {
+    return !!(t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')
+        && !(t.classList && t.classList.contains('xterm-helper-textarea')));
+}
+
 document.addEventListener('keydown', e => {
     if (_shortcutCapture) return; // recording a new shortcut; leave it to the capture listener
     // Escape: closing popups / restoring a maximized pane has top priority; otherwise pass through to xterm (vim etc. need it)
@@ -909,9 +916,12 @@ document.addEventListener('keydown', e => {
         }
         // Maximize state lives on the tab (per-tab source of truth): only the
         // ACTIVE tab's field may drive Esc — a manager-level copy could be set
-        // by a background tab and wedge Esc for every other tab
+        // by a background tab and wedge Esc for every other tab.
+        // A form field owns its Esc first (this capture listener runs before
+        // the field's own keydown): Esc in the search box closes the search
+        // bar there and must not restore the maximized pane underneath it.
         const tab = TabManager.getActive();
-        if (tab && tab.splitRoot && tab._maximizedPaneId) {
+        if (tab && tab.splitRoot && tab._maximizedPaneId && !_isFormFieldTarget(e.target)) {
             e.preventDefault(); e.stopPropagation();
             TabManager._maximizePane(tab.id, tab._maximizedPaneId);
         }
@@ -920,8 +930,7 @@ document.addEventListener('keydown', e => {
 
     // Do not trigger global shortcuts while typing in an input/select (except xterm's helper textarea)
     const t = e.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')
-        && !(t.classList && t.classList.contains('xterm-helper-textarea'))) return;
+    if (_isFormFieldTarget(t)) return;
     // An open modal layer outside .overlay (color picker, tab context menu)
     // owns the keyboard the same way an open overlay does.
     if (typeof hasModalLayer === 'function' && hasModalLayer()) return;
