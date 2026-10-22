@@ -79,9 +79,10 @@ test('clearDone removes done/cancelled/history, keeps active, and toggles its ow
     vm.TransferManager.complete(done);
     const cancelled = vm.TransferManager.add('cancelled.txt', 'upload', 'sessA');
     vm.TransferManager.cancel(cancelled);
-    vm.TransferManager.add('hist.txt', 'download', 'sessB');
-    // give the history-only entry a record too (second session group)
-    vm.TransferManager._transfers[3].done = true;
+    const hist = vm.TransferManager.add('hist.txt', 'download', 'sessB');
+    // give the history-only entry a record too (second session group);
+    // complete() moves the record to history at completion time
+    vm.TransferManager.complete(hist);
     vm.TransferManager._history.unshift({ name: 'old.txt', type: 'download', total: 5, tabId: 'sessB', sessionLabel: 'Host B', completedAt: Date.now() });
 
     vm.TransferManager.openPanel();

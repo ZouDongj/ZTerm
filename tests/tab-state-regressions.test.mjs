@@ -146,6 +146,49 @@ test('P3-13: a pty-created claim on a split pane re-aggregates and repaints the 
     assert.ok(renders >= 1, 'the strip repaints with the claim');
 });
 
+// ── P3-06: a completed transfer never appears in both lists ────────────────
+
+test('P3-06: a completed transfer moves to history at once — listed and counted exactly once', async () => {
+    const vmh = await loadSftpVm();
+    const id = vmh.TransferManager.add('a.txt', 'download', 'sessA');
+    vmh.TransferManager.openPanel();
+    // Old code: the done entry stayed in the active list for 3s while the
+    // history record already existed — the group listed it twice and the
+    // header count read +2.
+    vmh.TransferManager.complete(id);
+
+    assert.equal(vmh.TransferManager._transfers.length, 0, 'the active list releases the finished record at completion');
+    assert.equal(vmh.TransferManager._history.length, 1, 'the history record exists');
+    const groups = vmh.TransferManager._groups();
+    assert.equal(groups.length, 1, 'one session group');
+    assert.equal(groups[0].active.length + groups[0].history.length, 1, 'listed once, not in both sections');
+    const m = el(vmh.ctx, 'transfer-panel-body').innerHTML.match(/transfer-group-count">(\d+)</);
+    assert.ok(m, 'the group header rendered');
+    assert.equal(m[1], '1', 'the group count never reads +2');
+    const badge = el(vmh.ctx, 'transfer-btn').querySelector('.transfer-count');
+    assert.equal(badge.textContent, '', 'the top-bar badge counts only running transfers');
+
+    // The old 3s removal timer is gone: nothing disappears or reappears later.
+    vmh.ctx.__tq.advance(5000);
+    assert.equal(vmh.TransferManager._history.length, 1, 'the history record survives');
+    assert.equal(vmh.TransferManager._groups()[0].active.length + vmh.TransferManager._groups()[0].history.length, 1,
+        'still listed exactly once after the old removal window');
+});
+
+test('P3-06: a later completion never double-counts alongside earlier history', async () => {
+    const vmh = await loadSftpVm();
+    const first = vmh.TransferManager.add('a.txt', 'upload', 'sessA');
+    vmh.TransferManager.complete(first);
+    const second = vmh.TransferManager.add('b.txt', 'upload', 'sessA');
+    vmh.TransferManager.openPanel();
+    vmh.TransferManager.complete(second);
+
+    const groups = vmh.TransferManager._groups();
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].active.length, 0, 'no done entries linger in the active section');
+    assert.equal(groups[0].history.length, 2, 'both records live in history');
+    assert.equal(groups[0].active.length + groups[0].history.length, 2, 'the group count matches the listed rows');
+});
 
 // ── P2-04 (frontend): absent key vs explicitly saved empty list ────────────
 

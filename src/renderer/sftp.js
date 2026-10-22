@@ -1119,9 +1119,13 @@ const TransferManager = {
         // tabId + label snapshot keeps the session grouping intact after close
         this._history.unshift({ name: t.name, type: t.type, total: t.total, localPath: t.localPath, tabId: t.tabId, sessionLabel: t.sessionLabel, completedAt: Date.now() });
         if (this._history.length > 50) this._history.length = 50;
+        // The history record is the single representation from here on:
+        // keeping the entry in the active list as well listed and counted it
+        // twice until the removal timer fired (P3-06).
+        this._transfers = this._transfers.filter(x => x.id !== id);
         this._render();
+        this._syncButtonVisibility();
         showToast((t.type === 'download' ? '下载完成: ' : '上传完成: ') + t.name);
-        setTimeout(() => this.remove(id), 3000);
     },
 
     cancel(id) {
