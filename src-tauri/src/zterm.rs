@@ -2907,10 +2907,14 @@ pub async fn ssh_disconnect(
             // labels this as a user-initiated close instead of reporting
             // russh's information-free Error::Disconnect.
             *session.disconnect_reason.lock() = Some("closed by user".to_string());
-            session.handle.clone()
+            (session.handle.clone(), session.transfer_cancels.clone())
         })
     };
-    if let Some(h) = close_handle {
+    if let Some((h, cancels)) = close_handle {
+        // Cancel in-flight SFTP transfers first so their tasks drop temp
+        // files and release the handle before the channel goes away; the
+        // helper waits briefly for the registry to drain.
+        cancel_sftp_transfers(&cancels).await;
         // Disconnect explicitly so the remote session ends at once (Drop refcounting alone is not enough)
         let _ = h
             .disconnect(russh::Disconnect::ByApplication, "ZTerm closed", "")
@@ -3143,23 +3147,18 @@ pub async fn pty_destroy(
                     None
                 }
                 SessionType::Ssh(s) => {
-                    // Cancel all in-progress SFTP transfers on tab close (otherwise
-                    // the transfer tasks keep writing temp files the renderer can no longer cancel)
-                    {
-                        let cancels = s.transfer_cancels.lock();
-                        for c in cancels.values() {
-                            c.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
                     // Same pre-fill as ssh_disconnect: user-initiated close.
                     *s.disconnect_reason.lock() = Some("closed by user".to_string());
-                    Some(s.handle.clone())
+                    Some((s.handle.clone(), s.transfer_cancels.clone()))
                 }
             },
             None => None,
         }
     };
-    if let Some(h) = close_handle {
+    if let Some((h, cancels)) = close_handle {
+        // Cancel in-flight SFTP transfers first so their tasks drop temp
+        // files before the session is disconnected underneath them.
+        cancel_sftp_transfers(&cancels).await;
         // Disconnect explicitly so the remote session ends at once (Drop refcounting alone is not enough)
         let _ = h
             .disconnect(russh::Disconnect::ByApplication, "ZTerm closed", "")
@@ -5196,6 +5195,42 @@ pub async fn sftp_mkdir(state: State<'_, SessionMap>, args: Vec<Value>) -> Resul
     }
 }
 
+/// Grace window for cancelled SFTP transfers to remove their remote
+/// `.zterm-tmp-<id>` temp files before the session is disconnected underneath
+/// them (P3-07): a remove racing the disconnect would fail and leave the temp
+/// behind. Bounded so tab close stays prompt when a transfer is wedged in an
+/// uninterruptible syscall.
+const SFTP_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Cancel every in-flight SFTP transfer of a closing session and wait
+/// (bounded by `grace`) for the transfer tasks to run their temp-file
+/// cleanup: each task removes its cancel-registry entry only AFTER the
+/// cleanup ran, so an empty registry means every removal had its chance.
+async fn cancel_sftp_transfers_within(
+    cancels: &Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    grace: std::time::Duration,
+) {
+    {
+        let map = cancels.lock();
+        for c in map.values() {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if map.is_empty() {
+            return;
+        }
+    }
+    let deadline = std::time::Instant::now() + grace;
+    while !cancels.lock().is_empty() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+async fn cancel_sftp_transfers(
+    cancels: &Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+) {
+    cancel_sftp_transfers_within(cancels, SFTP_CANCEL_GRACE).await;
+}
+
 #[tauri::command]
 pub async fn sftp_download(
     app: AppHandle,
@@ -5271,19 +5306,25 @@ pub async fn sftp_download(
                 if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                     return Err("Transfer cancelled".to_string());
                 }
+                // Race each blocking step against the cancel flag (P3-07): a
+                // 256 KB chunk over a stalled link — or a server that stops
+                // answering mid-request — otherwise postpones cancel/close
+                // until the syscall returns. Dropping the in-flight SFTP
+                // request is safe: russh-sftp multiplexes by request id and
+                // discards the unclaimed reply.
                 use tokio::io::AsyncReadExt;
-                let n = file
-                    .read(&mut buf)
-                    .await
-                    .map_err(|e| format!("read: {e}"))?;
+                let n = tokio::select! {
+                    _ = wait_cancelled(&cancelled) => return Err("Transfer cancelled".to_string()),
+                    r = file.read(&mut buf) => r.map_err(|e| format!("read: {e}"))?,
+                };
                 if n == 0 {
                     break;
                 }
                 use tokio::io::AsyncWriteExt;
-                local
-                    .write_all(&buf[..n])
-                    .await
-                    .map_err(|e| format!("write: {e}"))?;
+                tokio::select! {
+                    _ = wait_cancelled(&cancelled) => return Err("Transfer cancelled".to_string()),
+                    r = local.write_all(&buf[..n]) => r.map_err(|e| format!("write: {e}"))?,
+                }
                 transferred += n as u64;
                 let _ = app2.emit(
                     "sftp-progress",
@@ -5461,17 +5502,22 @@ pub async fn sftp_upload(
                 if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
                     return Err("Transfer cancelled".to_string());
                 }
+                // Cancel-checked IO (P3-07): a stalled link or a wedged server
+                // no longer postpones cancel/close until a 256 KB syscall
+                // returns. Dropping an in-flight SFTP request is safe — the
+                // session multiplexes by request id and discards the reply.
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                let n = local
-                    .read(&mut buf)
-                    .await
-                    .map_err(|e| format!("read: {e}"))?;
+                let n = tokio::select! {
+                    _ = wait_cancelled(&cancelled) => return Err("Transfer cancelled".to_string()),
+                    r = local.read(&mut buf) => r.map_err(|e| format!("read: {e}"))?,
+                };
                 if n == 0 {
                     break;
                 }
-                file.write_all(&buf[..n])
-                    .await
-                    .map_err(|e| format!("write: {e}"))?;
+                tokio::select! {
+                    _ = wait_cancelled(&cancelled) => return Err("Transfer cancelled".to_string()),
+                    r = file.write_all(&buf[..n]) => r.map_err(|e| format!("write: {e}"))?,
+                }
                 transferred += n as u64;
                 let _ = app2.emit(
                     "sftp-progress",
@@ -9327,5 +9373,50 @@ mod tests {
             elapsed < std::time::Duration::from_secs(5),
             "deadline never re-armed after the pause: {elapsed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_sftp_transfers_within_sets_flags_and_drains_registry() {
+        let cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cancels.lock().insert("t1".to_string(), flag.clone());
+        // Mirror the real transfer task: on cancel it runs cleanup and only
+        // then removes its registry entry.
+        let c2 = cancels.clone();
+        let f2 = flag.clone();
+        tokio::spawn(async move {
+            while !f2.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            c2.lock().remove("t1");
+        });
+        cancel_sftp_transfers_within(&cancels, std::time::Duration::from_millis(500)).await;
+        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            cancels.lock().is_empty(),
+            "registry must drain within the grace"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_sftp_transfers_within_bails_after_grace_when_wedged() {
+        let cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cancels.lock().insert("stuck".to_string(), flag.clone());
+        // Nothing ever removes the entry: the wait must bail at the grace, not hang.
+        let start = std::time::Instant::now();
+        cancel_sftp_transfers_within(&cancels, std::time::Duration::from_millis(200)).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "wedged transfer blocked the close path: {elapsed:?}"
+        );
+        assert!(
+            flag.load(std::sync::atomic::Ordering::Relaxed),
+            "the flag is set even when the entry never drains"
+        );
+        assert!(!cancels.lock().is_empty());
     }
 }
