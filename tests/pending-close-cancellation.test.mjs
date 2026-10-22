@@ -1061,6 +1061,9 @@ test('T6 timer expiry then legitimate late success still claims', async () => {
     // Read the real constant out of the VM: the fallback must outlast the
     // backend establishment budget (SSH_CONNECT_TIMEOUT + SSH_ESTABLISH_TIMEOUT).
     const slotFallbackMs = vm.runInContext('SSH_CONNECT_SLOT_FALLBACK_MS', ctx);
+    // Pin the derivation, not just the value: the fallback firing inside the
+    // 30s+30s establishment budget would release the slot mid-handshake.
+    assert.ok(slotFallbackMs > 60000, `slot fallback (${slotFallbackMs}ms) must outlast the 60s establishment budget`);
     ctx.__tq.advance(slotFallbackMs); // the slot fallback fires for A's slot only
     await flushAsync();
     assert.ok(invOf(ctx, tabB._pendingAttempt), 'fallback released the slot; B proceeds');
