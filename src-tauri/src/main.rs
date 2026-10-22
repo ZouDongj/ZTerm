@@ -162,21 +162,31 @@ async fn main() {
             let quit_flag = Arc::clone(&quit_requested);
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    if let (Ok(pos), Ok(size)) =
-                        (win_for_state.outer_position(), win_for_state.outer_size())
-                    {
+                    let maximized = win_for_state.is_maximized().unwrap_or(false);
+                    // A maximized window's outer rect is the monitor-filling
+                    // one; persisting it would lose the normal rect, so a
+                    // maximize→close→restart cycle could never unmaximize back
+                    // to the previous size. Persist the pre-maximize rect
+                    // alongside the maximized flag; the restore side sets the
+                    // rect first and then maximizes on top of it.
+                    let rect = if maximized {
+                        normal_window_rect(&win_for_state).or_else(|| outer_rect(&win_for_state))
+                    } else {
+                        outer_rect(&win_for_state)
+                    };
+                    if let Some((x, y, width, height)) = rect {
                         // Closing while minimized must keep the last valid state (see minimized_at_close)
                         if !minimized_at_close(
                             win_for_state.is_minimized().unwrap_or(false),
-                            pos.x,
-                            pos.y,
+                            x,
+                            y,
                         ) {
                             zterm::save_window_state(&zterm::WindowState {
-                                x: pos.x,
-                                y: pos.y,
-                                width: size.width,
-                                height: size.height,
-                                maximized: win_for_state.is_maximized().unwrap_or(false),
+                                x,
+                                y,
+                                width,
+                                height,
+                                maximized,
                             });
                         }
                     }
@@ -258,9 +268,62 @@ fn minimized_at_close(is_minimized: bool, x: i32, y: i32) -> bool {
     is_minimized || (x <= -32000 && y <= -32000)
 }
 
+/// The window's current outer rect as (x, y, width, height); None when either
+/// query fails (same tolerance as the previous inline check).
+fn outer_rect(window: &tauri::WebviewWindow) -> Option<(i32, i32, u32, u32)> {
+    match (window.outer_position(), window.outer_size()) {
+        (Ok(pos), Ok(size)) => Some((pos.x, pos.y, size.width, size.height)),
+        _ => None,
+    }
+}
+
+/// Convert WINDOWPLACEMENT's rcNormalPosition (left/top/right/bottom) into
+/// the (x, y, width, height) shape save_window_state persists. Extents are
+/// clamped to at least 1 so a degenerate rect can never persist a zero-sized
+/// window. Pure function for unit tests.
+fn normal_rect_from_placement(left: i32, top: i32, right: i32, bottom: i32) -> (i32, i32, u32, u32) {
+    (
+        left,
+        top,
+        (right - left).max(1) as u32,
+        (bottom - top).max(1) as u32,
+    )
+}
+
+/// The window's normal (restored) rect even while maximized: Windows keeps it
+/// in WINDOWPLACEMENT.rcNormalPosition, while outer_position/outer_size only
+/// report the current monitor-filling rect. None when the query fails.
+#[cfg(windows)]
+fn normal_window_rect(window: &tauri::WebviewWindow) -> Option<(i32, i32, u32, u32)> {
+    use winapi::um::winuser::{GetWindowPlacement, WINDOWPLACEMENT};
+    let hwnd = window.hwnd().ok()?;
+    let mut placement: WINDOWPLACEMENT = unsafe { std::mem::zeroed() };
+    placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+    let ok = unsafe {
+        GetWindowPlacement(
+            hwnd.0 as winapi::shared::windef::HWND,
+            &mut placement,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let rc = placement.rcNormalPosition;
+    Some(normal_rect_from_placement(
+        rc.left, rc.top, rc.right, rc.bottom,
+    ))
+}
+
+/// Non-Windows builds have no normal-rect side channel; the caller falls back
+/// to the current outer rect.
+#[cfg(not(windows))]
+fn normal_window_rect(_window: &tauri::WebviewWindow) -> Option<(i32, i32, u32, u32)> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::minimized_at_close;
+    use super::{minimized_at_close, normal_rect_from_placement};
 
     #[test]
     fn normal_placement_is_saved() {
@@ -281,5 +344,22 @@ mod tests {
         // Windows parks minimized windows at (-32000, -32000).
         assert!(minimized_at_close(false, -32000, -32000));
         assert!(minimized_at_close(false, -40000, -32001));
+    }
+
+    #[test]
+    fn normal_rect_converts_left_top_right_bottom() {
+        assert_eq!(normal_rect_from_placement(100, 50, 1100, 770), (100, 50, 1000, 720));
+        // Negative-axis positions (secondary monitors) survive unchanged.
+        assert_eq!(
+            normal_rect_from_placement(-1919, -1079, -1, -1),
+            (-1919, -1079, 1918, 1078)
+        );
+    }
+
+    #[test]
+    fn normal_rect_clamps_degenerate_extents() {
+        // A zero/inverted rect must never persist a zero-sized window.
+        assert_eq!(normal_rect_from_placement(10, 10, 10, 10), (10, 10, 1, 1));
+        assert_eq!(normal_rect_from_placement(10, 10, 5, 5), (10, 10, 1, 1));
     }
 }
