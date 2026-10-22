@@ -873,6 +873,13 @@ document.addEventListener('keydown', e => {
             e.preventDefault(); e.stopPropagation();
             return;
         }
+        // Non-.overlay modal layers (color picker, tab context menu) stack
+        // above real overlays (a picker opens over the highlight edit layer),
+        // so Esc peels the topmost layer before the overlay branch below.
+        if (typeof popModalLayer === 'function' && popModalLayer()) {
+            e.preventDefault(); e.stopPropagation();
+            return;
+        }
         if (document.querySelector('.overlay.open')) {
             closeAllOverlays();
             // Split-aware refocus: a split tab has tab.term === null, so the
@@ -915,6 +922,9 @@ document.addEventListener('keydown', e => {
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')
         && !(t.classList && t.classList.contains('xterm-helper-textarea'))) return;
+    // An open modal layer outside .overlay (color picker, tab context menu)
+    // owns the keyboard the same way an open overlay does.
+    if (typeof hasModalLayer === 'function' && hasModalLayer()) return;
 
     const combo = _comboFromEvent(e);
     const bindings = _getShortcutBindings();

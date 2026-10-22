@@ -31,6 +31,9 @@ function closeAllOverlays() {
     // stale listeners are unbound lazily when the next dialog opens.
     if (typeof _activeHostkeyCleanup === 'function' && _activeHostkeyCleanup) _activeHostkeyCleanup();
     document.querySelectorAll('.overlay.open').forEach(o => o.classList.remove('open'));
+    // Non-.overlay layers (color picker, tab context menu) belong to the same
+    // teardown: a new modal must never open underneath a lingering layer.
+    while (popModalLayer()) {}
 }
 
 function closeOverlay(id) {
@@ -49,6 +52,35 @@ function openOverlay(id) {
     if (typeof LinkOpen !== 'undefined' && LinkOpen.hideLinkTip) LinkOpen.hideLinkTip();
     const el = document.getElementById(id);
     if (el) el.classList.add('open');
+}
+
+// ── Modal layer stack ──
+// Layers that are not .overlay elements (the color picker, the tab context
+// menu) register here so the global key handling treats them like overlays:
+// Escape peels the topmost layer first (a picker stacked over the highlight
+// edit overlay closes without touching the overlay underneath) and global
+// shortcuts stay blocked while any layer is open. The opener pushes; every
+// close route of the layer (backdrop click, item click, Esc) removes.
+const _modalLayers = [];
+function pushModalLayer(id, close) {
+    removeModalLayer(id);
+    _modalLayers.push({ id, close });
+}
+function removeModalLayer(id) {
+    const i = _modalLayers.findIndex(l => l.id === id);
+    if (i !== -1) _modalLayers.splice(i, 1);
+}
+// Closes the topmost registered layer; returns false when none is open so the
+// Esc chain falls through to the next owner (.overlay, flyout, maximized pane).
+function popModalLayer() {
+    const top = _modalLayers[_modalLayers.length - 1];
+    if (!top) return false;
+    _modalLayers.pop();
+    top.close();
+    return true;
+}
+function hasModalLayer() {
+    return _modalLayers.length > 0;
 }
 
 function formatSize(bytes) {

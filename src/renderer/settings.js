@@ -503,10 +503,15 @@ function openColorPicker(initialHex, callback) {
     updateColorPickerUI();
     overlay.classList.add('open');
     initColorPickerEvents();
+    // The picker is not an .overlay (it stacks ABOVE one — e.g. opened from
+    // the highlight edit dialog), so it joins the modal layer stack: Esc peels
+    // it and global shortcuts stay blocked while it is open.
+    if (typeof pushModalLayer === 'function') pushModalLayer('color-picker-overlay', closeColorPicker);
 }
 
 function closeColorPicker() {
     document.getElementById('color-picker-overlay').classList.remove('open');
+    if (typeof removeModalLayer === 'function') removeModalLayer('color-picker-overlay');
     _cpCallback = null;
 }
 
