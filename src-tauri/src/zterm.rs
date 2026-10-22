@@ -446,6 +446,10 @@ pub struct SshHandler {
     pub app: AppHandle,
     pub decisions: Arc<Mutex<HashMap<String, oneshot::Sender<HostKeyDecision>>>>,
     pub disconnect_reason: Arc<Mutex<Option<String>>>,
+    /// Set while a host-key-mismatch dialog is awaiting the user's decision:
+    /// pauses ssh_connect's establishment deadline so user thinking time never
+    /// counts as a stuck server (P3-08).
+    pub user_waiting: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Classify a session-level disconnect into a UI kind + human-readable text.
@@ -504,6 +508,74 @@ pub fn ssh_client_config() -> russh::client::Config {
     }
 }
 
+/// Establishment budget for the TCP connect + SSH handshake (P3-08). A
+/// tarpitted peer would otherwise park the connection task until the OS TCP
+/// timeout, and a closed tab could not abort it. While a host-key-mismatch
+/// dialog waits on the user the deadline PAUSES — thinking time is not a
+/// stuck server (see SshHandler::user_waiting).
+const SSH_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Shared deadline for everything after the handshake: auth, the session
+/// channel, the PTY request, the SFTP channels and the shell start (P3-08).
+const SSH_ESTABLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Per-step cap for the best-effort SFTP opens and the followCwd SFTP prep
+/// inside the establishment budget: one stalled SFTP subsystem degrades to
+/// "no SFTP" (or the typed-injection fallback) instead of eating the budget
+/// the shell start still needs — and instead of failing a working terminal
+/// session. The panel lazily rebuilds its channel on demand (issue #29).
+const SSH_SFTP_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Cancel-flag poll interval at establishment/transfer await points: a tab
+/// close lands within this interval instead of whenever the stuck peer's next
+/// reply happens to arrive. (AtomicBool has no async notify, hence polling.)
+const CANCEL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Wait until the cancel flag is set.
+async fn wait_cancelled(flag: &std::sync::atomic::AtomicBool) {
+    while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+        tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
+    }
+}
+
+/// A deadline that pauses while `pause` is set: fires after `timeout` of
+/// un-paused time (each pause re-arms the full timeout once it ends).
+async fn pausable_deadline(timeout: std::time::Duration, pause: &std::sync::atomic::AtomicBool) {
+    loop {
+        tokio::time::sleep(timeout).await;
+        if !pause.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        while pause.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(CANCEL_POLL_INTERVAL).await;
+        }
+    }
+}
+
+/// Outcome of an establishment step raced against cancel + deadline (P3-08).
+enum EstablishOutcome<T> {
+    Done(T),
+    Cancelled,
+    TimedOut,
+}
+
+/// Run one establishment await, racing it against the attempt's cancel flag
+/// (tab close / reconnect aborts promptly — dropping the in-flight request is
+/// safe: russh's session loop discards the unclaimed reply) and a deadline
+/// future (tarpit guard).
+async fn establish_cancellable<F, D>(
+    fut: F,
+    cancel: &std::sync::atomic::AtomicBool,
+    deadline: D,
+) -> EstablishOutcome<F::Output>
+where
+    F: std::future::Future,
+    D: std::future::Future<Output = ()>,
+{
+    tokio::select! {
+        out = fut => EstablishOutcome::Done(out),
+        _ = wait_cancelled(cancel) => EstablishOutcome::Cancelled,
+        _ = deadline => EstablishOutcome::TimedOut,
+    }
+}
+
 impl russh::client::Handler for SshHandler {
     type Error = russh::Error;
 
@@ -541,7 +613,14 @@ impl russh::client::Handler for SshHandler {
                         "newFingerprint": fingerprint,
                     }),
                 );
-                match rx.await {
+                // The dialog's wait is user time, not a stuck server: pause the
+                // connect deadline while it is outstanding (P3-08).
+                self.user_waiting
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                let decision = rx.await;
+                self.user_waiting
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                match decision {
                     Ok(decision) => {
                         if decision.accept && decision.trust {
                             known_hosts_trust(&self.host, self.port, &algorithm, &fingerprint);
@@ -2208,22 +2287,34 @@ pub async fn ssh_connect(
     // it loses the race, ssh_disconnect/tab-close pre-fill it for
     // user-initiated closes.
     let disconnect_reason = Arc::new(Mutex::new(None::<String>));
+    // The handler sets this while a host-key-mismatch dialog awaits the user:
+    // the connect deadline pauses for it (thinking time is not a tarpit).
+    let user_waiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    let mut handle = russh::client::connect(
-        config,
-        &addr,
-        SshHandler {
-            host: host.clone(),
-            port,
-            tab_id: tab_id.clone(),
-            attempt: attempt_id.clone(),
-            app: app.clone(),
-            decisions: decision_state.inner().clone(),
-            disconnect_reason: Arc::clone(&disconnect_reason),
-        },
+    // The handshake races the cancel flag and a pausable deadline (P3-08): a
+    // tarpitted peer or a tab close no longer parks the task forever.
+    // Dropping the in-flight connect future closes the socket with it.
+    let mut handle = match establish_cancellable(
+        russh::client::connect(
+            config,
+            &addr,
+            SshHandler {
+                host: host.clone(),
+                port,
+                tab_id: tab_id.clone(),
+                attempt: attempt_id.clone(),
+                app: app.clone(),
+                decisions: decision_state.inner().clone(),
+                disconnect_reason: Arc::clone(&disconnect_reason),
+                user_waiting: Arc::clone(&user_waiting),
+            },
+        ),
+        &cancel_flag,
+        pausable_deadline(SSH_CONNECT_TIMEOUT, &user_waiting),
     )
-        .await
-        .map_err(|e| {
+    .await
+    {
+        EstablishOutcome::Done(res) => res.map_err(|e| {
             if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 return "cancelled".to_string();
             }
@@ -2236,8 +2327,67 @@ pub async fn ssh_connect(
                 json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH connect (tcp/handshake {addr}): {e}") }),
             );
             format!("SSH connect (tcp/handshake {addr}): {e}")
-        })?;
+        })?,
+        EstablishOutcome::Cancelled => {
+            return Ok(json!({ "cancelled": true, "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }));
+        }
+        EstablishOutcome::TimedOut => {
+            let msg = format!(
+                "SSH connect (tcp/handshake {addr}): timed out after {}s (no response)",
+                SSH_CONNECT_TIMEOUT.as_secs()
+            );
+            let _ = app.emit(
+                "ssh-error",
+                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": msg }),
+            );
+            return Err(msg);
+        }
+    };
     cancelled!(handle);
+
+    // Everything after the handshake shares one establishment budget (P3-08):
+    // auth, the session channel, the PTY request, the SFTP channels and the
+    // shell start. Both terminal paths disconnect the handle so the session
+    // loop and socket die with this task instead of lingering on a stuck peer.
+    let establish_deadline = tokio::time::Instant::now() + SSH_ESTABLISH_TIMEOUT;
+    macro_rules! established {
+        ($step:expr, $stage:expr) => {
+            match establish_cancellable(
+                $step,
+                &cancel_flag,
+                tokio::time::sleep_until(establish_deadline),
+            )
+            .await
+            {
+                EstablishOutcome::Done(v) => v,
+                EstablishOutcome::Cancelled => {
+                    let _ = handle
+                        .disconnect(russh::Disconnect::ByApplication, "ZTerm cancelled", "")
+                        .await;
+                    return Ok(json!({ "cancelled": true, "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }));
+                }
+                EstablishOutcome::TimedOut => {
+                    let msg = format!(
+                        "SSH {}: timed out (establishment budget of {}s exhausted)",
+                        $stage,
+                        SSH_ESTABLISH_TIMEOUT.as_secs()
+                    );
+                    let _ = handle
+                        .disconnect(
+                            russh::Disconnect::ByApplication,
+                            "ZTerm establishment timeout",
+                            "",
+                        )
+                        .await;
+                    let _ = app.emit(
+                        "ssh-error",
+                        json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": msg }),
+                    );
+                    return Err(msg);
+                }
+            }
+        };
+    }
 
     // Authenticate (needs &mut self) — password or public key
     let auth_result = if let Some(ref key_path) = key_path {
@@ -2257,33 +2407,31 @@ pub async fn ssh_connect(
             format!("SSH key parse: {e}")
         })?;
         let kp = russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), None);
-        handle
-            .authenticate_publickey(&username, kp)
-            .await
-            .map_err(|e| {
-                if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    return "cancelled".to_string();
-                }
-                let _ = app.emit(
-                    "ssh-error",
-                    json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH auth: {e}") }),
-                );
-                format!("SSH auth: {e}")
-            })?
+        established!(handle.authenticate_publickey(&username, kp), "auth").map_err(|e| {
+            if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                return "cancelled".to_string();
+            }
+            let _ = app.emit(
+                "ssh-error",
+                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH auth: {e}") }),
+            );
+            format!("SSH auth: {e}")
+        })?
     } else {
-        handle
-            .authenticate_password(&username, &password.unwrap_or_default())
-            .await
-            .map_err(|e| {
-                if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    return "cancelled".to_string();
-                }
-                let _ = app.emit(
-                    "ssh-error",
-                    json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH auth: {e}") }),
-                );
-                format!("SSH auth: {e}")
-            })?
+        established!(
+            handle.authenticate_password(&username, &password.unwrap_or_default()),
+            "auth"
+        )
+        .map_err(|e| {
+            if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                return "cancelled".to_string();
+            }
+            let _ = app.emit(
+                "ssh-error",
+                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH auth: {e}") }),
+            );
+            format!("SSH auth: {e}")
+        })?
     };
     cancelled!(handle);
 
@@ -2299,63 +2447,117 @@ pub async fn ssh_connect(
     }
 
     // Open session channel
-    let mut channel = handle
-        .channel_open_session()
-        .await
-        .map_err(|e| {
-            if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                return "cancelled".to_string();
-            }
-            let _ = app.emit(
-                "ssh-error",
-                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH channel: {e}") }),
-            );
-            format!("SSH channel: {e}")
-        })?;
+    let mut channel = established!(handle.channel_open_session(), "channel").map_err(|e| {
+        if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return "cancelled".to_string();
+        }
+        let _ = app.emit(
+            "ssh-error",
+            json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH channel: {e}") }),
+        );
+        format!("SSH channel: {e}")
+    })?;
     cancelled!(handle);
 
     // Request PTY at the size the renderer reported while the handshake was in
     // flight (cached on this attempt by pty_resize); default 80x24 when none arrived.
     let (pty_cols, pty_rows) =
         pending_size_for(&pending_state.lock(), &attempt_id).unwrap_or((80, 24));
-    channel
-        .request_pty(false, "xterm-256color", pty_cols as u32, pty_rows as u32, 0, 0, &[])
-        .await
-        .map_err(|e| {
-            let _ = app.emit(
-                "ssh-error",
-                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH PTY: {e}") }),
-            );
-            format!("SSH PTY: {e}")
-        })?;
+    established!(
+        channel.request_pty(false, "xterm-256color", pty_cols as u32, pty_rows as u32, 0, 0, &[]),
+        "PTY"
+    )
+    .map_err(|e| {
+        let _ = app.emit(
+            "ssh-error",
+            json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH PTY: {e}") }),
+        );
+        format!("SSH PTY: {e}")
+    })?;
 
     let channel_id = channel.id();
 
-    // Open SFTP channels (panel + transfer, independent from terminal channel)
-    let sftp = open_sftp_channel(&handle).await;
-    let sftp_transfer = open_sftp_channel(&handle).await;
+    // Open SFTP channels (panel + transfer, independent from terminal channel).
+    // Best-effort under a per-step sub-deadline: a tarpitted SFTP subsystem
+    // degrades to None (the panel lazily rebuilds its channel on demand,
+    // issue #29) instead of failing a working terminal session, and cannot
+    // eat the establishment budget the shell start still needs. Cancellation
+    // stays terminal.
+    macro_rules! established_sftp {
+        ($step:expr, $stage:expr) => {{
+            let sub_deadline = std::cmp::min(
+                establish_deadline,
+                tokio::time::Instant::now() + SSH_SFTP_STEP_TIMEOUT,
+            );
+            match establish_cancellable($step, &cancel_flag, tokio::time::sleep_until(sub_deadline))
+                .await
+            {
+                EstablishOutcome::Done(v) => v,
+                EstablishOutcome::Cancelled => {
+                    let _ = handle
+                        .disconnect(russh::Disconnect::ByApplication, "ZTerm cancelled", "")
+                        .await;
+                    return Ok(json!({ "cancelled": true, "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }));
+                }
+                EstablishOutcome::TimedOut => {
+                    eprintln!("[zterm] SSH {}: SFTP step timed out; continuing without it", $stage);
+                    None
+                }
+            }
+        }};
+    }
+    let sftp = established_sftp!(open_sftp_channel(&handle), "SFTP panel");
+    let sftp_transfer = established_sftp!(open_sftp_channel(&handle), "SFTP transfer");
 
     // FollowCwd: prefer RC wrapper (zero-typing injection via SFTP rc file)
     let mut exec_cmd = None;
     if follow_cwd {
         if let Some(ref s) = sftp {
-            // Clean up residual injection artifacts from previous sessions.
-            // Best effort: a cleanup failure must not break the connection,
-            // but it is reported (log + event) so the state is diagnosable.
-            if let Err(e) = clean_history_artifacts(s, &username).await {
-                eprintln!("[zterm] followCwd history cleanup failed: {e}");
-                let _ = app.emit(
-                    "ssh-history-clean-failed",
-                    json!({ "tabId": tab_id, "rendererId": renderer_id, "error": e }),
-                );
+            let prep = establish_cancellable(
+                async {
+                    // Clean up residual injection artifacts from previous sessions.
+                    // Best effort: a cleanup failure must not break the connection,
+                    // but it is reported (log + event) so the state is diagnosable.
+                    if let Err(e) = clean_history_artifacts(s, &username).await {
+                        eprintln!("[zterm] followCwd history cleanup failed: {e}");
+                        let _ = app.emit(
+                            "ssh-history-clean-failed",
+                            json!({ "tabId": tab_id, "rendererId": renderer_id, "error": e }),
+                        );
+                    }
+                    prepare_cwd_wrapper(s, &username).await
+                },
+                &cancel_flag,
+                // Sub-deadline, not the whole budget: a tarpitted prep must
+                // leave room for the typed-injection fallback AND the shell
+                // start — an already-exhausted budget would make the shell
+                // step time out instantly and kill the connection anyway.
+                tokio::time::sleep_until(std::cmp::min(
+                    establish_deadline,
+                    tokio::time::Instant::now() + SSH_SFTP_STEP_TIMEOUT,
+                )),
+            )
+            .await;
+            match prep {
+                EstablishOutcome::Done(exec) => exec_cmd = exec,
+                // SFTP prep is best-effort: a tarpitted SFTP channel falls back
+                // to the typed injection instead of failing the connection.
+                EstablishOutcome::TimedOut => {
+                    eprintln!("[zterm] followCwd SFTP prep timed out; falling back to typed injection");
+                }
+                EstablishOutcome::Cancelled => {
+                    let _ = handle
+                        .disconnect(russh::Disconnect::ByApplication, "ZTerm cancelled", "")
+                        .await;
+                    return Ok(json!({ "cancelled": true, "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }));
+                }
             }
-            exec_cmd = prepare_cwd_wrapper(s, &username).await;
         }
     }
 
     // Start shell: exec wrapped shell (followCwd) or plain shell
     if let Some(ref cmd) = exec_cmd {
-        channel.exec(true, cmd.as_str()).await.map_err(|e| {
+        established!(channel.exec(true, cmd.as_str()), "shell").map_err(|e| {
             if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 return "cancelled".to_string();
             }
@@ -2366,7 +2568,7 @@ pub async fn ssh_connect(
             format!("SSH shell: {e}")
         })?;
     } else {
-        channel.request_shell(true).await.map_err(|e| {
+        established!(channel.request_shell(true), "shell").map_err(|e| {
             if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 return "cancelled".to_string();
             }
@@ -9063,6 +9265,67 @@ mod tests {
         assert!(
             !text.contains("HISTORY_IS_off"),
             "history was left off after the probe"
+        );
+    }
+
+    #[tokio::test]
+    async fn establish_cancellable_reports_done_cancelled_and_timed_out() {
+        use std::sync::atomic::AtomicBool;
+        // Ready future, unset flag: Done carries the value.
+        let cancel = AtomicBool::new(false);
+        let out = establish_cancellable(
+            std::future::ready(42u8),
+            &cancel,
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert!(matches!(out, EstablishOutcome::Done(42)));
+        // Pre-set flag with a never-ready step: Cancelled wins immediately.
+        let cancel = AtomicBool::new(true);
+        let out = establish_cancellable(
+            std::future::pending::<u8>(),
+            &cancel,
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert!(matches!(out, EstablishOutcome::Cancelled));
+        // Stuck step, unset flag: the deadline wins.
+        let cancel = AtomicBool::new(false);
+        let out = establish_cancellable(
+            std::future::pending::<u8>(),
+            &cancel,
+            tokio::time::sleep(std::time::Duration::from_millis(50)),
+        )
+        .await;
+        assert!(matches!(out, EstablishOutcome::TimedOut));
+    }
+
+    #[tokio::test]
+    async fn pausable_deadline_pauses_while_set() {
+        let pause = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Never paused: fires at the timeout.
+        let start = std::time::Instant::now();
+        pausable_deadline(std::time::Duration::from_millis(50), &pause).await;
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        // Paused past the timeout: must not fire while paused; the unpause at
+        // 300ms re-arms the full timeout (firing takes ~one more timeout plus
+        // a poll interval).
+        pause.store(true, std::sync::atomic::Ordering::Relaxed);
+        let p2 = pause.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            p2.store(false, std::sync::atomic::Ordering::Relaxed);
+        });
+        let start = std::time::Instant::now();
+        pausable_deadline(std::time::Duration::from_millis(80), &pause).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(300),
+            "deadline fired while paused: {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "deadline never re-armed after the pause: {elapsed:?}"
         );
     }
 }

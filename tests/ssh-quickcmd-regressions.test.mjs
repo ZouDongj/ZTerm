@@ -307,3 +307,26 @@ test('P3-01: a failed group rename keeps memory and toasts the failure', async (
 });
 
 
+// ── P3-08 (review follow-up): the new establishment-timeout wording must
+// stay inside ipc.js's transient-failure classifier, or tarpit/slow-network
+// connects lose the auto-retry OS-level timeouts (os error 10060) already get
+
+test('P3-08: the establishment-budget timeout auto-retries as transient', () => {
+    const ctx = loadVm();
+    const tab = wiredTab(ctx, 't_to', 'ssh_7', undefined, { type: 'ssh', connected: true, host: 'h', user: 'u' });
+    ctx.__emit('ssh-error', {
+        tabId: 'ssh_7', rendererId: tab.id,
+        error: 'SSH auth: timed out (establishment budget of 30s exhausted)',
+    });
+    assert.equal(tab._sshRetried, 1, 'timed-out establishment classified as transient');
+});
+
+test('P3-08: the connect-phase timeout wording also auto-retries', () => {
+    const ctx = loadVm();
+    const tab = wiredTab(ctx, 't_to2', 'ssh_8', undefined, { type: 'ssh', connected: true, host: 'h', user: 'u' });
+    ctx.__emit('ssh-error', {
+        tabId: 'ssh_8', rendererId: tab.id,
+        error: 'SSH connect (tcp/handshake 1.2.3.4:22): timed out after 30s (no response)',
+    });
+    assert.equal(tab._sshRetried, 1);
+});
