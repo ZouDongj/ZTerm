@@ -282,12 +282,15 @@ function applyTerminalScheme() {
         if (t.term) {
             // xterm caret must stay visible: the WebGL smooth-cursor adapter
             // animates the real caret (overlay-era transparent hack removed).
-            t.term.options.theme = { ...theme, cursor: theme.cursor || '#ffffff' };
+            // Same caret fallback chain as terminal.js _buildTerminalOptions
+            // (cursor || foreground || '#ffffff') so a scheme without a
+            // derived caret color stays contrast-safe here too (P3-15).
+            t.term.options.theme = { ...theme, cursor: theme.cursor || theme.foreground || '#ffffff' };
         }
         if (t.splitRoot) {
             getAllPanes(t).forEach(p => {
                 if (p.term) {
-                    p.term.options.theme = { ...theme, cursor: theme.cursor || '#ffffff' };
+                    p.term.options.theme = { ...theme, cursor: theme.cursor || theme.foreground || '#ffffff' };
                 }
             });
         }

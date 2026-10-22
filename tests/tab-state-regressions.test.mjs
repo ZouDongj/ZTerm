@@ -330,3 +330,34 @@ test('P3-15: _buildTerminalOptions falls back to the scheme foreground, never to
     ctx.getTerminalTheme = () => ({ cursor: '#123456', foreground: '#111111', background: '#eeeeee' });
     assert.equal(ctx._buildTerminalOptions().theme.cursor, '#123456', 'an explicit caret color wins');
 });
+
+test('P3-15: applyTerminalScheme hot-apply keeps the same caret fallback chain', () => {
+    const ctx = loadThemeVm(); // REAL state.js; getTerminalTheme staged per case
+    // Hot-apply fakes: a style sink, no .window (the scheme-light toggle is
+    // guarded), and tabs whose term.options capture the theme write — one
+    // plain tab plus one split pane, covering both write sites in state.js.
+    ctx.document = {
+        documentElement: { style: { setProperty() {} } },
+        querySelector: () => null,
+    };
+    const mkTerm = () => ({ options: {} });
+    const tab = { term: mkTerm() };
+    const paneTerm = mkTerm();
+    const split = { term: null, splitRoot: {}, _panes: [{ term: paneTerm }] };
+    ctx.TabManager = { tabs: [tab, split] };
+    ctx.getAllPanes = (t) => t._panes || [];
+    const apply = (theme) => {
+        ctx.getTerminalTheme = () => theme;
+        vm.runInContext('applyTerminalScheme()', ctx);
+    };
+    // Old state.js chain: theme.cursor || '#ffffff' — a cursor-less hot-apply
+    // painted a white caret onto the light canvas it had just applied, while
+    // new terminals built by _buildTerminalOptions fell back to foreground.
+    apply({ foreground: '#111111', background: '#eeeeee' }); // no cursor key
+    assert.equal(tab.term.options.theme.cursor, '#111111', 'tab path falls back to the foreground');
+    assert.equal(paneTerm.options.theme.cursor, '#111111', 'pane path falls back to the foreground');
+    apply({ background: '#eeeeee' }); // no cursor, no foreground
+    assert.equal(tab.term.options.theme.cursor, '#ffffff', 'the final fallback stays white');
+    apply({ cursor: '#123456', foreground: '#111111', background: '#eeeeee' });
+    assert.equal(tab.term.options.theme.cursor, '#123456', 'an explicit caret color wins');
+});
