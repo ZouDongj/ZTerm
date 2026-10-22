@@ -100,8 +100,51 @@ test('P3-12: extracting the last live pane re-aggregates the source tab (B-P2-09
     assert.equal(tab.connected, false, 'only dead panes remain: the source tab dot goes gray');
 });
 
+// ── P3-13: restored/claimed split tabs aggregate pane connectedness ────────
 
+test('P3-13: a restored local split tab aggregates pane connectedness (no hardcoded gray dot)', () => {
+    const ctx = loadVmWithSerialize();
+    // Old code: connected was a literal false, so the tab dot stayed gray
+    // while every pane header read green.
+    const tab = ctx.TabManager._restoreSplitTab(splitTabData());
+    const panes = ctx.getAllPanes(tab);
+    assert.equal(panes.length, 2, 'two panes restored');
+    assert.ok(panes.every(p => p.connected === true), 'local panes deserialize online (tab-serialize.js)');
+    assert.equal(tab.connected, true, 'the tab dot follows its panes');
+});
 
+test('P3-13: a restored SSH split tab stays disconnected until the handshake', () => {
+    const ctx = loadVmWithSerialize();
+    const tab = ctx.TabManager._restoreSplitTab(sshSplitTabData());
+    assert.equal(tab.connected, false, 'SSH panes deserialize offline — the tab must not flip green');
+});
+
+test('P3-13: a degraded (empty) restored split tree adopts the single-tab initial state', () => {
+    const ctx = loadVmWithSerialize();
+    const tab = ctx.TabManager._restoreSplitTab(splitTabData({
+        splitRoot: { orientation: 'h', children: [], ratios: [] },
+    }));
+    assert.equal(tab.splitRoot, null, 'an empty tree degrades to a normal tab');
+    assert.equal(tab.connected, true, 'matches createTabSilent: a local tab starts online');
+});
+
+test('P3-13: a pty-created claim on a split pane re-aggregates and repaints the tab dot', () => {
+    const ctx = loadVmWithSerialize();
+    const tab = ctx.TabManager._restoreSplitTab(splitTabData());
+    const panes = ctx.getAllPanes(tab);
+    // Stale strip state the claim must heal (a cloned split tab starts gray).
+    tab.connected = false;
+    let renders = 0;
+    const origRender = ctx.TabManager.render.bind(ctx.TabManager);
+    ctx.TabManager.render = () => { renders++; origRender(); };
+
+    // Old code: the split claim branch never aggregated and never repainted.
+    ctx.__emit('pty-created', { tabId: 'local_1', requestId: panes[0].requestId });
+
+    assert.equal(panes[0].tabId, 'local_1', 'the pane claimed its backend');
+    assert.equal(tab.connected, true, 'the claim re-aggregates the tab state');
+    assert.ok(renders >= 1, 'the strip repaints with the claim');
+});
 
 
 // ── P2-04 (frontend): absent key vs explicitly saved empty list ────────────

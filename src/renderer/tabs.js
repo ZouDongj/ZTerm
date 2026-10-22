@@ -3786,9 +3786,16 @@ const TabManager = {
                 panes[0].focused = true;
             }
         }
+        // The tab-level dot aggregates pane connectedness instead of a fixed
+        // offline marker: restored local panes deserialize online
+        // (tab-serialize.js), so a local split tab must not keep the literal
+        // `connected: false` while its pane headers read green (P3-13). SSH
+        // panes deserialize offline and keep the tab gray until the handshake.
+        if (tab.splitRoot) _aggregateSplitConnected(tab);
         this.tabs.push(tab);
         if (!tab.splitRoot) {
             // Degraded (empty tree): restore as a normal single-terminal tab and start the backend
+            tab.connected = tabData.type !== 'ssh'; // same initial state as createTabSilent
             const { wrap: w, inner: wInner } = createTermWrap(tab);
             document.getElementById('main-area').appendChild(w);
             if (tabData.type === 'ssh' && tabData.host) {

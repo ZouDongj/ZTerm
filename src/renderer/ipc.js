@@ -276,6 +276,13 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
                     if (spawnError && pane.term) pane.term.write('\r\n\x1b[31m[ZTerm] 启动失败: ' + spawnError + '\x1b[0m\r\n');
                     // Sync fit + report the size immediately: the local pty starts at 80x24, so this shortens the window before it reaches the real size
                     _syncFitAndReportSize(tab, pane);
+                    // A backend landing on (or failing) a pane changes the
+                    // pane set's liveness: re-aggregate the tab dot and
+                    // repaint the strip, or a restored/cloned local split tab
+                    // keeps its initial gray dot while every pane header
+                    // already reads green (P3-13).
+                    _aggregateSplitConnected(tab);
+                    TabManager.render();
                     return;
                 }
             } else if (tab.id === requestId || tab._ptyRequestId === requestId) {
