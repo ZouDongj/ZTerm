@@ -43,17 +43,31 @@ function startRename(ctx, gname) {
 
 const savesOf = (ctx, cmd) => ctx.__sends.filter(s => s.cmd === cmd);
 
+// The rename persist moved from send() to invoke() (persist-before-memory):
+// record save invocations instead. The promise never resolves — the memory
+// commit/render that follows is not under test in this file.
+function stageSaveInvoke(ctx) {
+    const saves = [];
+    ctx.ipcRenderer.invoke = (cmd, payload) => {
+        if (cmd === 'save-ssh-profiles') saves.push({ cmd, payload });
+        return new Promise(() => {});
+    };
+    return saves;
+}
+
 test('Escape cancels the group rename even though the removal blur re-enters finish', () => {
     const ctx = loadSshVm();
     ctx.TabManager.sshProfiles = [
         { id: 'a', group: 'Prod' }, { id: 'b', group: 'Dev' }, { id: 'c', group: 'Prod' },
     ];
+    const invSaves = stageSaveInvoke(ctx);
     const { header, input } = startRename(ctx, 'Prod');
     input.value = 'Renamed';
 
     input.dispatch('keydown', mkEvt({ key: 'Escape' }));
 
     assert.equal(savesOf(ctx, 'save-ssh-profiles').length, 0, 'Escape must not save the typed name');
+    assert.equal(invSaves.length, 0, 'Escape never reaches the persist invoke');
     assert.equal(ctx.TabManager.sshProfiles.map(p => p.group).join(','), 'Prod,Dev,Prod');
     assert.equal(header.querySelector('input'), null, 'rename input is gone');
     assert.equal(header.querySelector('.group-name-text').textContent, 'Prod', 'old name restored');
@@ -64,25 +78,26 @@ test('Enter commits the group rename exactly once', () => {
     ctx.TabManager.sshProfiles = [
         { id: 'a', group: 'Prod' }, { id: 'b', group: 'Dev' }, { id: 'c', group: 'Prod' },
     ];
+    const invSaves = stageSaveInvoke(ctx);
     const { input } = startRename(ctx, 'Prod');
     input.value = 'Renamed';
 
     input.dispatch('keydown', mkEvt({ key: 'Enter' })); // Enter blurs, the blur commits
 
-    const saves = savesOf(ctx, 'save-ssh-profiles');
-    assert.equal(saves.length, 1, 'a single finish — the removal blur must not re-commit');
-    assert.deepEqual(saves[0].payload.sshProfiles.map(p => p.group), ['Renamed', 'Dev', 'Renamed']);
+    assert.equal(invSaves.length, 1, 'a single finish — the removal blur must not re-commit');
+    assert.deepEqual(invSaves[0].payload.sshProfiles.map(p => p.group), ['Renamed', 'Dev', 'Renamed']);
 });
 
 test('a real blur (clicking away) still commits the group rename', () => {
     const ctx = loadSshVm();
     ctx.TabManager.sshProfiles = [{ id: 'a', group: 'Prod' }];
+    const invSaves = stageSaveInvoke(ctx);
     const { input } = startRename(ctx, 'Prod');
     input.value = 'Renamed';
 
     input.blur(); // the click moved focus first; blur is the only finish trigger
 
-    assert.equal(savesOf(ctx, 'save-ssh-profiles').length, 1, 'blur commits');
+    assert.equal(invSaves.length, 1, 'blur commits');
 });
 
 // ── Confirm (✓) button ──
@@ -106,13 +121,14 @@ test('the confirm button blocks the mousedown focus shift', () => {
 test('clicking the confirm button commits once and does not re-enter rename', () => {
     const ctx = loadSshVm();
     ctx.TabManager.sshProfiles = [{ id: 'a', group: 'Prod' }];
+    const invSaves = stageSaveInvoke(ctx);
     const { header, btn, input } = startRename(ctx, 'Prod');
     input.value = 'Renamed';
 
     btn.dispatch('mousedown', mkEvt());
     btn.dispatch('click', mkEvt());
 
-    assert.equal(savesOf(ctx, 'save-ssh-profiles').length, 1, 'the click commits exactly once');
+    assert.equal(invSaves.length, 1, 'the click commits exactly once');
     assert.equal(header.querySelector('input'), null, 'rename finished — no re-entry');
     assert.equal(header.querySelector('.group-name-text').textContent, 'Renamed');
     assert.equal(btn.onclick, null, 'finish closure cleared');

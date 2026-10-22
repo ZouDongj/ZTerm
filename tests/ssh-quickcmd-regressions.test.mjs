@@ -82,12 +82,13 @@ function stageRenameSave(ctx, behavior) {
     return saves;
 }
 
-test('P2-03: renaming the default SSH group (stored as "") actually renames', () => {
+test('P2-03: renaming the default SSH group (stored as "") actually renames', async () => {
     const ctx = loadSshVm();
     stubSshDisplay(ctx);
     ctx.TabManager.sshProfiles = [
         { id: 'a', group: '' }, { id: 'b', group: 'Dev' }, { id: 'c' }, // c: no group key at all
     ];
+    const saves = stageRenameSave(ctx);
     const { header, btn } = stageSshGroup(ctx, '默认');
     ctx.startRenameGroup(btn);
     const input = header.querySelector('input');
@@ -95,30 +96,178 @@ test('P2-03: renaming the default SSH group (stored as "") actually renames', ()
     input.value = 'Prod';
 
     input.dispatch('keydown', mkEvt({ key: 'Enter' })); // Enter blurs, the blur commits
+    await flush(); await flush();
 
-    const saves = ctx.__sends.filter(s => s.cmd === 'save-ssh-profiles');
     assert.equal(saves.length, 1, 'rename persisted once');
     assert.deepEqual(saves[0].payload.sshProfiles.map(p => p.group), ['Prod', 'Dev', 'Prod'],
         'both empty-string and missing groups matched the 默认 display name');
     assert.deepEqual(ctx.TabManager.sshProfiles.map(p => p.group), ['Prod', 'Dev', 'Prod']);
 });
 
-test('P2-03 (guard): renaming a named group leaves default-group profiles alone', () => {
+test('P2-03 (guard): renaming a named group leaves default-group profiles alone', async () => {
     const ctx = loadSshVm();
     stubSshDisplay(ctx);
     ctx.TabManager.sshProfiles = [{ id: 'a', group: '' }, { id: 'b', group: 'Dev' }];
+    const saves = stageRenameSave(ctx);
     const { header, btn } = stageSshGroup(ctx, 'Dev');
     ctx.startRenameGroup(btn);
     const input = header.querySelector('input');
     input.value = 'Ops';
 
     input.dispatch('keydown', mkEvt({ key: 'Enter' }));
+    await flush(); await flush();
 
-    const saves = ctx.__sends.filter(s => s.cmd === 'save-ssh-profiles');
     assert.equal(saves.length, 1);
-    assert.deepEqual(saves[0].payload.sshProfiles.map(p => p.group), ['', 'Ops']);
     assert.deepEqual(ctx.TabManager.sshProfiles.map(p => p.group || ''), ['', 'Ops'],
         'the default group keeps its stored empty string (display fallback intact)');
+});
+
+// ── P3-01: persist-before-memory, no orphaned once listener ────────────────
+
+// Stage the edit-dialog fields saveSSHEdit reads (the manager VM auto-vivifies
+// elements by id; the login-scripts descendant selector resolves to [] there).
+function stageSshEditForm(ctx, profile) {
+    ctx.TabManager.sshProfiles = [profile];
+    runIn(ctx, `_editingSSHId = ${JSON.stringify(profile.id)}; _sshPwdDirty = false;`);
+    const g = id => ctx.document.getElementById(id);
+    g('ssh-edit-name').value = 'renamed';
+    g('ssh-edit-host').value = 'h2';
+    g('ssh-edit-port').value = '2222';
+    g('ssh-edit-user').value = 'u2';
+    g('ssh-edit-password').value = '';
+    g('ssh-edit-note').value = '';
+    g('ssh-edit-group').value = '';
+    g('ssh-edit-auth').value = '密码';
+    g('ssh-edit-keypath').value = '';
+}
+
+test('P3-01: a failed profile save keeps memory and the dialog untouched', async () => {
+    const ctx = loadSshVm();
+    stageSshEditForm(ctx, { id: 'p1', name: 'old', host: 'h1', username: 'u1' });
+    const closed = [];
+    ctx.closeOverlay = id => closed.push(id);
+    let renders = 0;
+    ctx.renderSSHManagerInSettings = () => renders++;
+    ctx.ipcRenderer.invoke = (cmd) => cmd === 'save-ssh-profiles'
+        ? Promise.reject(new Error('config is read-only'))
+        : new Promise(() => {});
+
+    await ctx.saveSSHEdit();
+    await flush();
+
+    assert.equal(ctx.TabManager.sshProfiles[0].name, 'old', 'in-memory profile not mutated');
+    assert.equal(ctx.TabManager.sshProfiles[0].host, 'h1');
+    assert.equal(renders, 0, 'no re-render on failure');
+    assert.deepEqual(closed, [], 'the dialog stays open for a retry');
+    const errToasts = ctx.__toasts.filter(t => t.isError);
+    assert.equal(errToasts.length, 1, 'one error toast');
+    assert.match(errToasts[0].msg, /保存失败/);
+    assert.ok(!ctx.__toasts.some(t => t.msg === 'SSH 连接已保存'), 'no success toast');
+});
+
+test('P3-01 (control): a successful save commits memory, closes and toasts', async () => {
+    const ctx = loadSshVm();
+    stageSshEditForm(ctx, { id: 'p1', name: 'old', host: 'h1', username: 'u1' });
+    const closed = [];
+    ctx.closeOverlay = id => closed.push(id);
+    let renders = 0;
+    ctx.renderSSHManagerInSettings = () => renders++;
+    stubSshDisplay(ctx);
+    const saved = [];
+    ctx.ipcRenderer.invoke = (cmd, payload) => {
+        if (cmd === 'save-ssh-profiles') { saved.push(payload); return Promise.resolve({ ok: true }); }
+        return new Promise(() => {});
+    };
+
+    await ctx.saveSSHEdit();
+    await flush();
+
+    assert.equal(saved.length, 1, 'persisted once');
+    assert.equal(ctx.TabManager.sshProfiles[0].name, 'renamed', 'memory committed after persist');
+    assert.equal(ctx.TabManager.sshProfiles[0].host, 'h2');
+    assert.equal(ctx.TabManager.sshProfiles[0].port, 2222);
+    assert.equal(renders, 1, 'manager re-rendered');
+    assert.deepEqual(closed, ['overlay-ssh-edit'], 'dialog closed');
+    assert.ok(ctx.__toasts.some(t => t.msg === 'SSH 连接已保存' && !t.isError));
+});
+
+function stageConfirm(ctx) {
+    let onOk = null;
+    ctx.showConfirm = (msg, cb) => { onOk = cb; };
+    return () => onOk;
+}
+
+test('P3-01: a failed profile delete keeps memory and leaves no orphaned listener', async () => {
+    const ctx = loadSshVm();
+    ctx.TabManager.sshProfiles = [{ id: 'p1', name: 'n', host: 'h' }];
+    const getOnOk = stageConfirm(ctx);
+    const onceCalls = [];
+    ctx.ipcRenderer.once = (ch) => onceCalls.push(ch);
+    let renders = 0;
+    ctx.renderSSHManagerInSettings = () => renders++;
+    ctx.ipcRenderer.invoke = (cmd) => cmd === 'save-ssh-profiles'
+        ? Promise.reject(new Error('config is read-only'))
+        : new Promise(() => {});
+
+    ctx.deleteSSHProfile('p1');
+    const onOk = getOnOk();
+    assert.ok(onOk, 'confirm dialog staged');
+    await onOk();
+    await flush();
+
+    assert.equal(ctx.TabManager.sshProfiles.length, 1, 'profile kept in memory');
+    assert.deepEqual(onceCalls, [], 'no once(ssh-profiles-saved) listener to orphan');
+    assert.equal(renders, 0, 'no re-render on failure');
+    const errToasts = ctx.__toasts.filter(t => t.isError);
+    assert.equal(errToasts.length, 1, 'one error toast');
+    assert.match(errToasts[0].msg, /删除失败/);
+    assert.ok(!ctx.__toasts.some(t => t.msg === 'SSH 连接已删除'), 'no success toast');
+});
+
+test('P3-01 (control): a successful delete commits memory and toasts', async () => {
+    const ctx = loadSshVm();
+    ctx.TabManager.sshProfiles = [{ id: 'p1', name: 'n', host: 'h' }, { id: 'p2', name: 'm', host: 'h2' }];
+    const getOnOk = stageConfirm(ctx);
+    let renders = 0;
+    ctx.renderSSHManagerInSettings = () => renders++;
+    stubSshDisplay(ctx);
+    const saved = [];
+    ctx.ipcRenderer.invoke = (cmd, payload) => {
+        if (cmd === 'save-ssh-profiles') { saved.push(payload); return Promise.resolve({ ok: true }); }
+        return new Promise(() => {});
+    };
+
+    ctx.deleteSSHProfile('p1');
+    await getOnOk()();
+    await flush();
+
+    assert.deepEqual(ctx.TabManager.sshProfiles.map(p => p.id), ['p2'], 'memory committed after persist');
+    assert.deepEqual(saved.length, 1, 'persisted once');
+    assert.deepEqual([...saved[0].sshProfiles.map(p => p.id)], ['p2']);
+    assert.equal(renders, 1, 'manager re-rendered');
+    assert.ok(ctx.__toasts.some(t => t.msg === 'SSH 连接已删除' && !t.isError));
+});
+
+test('P3-01: a failed inline password save does not mutate the in-memory ciphertext', async () => {
+    const ctx = loadSshVm();
+    ctx.TabManager.sshProfiles = [{ id: 'p1', name: 'n', host: 'h', encryptedPassword: 'enc_old' }];
+    runIn(ctx, `_editingSSHId = 'p1'`);
+    ctx.document.getElementById('ssh-edit-password').value = 'newpass';
+    ctx.ipcRenderer.invoke = (cmd) => {
+        if (cmd === 'encrypt-password') return Promise.resolve({ encrypted: 'enc_new' });
+        if (cmd === 'save-ssh-profiles') return Promise.reject(new Error('config is read-only'));
+        return new Promise(() => {});
+    };
+
+    await ctx._savePasswordInline();
+    await flush();
+
+    assert.equal(ctx.TabManager.sshProfiles[0].encryptedPassword, 'enc_old',
+        'ciphertext untouched by the failed persist');
+    const errToasts = ctx.__toasts.filter(t => t.isError);
+    assert.equal(errToasts.length, 1, 'one error toast');
+    assert.match(errToasts[0].msg, /密码保存失败/);
+    assert.ok(!ctx.__toasts.some(t => t.msg === '密码已保存'), 'no success toast');
 });
 
 
@@ -130,8 +279,31 @@ test('P2-03 (guard): renaming a named group leaves default-group profiles alone'
 
 
 
+// ── P3-01 (review follow-up): the group rename persist had the same defects
+// P3-01 removed from save/delete — memory mutated before the write, failure
+// swallowed, orphaned once('ssh-profiles-saved') listener. It now persists
+// first and commits memory only on success ─────────────────────────────────
 
+test('P3-01: a failed group rename keeps memory and toasts the failure', async () => {
+    const ctx = loadSshVm();
+    stubSshDisplay(ctx);
+    ctx.TabManager.sshProfiles = [{ id: 'a', group: '' }, { id: 'b', group: 'Dev' }];
+    const saves = stageRenameSave(ctx, 'reject');
+    const { header, btn } = stageSshGroup(ctx, 'Dev');
+    ctx.startRenameGroup(btn);
+    const input = header.querySelector('input');
+    input.value = 'Ops';
 
+    input.dispatch('keydown', mkEvt({ key: 'Enter' }));
+    await flush(); await flush();
 
+    assert.equal(saves.length, 1, 'the write was attempted');
+    assert.deepEqual(ctx.TabManager.sshProfiles.map(p => p.group), ['', 'Dev'],
+        'memory keeps the old groups when the write fails');
+    const errToasts = ctx.__toasts.filter(t => t.isError);
+    assert.equal(errToasts.length, 1, 'one error toast');
+    assert.match(errToasts[0].msg, /分组重命名失败/);
+    assert.ok(!ctx.__toasts.some(t => t.msg === '分组已重命名'), 'no success toast on failure');
+});
 
 
