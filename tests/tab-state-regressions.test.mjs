@@ -55,7 +55,50 @@ function sshSplitTabData(over = {}) {
 
 // ── P3-12: close/extract re-aggregates the tab dot ─────────────────────────
 
+test('P3-12: closing the last live pane re-aggregates the surviving split tab', () => {
+    const ctx = loadVm();
+    const { tab, p1, p2 } = wiredSplitTab(ctx, 't_sp', 'b1', null, 'b2', null);
+    // Third pane through the real split path, then its backend arrives.
+    ctx.TabManager.addPaneRelativeTo(tab, 'b');
+    const p3 = ctx.getAllPanes(tab).find(p => p !== p1 && p !== p2);
+    p3.tabId = 'b3';
+    ctx.__tq.advance(2000); // drain setup timers (wiring fits/focuses)
 
+    // Two sessions exit; the live third pane keeps the tab connected.
+    ctx.__emit('pty-exit', { tabId: 'b1' });
+    ctx.__emit('pty-exit', { tabId: 'b2' });
+    assert.equal(tab.connected, true, 'precondition: the surviving pane keeps the tab connected');
+
+    // Close the last live pane. Old code: the removal's >=2-survivor branch
+    // rendered without re-aggregating — the dot stayed green forever.
+    ctx.TabManager._closePane(tab.id, p3.id);
+    ctx.__tq.advance(1000); // the 200ms exit window runs doRemove
+
+    assert.ok(ctx.TabManager.tabs.includes(tab), 'two dead panes remain: the tab itself survives');
+    assert.equal(ctx.getAllPanes(tab).length, 2, 'the split keeps its remaining panes');
+    assert.equal(tab.connected, false, 'no live pane left: the tab dot must go gray');
+});
+
+test('P3-12: extracting the last live pane re-aggregates the source tab (B-P2-09 pattern lock)', () => {
+    const ctx = loadVm();
+    const { tab, p1, p2 } = wiredSplitTab(ctx, 't_sp', 'b1', null, 'b2', null);
+    ctx.TabManager.addPaneRelativeTo(tab, 'b');
+    const p3 = ctx.getAllPanes(tab).find(p => p !== p1 && p !== p2);
+    p3.tabId = 'b3';
+    ctx.wireTerminalToPane(tab, p3); // extraction requires a live term + backend id
+    ctx.__tq.advance(2000);
+
+    ctx.__emit('pty-exit', { tabId: 'b1' });
+    ctx.__emit('pty-exit', { tabId: 'b2' });
+    assert.equal(tab.connected, true, 'precondition: the surviving pane keeps the tab connected');
+
+    ctx.TabManager._extractPaneToTab(tab.id, p3.id);
+
+    const nt = ctx.TabManager.tabs[ctx.TabManager.tabs.length - 1];
+    assert.ok(nt && nt !== tab && !nt.splitRoot, 'the pane became its own tab');
+    assert.equal(nt.connected, true, 'the extracted tab adopts its live session state');
+    assert.equal(tab.connected, false, 'only dead panes remain: the source tab dot goes gray');
+});
 
 
 

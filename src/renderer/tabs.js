@@ -2424,6 +2424,10 @@ const TabManager = {
                 if (!rem.some(p => p.focused)) rem[0].focused = true;
                 // The active terminal changed (terminal search follows)
                 if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
+                // The pane set shrank: re-aggregate the tab-level connected
+                // flag (same rule as extract/move, B-P2-09), or closing the
+                // last live pane would leave the tab dot green (P3-12).
+                _aggregateSplitConnected(tab);
                 // Deferred completion of the user's close (200ms ago): the
                 // refocuses below are PASSIVE, not new activations.
                 this._renderSplit(tab, true);
