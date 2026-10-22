@@ -75,6 +75,10 @@ test('U-05: the busy rule beats the hover/active/focus reveal (pointer-events st
     // explicitly and come later in the sheet to win the tie).
     assert.ok(rule.includes('.tab-reconnect-busy:focus-visible'),
         'keyboard focus must not re-enable pointer events on the busy variant');
+    // .tab-reconnect:hover carries opacity:1 !important; the busy opacity
+    // needs its own !important or hover would brighten the inert spinner.
+    assert.ok(/opacity:0\.72\s*!important/.test(rule),
+        'hover must not lift the busy spinner to full opacity');
     const busyIdx = css.indexOf('.tab-reconnect-busy:focus-visible');
     const revealIdx = css.indexOf('.tab-reconnect:focus-visible');
     assert.ok(revealIdx > 0 && busyIdx > revealIdx,

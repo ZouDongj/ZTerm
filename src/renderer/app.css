@@ -234,8 +234,10 @@ body.tab-dragging{user-select:none}
    rules re-enable pointer-events at a higher or equal specificity, which
    made the spinner a dead click zone that swallowed tab activation (and let
    a double-click bubble into the rename gesture). Listed last so the equal
-   specificity :focus-visible tie resolves here. */
-.tab-reconnect-busy,.tab:hover .tab-reconnect-busy,.tab.active .tab-reconnect-busy,.tab-reconnect-busy:focus-visible{opacity:0.72;pointer-events:none}
+   specificity :focus-visible tie resolves here. The opacity carries
+   !important because .tab-reconnect:hover{opacity:1!important} would
+   otherwise brighten the spinner on hover. */
+.tab-reconnect-busy,.tab:hover .tab-reconnect-busy,.tab.active .tab-reconnect-busy,.tab-reconnect-busy:focus-visible{opacity:0.72!important;pointer-events:none}
 #btn-add-tab{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:var(--text-2);cursor:pointer;font-size:16px;transition:all 0.12s;margin-left:4px;flex-shrink:0;-webkit-app-region:no-drag;line-height:1;user-select:none}
 #btn-add-tab:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 
