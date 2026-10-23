@@ -710,7 +710,7 @@ const TabManager = {
             if (!document.getElementById('btn-add-tab')) {
                 const addBtn = document.createElement('div');
                 addBtn.id = 'btn-add-tab';
-                addBtn.dataset.tip = '新建标签页（默认终端），Ctrl+Shift+N 选择会话';
+                addBtn.dataset.tip = '新建标签页';
                 addBtn.innerHTML = Icons.iconSvg('plusSmall', 14);
                 addBtn.onclick = () => {
                     const p = getDefaultLocalProfile();
