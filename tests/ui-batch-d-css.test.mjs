@@ -169,10 +169,11 @@ test('root crumb drive svg is 14px in both sftp.js and the css rule', () => {
 
 test('sftp toolbar svgs keep their per-icon optical sizes', () => {
   // Vertical ink spans on the 24-unit grid: arrow-up 14, refresh 18, pin 19,
-  // mkdir 17, upload 18 units — the arrow grows to 15px, the pin shrinks to
-  // 12px and the rest stay 13px so the rendered heights land within ~1px.
+  // mkdir 17, upload 18 units — the arrow grows to 15px and the rest stay
+  // 13px so the rendered heights land within ~1px. (The pin tried 12px but
+  // its narrow 14-unit width read small at that size; 13px holds parity.)
   const html = read('src/renderer.html');
-  const expected = { goUp: 15, refresh: 13, togglePin: 12, mkdir: 13, upload: 13 };
+  const expected = { goUp: 15, refresh: 13, togglePin: 13, mkdir: 13, upload: 13 };
   for (const [call, px] of Object.entries(expected)) {
     const m = html.match(new RegExp(`<button[^>]*onclick="SFTP\\.${call}\\(\\)"[^>]*><svg width="(\\d+)" height="(\\d+)" viewBox="0 0 24 24"`));
     assert.ok(m, `toolbar button ${call} inline svg found`);
