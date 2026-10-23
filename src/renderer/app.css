@@ -990,9 +990,11 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .ssh-pwd-status{display:flex;align-items:center;gap:8px;background:var(--field-bg);border:1.5px solid transparent;border-radius:var(--field-radius);padding:8px 11px;font-size:12px;color:var(--text-1);transition:all 0.12s;line-height:1.2;min-height:var(--field-height)}
 .ssh-pwd-status:hover{background:rgba(255,255,255,0.07)}
 .ssh-pwd-status .ssh-pwd-status-text{flex:1;color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2}
-/* Text-link button: no border/background + accent color + tight padding;
-   height = 12.5×1.2 = 15px (same as the input text), container height exactly matches the input's 34px */
-.ssh-pwd-status .btn-outline{background:transparent;color:#8fc1ee;border:none;padding:0 4px;font-size:12px;line-height:1.2;border-radius:0}
+/* Text-link button: no border/background + accent color + tight padding.
+   height:auto is required: the .btn-outline base sets height:30px, which
+   would inflate the 34px status box to 49px and make the dialog height jump
+   when switching auth methods. */
+.ssh-pwd-status .btn-outline{background:transparent;color:#8fc1ee;border:none;padding:0 4px;font-size:12px;line-height:1.2;border-radius:0;height:auto}
 .ssh-pwd-status .btn-outline:hover{background:rgba(var(--accent-rgb),0.12);color:#8fc1ee}
 
 /* Hide the browser's built-in password reveal button (replaced with a custom SVG) */

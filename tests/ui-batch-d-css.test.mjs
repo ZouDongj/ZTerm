@@ -135,3 +135,15 @@ test('U-19: settings renders the stroke gear at every size', () => {
     assert.ok(!svg.includes('fill="currentColor"'), `settings ${size}px never fills the hub`);
   }
 });
+
+// ── SSH saved-password status box height contract ──
+// The .btn-outline base carries height:30px; inside the 34px .ssh-pwd-status
+// flex row that inflates the box to 49px and the dialog height jumps when
+// switching auth methods. The scoped override must neutralize the height.
+
+test('ssh-pwd-status override resets the base 30px button height (status box stays 34px)', () => {
+  assert.ok(ruleBody('.btn-outline').includes('height:30px'),
+    'the base .btn-outline still carries the 30px height this pin guards against');
+  assert.match(ruleBody('.ssh-pwd-status .btn-outline'), /height\s*:\s*auto/,
+    'override must reset height or the status box grows past the 34px input height');
+});
