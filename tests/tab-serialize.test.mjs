@@ -165,3 +165,21 @@ test('roundtrip 后叶子数量与比率保持一致', () => {
     assert.deepEqual(restored.ratios, [0.2, 0.3, 0.5]);
     assert.ok(restored.children.every(c => c.id && c.id.startsWith('p_')));
 });
+
+test('manualName 标记随 pane 序列化往返（demote 后的重命名优先级跨重启保留）', () => {
+    const tree = {
+        orientation: 'h',
+        children: [
+            { id: 'a', type: 'local', name: 'MyServer', _manualName: true },
+            { id: 'b', type: 'local', name: 'Git Bash' },
+        ],
+        ratios: [0.5, 0.5],
+    };
+    const saved = serializeSplitNode(tree);
+    assert.equal(saved.children[0].manualName, true, 'marked pane persists the marker');
+    assert.equal(saved.children[1].manualName, undefined, 'unmarked pane stays lean');
+    const restored = deser(JSON.parse(JSON.stringify(saved)));
+    assert.equal(restored.children[0]._manualName, true, 'marker restored');
+    assert.equal(restored.children[0].name, 'MyServer');
+    assert.equal(restored.children[1]._manualName, undefined, 'unmarked pane restores without the marker');
+});

@@ -1875,8 +1875,10 @@ const TabManager = {
             // container: the custom name already moved onto the `existing` pane
             // (_newPaneData takes tab.name), so dropping the rename lock lets
             // the tab join its pane names again. Renaming AFTER the split still
-            // locks the container name explicitly.
-            delete tab._customName;
+            // locks the container name explicitly. The pane-level marker keeps
+            // the demoted name above the pane's tool-name display overlay
+            // (resolveTabDisplayName) — the priority the tab lock gave it.
+            if (tab._customName) { existing._manualName = true; delete tab._customName; }
             if (side === 'l' || side === 't') tab.splitRoot.children = [newPane, existing];
             else tab.splitRoot.children = [existing, newPane];
             tab.splitRoot.ratios = [0.5, 0.5];
@@ -2529,7 +2531,14 @@ const TabManager = {
                 // name: the survivor's name froze at split time, so adopting it
                 // here would resurrect the pre-rename name while the lock keeps
                 // _updateTabName from ever restoring the user's name.
-                if (!tab._customName) tab.name = rem[0]?.name || tab.name;
+                if (!tab._customName) {
+                    tab.name = rem[0]?.name || tab.name;
+                    // A survivor carrying a demoted rename restores the
+                    // tab-level lock on collapse: the session is single again,
+                    // so its manual name locks the whole tab (and outranks the
+                    // tool-name overlay) exactly as before the split.
+                    if (rem[0] && rem[0]._manualName) tab._customName = true;
+                }
                 this._exitSplit(tab);
                 // The active terminal collapsed back onto the tab (terminal
                 // search follows the surviving terminal)
@@ -2648,6 +2657,10 @@ const TabManager = {
             tabId: pane.tabId,
             splitRoot: null,
         };
+        // An extracted pane carrying a demoted rename becomes a locked single
+        // tab again — the manual name named its session, not the split it
+        // happened to sit in.
+        if (pane._manualName) nt._customName = true;
         // Session identity (type/ssh fields/command/args/credential) is adopted
         // from the extracted pane's own session — the source tab's fields may
         // belong to a different session and must not leak into the new tab
@@ -2709,7 +2722,12 @@ const TabManager = {
             st.tabId = rp.tabId;
             // Same collapse rule as _closePane: the rename lock outranks the
             // surviving pane's stale (split-time) name.
-            if (!st._customName) st.name = rp.name || st.name;
+            if (!st._customName) {
+                st.name = rp.name || st.name;
+                // Same lock restoration as _closePane: a demoted rename on the
+                // surviving pane locks the single tab again.
+                if (rp._manualName) st._customName = true;
+            }
             // Session identity follows the surviving pane — the tab's old
             // host/user/credential may belong to the extracted session
             adoptPaneFieldsIntoTab(st, rp);
@@ -2859,7 +2877,12 @@ const TabManager = {
                         sourceTab.syncInput = false;
                         // Same collapse rule as _closePane: the rename lock
                         // outranks the surviving pane's stale (split-time) name.
-                        if (!sourceTab._customName) sourceTab.name = rp.name || sourceTab.name;
+                        if (!sourceTab._customName) {
+                            sourceTab.name = rp.name || sourceTab.name;
+                            // Same lock restoration as _closePane: a demoted
+                            // rename on the survivor locks the single tab again.
+                            if (rp._manualName) sourceTab._customName = true;
+                        }
                         // Session identity follows the surviving pane — the
                         // tab's old host/credential/command may belong to the
                         // moved session
@@ -2958,8 +2981,9 @@ const TabManager = {
             targetTab.splitRoot = this._createContainer('h');
             // Same rename demotion as addPaneRelativeTo's first split: the
             // custom name moved onto fp via _newPaneData(targetTab), so the
-            // lock must go for the tab to join its pane names again.
-            delete targetTab._customName;
+            // lock must go for the tab to join its pane names again. The
+            // pane-level marker keeps the demoted name above the tool overlay.
+            if (targetTab._customName) { fp._manualName = true; delete targetTab._customName; }
             targetTab.splitRoot.children = [fp];
             targetTab.splitRoot.ratios = [1];
             targetTab.term = null;

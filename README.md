@@ -28,6 +28,8 @@ printf '\e]1337;ZTermTabName=\a'             # clear it
 
 The tool name is display-only: it is never written into the persisted tab name and does not survive a restart. A manual rename (double-click the tab) always wins while set; clearing the manual name falls back to the tool name. The name follows its terminal across split, unsplit, and drag-to-tab moves.
 
+Splitting a manually renamed single tab demotes the rename onto its original pane: the tab then joins its pane names, and on that pane the manual name still outranks the tool name. Collapsing or extracting back to a single terminal restores the tab-level rename.
+
 ## Install and build
 
 Published packages, when available, are listed on [GitHub Releases](https://github.com/ZouDongj/zterm/releases). Local verification does not establish that a matching package has been published. Windows requires WebView2; see the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for runtime and MSVC setup.

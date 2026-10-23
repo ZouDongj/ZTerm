@@ -64,3 +64,64 @@ test('(control) a tab renamed AFTER the split keeps its container lock on drag-i
     assert.equal(tab._customName, true, 'container rename stays locked');
     assert.equal(tab.name, 'Deploy window', 'container rename wins over pane joins');
 });
+
+test('a demoted rename still outranks the pane tool-name overlay', () => {
+    const ctx = loadVm();
+    const tab = wiredTab(ctx, 't1', 'local_1');
+    tab.name = 'MyServer';
+    tab._customName = true;
+    tab._toolName = 'ai-task'; // the tool label was active before the split
+
+    ctx.TabManager.addPaneRelativeTo(tab, 'r');
+
+    const panes = ctx.getAllPanes(tab);
+    assert.equal(panes[0]._manualName, true, 'demote marked the original pane');
+    assert.equal(panes[0]._toolName, 'ai-task', 'the tool overlay moved onto the pane');
+    panes[1].name = 'pwsh-session';
+    ctx.TabManager._updateTabName(tab);
+    // Display: the demoted manual name wins over the tool name on its pane —
+    // the same priority the tab-level lock gave it before the split.
+    assert.equal(ctx.TabManager._tabDisplayName(tab), 'MyServer | pwsh-session');
+    // The persisted base name never carries the tool overlay either.
+    assert.equal(tab.name, 'MyServer | pwsh-session');
+});
+
+test('closing the other pane after a demote restores the tab-level rename lock', () => {
+    const ctx = loadVm();
+    const tab = wiredTab(ctx, 't1', 'local_1');
+    tab.name = 'MyServer';
+    tab._customName = true;
+    ctx.TabManager.addPaneRelativeTo(tab, 'r');
+    const panes = ctx.getAllPanes(tab);
+    assert.equal(tab._customName, undefined, 'demoted');
+    const p2 = panes[1];
+    p2.tabId = 'local_2';
+    ctx.wireTerminalToPane(tab, p2);
+
+    ctx.TabManager._closePane(tab.id, p2.id);
+    ctx.__tq.advance(250); // pane exit fade → doRemove → collapse
+
+    assert.equal(tab.splitRoot, null, 'collapsed to a single terminal');
+    assert.equal(tab.name, 'MyServer', 'the surviving pane name adopted');
+    assert.equal(tab._customName, true, 'the manual rename locks the single tab again');
+});
+
+test('extracting a pane that carries a demoted rename re-locks it as a single tab', () => {
+    const ctx = loadVm();
+    const tab = wiredTab(ctx, 't1', 'local_1');
+    tab.name = 'MyServer';
+    tab._customName = true;
+    ctx.TabManager.addPaneRelativeTo(tab, 'r');
+    const panes = ctx.getAllPanes(tab);
+    const p2 = panes[1];
+    p2.tabId = 'local_2';
+    ctx.wireTerminalToPane(tab, p2);
+
+    const before = ctx.TabManager.tabs.length;
+    ctx.TabManager._extractPaneToTab(tab.id, panes[0].id);
+
+    assert.equal(ctx.TabManager.tabs.length, before + 1, 'extracted pane became its own tab');
+    const nt = ctx.TabManager.tabs[ctx.TabManager.tabs.length - 1];
+    assert.equal(nt.name, 'MyServer');
+    assert.equal(nt._customName, true, 'the demoted rename locks the extracted tab again');
+});

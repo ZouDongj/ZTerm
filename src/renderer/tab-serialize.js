@@ -33,6 +33,10 @@ function serializeSplitNode(node) {
         type: 'leaf',
         name: node.name,
         paneType: isSSH ? 'ssh' : (node.type || 'local'),
+        // A demoted manual rename rides the pane across restarts: without the
+        // marker the tool-name overlay would outrank the user's name on the
+        // restored split (resolveTabDisplayName).
+        ...(node._manualName ? { manualName: true } : {}),
         sshHost: node._sshHost,
         sshPort: node._sshPort,
         sshUser: node._sshUser,
@@ -66,6 +70,7 @@ function deserializeSplitNode(saved, opts) {
         name: saved.name || opts.defaultName,
         type: isSSH ? 'ssh' : (saved.paneType || 'local'),
         connected: !isSSH, // local starts online immediately; SSH waits for the handshake
+        ...(saved.manualName === true ? { _manualName: true } : {}),
         _sshHost: saved.sshHost, _sshPort: saved.sshPort, _sshUser: saved.sshUser,
         _sshProfileId: saved.sshProfileId,
         _command: isSSH ? '' : (saved.command || ''),

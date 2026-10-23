@@ -22,9 +22,10 @@ function resolveTabName(tab, panes) {
 // Compute the tab's VISIBLE name. Priority: a manual rename (`_customName`)
 // sticks to `tab.name`; otherwise a trimmed tool-provided `_toolName` (set
 // via the OSC 1337 rename channel, kept on the tab for single-terminal tabs
-// and on each pane for split tabs) outranks the persisted base name. This is
-// a pure display overlay — the result must never be written back to
-// `tab.name` or persisted.
+// and on each pane for split tabs) outranks the persisted base name — except
+// on a pane carrying a demoted manual rename (`_manualName`), whose user name
+// keeps winning. This is a pure display overlay — the result must never be
+// written back to `tab.name` or persisted.
 function resolveTabDisplayName(tab, panes) {
     if (!tab) return '';
     if (tab._customName) return tab.name || '';
@@ -33,6 +34,11 @@ function resolveTabDisplayName(tab, panes) {
         return t ? t : (tab.name || '');
     }
     const nameOf = (p) => {
+        // A pane carrying a demoted manual rename (_manualName, set when a
+        // renamed single tab is first split) keeps the user's name above the
+        // tool overlay — the same priority the tab-level lock gave it before
+        // the split.
+        if (p && p._manualName) return (p.name || '');
         const t = ((p && p._toolName) || '').trim();
         return t || ((p && p.name) || '');
     };
