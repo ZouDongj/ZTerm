@@ -3587,13 +3587,21 @@ const TabManager = {
             // Release the render-preservation marker only when THIS rename
             // still owns it (a rename on another tab may have taken over).
             if (this._renamingTabId === tabId) this._renamingTabId = null;
-            if (save && input.value.trim()) {
-                tab.name = input.value.trim();
-                tab._customName = true; // lock the custom name so pane changes no longer overwrite it
-            } else if (save && !input.value.trim() && tab.splitRoot) {
-                // user cleared the name → restore auto-generation
-                delete tab._customName;
-                this._updateTabName(tab);
+            if (save) {
+                const newName = input.value.trim();
+                if (newName && newName !== tab.name) {
+                    tab.name = newName;
+                    tab._customName = true; // lock the custom name so pane changes no longer overwrite it
+                } else if (!newName && tab._customName) {
+                    // user cleared the name → restore auto-generation (any tab,
+                    // not only splits: a single tab must be unlockable too)
+                    delete tab._customName;
+                    this._updateTabName(tab);
+                }
+                // An unchanged commit (Enter/blur without edits) must NOT lock:
+                // double-click selects the current name and clicking away blurs,
+                // so without the changed-check an accidental rename would pin the
+                // tab to its current name forever (persisted as customName).
             }
             this.render();
         };

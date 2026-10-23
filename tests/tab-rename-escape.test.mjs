@@ -120,3 +120,42 @@ test('a real blur (clicking away) still commits', () => {
     assert.equal(tab.name, 'Renamed', 'blur commits');
     assert.equal(tab._customName, true);
 });
+
+// An unchanged commit must not engage the rename lock: double-click selects
+// the current name and clicking away blurs, so without the changed-check an
+// accidental rename would pin the tab to its current name forever (persisted
+// as customName — later drag-splits then never re-join the pane names).
+test('blur with an unchanged name does NOT lock the tab', () => {
+    const ctx = loadVm();
+    const { tab, input } = renamed(ctx, 't_rn');
+    // startRenameTab pre-fills the input with the current name; the user edits nothing.
+    ctx.document.activeElement = ctx.document.body;
+    input.onblur();
+
+    assert.equal(tab.name, 't_rn', 'name untouched');
+    assert.equal(tab._customName, undefined, 'no custom-name lock on an unchanged blur commit');
+});
+
+test('Enter with an unchanged name does NOT lock the tab', () => {
+    const ctx = loadVm();
+    const { tab, input } = renamed(ctx, 't_rn');
+    input.onkeydown({ key: 'Enter', stopPropagation() {} });
+
+    assert.equal(tab.name, 't_rn');
+    assert.equal(tab._customName, undefined, 'no custom-name lock on an unchanged Enter commit');
+});
+
+// Clearing the name is the unlock gesture — it must work on single tabs too,
+// not only split tabs, otherwise an accidentally locked tab can never recover.
+test('clearing the name on a locked single tab releases the lock', () => {
+    const ctx = loadVm();
+    const { tab, input } = renamed(ctx, 't_rn');
+    tab.name = 'My Server';
+    tab._customName = true; // pre-existing lock (e.g. persisted across a restart)
+    input.value = '';
+
+    input.onkeydown({ key: 'Enter', stopPropagation() {} });
+
+    assert.equal(tab._customName, undefined, 'lock released');
+    assert.equal(tab.name, 'My Server', 'the last name stays until auto-naming moves it');
+});
