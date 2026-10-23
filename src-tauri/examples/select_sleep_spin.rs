@@ -6,7 +6,7 @@
 //! tokio's cooperative budget re-wakes a depleted task instead of parking it.
 //! An unguarded timeout arm therefore turns the loop into a permanent hot
 //! loop — the SSH reader burned a core per idle session this way until the
-//! one-shot guard was added (zterm.rs, `inject_fired`).
+//! one-shot guard was added (zterm.rs, `login_retire_fired`).
 //!
 //! Run with: `cargo run --example select_sleep_spin`
 

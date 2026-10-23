@@ -766,12 +766,12 @@ ipcRenderer.on('ssh-login-script-timeout', (event, { tabId, rendererId, expects 
     showToast('登录脚本步骤未匹配，自动应答已停用' + (steps ? `: ${steps}` : ''), true);
 });
 
-// ── IPC: followCwd history cleanup failed ──
-// Best-effort artifact cleanup failed; the connection proceeds. The temp-file
-// + rename swap leaves the original history file untouched — surface the
-// failure so the state stays diagnosable (stderr is invisible in release).
-ipcRenderer.on('ssh-history-clean-failed', (event, { tabId, rendererId, error } = {}) => {
-    showToast('历史记录清理失败（原文件未改动）' + (error ? `: ${error}` : ''), true);
+// ── IPC: followCwd unavailable ──
+// The SFTP RC wrapper (the only supported cwd-follow bootstrap) could not be
+// prepared; the connection continues as a plain shell. Surface the reason so
+// the degradation stays visible (stderr is invisible in release builds).
+ipcRenderer.on('sftp-cwd-follow-unavailable', (event, { tabId, rendererId, reason } = {}) => {
+    showToast('SFTP 目录跟随不可用（终端不受影响）' + (reason ? `: ${reason}` : ''), true);
 });
 
 // ── IPC: PTY exit ──

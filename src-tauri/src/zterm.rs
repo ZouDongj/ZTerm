@@ -522,9 +522,10 @@ const SSH_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 const SSH_ESTABLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Per-step cap for the best-effort SFTP opens and the followCwd SFTP prep
 /// inside the establishment budget: one stalled SFTP subsystem degrades to
-/// "no SFTP" (or the typed-injection fallback) instead of eating the budget
-/// the shell start still needs — and instead of failing a working terminal
-/// session. The panel lazily rebuilds its channel on demand (issue #29).
+/// "no SFTP" (followCwd reports its own follow-unavailable reason) instead of
+/// eating the budget the shell start still needs — and instead of failing a
+/// working terminal session. The panel lazily rebuilds its channel on demand
+/// (issue #29).
 const SSH_SFTP_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Cancel-flag poll interval at establishment/transfer await points: a tab
 /// close lands within this interval instead of whenever the stuck peer's next
@@ -1131,6 +1132,7 @@ const OSC7_CWD_PATTERN: &str = r"\x1b\]7;file://[^/\x07\x1b\\]*(/[^\x07\x1b\\]*?
 /// Pure function for unit tests; returns the path (with leading /) of the
 /// LATEST complete report — the reader feeds a rolling window that can retain
 /// earlier reports — or None when unmatched.
+#[cfg(test)]
 fn parse_osc7_cwd(text: &str) -> Option<String> {
     let re = regex::Regex::new(OSC7_CWD_PATTERN).ok()?;
     let caps = re.captures_iter(text).last()?;
@@ -1149,6 +1151,7 @@ fn parse_osc7_cwd(text: &str) -> Option<String> {
 const CURRENTDIR_1337_PATTERN: &str =
     r"\x1b\]1337;CurrentDir=(?:file://[^/\x07\x1b\\]*)?(/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)";
 
+#[cfg(test)]
 fn parse_1337_currentdir(text: &str) -> Option<String> {
     // path segment: up to the terminator; an optional file://[host] prefix is allowed (take from the first /)
     let re = regex::Regex::new(CURRENTDIR_1337_PATTERN).ok()?;
@@ -1343,30 +1346,6 @@ fn drain_utf8(carry: &mut Vec<u8>, data: &[u8]) -> String {
         }
     }
     out
-}
-
-/// End index (just past the marker) of the real ZTERM_INJECTED output line in
-/// the injection filter buffer — a line that STARTS with the marker.
-///
-/// Canonical shells without a line editor (sh/dash/ash) echo every typed line
-/// the moment its bytes arrive, so the whole injection script — including the
-/// literal line `echo ZTERM_INJECTED` — is echoed back BEFORE `stty -echo`
-/// takes effect. A plain substring search hits that echo line first and cuts
-/// the filter early, leaking the real marker output and the `stty echo` echo
-/// to the terminal. The echo line carries its `echo ` prefix, so anchoring the
-/// match at a line start selects only the marker actually printed by the
-/// `echo ZTERM_INJECTED` command.
-fn injected_marker_end(buffer: &str) -> Option<usize> {
-    const MARKER: &str = "ZTERM_INJECTED";
-    let mut search_from = 0;
-    while let Some(pos) = buffer[search_from..].find(MARKER) {
-        let abs = search_from + pos;
-        if abs == 0 || buffer.as_bytes()[abs - 1] == b'\n' {
-            return Some(abs + MARKER.len());
-        }
-        search_from = abs + MARKER.len();
-    }
-    None
 }
 
 /// Whitelist for the renderer-supplied COLORFGBG value ("15;0" dark /
@@ -2100,144 +2079,9 @@ fn passwd_entry_fields<'a>(passwd: &'a str, username: &str) -> Option<Vec<&'a st
         .map(|rest| rest.split(':').collect())
 }
 
-/// Home directory of `username` from /etc/passwd contents (5th field of the entry).
-fn passwd_home(passwd: &str, username: &str) -> Option<String> {
-    passwd_entry_fields(passwd, username).and_then(|f| f.get(4).map(|h| h.to_string()))
-}
-
 /// Login shell of `username` from /etc/passwd contents (last field of the entry).
 fn passwd_login_shell(passwd: &str, username: &str) -> Option<String> {
     passwd_entry_fields(passwd, username).and_then(|f| f.last().map(|s| s.trim().to_string()))
-}
-
-/// The followCwd typed-injection script (fallback when the RC wrapper is
-/// unavailable). Single source for the reader's inject task and for history
-/// cleanup: every line is a marker the cleanup removes by exact match.
-/// History is suspended only around the probe: the first line saves the
-/// previous state (zsh HIST_IGNORE_SPACE / bash `set -o history`) and the
-/// line after the marker restores it, so the session keeps recording the
-/// user's own commands (P2-07 — the pre-fix script never re-enabled history).
-const TYPED_CWD_INJECT_SCRIPT: &str = " if [ -n \"$ZSH_VERSION\" ]; then _zt_hio=${options[hist_ignore_space]:-off}; setopt HIST_IGNORE_SPACE 2>/dev/null; else set +o history 2>/dev/null; fi\n\
-     stty -echo\n\
-     _zt_cwd() { printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }\n\
-     if [ -n \"$ZSH_VERSION\" ]; then precmd_functions+=(_zt_cwd); else PROMPT_COMMAND=\"_zt_cwd;${PROMPT_COMMAND}\"; fi\n\
-     export COLORTERM=truecolor\n\
-     echo ZTERM_INJECTED\n\
-     if [ -n \"$ZSH_VERSION\" ]; then [ \"$_zt_hio\" = off ] && unsetopt HIST_IGNORE_SPACE 2>/dev/null; unset _zt_hio; else set -o history 2>/dev/null; fi\n\
-     stty echo\n";
-
-/// Command lines of the legacy typed injection (pre-Rust backend variant):
-/// sessions from old versions may still have them recorded, so cleanup
-/// matches them too. The generic shell fragments of that block ("if [ -n
-/// \"$ZSH_VERSION\" ]; then", "else", "fi") are deliberately excluded — a
-/// user's own multi-line commands contain those too.
-const LEGACY_INJECT_MARKER_LINES: &[&str] = &[
-    "if [ -n \"$ZSH_VERSION\" ]; then _zt_hio=${options[hist_ignore_space]:-off}; setopt HIST_IGNORE_SPACE 2>/dev/null; else set +o history 2>/dev/null; fi",
-    "precmd_functions+=(_zt_cwd)",
-    "PROMPT_COMMAND=\"_zt_cwd;${PROMPT_COMMAND}\"",
-    "if [ -n \"$ZSH_VERSION\" ]; then [ \"$_zt_hio\" = off ] && unsetopt HIST_IGNORE_SPACE 2>/dev/null; unset _zt_hio; else set -o history 2>/dev/null; fi",
-];
-
-/// zsh EXTENDED_HISTORY records entries as ": <begin>:<elapsed>;<command>".
-/// Strip that prefix only when the full decoration is present, so a user
-/// command that merely starts with ": " keeps its text.
-fn strip_zsh_history_prefix(text: &str) -> &str {
-    let Some(rest) = text.strip_prefix(": ") else {
-        return text;
-    };
-    let Some((begin, tail)) = rest.split_once(':') else {
-        return text;
-    };
-    let Some((elapsed, command)) = tail.split_once(';') else {
-        return text;
-    };
-    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
-    if digits(begin) && digits(elapsed) {
-        command
-    } else {
-        text
-    }
-}
-
-/// True when a raw history-file line is exactly one of the command lines the
-/// followCwd injection types (current or legacy variant). Matching is full
-/// line equality after removing history-file decorations (zsh EXTENDED_HISTORY
-/// prefix, backslash newline escape, line terminator); the injection's leading
-/// space (the HIST_IGNORE_SPACE marker) is ignored on both sides. No substring
-/// matching: a user command that merely contains a marker keeps its line.
-fn history_line_is_injection(line: &[u8]) -> bool {
-    let owned = String::from_utf8_lossy(line);
-    let body = strip_zsh_history_prefix(&owned);
-    let body = body.trim_end_matches(['\r', '\n']);
-    let body = body.strip_suffix('\\').unwrap_or(body);
-    let body = body.trim_start_matches(' ');
-    TYPED_CWD_INJECT_SCRIPT
-        .lines()
-        .chain(LEGACY_INJECT_MARKER_LINES.iter().copied())
-        .any(|marker| marker.trim_start_matches(' ') == body)
-}
-
-/// Return the history content with the injected command lines removed, or
-/// None when no line matched (the caller leaves the file untouched).
-/// Operates on raw bytes: kept lines — including invalid UTF-8 — are copied
-/// verbatim.
-fn cleaned_history_bytes(content: &[u8]) -> Option<Vec<u8>> {
-    let mut changed = false;
-    let mut out: Vec<u8> = Vec::with_capacity(content.len());
-    for line in content.split_inclusive(|b| *b == b'\n') {
-        if history_line_is_injection(line) {
-            changed = true;
-        } else {
-            out.extend_from_slice(line);
-        }
-    }
-    if changed {
-        Some(out)
-    } else {
-        None
-    }
-}
-
-/// Clean residual injection artifacts from ~/.bash_history and ~/.zsh_history.
-/// Only the exact command lines the injection types are removed (current and
-/// legacy variants); every other byte of the file — including non-UTF-8
-/// content — is preserved as-is. The cleaned copy goes to a temp file and is
-/// swapped in via finalize_upload_rename, so a failed write leaves the
-/// original history file untouched instead of truncating it.
-async fn clean_history_artifacts(
-    sftp: &russh_sftp::client::SftpSession,
-    username: &str,
-) -> Result<(), String> {
-    // Resolve home dir from /etc/passwd (SFTP doesn't expand ~)
-    let home = {
-        let content = sftp.read("/etc/passwd").await.ok();
-        content.and_then(|c| passwd_home(&String::from_utf8_lossy(&c), username))
-    };
-    let home = match home {
-        Some(h) if !h.is_empty() => h,
-        _ => return Ok(()),
-    };
-    let stamp = format!("{}-{}", std::process::id(), rand_suffix());
-    for name in ["bash_history", "zsh_history"] {
-        let path = format!("{}/.{}", home, name);
-        let content = match sftp.read(&path).await {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let Some(cleaned) = cleaned_history_bytes(&content) else {
-            continue; // nothing to remove: leave the file byte-identical
-        };
-        let tmp = format!("{}.zterm-clean-{}", path, stamp);
-        let backup = format!("{}.zterm-backup-{}", path, stamp);
-        if let Err(e) = sftp_write_file(sftp, &tmp, &cleaned).await {
-            let _ = sftp.remove_file(&tmp).await;
-            return Err(format!("clean {path}: {e}"));
-        }
-        if let Err(e) = finalize_upload_rename(sftp, &tmp, &path, &backup).await {
-            return Err(format!("clean {path}: {e}"));
-        }
-    }
-    Ok(())
 }
 
 /// Write file via SFTP, creating it if missing (sftp.write() requires existing file)
@@ -2343,14 +2187,55 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
     }
 }
 
-/// Prepare followCwd RC wrapper via SFTP. Returns exec command (bash/zsh) or None to fall back.
+/// Why the followCwd RC wrapper could not be prepared or started. Each
+/// variant maps to the one-line reason carried by the
+/// sftp-cwd-follow-unavailable event; the connection itself always proceeds
+/// as a plain shell.
+enum CwdFollowUnavailable {
+    /// No SFTP channel survived establishment — nothing to upload through.
+    NoSftpChannel,
+    /// /etc/passwd unreadable or the user has no entry in it.
+    ShellUndetected,
+    /// Login shell is neither bash nor zsh — no wrapper exists for it.
+    /// Carries the detected shell path (the caller exempts fish: its native
+    /// OSC 1337 reporting keeps follow working on the plain shell).
+    ShellUnsupported(String),
+    /// A wrapper startup file could not be written over SFTP.
+    WrapperUploadFailed,
+    /// Wrapper preparation exceeded its sub-deadline.
+    PrepTimedOut,
+    /// The wrapped shell could not be started over the exec channel; the
+    /// session falls back to a plain shell request on the same channel.
+    WrapperStartFailed,
+}
+
+impl CwdFollowUnavailable {
+    /// Short user-facing reason, shown verbatim in the renderer toast.
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::NoSftpChannel => "SFTP 通道不可用",
+            Self::ShellUndetected => "无法识别远程 shell",
+            Self::ShellUnsupported(_) => "当前 Shell 暂不支持目录跟随",
+            Self::WrapperUploadFailed => "目录跟随组件部署失败",
+            Self::PrepTimedOut => "目录跟随组件准备超时",
+            Self::WrapperStartFailed => "目录跟随组件启动失败",
+        }
+    }
+}
+
+/// Prepare followCwd RC wrapper via SFTP. Ok(exec) is the command that starts
+/// the wrapped shell (bash/zsh); the Err cause feeds the follow-unavailable
+/// report — the caller degrades to a plain shell, never fails the connection.
 async fn prepare_cwd_wrapper(
     sftp: &russh_sftp::client::SftpSession,
     username: &str,
-) -> Option<String> {
-    let shell = detect_shell(sftp, username).await?;
+) -> Result<String, CwdFollowUnavailable> {
+    let shell = detect_shell(sftp, username)
+        .await
+        .ok_or(CwdFollowUnavailable::ShellUndetected)?;
     let stamp = format!("{}-{}", std::process::id(), rand_suffix());
-    let (files, exec) = cwd_wrapper_files(&shell, &stamp)?;
+    let (files, exec) = cwd_wrapper_files(&shell, &stamp)
+        .ok_or_else(|| CwdFollowUnavailable::ShellUnsupported(shell.clone()))?;
     for (path, content) in &files {
         // zsh needs its directory created first
         if let Some(dir) = path.rsplit_once('/').map(|(d, _)| d) {
@@ -2359,10 +2244,10 @@ async fn prepare_cwd_wrapper(
             }
         }
         if sftp_write_file(sftp, path, content).await.is_err() {
-            return None;
+            return Err(CwdFollowUnavailable::WrapperUploadFailed);
         }
     }
-    Some(exec)
+    Ok(exec)
 }
 
 fn rand_suffix() -> String {
@@ -2738,65 +2623,93 @@ pub async fn ssh_connect(
     let sftp = established_sftp!(open_sftp_channel(&handle), "SFTP panel");
     let sftp_transfer = established_sftp!(open_sftp_channel(&handle), "SFTP transfer");
 
-    // FollowCwd: prefer RC wrapper (zero-typing injection via SFTP rc file)
+    // FollowCwd bootstrap: the SFTP-uploaded RC wrapper (started via the exec
+    // channel) is the only supported path. When it cannot be prepared or
+    // started the session degrades to a plain shell and a
+    // sftp-cwd-follow-unavailable event names the cause — follow failure
+    // never blocks or breaks the terminal itself.
     let mut exec_cmd = None;
     if follow_cwd {
-        if let Some(ref s) = sftp {
-            let prep = establish_cancellable(
-                async {
-                    // Clean up residual injection artifacts from previous sessions.
-                    // Best effort: a cleanup failure must not break the connection,
-                    // but it is reported (log + event) so the state is diagnosable.
-                    if let Err(e) = clean_history_artifacts(s, &username).await {
-                        eprintln!("[zterm] followCwd history cleanup failed: {e}");
-                        let _ = app.emit(
-                            "ssh-history-clean-failed",
-                            json!({ "tabId": tab_id, "rendererId": renderer_id, "error": e }),
-                        );
-                    }
-                    prepare_cwd_wrapper(s, &username).await
-                },
+        // A missing SFTP channel is itself an unavailable cause: route it
+        // through the same Done arm instead of duplicating the emit.
+        let prep = if let Some(ref s) = sftp {
+            establish_cancellable(
+                prepare_cwd_wrapper(s, &username),
                 &cancel_flag,
                 // Sub-deadline, not the whole budget: a tarpitted prep must
-                // leave room for the typed-injection fallback AND the shell
-                // start — an already-exhausted budget would make the shell
-                // step time out instantly and kill the connection anyway.
+                // leave room for the shell start — an already-exhausted budget
+                // would make the shell step time out instantly and kill the
+                // connection anyway.
                 tokio::time::sleep_until(std::cmp::min(
                     establish_deadline,
                     tokio::time::Instant::now() + SSH_SFTP_STEP_TIMEOUT,
                 )),
             )
-            .await;
-            match prep {
-                EstablishOutcome::Done(exec) => exec_cmd = exec,
-                // SFTP prep is best-effort: a tarpitted SFTP channel falls back
-                // to the typed injection instead of failing the connection.
-                EstablishOutcome::TimedOut => {
-                    eprintln!("[zterm] followCwd SFTP prep timed out; falling back to typed injection");
+            .await
+        } else {
+            EstablishOutcome::Done(Err(CwdFollowUnavailable::NoSftpChannel))
+        };
+        match prep {
+            EstablishOutcome::Done(result) => match result {
+                Ok(exec) => exec_cmd = Some(exec),
+                Err(cause) => {
+                    // fish is exempt from the report: it reports the cwd
+                    // natively via OSC 1337 at every prompt and cwd parsing
+                    // stays active on the degraded plain shell, so follow
+                    // keeps working without any wrapper.
+                    let fish = matches!(&cause, CwdFollowUnavailable::ShellUnsupported(sh)
+                        if sh == "fish" || sh.ends_with("/fish"));
+                    if fish {
+                        eprintln!("[zterm] followCwd: no RC wrapper for fish; relying on native OSC 1337 reporting");
+                    } else {
+                        eprintln!("[zterm] followCwd unavailable: {}", cause.reason());
+                        let _ = app.emit(
+                            "sftp-cwd-follow-unavailable",
+                            json!({ "tabId": tab_id, "rendererId": renderer_id, "reason": cause.reason() }),
+                        );
+                    }
                 }
-                EstablishOutcome::Cancelled => {
-                    let _ = handle
-                        .disconnect(russh::Disconnect::ByApplication, "ZTerm cancelled", "")
-                        .await;
-                    return Ok(json!({ "cancelled": true, "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }));
-                }
+            },
+            // SFTP prep is best-effort: a tarpitted prep degrades to a plain
+            // shell with an explicit reason instead of failing the connection.
+            EstablishOutcome::TimedOut => {
+                eprintln!("[zterm] followCwd SFTP prep timed out; continuing with a plain shell");
+                let _ = app.emit(
+                    "sftp-cwd-follow-unavailable",
+                    json!({ "tabId": tab_id, "rendererId": renderer_id, "reason": CwdFollowUnavailable::PrepTimedOut.reason() }),
+                );
+            }
+            EstablishOutcome::Cancelled => {
+                let _ = handle
+                    .disconnect(russh::Disconnect::ByApplication, "ZTerm cancelled", "")
+                    .await;
+                return Ok(json!({ "cancelled": true, "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }));
             }
         }
     }
 
-    // Start shell: exec wrapped shell (followCwd) or plain shell
+    // Start shell: exec wrapped shell (followCwd) or plain shell. A failed
+    // wrapper exec only means follow is unavailable — degrade to a plain
+    // shell request on the same channel; only when that also fails is the
+    // channel genuinely broken and the connection lost.
+    let mut exec_failed = false;
     if let Some(ref cmd) = exec_cmd {
-        established!(channel.exec(true, cmd.as_str()), "shell").map_err(|e| {
-            if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                return "cancelled".to_string();
+        match established!(channel.exec(true, cmd.as_str()), "shell") {
+            Ok(()) => {}
+            Err(e) => {
+                if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err("cancelled".to_string());
+                }
+                eprintln!("[zterm] followCwd wrapper exec failed: {e}; falling back to a plain shell");
+                let _ = app.emit(
+                    "sftp-cwd-follow-unavailable",
+                    json!({ "tabId": tab_id, "rendererId": renderer_id, "reason": CwdFollowUnavailable::WrapperStartFailed.reason() }),
+                );
+                exec_failed = true;
             }
-            let _ = app.emit(
-                "ssh-error",
-                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH shell: {e}") }),
-            );
-            format!("SSH shell: {e}")
-        })?;
-    } else {
+        }
+    }
+    if exec_cmd.is_none() || exec_failed {
         established!(channel.request_shell(true), "shell").map_err(|e| {
             if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 return "cancelled".to_string();
@@ -2836,22 +2749,10 @@ pub async fn ssh_connect(
         });
     }
 
-    // FollowCwd typed injection: fallback when RC wrapper unavailable
-    let inject = follow_cwd && exec_cmd.is_none();
-    let track_cwd = follow_cwd; // OSC 7 parsing active for both rc wrapper and typed injection
-                                // Injection filter flag: only activates once the injection is sent, so login-script output is not swallowed
-    let filtering = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let filtering_inject = Arc::clone(&filtering);
-    if inject {
-        let wtx = writer_tx.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-            // Every line starts with a space: once zsh sets HIST_IGNORE_SPACE inline, these lines are never recorded — fully traceless
-            // The marker is printed while stty -echo is active → printed once, with no echo
-            filtering_inject.store(true, std::sync::atomic::Ordering::Relaxed);
-            let _ = wtx.send(TYPED_CWD_INJECT_SCRIPT.as_bytes().to_vec()).await;
-        });
-    }
+    // OSC 7 / 1337 cwd parsing is active on every followCwd session, wrapper
+    // or degraded plain shell alike: the wrapper's _zt_cwd, fish's native
+    // 1337 reports, and any user-configured reporter feed the same window.
+    let track_cwd = follow_cwd;
 
     // Spawn reader task (owns Channel — wait() needs &mut, handles resize via select!)
     let app2 = app.clone();
@@ -2863,7 +2764,6 @@ pub async fn ssh_connect(
     let reader_writer = writer_tx.clone();
     let cwd = Arc::new(Mutex::new(None::<String>));
     let cwd_reader = Arc::clone(&cwd);
-    let filtering_reader = Arc::clone(&filtering);
     let reason_reader = Arc::clone(&disconnect_reason);
     tokio::spawn(async move {
         // Cross-chunk character carry: SSH channel data can split a UTF-8 multi-byte
@@ -2871,19 +2771,6 @@ pub async fn ssh_connect(
         let mut utf8_carry: Vec<u8> = Vec::new();
         // Cross-chunk OSC 7 window: join chunk tails so a sequence split across data chunks still matches
         let mut osc7_window = String::new();
-        // Inject state machine: filter output until ZTERM_INJECTED marker.
-        // Filtering only activates when the injection task sets the flag.
-        let mut inject_buffer = String::new();
-        let inject_timeout = tokio::time::sleep(std::time::Duration::from_secs(5));
-        tokio::pin!(inject_timeout);
-        // One-shot latch for the injection-timeout arm. A pinned `Sleep` stays
-        // Ready(()) forever once its deadline passes (the timer entry settles
-        // in the fired/DEREGISTERED state and only reset() re-arms it), and
-        // tokio's coop budget re-wakes the task instead of parking it —
-        // without this guard the reader becomes a permanent hot loop five
-        // seconds into every SSH session, burning a core per idle session
-        // (issue #15). See examples/select_sleep_spin.rs.
-        let mut inject_fired = false;
         // Cross-chunk expect window: login-script prompts split across SSH
         // data chunks still match (see feed_login_scripts_windowed)
         let mut login_expect_window = String::new();
@@ -2892,9 +2779,13 @@ pub async fn ssh_connect(
         // text printed after login gets auto-answered. This one-shot deadline
         // retires whatever never matched: once the queue has been quiet past
         // the deadline the login is over — every step either matched, or its
-        // prompt is gone. Same pinned-Sleep latch guard as inject_timeout
-        // above (a fired Sleep polls Ready forever; the guard prevents the
-        // permanent hot loop).
+        // prompt is gone. The fired latch matters because a pinned `Sleep`
+        // stays Ready(()) forever once its deadline passes (the timer entry
+        // settles in the fired/DEREGISTERED state and only reset() re-arms
+        // it), and tokio's coop budget re-wakes the task instead of parking
+        // it — without this guard the reader becomes a permanent hot loop,
+        // burning a core per idle session (issue #15). See
+        // examples/select_sleep_spin.rs.
         let login_retire_timeout = tokio::time::sleep(std::time::Duration::from_millis(
             LOGIN_SCRIPT_RETIRE_TIMEOUT_MS,
         ));
@@ -2916,16 +2807,6 @@ pub async fn ssh_connect(
                                 "ssh-login-script-timeout",
                                 json!({ "tabId": tid, "rendererId": rid, "expects": missed_required }),
                             );
-                        }
-                    }
-                }
-                _ = &mut inject_timeout, if !inject_fired => {
-                    inject_fired = true;
-                    // Timeout: force Normal state to avoid stuck filtering
-                    if filtering_reader.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                        let remainder = std::mem::take(&mut inject_buffer);
-                        if !remainder.is_empty() {
-                            let _ = app2.emit("pty-output", json!({ "tabId": tid, "data": remainder }));
                         }
                     }
                 }
@@ -2953,44 +2834,26 @@ pub async fn ssh_connect(
                             for t in send_texts {
                                 let _ = reader_writer.send(t.into_bytes()).await;
                             }
-                            if filtering_reader.load(std::sync::atomic::Ordering::Relaxed) {
-                                // Filter injection echo until ZTERM_INJECTED marker
-                                inject_buffer.push_str(&text);
-                                // Match the marker at a LINE START only: canonical
-                                // shells echo the typed `echo ZTERM_INJECTED` line
-                                // before stty -echo takes effect, and a plain
-                                // substring match would cut the filter at that echo
-                                // line, leaking the real marker to the terminal.
-                                if let Some(marker_end) = injected_marker_end(&inject_buffer) {
-                                    filtering_reader.store(false, std::sync::atomic::Ordering::Relaxed);
-                                    // Strip everything up to and including the marker + trailing newline
-                                    let remainder = inject_buffer[marker_end..].trim_start_matches(['\n', '\r']).to_string();
-                                    inject_buffer.clear();
-                                    if !remainder.is_empty() {
-                                        let _ = app2.emit("pty-output", json!({ "tabId": tid, "data": remainder }));
+                            // Parse OSC 7 / 1337 for cwd tracking (the RC wrapper's
+                            // _zt_cwd and fish's native per-prompt reports)
+                            if track_cwd {
+                                // An OSC 7 sequence can be split across SSH data chunks: the rolling
+                                // window in window_cwd_after keeps the previous chunk's tail joined
+                                let new_cwd = window_cwd_after(&mut osc7_window, &text);
+                                if let Some(new_cwd) = new_cwd {
+                                    let changed = {
+                                        let mut c = cwd_reader.lock();
+                                        if c.as_ref() != Some(&new_cwd) {
+                                            *c = Some(new_cwd.clone());
+                                            true
+                                        } else { false }
+                                    };
+                                    if changed {
+                                        let _ = app2.emit("sftp-cwd-changed", json!({ "tabId": tid, "cwd": new_cwd }));
                                     }
                                 }
-                            } else {
-                                // Parse OSC 7 for cwd tracking (active for both rc wrapper and typed injection)
-                                if track_cwd {
-                                    // An OSC 7 sequence can be split across SSH data chunks: the rolling
-                                    // window in window_cwd_after keeps the previous chunk's tail joined
-                                    let new_cwd = window_cwd_after(&mut osc7_window, &text);
-                                    if let Some(new_cwd) = new_cwd {
-                                        let changed = {
-                                            let mut c = cwd_reader.lock();
-                                            if c.as_ref() != Some(&new_cwd) {
-                                                *c = Some(new_cwd.clone());
-                                                true
-                                            } else { false }
-                                        };
-                                        if changed {
-                                            let _ = app2.emit("sftp-cwd-changed", json!({ "tabId": tid, "cwd": new_cwd }));
-                                        }
-                                    }
-                                }
-                                let _ = app2.emit("pty-output", json!({ "tabId": tid, "data": text }));
                             }
+                            let _ = app2.emit("pty-output", json!({ "tabId": tid, "data": text }));
                         }
                         Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) => {
                             let path = if matches!(msg, Some(russh::ChannelMsg::Eof)) {
@@ -8654,120 +8517,14 @@ mod tests {
     }
 
     #[test]
-    fn passwd_home_picks_home_field_not_shell() {
-        // Regression: clean_history_artifacts resolved the home from the entry's
-        // 6th field (the login shell), producing /bin/bash/.bash_history — a
-        // path that never exists, so every history cleanup silently skipped.
-        let passwd = "root:x:0:0:root:/root:/bin/bash\n\
-                      alice:x:1000:1000:Alice,,,:/home/alice:/bin/zsh\n";
-        assert_eq!(passwd_home(passwd, "alice").as_deref(), Some("/home/alice"));
-        assert_eq!(passwd_home(passwd, "root").as_deref(), Some("/root"));
-        assert_eq!(passwd_home(passwd, "nobody"), None);
-    }
-
-    #[test]
     fn passwd_login_shell_picks_last_field() {
-        // Shared parser with passwd_home: both read the same entry shape.
+        // Field layout of an /etc/passwd entry: name:passwd:uid:gid:gecos:home:shell.
         let passwd = "alice:x:1000:1000:Alice:/home/alice:/bin/zsh\n";
         assert_eq!(
             passwd_login_shell(passwd, "alice").as_deref(),
             Some("/bin/zsh")
         );
         assert_eq!(passwd_login_shell(passwd, "nobody"), None);
-    }
-
-    #[test]
-    fn history_cleanup_keeps_file_without_markers() {
-        assert!(cleaned_history_bytes(b"ls -la\ngit status\n").is_none());
-        assert!(cleaned_history_bytes(b"").is_none());
-    }
-
-    #[test]
-    fn history_cleanup_removes_exact_injected_lines() {
-        // Byte-identical to what the typed injection sends, leading space
-        // included; everything else survives.
-        let mut content = String::new();
-        for l in TYPED_CWD_INJECT_SCRIPT.lines() {
-            content.push_str(l);
-            content.push('\n');
-        }
-        content.push_str("ls -la\n");
-        let cleaned = cleaned_history_bytes(content.as_bytes()).expect("markers must be removed");
-        assert_eq!(String::from_utf8_lossy(&cleaned), "ls -la\n");
-    }
-
-    #[test]
-    fn history_cleanup_no_substring_false_positives() {
-        // Substring lookalikes of every old pattern must survive: only exact
-        // full-line matches are removed.
-        let content = b"grep _zt_cwd file.txt\n\
-                        echo ZTERM_INJECTED extra-words\n\
-                        man set +o history\n\
-                        vim hist_ignore_space.conf\n\
-                        _zt_hio=1\n\
-                        setopt HIST_IGNORE_SPACE manually\n\
-                        fi\n\
-                        else\n";
-        assert!(cleaned_history_bytes(content).is_none());
-    }
-
-    #[test]
-    fn history_cleanup_preserves_non_utf8_bytes() {
-        // Invalid UTF-8 content must come back byte-identical (no lossy
-        // replacement), while the marker line next to it is removed.
-        let mut content = b"\xFF\xFE raw \xC3\x28 bytes\n".to_vec();
-        content.extend_from_slice(TYPED_CWD_INJECT_SCRIPT.lines().next().unwrap().as_bytes());
-        content.extend_from_slice(b"\n");
-        let cleaned = cleaned_history_bytes(&content).expect("marker removed");
-        assert_eq!(cleaned, b"\xFF\xFE raw \xC3\x28 bytes\n");
-    }
-
-    #[test]
-    fn history_cleanup_matches_decorated_history_lines() {
-        // zsh EXTENDED_HISTORY prefix and backslash newline escape are
-        // stripped before the comparison, so decorated entries are cleaned.
-        let marker = TYPED_CWD_INJECT_SCRIPT.lines().next().unwrap();
-        let prefixed = format!(": 1696000000:0;{marker}\n");
-        let continued = format!("{marker}\\\n");
-        let mut content = prefixed.into_bytes();
-        content.extend_from_slice(continued.as_bytes());
-        content.extend_from_slice(b"keep me\n");
-        let cleaned = cleaned_history_bytes(&content).expect("decorated markers removed");
-        assert_eq!(String::from_utf8_lossy(&cleaned), "keep me\n");
-    }
-
-    #[test]
-    fn history_cleanup_removes_legacy_injection_lines() {
-        // Residue from the pre-Rust backend injection variant still gets
-        // cleaned, by exact line.
-        let mut content = LEGACY_INJECT_MARKER_LINES.join("\n").into_bytes();
-        content.extend_from_slice(b"\ntrue\n");
-        let cleaned = cleaned_history_bytes(&content).expect("legacy markers removed");
-        assert_eq!(String::from_utf8_lossy(&cleaned), "true\n");
-    }
-
-    #[test]
-    fn history_cleanup_preserves_line_terminators_and_missing_final_newline() {
-        // CRLF lines and a final line without a newline survive as-is.
-        let marker = TYPED_CWD_INJECT_SCRIPT.lines().next().unwrap();
-        let content = format!("a\r\n{marker}\nb");
-        let cleaned = cleaned_history_bytes(content.as_bytes()).expect("marker removed");
-        assert_eq!(String::from_utf8_lossy(&cleaned), "a\r\nb");
-    }
-
-    #[test]
-    fn history_line_prefix_stripper_requires_full_zsh_decoration() {
-        // A user command that merely starts with ": " keeps its text.
-        assert_eq!(
-            strip_zsh_history_prefix(": not a timestamp; echo hi"),
-            ": not a timestamp; echo hi"
-        );
-        assert_eq!(strip_zsh_history_prefix("plain"), "plain");
-        assert_eq!(strip_zsh_history_prefix(": 1696000000:0;cmd"), "cmd");
-        assert_eq!(
-            strip_zsh_history_prefix(": 1696000000:;cmd"),
-            ": 1696000000:;cmd"
-        );
     }
 
     #[test]
@@ -8923,35 +8680,6 @@ mod tests {
         let out = drain_utf8(&mut carry, b"");
         assert_eq!(out, "");
         assert_eq!(carry, vec![0xE4], "空输入不得动 carry");
-    }
-
-    #[test]
-    fn injected_marker_ignores_the_typed_echo_line() {
-        // Canonical shells (sh/dash) echo every typed line before stty -echo
-        // takes effect: the buffer holds the echoed `echo ZTERM_INJECTED` line
-        // BEFORE the real marker output. A plain substring match would cut the
-        // filter at the echo line and leak the real marker + stty echo output.
-        let buffer = " set +o history\r\nstty -echo\r\necho ZTERM_INJECTED\r\nstty echo\r\nZTERM_INJECTED\r\n$ ";
-        let end = injected_marker_end(buffer).expect("real marker line must match");
-        assert_eq!(
-            &buffer[end..],
-            "\r\n$ ",
-            "cut must happen at the real marker line"
-        );
-        // Only the typed echo so far (the real marker has not been printed yet):
-        // the filter must keep waiting instead of cutting early.
-        let echo_only = "$ echo ZTERM_INJECTED\r\n$ ";
-        assert_eq!(injected_marker_end(echo_only), None);
-    }
-
-    #[test]
-    fn injected_marker_matches_at_buffer_start() {
-        // No typed echo (shell with a line editor honors stty -echo in time):
-        // the marker line is the first thing in the buffer.
-        let buffer = "ZTERM_INJECTED\r\n$ ";
-        let end = injected_marker_end(buffer).expect("marker at buffer start");
-        assert_eq!(&buffer[end..], "\r\n$ ");
-        assert_eq!(injected_marker_end("no marker here"), None);
     }
 
     #[test]
@@ -9217,11 +8945,11 @@ mod tests {
     #[test]
     fn truecolor_is_advertised_on_every_remote_shell_path() {
         // xterm.js renders 24-bit color, so every way a remote shell can
-        // start must see COLORTERM=truecolor: the bash rc wrapper, the zsh
-        // ZDOTDIR wrapper, and the typed-injection fallback. Shells with no
-        // wrapper (fish & co.) rely on the SSH set_env instead (not covered
-        // here — needs a live channel). Placed after profile sourcing so the
-        // advertisement wins over stale inherited values.
+        // start must see COLORTERM=truecolor: the bash rc wrapper and the zsh
+        // ZDOTDIR wrapper. Shells with no wrapper (fish & co.) rely on the
+        // SSH set_env instead (not covered here — needs a live channel).
+        // Placed after profile sourcing so the advertisement wins over stale
+        // inherited values.
         let (files, _) = cwd_wrapper_files("/bin/bash", "t").expect("bash wrapper");
         let rc = String::from_utf8_lossy(&files[0].1);
         assert!(rc.contains("export COLORTERM=truecolor"), "bash rc: {rc}");
@@ -9230,11 +8958,21 @@ mod tests {
         let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
         let text = String::from_utf8_lossy(&zshrc.1);
         assert!(text.contains("export COLORTERM=truecolor"), "zsh .zshrc: {text}");
+    }
 
-        assert!(
-            TYPED_CWD_INJECT_SCRIPT.contains("export COLORTERM=truecolor"),
-            "typed injection fallback"
+    #[test]
+    fn cwd_follow_unavailable_reasons_are_pinned() {
+        // The reason strings surface verbatim in the renderer toast; every
+        // variant is pinned so a wording change is a deliberate, reviewed one.
+        assert_eq!(CwdFollowUnavailable::NoSftpChannel.reason(), "SFTP 通道不可用");
+        assert_eq!(CwdFollowUnavailable::ShellUndetected.reason(), "无法识别远程 shell");
+        assert_eq!(
+            CwdFollowUnavailable::ShellUnsupported("/usr/bin/fish".into()).reason(),
+            "当前 Shell 暂不支持目录跟随"
         );
+        assert_eq!(CwdFollowUnavailable::WrapperUploadFailed.reason(), "目录跟随组件部署失败");
+        assert_eq!(CwdFollowUnavailable::PrepTimedOut.reason(), "目录跟随组件准备超时");
+        assert_eq!(CwdFollowUnavailable::WrapperStartFailed.reason(), "目录跟随组件启动失败");
     }
 
     #[test]
@@ -9845,100 +9583,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r["error"], json!("missing path"));
-    }
-
-    #[test]
-    fn typed_inject_script_suspends_then_restores_history() {
-        // P2-07: history is disabled only around the probe and restored right
-        // after the marker, so the session keeps recording the user's commands.
-        let marker = TYPED_CWD_INJECT_SCRIPT
-            .find("echo ZTERM_INJECTED")
-            .expect("marker line");
-        let disable = TYPED_CWD_INJECT_SCRIPT
-            .find("set +o history")
-            .expect("bash history suspend");
-        assert!(
-            disable < marker,
-            "history must be suspended before the marker"
-        );
-        let restore = TYPED_CWD_INJECT_SCRIPT
-            .find("set -o history")
-            .expect("bash history restore");
-        assert!(restore > marker, "history must be restored after the marker");
-        // The zsh idiom restores HIST_IGNORE_SPACE in the same step.
-        let zsh_restore = TYPED_CWD_INJECT_SCRIPT
-            .find("unsetopt HIST_IGNORE_SPACE")
-            .expect("zsh history restore");
-        assert!(zsh_restore > marker);
-        // The first line starts with a space (history-ignore marker); later
-        // lines rely on the just-set HIST_IGNORE_SPACE / disabled history and
-        // on clean_history_artifacts' exact-match cleanup.
-        assert!(TYPED_CWD_INJECT_SCRIPT.starts_with(' '));
-    }
-
-    #[test]
-    fn typed_inject_script_leaves_history_on_e2e() {
-        // Feed the real script to an interactive bash (skipped when no bash on
-        // this machine): after the probe, `set -o` must report history on —
-        // the pre-fix script left it off for the rest of the session (P2-07).
-        let bash = [
-            "bash",
-            "D:/Program Files/Git/bin/bash.exe",
-            "C:/Program Files/Git/bin/bash.exe",
-        ]
-        .iter()
-        .find(|p| {
-            std::process::Command::new(p)
-                .arg("--version")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        });
-        let Some(bash) = bash else {
-            eprintln!("skip: no bash on this machine");
-            return;
-        };
-        let mut child = std::process::Command::new(bash)
-            .arg("--noprofile")
-            .arg("--norc")
-            .arg("-i")
-            .env("TERM", "dumb")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            // stty on a pipe complains "not a tty": noise, not failure.
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn bash");
-        use std::io::Write;
-        let mut input = TYPED_CWD_INJECT_SCRIPT.to_string();
-        // awk prints an unambiguous sentinel (the shell's own OSC7 prompt hooks
-        // glue bare output onto escape sequences, so a plain grep line is not
-        // reliably line-anchored).
-        input.push_str("set -o | awk '$1==\"history\"{print \"HISTORY_IS_\" $2}'\nexit\n");
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .expect("feed stdin");
-        let out = child.wait_with_output().expect("wait bash");
-        let text = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            text.contains("ZTERM_INJECTED"),
-            "script did not run to the marker: {}",
-            text.escape_debug().take(300).collect::<String>()
-        );
-        assert!(
-            text.contains("HISTORY_IS_on"),
-            "history must be on after the probe: {}",
-            text.escape_debug().take(300).collect::<String>()
-        );
-        assert!(
-            !text.contains("HISTORY_IS_off"),
-            "history was left off after the probe"
-        );
     }
 
     #[tokio::test]
