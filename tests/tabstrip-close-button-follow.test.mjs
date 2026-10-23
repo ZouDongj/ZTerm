@@ -144,6 +144,59 @@ test('a close burst keeps the button hold until the LAST dying slot settles', ()
     }
 });
 
+// The burst intermediate render must not just KEEP the hold — the settled
+// slot's width already collapsed out of the layout, so the held offset is
+// stale by exactly that width (the buttons would jump a full slot at each
+// intermediate doRemove and snap back at the settle). The render re-anchors
+// the hold onto the REMAINING dying width, like _reholdStripSlides does for
+// the follower tabs.
+test('the burst intermediate render re-anchors the button hold to the remaining dying width', () => {
+    const ctx = loadVm();
+    const { addBtn, menuBtn } = stripFixture(ctx, 4);
+
+    ctx.TabManager.closeTab('t1');
+    ctx.TabManager.closeTab('t2');
+    for (const btn of [addBtn, menuBtn]) {
+        assert.equal(btn._animateCalls.length, 2, 'burst: second close re-targeted the hold');
+        assert.equal(liveStripSlides(btn).length, 1, 'burst: one live hold');
+    }
+
+    ctx.__tq.advance(200); // t1's slot collapses inside this render
+    for (const btn of [addBtn, menuBtn]) {
+        const live = liveStripSlides(btn);
+        assert.equal(live.length, 1, 'one re-anchored hold, not a stale one');
+        // Geometry note: render rebuilt the dying tab element, so the VM reads
+        // its width as 0 — the remaining dying width here is just the 2px
+        // strip gap (in a real layout: t2's 120px + 2). The pin is the
+        // RETARGET to remaining-only, not the absolute figure.
+        assert.equal(live[0].keyframes[1].transform, 'translateX(-2px)',
+            'the hold retargets to the remaining dying slot only');
+        assert.notEqual(live[0], btn._animateCalls[1], 'the re-anchor replaced the burst hold');
+        assert.ok(btn._animateCalls[1].cancelled, 'the stale full-owed hold was cancelled');
+    }
+});
+
+// doRemove's early return (the tab was already removed by another path) runs
+// no render — the button hold from the close slide would linger until the
+// next unrelated render. It settles inline now.
+test('a doRemove that finds the tab already gone still settles the button hold', () => {
+    const ctx = loadVm();
+    const { addBtn, menuBtn } = stripFixture(ctx);
+
+    ctx.TabManager.closeTab('t1');
+    for (const btn of [addBtn, menuBtn]) {
+        assert.equal(liveStripSlides(btn).length, 1, 'hold armed by the close');
+    }
+    // Another path (drag-extract, teardown, ...) removes the tab before the
+    // fade timer fires.
+    ctx.TabManager.tabs.splice(ctx.TabManager.tabs.findIndex(t => t.id === 't1'), 1);
+
+    ctx.__tq.advance(200); // doRemove takes the cur < 0 early return
+    for (const btn of [addBtn, menuBtn]) {
+        assert.equal(liveStripSlides(btn).length, 0, 'the hold settled without waiting for a render');
+    }
+});
+
 // The buttons move on a close only when the viewport actually shrinks:
 // overflow keeps it clamped to the availability, and sharing recomputes the
 // widths at the removal unless the close deferral holds them (pointer over

@@ -1178,7 +1178,19 @@ const TabManager = {
             // Re-locate idx by id — the user may have reordered or closed other tabs
             // during the animation, and the closure's stale idx would splice the wrong slot
             const cur = this.tabs.findIndex(t => t.id === id);
-            if (cur < 0) { this._closingTabs.delete(id); return; } // already closed by another path
+            // Already closed by another path: no render follows from this
+            // early return, so a lingering button hold from the close slide
+            // would otherwise wait for the next unrelated render — settle it.
+            if (cur < 0) {
+                this._closingTabs.delete(id);
+                if (this._closingTabs.size === 0) {
+                    const goneAdd = document.getElementById('btn-add-tab');
+                    const goneMenu = document.getElementById('btn-menu');
+                    if (goneAdd) _cancelStripSlides(goneAdd);
+                    if (goneMenu) _cancelStripSlides(goneMenu);
+                }
+                return;
+            }
             this.tabs.splice(cur, 1);
             this._closingTabs.delete(id);
             // Release the plaintext credential held in main-process memory
@@ -1594,6 +1606,7 @@ const TabManager = {
         vp.scrollLeft = prevScroll;
         this._relayout(false);
         this._reholdStripSlides(vp, prevRects);
+        this._reholdStripButtonSlides(vp, prevRects);
         this._applyStripFlip(vp, prevRects);
         // Settle the add/menu buttons' close slide: closeTab holds them in a
         // forwards-filled transform while the dying slot fades, and the
@@ -1650,6 +1663,47 @@ const TabManager = {
         });
     },
 
+    // Burst re-anchor for the add/menu buttons: their close-initiation slide
+    // holds the FULL owed dying width, but an interleaved doRemove render has
+    // already collapsed the settled part of it into the layout — without the
+    // same re-anchor the follower tabs get in _reholdStripSlides, the buttons
+    // jump a whole slot width at each intermediate doRemove and snap back at
+    // the final settle. Retarget the hold from its pre-rebuild visual offset
+    // to the REMAINING dying width; the settle cancel below is unchanged.
+    _reholdStripButtonSlides(vp, prevRects) {
+        if (!vp || this._dragTab || this._closingTabs.size === 0 || !vp.querySelectorAll) return;
+        const bar = document.getElementById('tabbar');
+        if (!bar) return;
+        // Same skip conditions as the close-initiation slide: in the pinned
+        // states a close never moves the buttons, so there is no hold to
+        // re-anchor.
+        if (bar.classList.contains('tabbar-overflow')
+            || (bar.classList.contains('tabbar-sharing') && !this._deferStripRelayout)) return;
+        let cumDx = 0;
+        vp.querySelectorAll('.tab').forEach(el => {
+            if (this._closingTabs.has(el.getAttribute('data-tab'))) cumDx += (el.offsetWidth || 0) + 2;
+        });
+        for (const btnId of ['btn-add-tab', 'btn-menu']) {
+            const btn = document.getElementById(btnId);
+            if (!btn || typeof btn.animate !== 'function' || !btn.getBoundingClientRect) continue;
+            _cancelStripSlides(btn); // drop the stale hold BEFORE measuring the pure layout position
+            const layoutLeft = btn.getBoundingClientRect().left;
+            const prev = prevRects ? prevRects.get(btnId) : null;
+            const from = prev == null ? 0 : prev - layoutLeft;
+            const to = -cumDx;
+            if (Math.abs(from - to) < 0.5) {
+                if (btn.style) btn.style.transform = `translateX(${to}px)`;
+                continue;
+            }
+            try {
+                const anim = btn.animate(
+                    [{ transform: `translateX(${from}px)` }, { transform: `translateX(${to}px)` }],
+                    { duration: 180, easing: 'cubic-bezier(0.05, 0.7, 0.1, 1)', fill: 'forwards' });
+                anim.id = STRIP_SLIDE_ID;
+            } catch (e) {}
+        }
+    },
+
     // FLIP helpers for the tab strip. Positions are animated with WAAPI
     // composite transforms only — layout-property transitions stay banned on
     // the strip (they stall the WebView2 host message pump; see the .tab-exit
@@ -1662,6 +1716,14 @@ const TabManager = {
             const r = el.getBoundingClientRect && el.getBoundingClientRect();
             if (r && Number.isFinite(r.left)) rects.set(el.getAttribute('data-tab'), r.left);
         });
+        // The add/menu buttons live outside the viewport but ride the same
+        // close slides; their pre-rebuild visual positions (in-flight holds
+        // included) feed the burst re-anchor in _reholdStripButtonSlides.
+        for (const btnId of ['btn-add-tab', 'btn-menu']) {
+            const btn = document.getElementById(btnId);
+            const r = btn && btn.getBoundingClientRect && btn.getBoundingClientRect();
+            if (r && Number.isFinite(r.left)) rects.set(btnId, r.left);
+        }
         return rects;
     },
 
