@@ -6,7 +6,10 @@
 // resolveTabName immediately rejoined the pane names over the user's rename.
 // The single-tab variant lost the lock silently too: the name survived the
 // restart (nothing recomputed it yet), but the FIRST later split recomputed
-// the name from the pane sessions and the rename was gone.
+// the name from the pane sessions and the rename was gone. (Since the demote-
+// on-first-split semantics, a later split no longer needs the tab-level lock:
+// the rename rides the original pane and joins the split name — see
+// tab-rename-split-demote.test.mjs.)
 //
 // REAL in this VM: tabs.js (_restoreSplitTab, the profiles restore callback
 // driving createTabSilent, _updateTabName, addPaneRelativeTo), tab-title-
@@ -67,7 +70,7 @@ test('restored split tab without customName still auto-joins pane names (guard)'
     assert.equal(tab.name, 'alpha | beta', 'auto naming keeps working for unlocked tabs');
 });
 
-test('restored single tab with customName keeps the lock through a later split', async () => {
+test('restored single tab with customName demotes the rename on a later split', async () => {
     const ctx = loadVmWithSerialize();
     let profilesFn = null;
     ctx.ipcRenderer.once = (ch, fn) => { if (ch === 'profiles') profilesFn = fn; };
@@ -86,13 +89,16 @@ test('restored single tab with customName keeps the lock through a later split',
     assert.equal(tab._customName, true, 'rename lock restored on the single-tab path');
     assert.equal(tab.name, 'Work');
 
-    // The variant from the report: backend arrives, the tab is split, and a
-    // pane gets its own session name — the rename must still win.
+    // The rename names the single session: on the first split it demotes onto
+    // the original pane and the tab re-joins its pane names (the lock only
+    // survives when the tab was renamed AFTER the split).
     ctx.wireTerminal(tab, 'local_1');
     ctx.TabManager.addPaneRelativeTo(tab, 'b');
     const panes = ctx.getAllPanes(tab);
     assert.equal(panes.length, 2, 'split built');
+    assert.equal(tab._customName, undefined, 'the lock demoted onto the original pane');
+    assert.equal(panes[0].name, 'Work', 'the custom name rides the original pane');
     panes[1].name = 'pwsh-session'; // session naming arriving for the new pane
     ctx.TabManager._updateTabName(tab);
-    assert.equal(tab.name, 'Work', 'the lock survives the later split');
+    assert.equal(tab.name, 'Work | pwsh-session', 'the demoted rename joins the split name');
 });

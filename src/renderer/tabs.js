@@ -1809,6 +1809,12 @@ const TabManager = {
             const newPane = this._newPaneData(tab);
             const isH = side === 'l' || side === 'r';
             tab.splitRoot = this._createContainer(isH ? 'h' : 'v');
+            // A manual rename names the single session, not the future split
+            // container: the custom name already moved onto the `existing` pane
+            // (_newPaneData takes tab.name), so dropping the rename lock lets
+            // the tab join its pane names again. Renaming AFTER the split still
+            // locks the container name explicitly.
+            delete tab._customName;
             if (side === 'l' || side === 't') tab.splitRoot.children = [newPane, existing];
             else tab.splitRoot.children = [existing, newPane];
             tab.splitRoot.ratios = [0.5, 0.5];
@@ -2888,6 +2894,10 @@ const TabManager = {
             // Same transfer rule as the terminal: the tool-provided name moves onto fp.
             if (targetTab._toolName !== undefined) { fp._toolName = targetTab._toolName; delete targetTab._toolName; }
             targetTab.splitRoot = this._createContainer('h');
+            // Same rename demotion as addPaneRelativeTo's first split: the
+            // custom name moved onto fp via _newPaneData(targetTab), so the
+            // lock must go for the tab to join its pane names again.
+            delete targetTab._customName;
             targetTab.splitRoot.children = [fp];
             targetTab.splitRoot.ratios = [1];
             targetTab.term = null;
