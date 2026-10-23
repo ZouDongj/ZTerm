@@ -229,15 +229,21 @@ body.tab-dragging{user-select:none}
 .tab-reconnect-normal{font-size:12px;cursor:pointer;color:var(--text-2);opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
 .tab:hover .tab-reconnect-normal,.tab-reconnect-normal:focus-visible{opacity:0.5;pointer-events:auto}
 .tab-reconnect-normal:hover{opacity:1!important;color:rgb(var(--accent-rgb))}
-/* The busy variant stays inert under hover/active/focus too: the plainer
-   .tab:hover/.tab.active .tab-reconnect and .tab-reconnect:focus-visible
-   rules re-enable pointer-events at a higher or equal specificity, which
-   made the spinner a dead click zone that swallowed tab activation (and let
-   a double-click bubble into the rename gesture). Listed last so the equal
-   specificity :focus-visible tie resolves here. The opacity carries
-   !important because .tab-reconnect:hover{opacity:1!important} would
-   otherwise brighten the spinner on hover. */
-.tab-reconnect-busy,.tab:hover .tab-reconnect-busy,.tab.active .tab-reconnect-busy,.tab-reconnect-busy:focus-visible{opacity:0.72!important;pointer-events:none}
+/* The busy spinner hides unless the tab is hovered or the button is
+   keyboard-focused: the connecting state is already carried by the left
+   status dot, so .tab.active alone must not reveal it. It stays inert in
+   every state — the plainer .tab:hover/.tab.active .tab-reconnect and
+   .tab-reconnect:focus-visible rules re-enable pointer-events at an equal
+   specificity, which made the spinner a dead click zone that swallowed
+   tab activation (and let a double-click bubble into the rename gesture);
+   the busy rules sit after them so the equal-specificity ties resolve
+   here. Both busy opacities keep !important so .tab-reconnect:hover
+   (opacity:1 !important) can never brighten the spinner if a hover state
+   is already on the element when the busy class lands. Reveal changes
+   opacity only — never animate layout here (see the max-width reflow
+   note above). */
+.tab-reconnect-busy,.tab.active .tab-reconnect-busy{opacity:0!important;pointer-events:none}
+.tab:hover .tab-reconnect-busy,.tab-reconnect-busy:focus-visible{opacity:0.72!important;pointer-events:none}
 /* transition must stay off transform: closeTab holds a WAAPI slide on this
    button while the dying tab's slot fades, and cancelling that hold must land
    on the same frame the slot collapses — `all` would glide the reset. */

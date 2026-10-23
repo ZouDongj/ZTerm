@@ -6,7 +6,10 @@
 // U-05: the busy reconnect spinner swallowed tab activation — the plainer
 //   .tab:hover/.tab.active .tab-reconnect rule re-enabled pointer-events at a
 //   higher specificity than the lone .tab-reconnect-busy rule, and the button
-//   had no ondblclick guard, so a double click bubbled into the rename gesture.
+//   had no ondblclick guard, so a double click bubbled into the rename
+//   gesture. Follow-up: the busy spinner now also auto-hides (opacity:0)
+//   unless the tab is hovered or the button is keyboard-focused — the
+//   connecting dot already carries the state — while staying inert everywhere.
 // U-07: tab→pane promotion and cross-tab terminal moves copied _sessionFailed
 //   but not _sshConnecting/_sshErrored — a still-connecting or errored session
 //   lost its busy ring / error dot on arrival (pane-fields.js
@@ -61,28 +64,43 @@ test('U-05: the busy reconnect button stops double-click propagation (no rename)
         'dblclick must not bubble into the rename gesture (old code lacked the guard)');
 });
 
-test('U-05: the busy rule beats the hover/active/focus reveal (pointer-events stay none)', () => {
+test('U-05: the busy spinner hides unless hovered/focused (pointer-events stay none)', () => {
     const css = readFileSync(new URL('../src/renderer/app.css', import.meta.url), 'utf8');
-    // Rules are brace-terminated; the fix's comment block carries no braces.
-    const rule = css.split('}').map(r => r.trim()).find(r => r.includes('.tab-reconnect-busy'));
-    assert.ok(rule, 'busy rule present');
-    assert.ok(rule.includes('pointer-events:none'), 'busy spinner stays inert');
-    assert.ok(rule.includes('.tab:hover .tab-reconnect-busy') && rule.includes('.tab.active .tab-reconnect-busy'),
-        'the plainer .tab:hover/.tab.active .tab-reconnect rule must not re-enable pointer events on the busy variant');
+    // Rules are brace-terminated; the busy comment block carries no braces.
+    const rules = css.split('}').map(r => r.trim())
+        .filter(r => r.includes('.tab-reconnect-busy') && r.includes('{'));
+    assert.equal(rules.length, 2, 'exactly one hide rule and one reveal rule');
+    const hide = rules.find(r => /opacity:0!important/.test(r));
+    const reveal = rules.find(r => /opacity:0\.72!important/.test(r));
+    assert.ok(hide, 'a hide rule pins opacity 0');
+    assert.ok(reveal, 'a reveal rule keeps the reduced hover opacity');
+    // Hidden + inert in the base state AND on the active tab — .tab.active
+    // alone must not reveal it (the connecting dot carries the state), and
+    // .tab.active .tab-reconnect would otherwise re-enable pointer-events at
+    // equal specificity.
+    assert.ok(hide.includes('.tab-reconnect-busy') && hide.includes('.tab.active .tab-reconnect-busy'),
+        'base and .tab.active keep the spinner hidden and inert');
+    // Revealed ONLY by tab hover and keyboard focus, still at reduced opacity.
+    assert.ok(reveal.includes('.tab:hover .tab-reconnect-busy') && reveal.includes('.tab-reconnect-busy:focus-visible'),
+        'only hover/focus reveal the busy spinner');
+    for (const r of rules) {
+        assert.ok(r.includes('pointer-events:none'),
+            'pointer-events never becomes auto on the busy variant');
+        assert.ok(!r.includes('pointer-events:auto'), 'no busy rule re-enables pointer events');
+    }
     // The busy button still carries the .tab-reconnect class, so keyboard focus
     // matches .tab-reconnect:focus-visible (0,2,0 — same specificity as
-    // .tab-reconnect-busy:focus-visible, which therefore must be listed
-    // explicitly and come later in the sheet to win the tie).
-    assert.ok(rule.includes('.tab-reconnect-busy:focus-visible'),
-        'keyboard focus must not re-enable pointer events on the busy variant');
-    // .tab-reconnect:hover carries opacity:1 !important; the busy opacity
-    // needs its own !important or hover would brighten the inert spinner.
-    assert.ok(/opacity:0\.72\s*!important/.test(rule),
-        'hover must not lift the busy spinner to full opacity');
-    const busyIdx = css.indexOf('.tab-reconnect-busy:focus-visible');
-    const revealIdx = css.indexOf('.tab-reconnect:focus-visible');
-    assert.ok(revealIdx > 0 && busyIdx > revealIdx,
+    // .tab-reconnect-busy:focus-visible, which therefore must come later in
+    // the sheet to win the tie). Brace-anchored literals so comment mentions
+    // cannot satisfy the ordering check.
+    const revealFocusIdx = css.indexOf('.tab-reconnect:focus-visible{');
+    const busyFocusIdx = css.indexOf('.tab-reconnect-busy:focus-visible{');
+    assert.ok(revealFocusIdx > 0 && busyFocusIdx > revealFocusIdx,
         'the busy :focus-visible selector must come after the reveal rule to win the equal-specificity tie');
+    // The reveal rule must follow the hide rule: on a hovered ACTIVE tab both
+    // match at 0,3,0 with !important, so sheet order decides (0.72 must win).
+    assert.ok(css.indexOf('.tab-reconnect-busy,') < css.indexOf('.tab:hover .tab-reconnect-busy'),
+        'the hide rule precedes the reveal rule so hover wins the equal-specificity opacity tie');
 });
 
 // ── U-07 ────────────────────────────────────────────────────────────────────
