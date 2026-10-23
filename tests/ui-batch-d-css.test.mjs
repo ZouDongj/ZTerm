@@ -147,3 +147,36 @@ test('ssh-pwd-status override resets the base 30px button height (status box sta
   assert.match(ruleBody('.ssh-pwd-status .btn-outline'), /height\s*:\s*auto/,
     'override must reset height or the status box grows past the 34px input height');
 });
+
+// ── SFTP dock icon optical sizing ──
+// The breadcrumb drive glyph spans only 12x9 of its 16-unit viewBox and the
+// toolbar glyphs span 14–19 of their 24-unit grid, so equal px boxes render
+// visibly unequal ink. These pins freeze the optical corrections: the root
+// crumb svg at 14px (sftp.js attrs and the css rule must agree — the rule
+// overrides the attributes), and per-icon toolbar sizes chosen so each
+// glyph's vertical ink span lands within ~1px of its neighbours.
+
+test('root crumb drive svg is 14px in both sftp.js and the css rule', () => {
+  const sftpSrc = read('src/renderer/sftp.js');
+  const icon = sftpSrc.match(/const SFTP_ROOT_ICON = '<svg width="(\d+)" height="(\d+)"/);
+  assert.ok(icon, 'SFTP_ROOT_ICON svg tag found in sftp.js');
+  assert.equal(icon[1], '14', 'sftp.js svg width');
+  assert.equal(icon[2], '14', 'sftp.js svg height');
+  const rule = ruleBody('.sftp-breadcrumb .seg-root svg');
+  assert.ok(rule.includes('width:14px') && rule.includes('height:14px'),
+    'css rule must agree with the svg attrs (it overrides them)');
+});
+
+test('sftp toolbar svgs keep their per-icon optical sizes', () => {
+  // Vertical ink spans on the 24-unit grid: arrow-up 14, refresh 18, pin 19,
+  // mkdir 17, upload 18 units — the arrow grows to 15px, the pin shrinks to
+  // 12px and the rest stay 13px so the rendered heights land within ~1px.
+  const html = read('src/renderer.html');
+  const expected = { goUp: 15, refresh: 13, togglePin: 12, mkdir: 13, upload: 13 };
+  for (const [call, px] of Object.entries(expected)) {
+    const m = html.match(new RegExp(`<button[^>]*onclick="SFTP\\.${call}\\(\\)"[^>]*><svg width="(\\d+)" height="(\\d+)" viewBox="0 0 24 24"`));
+    assert.ok(m, `toolbar button ${call} inline svg found`);
+    assert.equal(m[1], String(px), `${call} svg width`);
+    assert.equal(m[2], String(px), `${call} svg height`);
+  }
+});

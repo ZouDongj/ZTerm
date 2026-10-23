@@ -702,14 +702,17 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .sftp-breadcrumb span:hover{background:rgba(var(--accent-rgb),0.12);color:var(--text-1)}
 .sftp-breadcrumb .sep{color:var(--text-3);cursor:default;opacity:0.6}
 .sftp-breadcrumb .sep:hover{background:none;color:var(--text-3)}
-/* Root crumb: inline-flex centers the fixed 13px drive in the same 20px
+/* Root crumb: inline-flex centers the fixed 14px drive in the same 20px
    box the text crumbs occupy, so it reads as part of the 12px inline row.
-   The glyph ignores pointer events so a click on it targets the crumb span
+   The glyph only spans 12x9 of the svg's 16-unit grid, so 14px is what
+   holds its ink on the row's optical centerline — at 13px the drive
+   rendered ~7.3px tall and read small next to the 12px path text. The
+   glyph ignores pointer events so a click on it targets the crumb span
    itself — the whole icon navigates to / like the rest of the crumb (the
    bar's closest guard covers the cases this rule cannot). */
 .sftp-breadcrumb .seg-root{display:inline-flex;align-items:center;justify-content:center;height:20px;padding:0 6px;color:var(--text-3)}
 .sftp-breadcrumb .seg-root:hover{color:var(--text-1)}
-.sftp-breadcrumb .seg-root svg{display:block;width:13px;height:13px;flex:none;pointer-events:none}
+.sftp-breadcrumb .seg-root svg{display:block;width:14px;height:14px;flex:none;pointer-events:none}
 .sftp-breadcrumb .more{color:var(--text-3)}
 /* Edit mode: the input swaps in as a real field with the same 20px box the
    crumbs occupy (field fill, 12px text, pill radius, inset focus ring), so
