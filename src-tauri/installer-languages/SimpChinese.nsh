@@ -4,6 +4,10 @@
 ; olderOrUnknownVersionInstalled are reworded to present installing
 ; over an existing version as an in-place upgrade that keeps user
 ; data (issue #20). Re-sync with upstream when upgrading the CLI.
+; Length budget: the reinstall page shows these in a fixed 24u label
+; (~2 full CJK lines; installer.nsi NSD_CreateLabel 0 0 100% 24u). The
+; first rewording overflowed it and clipped the last line's bottoms —
+; keep the text at or under the upstream length.
 LangString addOrReinstall ${LANG_SIMPCHINESE} "添加/重新安装组件"
 LangString alreadyInstalled ${LANG_SIMPCHINESE} "已安装"
 LangString alreadyInstalledLong ${LANG_SIMPCHINESE} "${PRODUCTNAME} ${VERSION} 已经安装了。选择你想要执行的操作后点击下一步以继续。"
@@ -18,7 +22,7 @@ LangString failedToKillApp ${LANG_SIMPCHINESE} "无法终止 {{product_name}}。
 LangString installingWebview2 ${LANG_SIMPCHINESE} "正在安装 WebView2..."
 LangString newerVersionInstalled ${LANG_SIMPCHINESE} "有一个更新版本的 ${PRODUCTNAME} 已经安装了！不推荐你安装旧的版本。如果你真的想要安装这个旧的版本，推荐先卸载当前版本。选择你想要执行的操作后点击下一步以继续。"
 LangString older ${LANG_SIMPCHINESE} "旧的"
-LangString olderOrUnknownVersionInstalled ${LANG_SIMPCHINESE} "系统中已存在版本为 $R4 的 ${PRODUCTNAME}。本次安装为原地升级：无需先卸载旧版本，你的设置和数据都会保留。选择你想要执行的操作后点击下一步以继续。"
+LangString olderOrUnknownVersionInstalled ${LANG_SIMPCHINESE} "系统中已存在版本为 $R4 的 ${PRODUCTNAME}。本次安装为原地升级，设置和数据都会保留。选择操作后点击下一步以继续。"
 LangString silentDowngrades ${LANG_SIMPCHINESE} "降级操作在此安装程序上已禁用，无法进行安静安装，请使用图形操作界面。$\n"
 LangString unableToUninstall ${LANG_SIMPCHINESE} "无法卸载！"
 LangString uninstallApp ${LANG_SIMPCHINESE} "卸载 ${PRODUCTNAME}"

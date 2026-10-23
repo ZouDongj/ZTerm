@@ -4,6 +4,9 @@
 ; olderOrUnknownVersionInstalled are reworded to present installing
 ; over an existing version as an in-place upgrade that keeps user
 ; data (issue #20). Re-sync with upstream when upgrading the CLI.
+; Length budget: the reinstall page shows these in a fixed 24u label
+; (installer.nsi NSD_CreateLabel 0 0 100% 24u) — keep the text at or
+; under the upstream length or the last line clips.
 LangString addOrReinstall ${LANG_ENGLISH} "Add/Reinstall components"
 LangString alreadyInstalled ${LANG_ENGLISH} "Already Installed"
 LangString alreadyInstalledLong ${LANG_ENGLISH} "${PRODUCTNAME} ${VERSION} is already installed. Select the operation you want to perform and click Next to continue."
@@ -18,7 +21,7 @@ LangString failedToKillApp ${LANG_ENGLISH} "Failed to kill {{product_name}}. Ple
 LangString installingWebview2 ${LANG_ENGLISH} "Installing WebView2..."
 LangString newerVersionInstalled ${LANG_ENGLISH} "A newer version of ${PRODUCTNAME} is already installed! It is not recommended that you install an older version. If you really want to install this older version, it's better to uninstall the current version first. Select the operation you want to perform and click Next to continue."
 LangString older ${LANG_ENGLISH} "older"
-LangString olderOrUnknownVersionInstalled ${LANG_ENGLISH} "An $R4 version of ${PRODUCTNAME} is installed on your system. There is no need to uninstall it first: this is an in-place upgrade and your settings and data are preserved. Select the operation you want to perform and click Next to continue."
+LangString olderOrUnknownVersionInstalled ${LANG_ENGLISH} "An $R4 version of ${PRODUCTNAME} is installed. This in-place upgrade keeps your settings and data. Select an operation and click Next."
 LangString silentDowngrades ${LANG_ENGLISH} "Downgrades are disabled for this installer, can't proceed with the silent installer, please use the graphical interface installer instead.$\n"
 LangString unableToUninstall ${LANG_ENGLISH} "Unable to uninstall!"
 LangString uninstallApp ${LANG_ENGLISH} "Uninstall ${PRODUCTNAME}"
