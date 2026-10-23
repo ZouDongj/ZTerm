@@ -53,6 +53,7 @@ function loadSettingsVm() {
     const els = new Map();
     const sends = [];
     const toasts = [];
+    const toggles = new Map();
     // Appearance-page inputs saveAppearance reads.
     els.set('set-font', mkSelect());
     els.set('set-ui-font', mkSelect());
@@ -99,11 +100,17 @@ function loadSettingsVm() {
         },
         _settingsConfig: {},
         TabManager: { tabs: [], render() {} },
-        getToggle: () => true,
+        // Mirrors split.js: setToggle forces the state, getToggle reads it
+        // back, and a never-set toggle reads as on (missing element).
+        setToggle: (id, on) => toggles.set(id, !!on),
+        getToggle: (id) => (toggles.has(id) ? toggles.get(id) : true),
         updateAccentDot() {},
         applyTerminalScheme() {},
+        applyStatusbarVisibility() {},
+        populateTerminalSchemeSelect() {},
         getAllPanes: () => [],
         _normalizeFontFamily: (family) => family || '',
+        _firstFontName: (family) => family || '',
         _normalizeWordSeparators: (v) => (typeof v === 'string' && v ? v : ''),
         _clampFontWeight: (v, dflt) => parseInt(v, 10) || parseInt(dflt, 10),
         showToast: (msg, isError) => toasts.push({ msg, isError }),
@@ -113,7 +120,7 @@ function loadSettingsVm() {
     vm.runInContext(colorUtilsSrc, context, { filename: 'color-utils.js' });
     vm.runInContext(settingsSrc, context, { filename: 'settings.js' });
     return {
-        context, els, sends, toasts,
+        context, els, sends, toasts, toggles,
         run: (code) => vm.runInContext(code, context),
         appearancePayload: () => sends.filter(s => s.cmd === 'save-appearance').pop()?.payload,
     };
@@ -261,4 +268,34 @@ test('颜色选择器：RGB 超范围输入最终确认的强调色仍是合法 
     vm1.run('confirmColorPicker()');
     assert.match(vm1.appearancePayload().accentColor, /^#[0-9a-f]{6}$/i);
     assert.equal(vm1.toasts.length, 0);
+});
+
+// ── SFTP dock material default-off ──
+
+test('loadSettingsIntoForm：无 sftpMaterial 键的配置读为关，仅显式 true 开启', () => {
+    const vm1 = loadSettingsVm();
+    vm1.context._settingsConfig = {};
+    vm1.run('loadSettingsIntoForm()');
+    // Legacy config: key absent must read as OFF, not fall back to on.
+    assert.equal(vm1.toggles.get('toggle-sftp-material'), false);
+    vm1.context._settingsConfig = { sftpMaterial: true };
+    vm1.run('loadSettingsIntoForm()');
+    assert.equal(vm1.toggles.get('toggle-sftp-material'), true);
+    vm1.context._settingsConfig = { sftpMaterial: false };
+    vm1.run('loadSettingsIntoForm()');
+    assert.equal(vm1.toggles.get('toggle-sftp-material'), false);
+});
+
+test('loadSettings：settings 文件为空时内置默认 sftpMaterial 为 false', async () => {
+    const vm1 = loadSettingsVm();
+    vm1.context.ipcRenderer.invoke = async () => null;
+    await vm1.run('loadSettings()');
+    assert.equal(vm1.context._settingsConfig.sftpMaterial, false);
+});
+
+test('renderer.html：sftp 材质开关静态标记不带 on（首帧渲染默认关闭）', () => {
+    const el = read('src/renderer.html').match(/<div class="([^"]*)" id="toggle-sftp-material"/);
+    assert.ok(el, 'toggle-sftp-material markup not found in renderer.html');
+    assert.ok(!el[1].split(/\s+/).includes('on'),
+        `static markup must not pre-set on (class="${el[1]}")`);
 });

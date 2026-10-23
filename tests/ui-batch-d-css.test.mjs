@@ -180,3 +180,13 @@ test('sftp toolbar svgs keep their per-icon optical sizes', () => {
     assert.equal(m[2], String(px), `${call} svg height`);
   }
 });
+
+// ── SFTP dock material default-off ──
+// The material is opt-in: configs written before the key existed (missing
+// sftpMaterial) and explicit false must all render the plain dock, so
+// applyChromeFlags applies dock-plain to everything except an explicit true.
+
+test('dock-plain is the default: only an explicit sftpMaterial true keeps the material', () => {
+  assert.match(stateSrc, /classList\.toggle\('dock-plain', _settingsConfig\.sftpMaterial !== true\)/,
+    'missing/false sftpMaterial (pre-existing configs) must apply the plain dock');
+});

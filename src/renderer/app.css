@@ -73,8 +73,10 @@ body{
 .no-edge .settings-card-list .ssh-mgr-group-items::before,
 .no-edge .zt-tip::before,.no-edge .color-picker::before,
 .no-edge .search-bar::before,.no-edge .settings-pane::before{display:none}
-/* SFTP material off: the dock follows the active terminal scheme instead of
-   compositing the desktop through acrylic. */
+/* SFTP material off (the default): the dock follows the active terminal
+   scheme instead of the frosted panel. The frosted panel's backdrop-filter
+   only blurs page content behind the dock — the window is opaque (main.rs),
+   so nothing here samples the desktop. */
 .window.dock-plain .sftp-window{
   background:var(--term-bg);
   -webkit-backdrop-filter:none;backdrop-filter:none;

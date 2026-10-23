@@ -475,7 +475,7 @@ function loadSettingsIntoForm() {
     setToggle('toggle-statusdot', config.showStatusDot !== false);
     setToggle('toggle-pane-ring', config.paneRing === true);
     setToggle('toggle-panel-edge', config.panelEdge !== false);
-    setToggle('toggle-sftp-material', config.sftpMaterial !== false);
+    setToggle('toggle-sftp-material', config.sftpMaterial === true);
     setToggle('toggle-richtext', config.richTextCopy === true);
     setToggle('toggle-smartcopy', config.smartCopy !== false);
     setToggle('toggle-osc52', config.osc52 !== false);
@@ -1119,7 +1119,7 @@ async function loadSettings() {
             return;
         }
     } catch(e) { console.error('[loadSettings]', e); }
-    _settingsConfig = { cursor: 'bar', scrollback: 10000, bell: 'off', cursorBlink: true, autoCopy: true, rightClickPaste: true, fontFamily: '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace', fontSize: 16, lineHeight: 1.125, fontWeight: '400', fontWeightBold: '600', accentColor: '#61afef', theme: 'dark', animations: true, showStatusDot: true, paneRing: false, panelEdge: true, sftpMaterial: true, restoreLocalContent: false, smartCopy: true, osc52: true, richTextCopy: false };
+    _settingsConfig = { cursor: 'bar', scrollback: 10000, bell: 'off', cursorBlink: true, autoCopy: true, rightClickPaste: true, fontFamily: '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace', fontSize: 16, lineHeight: 1.125, fontWeight: '400', fontWeightBold: '600', accentColor: '#61afef', theme: 'dark', animations: true, showStatusDot: true, paneRing: false, panelEdge: true, sftpMaterial: false, restoreLocalContent: false, smartCopy: true, osc52: true, richTextCopy: false };
     if (typeof applyChromeFlags === 'function') applyChromeFlags();
     applyStatusbarVisibility();
 }
