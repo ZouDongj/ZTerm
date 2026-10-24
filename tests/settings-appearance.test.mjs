@@ -96,7 +96,10 @@ function loadSettingsVm() {
         },
         ipcRenderer: {
             send: (cmd, payload) => sends.push({ cmd, payload }),
-            invoke: () => new Promise(() => {}),
+            invoke: (cmd, payload) => {
+                if (cmd.startsWith('save-')) { sends.push({ cmd, payload }); return Promise.resolve(); }
+                return new Promise(() => {});
+            },
         },
         _settingsConfig: {},
         TabManager: { tabs: [], render() {} },
@@ -142,7 +145,7 @@ test('saveAppearance：字体 select 未填充时保留已配置的终端字体�
     assert.equal(payload.fallbackFont, 'Microsoft YaHei UI');
 });
 
-test('saveAppearance：select 已填充后采用 select 当前值（含显式选择的空值）', () => {
+test('saveAppearance：select 已填充后采用 select 当前值（含显式选择的空值）', async () => {
     const vm1 = loadSettingsVm();
     vm1.context._settingsConfig = {
         fontFamily: "'Cascadia Mono',monospace",
@@ -156,13 +159,13 @@ test('saveAppearance：select 已填充后采用 select 当前值（含显式选
     fbEl.appendChild({ value: 'FbA', textContent: 'FbA' });
     fbEl.appendChild({ value: '', textContent: '无' });
     fbEl.value = 'FbA';
-    vm1.run('saveAppearance()');
+    await vm1.run('saveAppearance()');
     let payload = vm1.appearancePayload();
     assert.equal(payload.fontFamily, "'FontA',monospace");
     assert.equal(payload.fallbackFont, 'FbA');
     // An explicit '无' choice ('') must survive once options exist.
     fbEl.value = '';
-    vm1.run('saveAppearance()');
+    await vm1.run('saveAppearance()');
     payload = vm1.appearancePayload();
     assert.equal(payload.fallbackFont, '');
 });
@@ -247,14 +250,14 @@ test('saveAppearance：输入与旧配置均非法时回退默认强调色', () 
     assert.equal(vm1.appearancePayload().accentColor, '#61afef');
 });
 
-test('saveAppearance：合法强调色（含无 # 前缀）照常落盘且无提示', () => {
+test('saveAppearance：合法强调色（含无 # 前缀）照常落盘且无提示', async () => {
     const vm1 = loadSettingsVm();
     vm1.context._settingsConfig = { accentColor: '#61afef' };
     vm1.els.get('set-accent').value = '#9CA3FF';
-    vm1.run('saveAppearance()');
+    await vm1.run('saveAppearance()');
     assert.equal(vm1.appearancePayload().accentColor, '#9CA3FF');
     vm1.els.get('set-accent').value = '8bc4ff'; // applyAccentColor accepts missing '#'
-    vm1.run('saveAppearance()');
+    await vm1.run('saveAppearance()');
     assert.equal(vm1.appearancePayload().accentColor, '8bc4ff');
     assert.equal(vm1.toasts.length, 0);
 });

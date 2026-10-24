@@ -390,7 +390,10 @@ function loadSaveVm(fontFamily, installedFonts, tabs) {
         },
         ipcRenderer: {
             send: (cmd, payload) => sends.push({ cmd, payload }),
-            invoke: (cmd) => cmd === 'get-system-fonts' ? Promise.resolve(installedFonts) : new Promise(() => {}),
+            invoke: (cmd, payload) => {
+                if (cmd.startsWith('save-')) { sends.push({ cmd, payload }); return Promise.resolve(); }
+                return cmd === 'get-system-fonts' ? Promise.resolve(installedFonts) : new Promise(() => {});
+            },
         },
         _settingsConfig: { fontFamily },
         TabManager: { tabs, render() {} },

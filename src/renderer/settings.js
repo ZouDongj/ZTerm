@@ -833,8 +833,9 @@ const DEFAULT_UI_FONT = "'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif";
 function toggleUiFollowTerminal() {
     _settingsConfig.uiFollowTerminal = !(_settingsConfig.uiFollowTerminal !== false);
     syncUiFollowUI();
-    persistSettings();
+    const saving = persistSettings();
     applyUiFont();
+    return saving;
 }
 
 function syncUiFollowUI() {
@@ -939,7 +940,7 @@ function saveAppearance() {
 
     const config = { fontFamily, uiFont, uiFallbackFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, paneRing, panelEdge, sftpMaterial, terminalScheme, minimumContrastRatio, theme: 'dark' };
     _settingsConfig = { ..._settingsConfig, ...config };
-    persistSettings();
+    const saving = persistSettings();
     applyUiFont();
     _updateNfMonoHint();
 
@@ -994,6 +995,7 @@ function saveAppearance() {
             });
         }
     });
+    return saving;
 }
 
 function saveTerminal() {
@@ -1033,7 +1035,7 @@ function saveTerminal() {
     const config = { cursor, scrollback, bell, cursorBlink, wordSeparators, autoCopy, rightClickPaste, richTextCopy, smartCopy, osc52, restoreLocalContent, defaultShell, startupDir, updateProxy, hiddenProfiles };
     _settingsConfig = { ..._settingsConfig, ...config };
     if (typeof _syncOsc52Permission === 'function') _syncOsc52Permission();
-    persistSettings();
+    const saving = persistSettings();
 
     TabManager.tabs.forEach(t => {
         if (t.term) {
@@ -1060,11 +1062,15 @@ function saveTerminal() {
             });
         }
     });
+    return saving;
 }
 
 function persistSettings() {
     const config = { ..._settingsConfig };
-    ipcRenderer.send('save-appearance', {
+    if (Array.isArray(config.hiddenProfiles)) config.hiddenProfiles = [...config.hiddenProfiles];
+    // Queue the entire captured snapshot. Sequencing only its two commands
+    // would still let a later appearance reply overtake an older terminal write.
+    const writeSnapshot = () => ipcRenderer.invoke('save-appearance', {
         fontFamily: config.fontFamily,
         uiFont: config.uiFont,
         uiFallbackFont: config.uiFallbackFont,
@@ -1084,8 +1090,7 @@ function persistSettings() {
         panelEdge: config.panelEdge,
         sftpMaterial: config.sftpMaterial,
         minimumContrastRatio: config.minimumContrastRatio,
-    });
-    ipcRenderer.send('save-terminal-settings', {
+    }).then(() => ipcRenderer.invoke('save-terminal-settings', {
         cursor: config.cursor,
         scrollback: config.scrollback,
         bell: config.bell,
@@ -1102,7 +1107,22 @@ function persistSettings() {
         updateProxy: config.updateProxy,
         hiddenProfiles: config.hiddenProfiles,
         qcAutoEnter: config.qcAutoEnter,
+    }));
+    const previous = persistSettings._pending;
+    const saving = previous ? previous.then(writeSnapshot, writeSnapshot) : writeSnapshot();
+    persistSettings._pending = saving;
+    const finish = () => {
+        if (persistSettings._pending === saving) persistSettings._pending = null;
+    };
+    // UI events may ignore the result; explicit callers still receive the
+    // original rejecting promise rather than a fulfilled logging promise.
+    saving.then(finish, error => {
+        finish();
+        console.error('[persistSettings]', error);
+        const message = error && error.message ? error.message : String(error);
+        showToast('设置保存失败，请重试：' + message, true);
     });
+    return saving;
 }
 
 async function loadSettings() {

@@ -133,12 +133,19 @@ test('toggleStatusbar：翻转可见性、写回配置并持久化', () => {
 
 // ── settings.js persistence wiring ──
 
-test('persistSettings 的 save-appearance 载荷包含 showStatusbar', () => {
+test('persistSettings 的 save-appearance 载荷包含 showStatusbar', async () => {
     const fn = settingsSrc.match(/function persistSettings\(\) \{([\s\S]*?)\n\}/);
     assert.ok(fn, 'persistSettings not found');
-    const payload = fn[1].match(/ipcRenderer\.send\('save-appearance', \{([\s\S]*?)\n    \}\);/);
-    assert.ok(payload, 'save-appearance send not found');
-    assert.match(payload[1], /showStatusbar:\s*config\.showStatusbar/, 'showStatusbar must round-trip via save-appearance');
+    const calls = [];
+    const context = vm.createContext({
+        _settingsConfig: { showStatusbar: false },
+        ipcRenderer: { invoke: async (command, payload) => { calls.push({ command, payload }); } },
+        console,
+        showToast() { assert.fail('successful persistence must not report failure'); },
+    });
+    vm.runInContext(fn[0], context);
+    await context.persistSettings();
+    assert.equal(calls.find(call => call.command === 'save-appearance')?.payload.showStatusbar, false);
 });
 
 test('loadSettings 启动时调用 applyStatusbarVisibility（成功与回退两条路径）', () => {

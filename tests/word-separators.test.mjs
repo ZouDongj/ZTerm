@@ -126,7 +126,10 @@ function loadSettingsVm({ tabs = [], panesByTab = new Map() } = {}) {
         },
         ipcRenderer: {
             send: (cmd, payload) => sends.push({ cmd, payload }),
-            invoke: () => new Promise(() => {}),
+            invoke: (cmd, payload) => {
+                if (cmd.startsWith('save-')) { sends.push({ cmd, payload }); return Promise.resolve(); }
+                return new Promise(() => {});
+            },
         },
         _settingsConfig: {},
         TabManager: { tabs, render() {} },
@@ -195,13 +198,13 @@ test('_buildTerminalOptions：配置非空字符串时按原样传递 wordSepara
 
 // -- saveTerminal persists and live-applies to open terminals -------------
 
-test('saveTerminal：输入分隔符落盘并热应用到标签页与分栏终端', () => {
+test('saveTerminal：输入分隔符落盘并热应用到标签页与分栏终端', async () => {
     const tabTerm = mkTerm(), paneTerm = mkTerm();
     const tab = { term: tabTerm, splitRoot: null };
     const splitTab = { term: null, splitRoot: {} };
     const vm1 = loadSettingsVm({ tabs: [tab, splitTab], panesByTab: new Map([[splitTab, [{ term: paneTerm }]]]) });
     vm1.els.get('set-word-separators').value = ' /:';
-    vm1.run('saveTerminal()');
+    await vm1.run('saveTerminal()');
     // Persisted payload carries the raw string.
     assert.equal(vm1.terminalPayload().wordSeparators, ' /:');
     assert.equal(vm1.context._settingsConfig.wordSeparators, ' /:');
@@ -211,12 +214,12 @@ test('saveTerminal：输入分隔符落盘并热应用到标签页与分栏终�
     assert.equal(paneTerm.options.wordSeparator, ' /:');
 });
 
-test('saveTerminal：清空输入落盘空串并向终端赋空串（由 xterm 清洗回内置默认）', () => {
+test('saveTerminal：清空输入落盘空串并向终端赋空串（由 xterm 清洗回内置默认）', async () => {
     const tabTerm = mkTerm();
     const vm1 = loadSettingsVm({ tabs: [{ term: tabTerm, splitRoot: null }] });
     vm1.context._settingsConfig = { wordSeparators: ' /:' };
     vm1.els.get('set-word-separators').value = '';
-    vm1.run('saveTerminal()');
+    await vm1.run('saveTerminal()');
     assert.equal(vm1.terminalPayload().wordSeparators, '');
     // The reset relies on the vendored option sanitizer: a falsy
     // wordSeparator is replaced by xterm's own DEFAULT_OPTIONS value, so the
@@ -224,21 +227,21 @@ test('saveTerminal：清空输入落盘空串并向终端赋空串（由 xterm �
     assert.equal(tabTerm.options.wordSeparator, '');
 });
 
-test('saveTerminal：设置页输入缺失时不报错（与其他文本输入一致回退空串）', () => {
+test('saveTerminal：设置页输入缺失时不报错（与其他文本输入一致回退空串）', async () => {
     // saveTerminal only runs from the settings page, where the input exists;
     // this guards the defensive ?. path. Like set-startup-dir and friends,
     // a missing element falls back to '' rather than throwing.
     const vm1 = loadSettingsVm({ tabs: [] });
     vm1.els.delete('set-word-separators');
-    vm1.run('saveTerminal()');
+    await vm1.run('saveTerminal()');
     assert.equal(vm1.terminalPayload().wordSeparators, '');
     assert.equal(vm1.toasts.length, 0);
 });
 
-test('persistSettings：已配置的分隔符键随 save-terminal-settings 载荷下发', () => {
+test('persistSettings：已配置的分隔符键随 save-terminal-settings 载荷下发', async () => {
     const vm1 = loadSettingsVm({ tabs: [] });
     vm1.context._settingsConfig = { wordSeparators: '/' };
-    vm1.run('persistSettings()');
+    await vm1.run('persistSettings()');
     assert.equal(vm1.terminalPayload().wordSeparators, '/');
 });
 

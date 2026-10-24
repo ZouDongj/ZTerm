@@ -100,7 +100,10 @@ function loadSettingsVm({ openDropdowns = [] } = {}) {
         },
         ipcRenderer: {
             send: (cmd, payload) => sends.push({ cmd, payload }),
-            invoke: () => new Promise(() => {}),
+            invoke: (cmd, payload) => {
+                if (cmd.startsWith('save-')) { sends.push({ cmd, payload }); return Promise.resolve(); }
+                return new Promise(() => {});
+            },
         },
         _settingsConfig: {},
         TabManager: { tabs: [], render() {} },
@@ -180,11 +183,11 @@ test('saveAppearance：非法行高连同其余字段照常保存（仅非法值
 
 // ── T08: saveTerminal scrollback validation ─────────────────────────────────
 
-test('saveTerminal：回滚行数 -1 不落盘，回退上次合法值并提示', () => {
+test('saveTerminal：回滚行数 -1 不落盘，回退上次合法值并提示', async () => {
     const vm1 = loadSettingsVm();
     vm1.context._settingsConfig = { scrollback: 5000 };
     vm1.els.get('set-scrollback').value = '-1';
-    vm1.run('saveTerminal()');
+    await vm1.run('saveTerminal()');
     const payload = vm1.terminalPayload();
     assert.notEqual(payload.scrollback, -1);
     assert.equal(payload.scrollback, 5000);
@@ -193,22 +196,22 @@ test('saveTerminal：回滚行数 -1 不落盘，回退上次合法值并提示'
     assert.equal(vm1.toasts[0].isError, true);
 });
 
-test('saveTerminal：回滚行数非数值（空输入）回退默认并提示', () => {
+test('saveTerminal：回滚行数非数值（空输入）回退默认并提示', async () => {
     const vm1 = loadSettingsVm();
     vm1.els.get('set-scrollback').value = 'abc';
-    vm1.run('saveTerminal()');
+    await vm1.run('saveTerminal()');
     assert.equal(vm1.terminalPayload().scrollback, 10000);
     assert.equal(vm1.toasts.length, 1);
     assert.equal(vm1.toasts[0].isError, true);
 });
 
-test('saveTerminal：回滚行数 0 与正常值照常落盘且无提示', () => {
+test('saveTerminal：回滚行数 0 与正常值照常落盘且无提示', async () => {
     const vm1 = loadSettingsVm();
     vm1.els.get('set-scrollback').value = '0';
-    vm1.run('saveTerminal()');
+    await vm1.run('saveTerminal()');
     assert.equal(vm1.terminalPayload().scrollback, 0);
     vm1.els.get('set-scrollback').value = '2000';
-    vm1.run('saveTerminal()');
+    await vm1.run('saveTerminal()');
     assert.equal(vm1.terminalPayload().scrollback, 2000);
     assert.equal(vm1.toasts.length, 0);
 });

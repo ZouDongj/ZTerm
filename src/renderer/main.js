@@ -135,7 +135,11 @@ function saveConfig() {
         });
     // Save the current state even when there is no content / all tabs are closed, otherwise stale lastTabs would resurrect closed tabs
     // invoke waits until the Rust side has written to disk (save_last_tabs flushes synchronously), so calling it before quit guarantees persistence
-    return ipcRenderer.invoke('save-last-tabs', tabs).catch(e => console.error('[saveConfig]', e));
+    const saving = ipcRenderer.invoke('save-last-tabs', tabs);
+    // Observe background failures without converting the promise returned to
+    // quit/update callers into a successful save.
+    saving.catch(e => console.error('[saveConfig]', e));
+    return saving;
 }
 
 setInterval(() => { saveConfig(); }, 15000);

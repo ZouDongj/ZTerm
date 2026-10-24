@@ -70,7 +70,10 @@ function loadSettingsVm(contrastValue) {
         },
         ipcRenderer: {
             send: (cmd, payload) => sends.push({ cmd, payload }),
-            invoke: () => new Promise(() => {}),
+            invoke: (cmd, payload) => {
+                if (cmd.startsWith('save-')) { sends.push({ cmd, payload }); return Promise.resolve(); }
+                return new Promise(() => {});
+            },
         },
         _settingsConfig: {},
         TabManager: { profiles: [], tabs: [], render() {} },

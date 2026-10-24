@@ -775,10 +775,20 @@ async function applyUpdate() {
 
 async function _doApplyUpdate() {
     const apply = document.getElementById('btn-update-apply');
-    if (apply) { apply.disabled = true; apply.textContent = '正在退出…'; }
+    if (apply) { apply.disabled = true; apply.textContent = '正在保存…'; }
+    // Drain queued settings with a fresh snapshot before the final tab save.
+    try {
+        if (typeof persistSettings === 'function') await persistSettings();
+        if (typeof saveConfig === 'function') await saveConfig();
+    } catch (e) {
+        if (apply) { apply.disabled = false; apply.textContent = '重启并安装'; }
+        const raw = e && e.message ? e.message : String(e);
+        _setUpdateDesc('保存状态失败，更新未安装：' + raw, 'rgba(220,120,120,0.9)');
+        showToast('保存状态失败，已取消退出安装，请重试', true);
+        return;
+    }
+    if (apply) apply.textContent = '正在退出…';
     showToast('正在退出并启动安装…');
-    // Persist session state so the post-install relaunch restores tabs.
-    try { if (typeof saveConfig === 'function') await saveConfig(); } catch(e) {}
     try {
         await ipcRenderer.invoke('apply-update');
         // On success the main process exits and the installer takes over;

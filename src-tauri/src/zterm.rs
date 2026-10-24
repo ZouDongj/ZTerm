@@ -884,7 +884,7 @@ fn merge_value(base: &mut Value, over: &Value) {
     }
 }
 
-/// Content for the anchor fallback write in save_config: the existing anchor's
+/// Content for the anchor recovery write in save_config: the existing anchor's
 /// keys survive (above all the dataDir pointer — the anchor is its only store,
 /// and resolve_data_dir reads it from nowhere else), overlaid by the new config.
 /// Split from save_config's file IO for unit testing.
@@ -915,10 +915,9 @@ fn load_config() -> Value {
 }
 
 /// Data-dir config first; when it is missing entirely or cannot be READ (an
-/// IO condition, not corruption), read the anchor's full config back — the
-/// anchor is save_config's fallback mirror, so settings survive a data dir
-/// that stays unwritable. Split from load_config's path resolution for unit
-/// testing (passes explicit paths).
+/// IO condition, not corruption), read the anchor's recovery copy back.
+/// A readable primary still wins, so writing only this recovery copy is not
+/// reported as a successful save. Split from path resolution for unit tests.
 fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
     // True when an existing config file could not be read (IO failure): the
     // defaults below are then not known to be safe to save over it.
@@ -1076,35 +1075,55 @@ fn save_config_to(
         let _ = std::fs::create_dir_all(parent);
     }
     let content = serde_json::to_string_pretty(config).unwrap_or_default();
-    // Atomic write: tmp + rename, so a mid-write crash cannot leave a corrupt config
-    if atomic_write_config(path, &content).is_ok() {
-        return Ok(());
+    // Only the authoritative path can complete a save. A recovery mirror is
+    // not a successful save: later reads may still prefer an older primary.
+    let primary_error = match atomic_write_config(path, &content) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if path == anchor {
+        return Err(format!(
+            "write config to {} failed: {primary_error}",
+            path.display()
+        ));
     }
-    // Fallback: default data dir not writable (e.g. no permission in
-    // Program Files) — persist to the anchor dir so data is not lost.
-    // The anchor also holds the custom dataDir pointer, so merge over its
-    // current content instead of overwriting it wholesale.
+    // Retain a recovery copy without changing the active data directory or
+    // claiming that subsequent reads will use this copy.
     eprintln!(
-        "[zterm] write {} failed, falling back to anchor",
+        "[zterm] write {} failed, attempting a recovery copy in the anchor",
         path.display()
     );
     if let Some(parent) = anchor.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let existing = std::fs::read_to_string(anchor)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let existing = match std::fs::read_to_string(anchor) {
+        Ok(content) => match serde_json::from_str::<Value>(&content) {
+            Ok(value) if value.is_object() => Some(value),
+            _ => return Err(format!(
+                "write config to {} failed: {primary_error}; the anchor is invalid and was left unchanged",
+                path.display()
+            )),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!(
+            "write config to {} failed: {primary_error}; read anchor failed: {error}; the anchor was left unchanged",
+            path.display()
+        )),
+    };
     let merged = anchor_fallback_content(existing, config);
-    atomic_write_config(
+    match atomic_write_config(
         anchor,
         &serde_json::to_string_pretty(&merged).unwrap_or_default(),
-    )
-    .map_err(|e| {
-        format!(
-            "write config to {} failed and the anchor fallback also failed: {e}",
+    ) {
+        Ok(()) => Err(format!(
+            "write config to {} failed: {primary_error}; a recovery copy was saved to {}, but the active configuration was not saved",
+            path.display(), anchor.display()
+        )),
+        Err(error) => Err(format!(
+            "write config to {} failed: {primary_error}; the anchor recovery copy also failed: {error}",
             path.display()
-        )
-    })
+        )),
+    }
 }
 
 // ── Command: get_profiles (emit profiles event) ──
@@ -3775,58 +3794,154 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
         .get("force")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    // Switching the data dir writes the in-memory config into the new
-    // location; while persistence is suppressed that in-memory config is
-    // factory defaults (the real one failed to parse), so the switch would
-    // overwrite the target with defaults as if they were the user's settings.
-    if let Some(err) = data_dir_suppressed_error() {
-        return Ok(err);
+    Ok(set_data_dir_from_anchor(
+        &anchor_config_path(),
+        &default_data_dir().join("config.json"),
+        &dir,
+        force,
+    ))
+}
+
+fn set_data_dir_from_anchor(
+    anchor: &std::path::Path,
+    default_config_path: &std::path::Path,
+    dir: &str,
+    force: bool,
+) -> Value {
+    // A migration cannot use startup's tolerant resolver: losing an unreadable
+    // custom pointer would authorize copying an unrelated default configuration.
+    let anchor_value = match std::fs::read_to_string(anchor) {
+        Ok(content) => match serde_json::from_str::<Value>(&content) {
+            Ok(value) if value.is_object() => value,
+            _ => {
+                return json!({
+                    "error": "the data directory pointer could not be parsed; data directory unchanged",
+                    "code": "config-unreadable"
+                })
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => {
+            return json!({
+                "error": format!("the data directory pointer could not be read; data directory unchanged: {error}"),
+                "code": "config-unreadable"
+            })
+        }
+    };
+    let current_path = match anchor_value.get("dataDir") {
+        None => default_config_path.to_path_buf(),
+        Some(Value::String(path)) if path.is_empty() => default_config_path.to_path_buf(),
+        Some(Value::String(path)) => PathBuf::from(path).join("config.json"),
+        Some(_) => {
+            return json!({
+                "error": "the data directory pointer is not a path string; data directory unchanged",
+                "code": "config-unreadable"
+            })
+        }
+    };
+    set_data_dir_from(&current_path, anchor, default_config_path, dir, force)
+}
+
+// Migration requires a current, readable snapshot. Unlike the normal startup
+// loader, this path never backs up or resets corrupt files or mutates a pointer.
+fn read_config_for_migration_from(
+    path: &std::path::Path,
+    anchor: &std::path::Path,
+) -> Result<Value, String> {
+    let parse = |content: String, source: &std::path::Path, mirror: bool| {
+        let raw: Value = serde_json::from_str(&content)
+            .map_err(|error| format!("parse {}: {error}", source.display()))?;
+        if mirror
+            && !raw
+                .as_object()
+                .is_some_and(|object| object.keys().any(|key| key != "dataDir"))
+        {
+            return Err(format!(
+                "{} has no configuration snapshot to migrate",
+                source.display()
+            ));
+        }
+        let (mut config, corrupt) = sanitize_config(raw);
+        if corrupt {
+            return Err(format!(
+                "{} does not contain a configuration object",
+                source.display()
+            ));
+        }
+        if let Some(object) = config.as_object_mut() {
+            object.remove("dataDir");
+        }
+        Ok(config)
+    };
+    let primary_error = match std::fs::read_to_string(path) {
+        Ok(content) => return parse(content, path, false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => Some(format!("read {}: {error}", path.display())),
+    };
+    if path != anchor {
+        match std::fs::read_to_string(anchor) {
+            Ok(content) => return parse(content, anchor, true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("read {}: {error}", anchor.display())),
+        }
     }
-    let anchor_dir = PathBuf::from(
-        std::env::var("APPDATA")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_default(),
-    )
-    .join("ZTerm");
-    let anchor_config = anchor_dir.join("config.json");
-    let _ = std::fs::create_dir_all(&anchor_dir);
+    match primary_error {
+        Some(error) => Err(error),
+        None => Ok(default_config()),
+    }
+}
+
+fn set_data_dir_from(
+    current_path: &std::path::Path,
+    anchor_config: &std::path::Path,
+    default_dir_config: &std::path::Path,
+    dir: &str,
+    force: bool,
+) -> Value {
+    let current_config = match read_config_for_migration_from(current_path, anchor_config) {
+        Ok(config) => config,
+        Err(error) => {
+            return json!({
+                "error": format!("the current config could not be read; data directory unchanged: {error}"),
+                "code": "config-unreadable"
+            })
+        }
+    };
+    if let Some(parent) = anchor_config.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            return json!({ "error": format!("create {}: {error}", parent.display()) });
+        }
+    }
 
     if dir.is_empty() {
-        let default_dir_config = default_data_dir().join("config.json");
         // Resetting overwrites whatever config still sits in the default dir
         // (e.g. left there from before the switch to a custom dir): refuse
         // without an explicit force, same as the custom-dir branch below.
         if !force {
-            if let Some(err) = data_dir_conflict_error(&default_dir_config) {
-                return Ok(err);
+            if let Some(err) = data_dir_conflict_error(default_dir_config) {
+                return err;
             }
         }
-        if let Err(e) =
-            restore_default_data_dir(&default_dir_config, &anchor_config, &load_config())
+        if let Err(e) = restore_default_data_dir(default_dir_config, anchor_config, &current_config)
         {
-            return Ok(json!({ "error": e }));
+            return json!({ "error": e });
         }
     } else {
-        let current_config = load_config();
-        let mut clean_config = current_config.clone();
-        if let Value::Object(ref mut m) = clean_config {
-            m.remove("dataDir");
-        }
         // The target must not silently clobber a config that already lives in
         // it (SSH profiles / encrypted passwords would be lost for good).
         if !force {
-            if let Some(err) = data_dir_conflict_error(&PathBuf::from(&dir).join("config.json")) {
-                return Ok(err);
+            if let Some(err) = data_dir_conflict_error(&PathBuf::from(dir).join("config.json")) {
+                return err;
             }
         }
         // The target must actually hold the config before the anchor is
         // repointed at it, or an unwritable directory is reported as a
         // successful migration (and the next launch reads factory defaults).
-        if let Err(e) = write_config_to_dir(&PathBuf::from(&dir), &clean_config) {
-            return Ok(json!({ "error": e }));
+        if let Err(e) = write_config_to_dir(&PathBuf::from(dir), &current_config) {
+            return json!({ "error": e });
         }
         let mut anchor: Value = if anchor_config.exists() {
-            std::fs::read_to_string(&anchor_config)
+            std::fs::read_to_string(anchor_config)
                 .ok()
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or(json!({}))
@@ -3837,13 +3952,13 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
             m.insert("dataDir".into(), json!(dir));
         }
         if let Err(e) = atomic_write_config(
-            &anchor_config,
+            anchor_config,
             &serde_json::to_string_pretty(&anchor).unwrap_or_default(),
         ) {
-            return Ok(json!({ "error": format!("write {}: {e}", anchor_config.display()) }));
+            return json!({ "error": format!("write {}: {e}", anchor_config.display()) });
         }
     }
-    Ok(json!({ "ok": true }))
+    json!({ "ok": true })
 }
 
 /// True when the file exists and holds at least one byte; a zero-length
@@ -3866,23 +3981,6 @@ fn data_dir_conflict_error(target_config: &std::path::Path) -> Option<Value> {
                 target_config.display()
             ),
             "code": "target-config-exists"
-        }))
-    } else {
-        None
-    }
-}
-
-/// A data-dir switch while persistence is suppressed would write factory
-/// defaults (the real config failed to parse at startup, so load_config fell
-/// back) into the target directory as if they were the user's settings.
-/// Returns the command's error payload with a stable code the renderer can
-/// surface, or None when switching is allowed. Split from set_data_dir for
-/// unit testing.
-fn data_dir_suppressed_error() -> Option<Value> {
-    if CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst) {
-        Some(json!({
-            "error": "the current config is unreadable; refusing to switch the data directory because factory defaults would be written as if they were your settings",
-            "code": "config-unreadable"
         }))
     } else {
         None
@@ -6557,10 +6655,27 @@ mod tests {
     }
 
     fn config_test_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("zterm-cfgtest-{}-{}", std::process::id(), name));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let root = checkout.join("artifacts/e2e-tmp");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        assert!(
+            root.starts_with(&checkout),
+            "config fixtures must stay in the checkout"
+        );
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = root.join(format!(
+            "zterm-cfgtest-{}-{name}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
         dir
     }
 
@@ -9872,16 +9987,399 @@ mod tests {
     }
 
     #[test]
-    fn data_dir_suppressed_error_tracks_persist_suppression() {
-        // CONFIG_PERSIST_SUPPRESSED is process-global: serialize against the
-        // other tests that flip it, and restore it before exiting.
+    #[cfg(windows)]
+    fn readable_primary_write_failure_never_reports_recovery_as_saved() {
+        use std::os::windows::fs::OpenOptionsExt;
         let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
         CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
-        assert!(data_dir_suppressed_error().is_none());
-        CONFIG_PERSIST_SUPPRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
-        let err = data_dir_suppressed_error().expect("suppressed config must block the switch");
-        assert_eq!(err["code"], json!("config-unreadable"));
+        let dir = config_test_dir("readable-write-failure");
+        let primary = dir.join("data/config.json");
+        let anchor = dir.join("anchor/config.json");
+        write_config_to_dir(
+            primary.parent().unwrap(),
+            &json!({ "appearance": { "fontSize": 12 } }),
+        )
+        .unwrap();
+        write_config_to_dir(anchor.parent().unwrap(), &json!({ "dataDir": primary.parent().unwrap().to_string_lossy(), "appearance": { "fontSize": 12 } })).unwrap();
+        // Read sharing remains available, but replacing the existing primary
+        // is denied. This must not be confused with a failed configuration read.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&primary)
+            .unwrap();
+        for size in [18, 20] {
+            let mut config = load_config_from(&primary, &anchor);
+            assert_eq!(config["appearance"]["fontSize"], 12);
+            config["appearance"]["fontSize"] = json!(size);
+            let error = save_config_to(&primary, &anchor, &config).unwrap_err();
+            assert!(
+                error.contains("active configuration was not saved"),
+                "{error}"
+            );
+            let recovery: Value =
+                serde_json::from_str(&std::fs::read_to_string(&anchor).unwrap()).unwrap();
+            assert_eq!(recovery["appearance"]["fontSize"], size);
+            assert_eq!(
+                recovery["dataDir"],
+                primary.parent().unwrap().to_string_lossy().as_ref()
+            );
+            assert_eq!(
+                load_config_from(&primary, &anchor)["appearance"]["fontSize"],
+                12
+            );
+        }
+        drop(lock);
+        let mut recovered = load_config_from(&dir.join("missing.json"), &anchor);
+        assert_eq!(recovered["appearance"]["fontSize"], 20);
+        recovered["appearance"]["fontSize"] = json!(22);
+        save_config_to(&primary, &anchor, &recovered).unwrap();
+        assert_eq!(
+            load_config_from(&primary, &anchor)["appearance"]["fontSize"],
+            22
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn data_dir_switch_current_read_failure_preserves_targets_and_pointer() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        let dir = config_test_dir("migration-current-read-failure");
+        let primary = dir.join("current/config.json");
+        let anchor = dir.join("anchor/config.json");
+        let default = dir.join("default/config.json");
+        let target = dir.join("target");
+        write_config_to_dir(
+            primary.parent().unwrap(),
+            &json!({ "appearance": { "fontSize": 27 } }),
+        )
+        .unwrap();
+        write_config_to_dir(
+            anchor.parent().unwrap(),
+            &json!({ "dataDir": primary.parent().unwrap().to_string_lossy() }),
+        )
+        .unwrap();
+        write_config_to_dir(default.parent().unwrap(), &json!({ "keep": "default" })).unwrap();
+        let pointer_before = std::fs::read_to_string(&anchor).unwrap();
+        let default_before = std::fs::read_to_string(&default).unwrap();
+        assert_eq!(
+            load_config_from(&primary, &anchor)["appearance"]["fontSize"],
+            27
+        );
+        assert!(!CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst));
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&primary)
+            .unwrap();
+        let failed = set_data_dir_from(
+            &primary,
+            &anchor,
+            &default,
+            &target.to_string_lossy(),
+            false,
+        );
+        assert_eq!(failed["code"], "config-unreadable");
+        assert!(!target.exists(), "failed read must not create the target");
+        write_config_to_dir(&target, &json!({ "keep": "custom" })).unwrap();
+        let target_before = std::fs::read_to_string(target.join("config.json")).unwrap();
+        for destination in [target.to_string_lossy().into_owned(), String::new()] {
+            let failed = set_data_dir_from(&primary, &anchor, &default, &destination, true);
+            assert_eq!(failed["code"], "config-unreadable");
+        }
+        assert_eq!(std::fs::read_to_string(&anchor).unwrap(), pointer_before);
+        assert_eq!(std::fs::read_to_string(&default).unwrap(), default_before);
+        assert_eq!(
+            std::fs::read_to_string(target.join("config.json")).unwrap(),
+            target_before
+        );
+        drop(lock);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_save_leaves_invalid_recovery_anchor_unchanged() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
         CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let dir = config_test_dir("invalid-recovery-anchor");
+        let primary = dir.join("current/config.json");
+        let anchor = dir.join("anchor/config.json");
+        write_config_to_dir(
+            primary.parent().unwrap(),
+            &json!({ "appearance": { "fontSize": 12 } }),
+        )
+        .unwrap();
+        std::fs::create_dir(primary.with_extension("json.tmp")).unwrap();
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        std::fs::write(&anchor, "{\"dataDir\":").unwrap();
+        assert!(save_config_to(
+            &primary,
+            &anchor,
+            &json!({ "appearance": { "fontSize": 20 } })
+        )
+        .is_err());
+        assert_eq!(std::fs::read_to_string(&anchor).unwrap(), "{\"dataDir\":");
+        assert_eq!(
+            load_config_from(&primary, &anchor)["appearance"]["fontSize"],
+            12
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn data_dir_switch_uses_successful_current_read_over_stale_suppression() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        let dir = config_test_dir("migration-current-success");
+        let primary = dir.join("current/config.json");
+        let anchor = dir.join("anchor/config.json");
+        let default = dir.join("default/config.json");
+        let target = dir.join("target");
+        write_config_to_dir(
+            primary.parent().unwrap(),
+            &json!({ "appearance": { "fontSize": 27 } }),
+        )
+        .unwrap();
+        CONFIG_PERSIST_SUPPRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let switched = set_data_dir_from(
+            &primary,
+            &anchor,
+            &default,
+            &target.to_string_lossy(),
+            false,
+        );
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(switched["ok"], true);
+        let migrated: Value =
+            serde_json::from_str(&std::fs::read_to_string(target.join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(migrated["appearance"]["fontSize"], 27);
+        let pointer: Value =
+            serde_json::from_str(&std::fs::read_to_string(&anchor).unwrap()).unwrap();
+        assert_eq!(pointer["dataDir"], target.to_string_lossy().as_ref());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn data_dir_switch_corrupt_source_is_read_only() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        let dir = config_test_dir("migration-corrupt-source");
+        let primary = dir.join("current/config.json");
+        let anchor = dir.join("anchor/config.json");
+        let target = dir.join("target");
+        write_config_to_dir(primary.parent().unwrap(), &json!({})).unwrap();
+        std::fs::write(&primary, "{invalid").unwrap();
+        write_config_to_dir(anchor.parent().unwrap(), &json!({ "dataDir": "original" })).unwrap();
+        let pointer_before = std::fs::read_to_string(&anchor).unwrap();
+        let failed = set_data_dir_from(
+            &primary,
+            &anchor,
+            &dir.join("default/config.json"),
+            &target.to_string_lossy(),
+            false,
+        );
+        assert_eq!(failed["code"], "config-unreadable");
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_to_string(&primary).unwrap(), "{invalid");
+        assert_eq!(std::fs::read_to_string(&anchor).unwrap(), pointer_before);
+        assert_eq!(
+            std::fs::read_dir(primary.parent().unwrap())
+                .unwrap()
+                .count(),
+            1,
+            "migration must not create corruption backups or reset the source"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migration_read_accepts_full_mirror_and_known_first_run_only() {
+        let dir = config_test_dir("migration-read-provenance");
+        let primary = dir.join("primary/config.json");
+        let anchor = dir.join("anchor/config.json");
+        assert_eq!(
+            read_config_for_migration_from(&primary, &anchor).unwrap(),
+            default_config()
+        );
+        std::fs::create_dir_all(&primary).unwrap();
+        write_config_to_dir(
+            anchor.parent().unwrap(),
+            &json!({ "dataDir": "unreadable-target" }),
+        )
+        .unwrap();
+        assert!(read_config_for_migration_from(&primary, &anchor).is_err());
+        write_config_to_dir(
+            anchor.parent().unwrap(),
+            &json!({ "dataDir": "unreadable-target", "appearance": { "fontSize": 31 } }),
+        )
+        .unwrap();
+        let recovered = read_config_for_migration_from(&primary, &anchor).unwrap();
+        assert_eq!(recovered["appearance"]["fontSize"], 31);
+        assert!(recovered.get("dataDir").is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn data_dir_switch_target_write_failure_preserves_pointer_and_existing_data() {
+        let dir = config_test_dir("migration-target-write-failure");
+        let primary = dir.join("current/config.json");
+        let anchor = dir.join("anchor/config.json");
+        let target = dir.join("target");
+        write_config_to_dir(
+            primary.parent().unwrap(),
+            &json!({ "appearance": { "fontSize": 27 } }),
+        )
+        .unwrap();
+        write_config_to_dir(anchor.parent().unwrap(), &json!({ "dataDir": "original" })).unwrap();
+        write_config_to_dir(&target, &json!({ "keep": "target" })).unwrap();
+        std::fs::create_dir(target.join("config.json.tmp")).unwrap();
+        let target_before = std::fs::read_to_string(target.join("config.json")).unwrap();
+        let pointer_before = std::fs::read_to_string(&anchor).unwrap();
+        let failed = set_data_dir_from(
+            &primary,
+            &anchor,
+            &dir.join("default/config.json"),
+            &target.to_string_lossy(),
+            true,
+        );
+        assert!(failed.get("error").is_some());
+        assert_eq!(std::fs::read_to_string(&anchor).unwrap(), pointer_before);
+        assert_eq!(
+            std::fs::read_to_string(target.join("config.json")).unwrap(),
+            target_before
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn data_dir_switch_initializes_only_when_both_sources_are_missing() {
+        let dir = config_test_dir("migration-first-run");
+        let primary = dir.join("current/config.json");
+        let anchor = dir.join("anchor/config.json");
+        let target = dir.join("target");
+        let switched = set_data_dir_from(
+            &primary,
+            &anchor,
+            &dir.join("default/config.json"),
+            &target.to_string_lossy(),
+            false,
+        );
+        assert_eq!(switched["ok"], true);
+        let migrated: Value =
+            serde_json::from_str(&std::fs::read_to_string(target.join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(migrated, default_config());
+        let pointer: Value =
+            serde_json::from_str(&std::fs::read_to_string(&anchor).unwrap()).unwrap();
+        assert_eq!(pointer["dataDir"], target.to_string_lossy().as_ref());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migration_anchor_corruption_never_selects_stale_default_config() {
+        let dir = config_test_dir("migration-anchor-corrupt");
+        let anchor = dir.join("anchor/config.json");
+        let default = dir.join("default/config.json");
+        let target = dir.join("target");
+        write_config_to_dir(
+            default.parent().unwrap(),
+            &json!({ "appearance": { "fontSize": 12 } }),
+        )
+        .unwrap();
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        std::fs::write(&anchor, "{\"dataDir\":\"missing-end").unwrap();
+        let anchor_before = std::fs::read_to_string(&anchor).unwrap();
+        let default_before = std::fs::read_to_string(&default).unwrap();
+        let result = set_data_dir_from_anchor(&anchor, &default, &target.to_string_lossy(), false);
+        assert_eq!(result["code"], "config-unreadable");
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_to_string(&anchor).unwrap(), anchor_before);
+        assert_eq!(std::fs::read_to_string(&default).unwrap(), default_before);
+        let reset = set_data_dir_from_anchor(&anchor, &default, "", true);
+        assert_eq!(reset["code"], "config-unreadable");
+        assert_eq!(std::fs::read_to_string(&anchor).unwrap(), anchor_before);
+        assert_eq!(std::fs::read_to_string(&default).unwrap(), default_before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn migration_anchor_read_failure_never_selects_stale_default_config() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = config_test_dir("migration-anchor-unreadable");
+        let anchor = dir.join("anchor/config.json");
+        let current = dir.join("current/config.json");
+        let default = dir.join("default/config.json");
+        let target = dir.join("target");
+        write_config_to_dir(
+            current.parent().unwrap(),
+            &json!({ "appearance": { "fontSize": 27 } }),
+        )
+        .unwrap();
+        write_config_to_dir(
+            default.parent().unwrap(),
+            &json!({ "appearance": { "fontSize": 12 } }),
+        )
+        .unwrap();
+        write_config_to_dir(
+            anchor.parent().unwrap(),
+            &json!({ "dataDir": current.parent().unwrap().to_string_lossy() }),
+        )
+        .unwrap();
+        let anchor_before = std::fs::read_to_string(&anchor).unwrap();
+        let default_before = std::fs::read_to_string(&default).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&anchor)
+            .unwrap();
+        let result = set_data_dir_from_anchor(&anchor, &default, &target.to_string_lossy(), false);
+        let reset = set_data_dir_from_anchor(&anchor, &default, "", true);
+        drop(lock);
+        assert_eq!(result["code"], "config-unreadable");
+        assert_eq!(reset["code"], "config-unreadable");
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_to_string(&anchor).unwrap(), anchor_before);
+        assert_eq!(std::fs::read_to_string(&default).unwrap(), default_before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn migration_anchor_valid_custom_pointer_selects_current_config() {
+        let dir = config_test_dir("migration-anchor-valid-custom");
+        let anchor = dir.join("anchor/config.json");
+        let current = dir.join("current/config.json");
+        let default = dir.join("default/config.json");
+        let target = dir.join("target");
+        write_config_to_dir(
+            current.parent().unwrap(),
+            &json!({ "appearance": { "fontSize": 27 } }),
+        )
+        .unwrap();
+        write_config_to_dir(
+            default.parent().unwrap(),
+            &json!({ "appearance": { "fontSize": 12 } }),
+        )
+        .unwrap();
+        write_config_to_dir(
+            anchor.parent().unwrap(),
+            &json!({ "dataDir": current.parent().unwrap().to_string_lossy() }),
+        )
+        .unwrap();
+        let result = set_data_dir_from_anchor(&anchor, &default, &target.to_string_lossy(), false);
+        assert_eq!(result["ok"], true);
+        let migrated: Value =
+            serde_json::from_str(&std::fs::read_to_string(target.join("config.json")).unwrap())
+                .unwrap();
+        assert_eq!(migrated["appearance"]["fontSize"], 27);
+        let stale: Value =
+            serde_json::from_str(&std::fs::read_to_string(&default).unwrap()).unwrap();
+        assert_eq!(stale["appearance"]["fontSize"], 12);
+        let pointer: Value =
+            serde_json::from_str(&std::fs::read_to_string(&anchor).unwrap()).unwrap();
+        assert_eq!(pointer["dataDir"], target.to_string_lossy().as_ref());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

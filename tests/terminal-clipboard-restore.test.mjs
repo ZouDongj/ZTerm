@@ -20,6 +20,9 @@ function fixture({ enabled = true, read } = {}) {
     ctx._settingsConfig.osc52 = enabled;
     const calls = [];
     ctx.ipcRenderer.invoke = (command, args) => {
+        // Settings persistence is a separate IPC effect; this recorder checks
+        // terminal clipboard access while the real settings handler runs.
+        if (command === 'save-appearance' || command === 'save-terminal-settings') return Promise.resolve();
         calls.push({ command, args });
         return command === 'clipboard-read-text'
             ? (read ? read() : Promise.resolve('SYNTHETIC_CLIPBOARD'))
