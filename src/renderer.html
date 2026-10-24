@@ -625,7 +625,8 @@
       </div>
     </div>
     <!-- SFTP side dock: non-modal panel docked to the right edge of the main
-         area; binding and visibility follow the focused SSH pane (sftp.js). -->
+         area; shown only on a frontend tab where the user opened SFTP, while
+         its focused pane is a connected SSH session (sftp.js). -->
     <aside class="sftp-dock" id="overlay-sftp" aria-hidden="true">
       <div class="sftp-resize" id="sftp-resize" role="separator" aria-orientation="vertical" tabindex="0" title="拖拽或左右方向键调整宽度"></div>
       <!-- Header/toolbar buttons swallow mousedown (preventDefault): the click

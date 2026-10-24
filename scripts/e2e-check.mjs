@@ -1284,14 +1284,15 @@ async function main() {
     // 12. SFTP panel: open → panel visible → close
     // Section 11 leaves a real retry chain (backoff 2s/5s/10s) running against
     // 127.0.0.1:1: every ssh-error landing in the retry branch calls
-    // SFTP.updateTarget() (ipc.js), which re-reads the ACTIVE tab and suspends
-    // a dock bound to anything else — including this section's artificial
-    // 'e2e-dummy-tab' binding. The product behavior is by design (the dock
-    // follows the active SSH pane); the artificial binding is what makes the
-    // window observable. Exhaust the chain deterministically: bump the retry
-    // token so scheduled retries no-op at fire time, and exhaust the budget so
-    // an arriving in-flight error takes the terminal branch (no updateTarget,
-    // no new attempt).
+    // SFTP.updateTarget() (ipc.js), which re-reads the ACTIVE tab against the
+    // per-tab open set and suspends a dock whose active tab shows no connected
+    // SSH target — including this section's artificial 'e2e-dummy-tab'
+    // binding. The product behavior is by design (the dock reflects the
+    // active tab's own open state and focus); the artificial binding is what
+    // makes the window observable. Exhaust the chain deterministically: bump
+    // the retry token so scheduled retries no-op at fire time, and exhaust the
+    // budget so an arriving in-flight error takes the terminal branch (no
+    // updateTarget, no new attempt).
     await cdp.eval(`(() => {
       for (const t of TabManager.tabs) {
         t._sshRetryToken = (t._sshRetryToken || 0) + 1;
@@ -1395,6 +1396,18 @@ async function main() {
       await sleep(300);
 
       // B) A late rejection of a superseded open must not overwrite B's listing.
+      // Fresh-open staging note (applies to the resets in C-H too): these
+      // pre-J subsections stage rebinds through direct SFTP.open(X) and were
+      // written against the old global model, where open() ALWAYS issued a
+      // fresh sftp-open. Under the per-session directory memory, a remembered
+      // path (or a leftover pin) redirects open(X) into a restore
+      // sftp-readdir instead — the waitForValue('sftp-open') below would
+      // stall and every settle/fail would no-op. Each subsection resets
+      // _lastPath (and pins where it does not stage them itself) so its
+      // opens are exactly the fresh opens the section verifies; the
+      // ownership assertions are untouched, and section J covers the
+      // restore semantics against the real model.
+      await cdp.eval(`SFTP._lastPath = {}`);
       await cdp.eval(`window.__sftpGate.run('rebind-a2', () => { SFTP.close(); return SFTP.open(${JSON.stringify(A)}); })`); // A's open stays pending
       await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
       await sleep(300);
@@ -1415,6 +1428,7 @@ async function main() {
       //    no stale row can dispatch a download against the new session.
       await cdp.eval(`SFTP.close()`);
       await sleep(200);
+      await cdp.eval(`SFTP._lastPath = {}`); // fresh-open staging (see B)
       await cdp.eval(`window.__sftpGate.run('open-b3', () => SFTP.open(${JSON.stringify(B)}))`);
       await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(B)}).length`, 1, 5000);
       await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(B)}, { path: '/var/log', files: [{ name: 'syslog', isDir: false, size: 5, mtime: 0 }] })`);
@@ -1447,6 +1461,7 @@ async function main() {
       //    channel): only the panel's own live session follows; pinned stays.
       await cdp.eval(`SFTP.close()`);
       await sleep(200);
+      await cdp.eval(`SFTP._lastPath = {}`); // fresh-open staging (see B)
       await cdp.eval(`window.__sftpGate.run('open-a4', () => SFTP.open(${JSON.stringify(A)}))`);
       await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
       await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, { path: '/srv/app', files: [] })`);
@@ -1486,6 +1501,7 @@ async function main() {
       //    feedback.
       await cdp.eval(`SFTP.togglePin()`); // unpin A again for the later sections
       await sleep(200);
+      await cdp.eval(`SFTP._lastPath = {}`); // fresh-open staging (see B)
       await cdp.eval(`SFTP.close()`);
       await sleep(200);
       await cdp.eval(`window.__sftpGate.run('open-a5', () => SFTP.open(${JSON.stringify(A)}))`);
@@ -1519,6 +1535,7 @@ async function main() {
       //    editor's Enter still navigates the typed path.
       await cdp.eval(`SFTP.close()`);
       await sleep(200);
+      await cdp.eval(`SFTP._lastPath = {}`); // fresh-open staging (see B)
       await cdp.eval(`window.__sftpGate.run('open-a7', () => SFTP.open(${JSON.stringify(A)}))`);
       await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
       await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, { path: '/srv/app', files: [] })`);
@@ -1558,6 +1575,10 @@ async function main() {
       //    current view's upload-completion refresh.
       await cdp.eval(`SFTP.close()`);
       await sleep(200);
+      // Fresh-open staging (see B), pins included: section C left B pinned at
+      // /var/log, and this section's open(B) must be a fresh sftp-open so the
+      // pending-readdir count below is genuinely the upload refresh.
+      await cdp.eval(`SFTP._lastPath = {}; SFTP._pinned = {}; SFTP._pinnedPath = {};`);
       await cdp.eval(`window.__sftpGate.run('open-a8', () => SFTP.open(${JSON.stringify(A)}))`); // A's open stays pending
       await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
       await sleep(300);
@@ -1580,6 +1601,7 @@ async function main() {
       //    lists every completed file.
       await cdp.eval(`SFTP.close()`);
       await sleep(200);
+      await cdp.eval(`SFTP._lastPath = {}`); // fresh-open staging (see B)
       await cdp.eval(`window.__sftpGate.run('open-a9', () => SFTP.open(${JSON.stringify(A)}))`);
       await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
       await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, { path: '/srv/app', files: [] })`);
@@ -1744,6 +1766,88 @@ async function main() {
         rootRendered.path === '/' && rootRendered.seps === 0 && rootRendered.rows.includes('root-note.txt'),
         JSON.stringify({ iconPos, iconHit, afterIcon, rootRendered }));
 
+      // J) Per-tab open-state model: the dock is shown ONLY on a frontend tab
+      //    the user explicitly opened SFTP on. Switching to an SSH tab that
+      //    never opened it shows no dock and fires no request; switching back
+      //    restores the dock at the remembered directory. Two synthetic tabs
+      //    (never wired to a backend; their session ids stay inside the gate)
+      //    ride the REAL switchTo → SFTP.updateTarget reflection path.
+      await cdp.eval(`SFTP.close()`);
+      await sleep(200);
+      await cdp.eval(`(() => {
+        // Deterministic staging: drop the earlier subsections' per-session
+        // memories and per-tab open states (fixture reset, not product path).
+        SFTP._lastPath = {}; SFTP._openTabs.clear();
+        TabManager.tabs.push({ id: 'e2e-ft-a', type: 'ssh', tabId: ${JSON.stringify(A)}, name: 'E2E-FTA', connected: true });
+        TabManager.tabs.push({ id: 'e2e-ft-b', type: 'ssh', tabId: ${JSON.stringify(B)}, name: 'E2E-FTB', connected: true });
+        TabManager.render();
+        TabManager.switchTo('e2e-ft-a');
+        return TabManager.activeId;
+      })()`);
+      await sleep(300);
+      // Open the dock on tab A through the real bar toggle, then browse away
+      // from home so the remembered directory is observable.
+      await cdp.eval(`SFTP.toggleFromBar()`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, { path: '/srv/app', files: [] })`);
+      await sleep(300);
+      await cdp.eval(`window.__sftpGate.run('per-tab-nav', () => SFTP.navigate('/srv/app/deep'))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app/deep').length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app/deep', { files: [] })`);
+      await sleep(300);
+      const perTabOpenA = await cdp.eval(`(() => ({ open: SFTP.isOpen, tabId: SFTP._tabId, inSet: SFTP._openTabs.has('e2e-ft-a') }))()`);
+      check('SFTP 每标签：A 上显式打开后 dock 绑定 A',
+        perTabOpenA.open === true && perTabOpenA.tabId === A && perTabOpenA.inSet === true,
+        JSON.stringify(perTabOpenA));
+
+      // Switch to tab B (never opened): no dock, no sftp-open for B, A's state kept.
+      await cdp.eval(`TabManager.switchTo('e2e-ft-b')`);
+      await sleep(300);
+      const perTabHidden = await cdp.eval(`(() => ({
+        open: SFTP.isOpen,
+        bOpens: window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(B)}).length,
+        aKept: SFTP._openTabs.has('e2e-ft-a'),
+      }))()`);
+      check('SFTP 每标签：切到未打开过的 B 隐藏 dock 且不发 sftp-open',
+        perTabHidden.open === false && perTabHidden.bOpens === 0 && perTabHidden.aKept === true,
+        JSON.stringify(perTabHidden));
+
+      // Back to A: the dock restores at the remembered directory (a readdir
+      // resume, not a fresh sftp-open at the remote home).
+      await cdp.eval(`TabManager.switchTo('e2e-ft-a')`);
+      const perTabRestorePending = await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app/deep').length`, 1, 5000);
+      const perTabNoFreshOpen = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app/deep', { files: [] })`);
+      await sleep(300);
+      const perTabRestore = await cdp.eval(`(() => ({ open: SFTP.isOpen, tabId: SFTP._tabId, path: SFTP._path }))()`);
+      check('SFTP 每标签：切回 A 恢复 dock 并回到记忆目录',
+        perTabRestorePending === 1 && perTabNoFreshOpen === 0 &&
+        perTabRestore.open === true && perTabRestore.tabId === A && perTabRestore.path === '/srv/app/deep',
+        JSON.stringify({ perTabRestorePending, perTabNoFreshOpen, perTabRestore }));
+
+      // Close on A (the header × path through the public close): the tab
+      // leaves the open set — leaving and returning shows no dock (per-tab
+      // close, not a global toggle).
+      await cdp.eval(`SFTP.close()`);
+      await sleep(200);
+      await cdp.eval(`TabManager.switchTo('e2e-ft-b')`);
+      await sleep(200);
+      await cdp.eval(`TabManager.switchTo('e2e-ft-a')`);
+      await sleep(300);
+      const perTabClosed = await cdp.eval(`(() => ({ open: SFTP.isOpen, aOpen: SFTP._openTabs.has('e2e-ft-a') }))()`);
+      check('SFTP 每标签：A 上关闭后切回 A 无 dock', perTabClosed.open === false && perTabClosed.aOpen === false, JSON.stringify(perTabClosed));
+
+      // Fixture teardown: null the synthetic session ids first so the real
+      // closeTab never sends backend events for the synthetic sessions.
+      await cdp.eval(`(() => {
+        for (const id of ['e2e-ft-a', 'e2e-ft-b']) {
+          const t = TabManager.tabs.find(x => x.id === id);
+          if (t) { t.tabId = null; try { TabManager.closeTab(id); } catch (e) {} }
+        }
+        return true;
+      })()`);
+      await sleep(500);
+
       // Unexpected action rejections recorded by the gate fail the section
       // explicitly instead of dying as background console errors.
       const sftpGateErrors = await cdp.eval(`window.__sftpGate ? window.__sftpGate.errors.slice() : ['gate-missing']`);
@@ -1780,6 +1884,7 @@ async function main() {
         try {
           SFTP.close();
           SFTP._pinned = {}; SFTP._pinnedPath = {};
+          SFTP._openTabs.clear(); SFTP._lastPath = {};
           SFTP._editingPath = false; SFTP._viewReq = null; SFTP._refreshInFlight = null; SFTP._refreshQueued = null;
           TransferManager._transfers = []; TransferManager._history = [];
           try { TransferManager._render(); } catch (e) { r.renderError = String(e && e.message || e); }

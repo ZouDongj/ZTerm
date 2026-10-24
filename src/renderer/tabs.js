@@ -1001,7 +1001,8 @@ const TabManager = {
         this.updateStatus();
         // The active terminal changed (terminal search follows)
         if (typeof _refreshSearchAfterActiveChange === 'function') _refreshSearchAfterActiveChange();
-        // SFTP dock follows the active tab's focused pane (hide on settings)
+        // SFTP dock reflects the newly active tab's own open state (hidden on
+        // tabs that never opened it; settings never targets)
         if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
     },
 
@@ -1014,10 +1015,16 @@ const TabManager = {
     },
 
     // The SFTP panel is bound to one backend session: any teardown of that
-    // session (tab close, pane close, reconnect) closes the panel first, so
-    // it never points at a destroyed session.
-    _closeSftpForSessions(ids) {
-        if (window.SFTP && SFTP._tabId && ids.indexOf(SFTP._tabId) >= 0) SFTP.close();
+    // session (tab close, reconnect) closes the panel first when the dying
+    // tab is the bound one, so it never points at a destroyed session. The
+    // close names the DYING frontend tab (SFTP.closeForTab) — the panel may
+    // be suspended on a background tab's binding while another tab is
+    // active, and an active-tab close there would wipe the wrong tab's open
+    // state. The per-tab open state / memory cleanup beside each call goes
+    // through SFTP.forgetTabState (pane close keeps the tab's open state
+    // instead — see _closePane).
+    _closeSftpForSessions(tab, ids) {
+        if (typeof SFTP !== 'undefined' && SFTP._tabId && ids.indexOf(SFTP._tabId) >= 0) SFTP.closeForTab(tab.id);
     },
 
     closeTab(id) {
@@ -1052,6 +1059,16 @@ const TabManager = {
             const t = this.tabs[0];
             const deadShell = t && t.type !== 'settings' && !t.splitRoot && !t.term && !t.tabId && !sshAttempts.ownerAttempt(t) && !t._ptyRequestId && !t._reconnectPending;
             if (t && ((t.splitRoot && getAllPanes(t).length === 0) || deadShell)) {
+                // The reset discards the tab's SSH identity: its SFTP open
+                // state goes and the dock (still bound to one of its dead
+                // sessions, if any) hides. This is the last tab alive, so no
+                // other tab can own the dock. The sessions' ids are already
+                // unrecoverable here (tabId/panes gone), so their `_lastPath`
+                // entries cannot be cleared — bounded orphans: backend ids are
+                // never reused, so a stale entry can never be restored, it
+                // only lives until restart (same lifecycle as _pinned).
+                if (typeof SFTP !== 'undefined' && SFTP.forgetTabState) SFTP.forgetTabState(t.id, []);
+                if (typeof SFTP !== 'undefined' && SFTP.closeForTab) SFTP.closeForTab(t.id);
                 t.splitRoot = null;
                 t.type = 'local';
                 t.command = t.command || 'powershell.exe';
@@ -1067,8 +1084,14 @@ const TabManager = {
         if (idx < 0) return;
         const tab = this.tabs[idx];
         const wasActive = this.activeId === id;
-        // If the tab being closed has the SFTP panel open, close the panel too (so it never points at a destroyed session)
-        this._closeSftpForSessions(tab.splitRoot ? getAllPanes(tab).map(p => p.tabId) : [tab.tabId]);
+        // If the tab being closed had the SFTP dock open, its per-tab open
+        // state and its sessions' directory memory go with it (other tabs'
+        // docks are untouched); the dock itself is only closed when this tab
+        // is the bound one, and the neighbor that activates at the deferred
+        // removal reflects its OWN open state.
+        const dyingSessions = tab.splitRoot ? getAllPanes(tab).map(p => p.tabId) : [tab.tabId];
+        this._closeSftpForSessions(tab, dyingSessions);
+        if (typeof SFTP !== 'undefined' && SFTP.forgetTabState) SFTP.forgetTabState(tab.id, dyingSessions);
         if (tab.type === 'settings') {
             document.getElementById('settings-pane')?.classList.remove('active');
         }
@@ -1325,8 +1348,12 @@ const TabManager = {
         if (typeof showToast === 'function') showToast('正在重连: ' + this._tabDisplayName(tab));
 
         // The old session is discarded below: the SFTP panel must not stay
-        // bound to it (it would show a dead session's listing).
-        this._closeSftpForSessions([tab.tabId]);
+        // bound to it (it would show a dead session's listing). Reconnect
+        // closes the tab's SFTP outright — the open state and the old
+        // session's directory memory go, and the dock does not auto-reopen
+        // on the new session.
+        this._closeSftpForSessions(tab, [tab.tabId]);
+        if (typeof SFTP !== 'undefined' && SFTP.forgetTabState) SFTP.forgetTabState(tab.id, [tab.tabId]);
         // The old generation is discarded by this replacement: its attempt
         // (if still unsettled) is cancelled by identity and its queue slot
         // released, so a late event for the dead generation can neither
@@ -1404,8 +1431,11 @@ const TabManager = {
         tab._sshReconnectNotice = true;
         if (typeof showToast === 'function') showToast('正在重连: ' + (pane._sshHost || pane.name || tab.name));
         // The old session is discarded below: the SFTP panel must not stay
-        // bound to it.
-        this._closeSftpForSessions([pane.tabId]);
+        // bound to it. Same per-tab contract as reconnectTab (this path also
+        // serves its split delegation): the tab's open state and the old
+        // session's memory go; no auto-reopen after the reconnect.
+        this._closeSftpForSessions(tab, [pane.tabId]);
+        if (typeof SFTP !== 'undefined' && SFTP.forgetTabState) SFTP.forgetTabState(tab.id, [pane.tabId]);
         // Same identity-exact discard as reconnectTab: the pane's OWN attempt
         // (backend id once claimed, else the token alone — a pre-claim cancel
         // releases the queue slot the replacement is about to need), never a
@@ -2438,9 +2468,11 @@ const TabManager = {
         if (pane._closing) return;
         pane._closing = true;
         if (tab._maximizedPaneId === paneId) tab._maximizedPaneId = null;
-        // The pane's session is destroyed below: the SFTP panel must not stay
-        // bound to it (it would keep showing a dead session's listing).
-        this._closeSftpForSessions([pane.tabId]);
+        // The pane's session is destroyed below: its directory memory goes,
+        // but the tab's dock open state survives — the updateTarget call
+        // after the focus handoff rebinds to the remaining focused connected
+        // pane or hides the dock (the tab keeps its open state either way).
+        if (typeof SFTP !== 'undefined' && SFTP.forgetSession) SFTP.forgetSession(pane.tabId);
         // Destroy backend immediately but keep the DOM for exit animation.
         // The cancellation carries the pane's OWN attempt identity (backend
         // id once claimed, else the attempt token): the main process locates
@@ -2504,6 +2536,14 @@ const TabManager = {
             const sibling = getAllPanes(tab).find(p => p !== pane && !p._closing);
             if (sibling) sibling.focused = true;
         }
+        // SFTP dock: the normal update path re-evaluates the (kept) open
+        // state against the surviving focused pane — rebind or hide.
+        // Load-bearing ordering: the dying pane's tabId and focused flag are
+        // cleared ABOVE (session slots at initiation, focus handoff just
+        // before this call), so currentTargetTabId can never resolve the dead
+        // pane — running updateTarget earlier would rebind the dock right
+        // back to the session being destroyed.
+        if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
         // Exit animation: fade + shrink, then remove from tree and re-render
         const rootEl = document.getElementById('split_' + tab.id);
         const paneEl = rootEl ? rootEl.querySelector('.split-pane[data-pane="' + paneId + '"]') : null;

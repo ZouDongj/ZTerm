@@ -51,11 +51,10 @@ const SFTP = {
     _saveDialogOpen: false, // a save dialog is up: re-entrant download() calls return early
     _mkdir: null,      // inline mkdir edit state {tabId, base, ready, moving, row} while its input row is open
     _sessionDead: false, // the bound session died mid-panel: navigations are refused until a fresh open() rebinds
-    _pinned: {},       // tabId -> boolean, per-tab pin state
-    _pinnedPath: {},   // tabId -> path, per-tab pinned path
-    _userOpen: false,  // the user's dock toggle state; kept while the dock is suspended on a non-SSH focus and restored on return
-    _suspendedPath: null,      // {tabId, path} the suspended view was browsing; consumed by the next open() of the SAME session (a pinned path wins)
-    _pendingRestorePath: null, // destination of an in-flight restore navigation: a suspend landing before it settles must record this, not the '/' placeholder this._path still holds
+    _pinned: {},       // backend session id -> boolean, per-session pin state
+    _pinnedPath: {},   // backend session id -> path, per-session pinned path
+    _openTabs: new Set(), // FRONTEND tab ids (TabManager tab id, not the backend session id — a tab can hold several sessions via split, and reconnect changes the backend id) where the user opened the dock. Per-tab open state: switching to a tab that never opened SFTP shows no dock.
+    _lastPath: {},     // backend session id -> last directory the panel successfully listed for it; rebind restore priority: pin > last path > fresh sftp-open. Explicit close keeps it (reopen resumes); tab close / session teardown clears it.
 
     togglePin() {
         const tabId = this._tabId;
@@ -74,7 +73,22 @@ const SFTP = {
         return !!this._pinned[tabId];
     },
 
+    // User-open on the ACTIVE frontend tab: the tab joins the open set (its
+    // dock will show whenever it is active with a connected SSH focus), then
+    // the given backend session is bound and shown. Passing an explicit
+    // backend id (rather than re-deriving the target) keeps the toggle, the
+    // menu action and the E2E drivers on one path.
     async open(tabId) {
+        const active = TabManager.getActive();
+        if (active) this._openTabs.add(active.id);
+        await this._bind(tabId);
+    },
+
+    // Bind + show the dock for one backend session (idempotent rebind used by
+    // open() and updateTarget; never touches the per-tab open set). Restore
+    // priority: this session's pin > this session's remembered directory >
+    // fresh sftp-open at the remote home.
+    async _bind(tabId) {
         // tabId here is the main-process tabId, not TabManager's tab id
         this._tabId = tabId;
         // set connection info — pane-aware: a split tab's own tabId is
@@ -114,7 +128,6 @@ const SFTP = {
         document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载中…</div>';
         // Non-modal dock: the terminal keeps the keyboard focus while the
         // panel is open (no focus move on open; close() still refocuses).
-        this._userOpen = true;
         this._setDockVisible(true);
         this._syncToggleBtn();
         // restore this tab's pin state onto the button
@@ -125,26 +138,17 @@ const SFTP = {
             await this.navigate(this._pinnedPath[tabId]);
             return;
         }
-        // Restore the suspended view's directory when the SAME session comes
-        // back; a record for any other binding is dropped — that view was
-        // superseded, not suspended. Consumed up front (not after the await)
-        // so a re-suspend mid-navigation cannot double-restore.
-        if (this._suspendedPath) {
-            const sp = this._suspendedPath;
-            this._suspendedPath = null;
-            if (sp.tabId === tabId && sp.path) {
-                // this._path still holds the '/' placeholder until the
-                // navigation settles: park the destination so a suspend
-                // inside the window records the real path, and drop it once
-                // the navigation is done (settled OR superseded OR failed).
-                this._pendingRestorePath = sp.path;
-                try {
-                    await this.navigate(sp.path);
-                } finally {
-                    this._pendingRestorePath = null;
-                }
-                return;
-            }
+        // Resume the session's remembered directory. Memory is written only
+        // on listing success, so it is always a directory the panel really
+        // showed, and a suspend landing mid-restore cannot corrupt it (an
+        // unsettled restore wrote nothing; the next bind re-reads the same
+        // record). A restore whose listing FAILS drops the record
+        // (navigate's restore flag → _navFailed), so the next open falls
+        // back to a fresh sftp-open instead of failing on a dead directory
+        // forever.
+        if (this._lastPath[tabId]) {
+            await this.navigate(this._lastPath[tabId], { restore: true });
+            return;
         }
         // Request sequence + ownership check: the user may switch tabs or close
         // the panel meanwhile; a stale response must not overwrite the current panel state
@@ -175,6 +179,7 @@ const SFTP = {
                 return;
             }
             this._path = homePath || '/';
+            this._lastPath[myTab] = this._path;
             this._files = (files || []).sort((a, b) => {
                 if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
                 return a.name.localeCompare(b.name);
@@ -189,8 +194,32 @@ const SFTP = {
         }
     },
 
+    // User close for the ACTIVE frontend tab: that tab alone leaves the open
+    // set (other tabs' docks and memories are untouched), the dock hides and
+    // the binding drops. The per-session directory memory deliberately
+    // SURVIVES an explicit close — reopening resumes where the user left off
+    // (tab close / session teardown clear it instead).
     close() {
-        this._userOpen = false;
+        const active = TabManager.getActive();
+        if (active) this._openTabs.delete(active.id);
+        this._teardownDockView();
+    },
+
+    // Teardown close for one NAMED (possibly BACKGROUND) frontend tab whose
+    // sessions are going away (tab close, reconnect discard). The caller
+    // (_closeSftpForSessions) only invokes this when the dock's binding
+    // points at one of that tab's sessions, so the visual teardown below is
+    // always owed; the open-set removal names the DYING tab — close()'s
+    // active-tab guess would wipe the ACTIVE tab's open state whenever a
+    // suspended dock still carries a background tab's binding.
+    closeForTab(tabId) {
+        this._openTabs.delete(tabId);
+        this._teardownDockView();
+    },
+
+    // Shared visual/state teardown of the dock view: hide, unbind, retire the
+    // request generation and hand the keyboard back to the active terminal.
+    _teardownDockView() {
         this._setDockVisible(false);
         this._tabId = null;
         // The binding is gone: retire its request generation so no in-flight
@@ -202,11 +231,6 @@ const SFTP = {
         this._viewReq = null;
         this._refreshQueued = null;
         this._refreshInFlight = null;
-        // A closed dock restores nothing: drop any suspended-view record so a
-        // later open() (e.g. unpinned, after a pinned reopen skipped the
-        // consume block) can never resurrect a pre-close snapshot.
-        this._suspendedPath = null;
-        this._pendingRestorePath = null;
         this._syncToggleBtn();
         // Refocus terminal after closing SFTP panel
         const tab = TabManager.getActive();
@@ -237,19 +261,23 @@ const SFTP = {
         return document.getElementById('overlay-sftp').classList.contains('open');
     },
 
-    // User toggle state vs visibility gating: the dock is shown only while the
-    // active tab's focused pane is a connected SSH session. Focusing a local
-    // pane or the settings tab suspends the dock but keeps _userOpen, so
-    // refocusing an SSH pane restores it (Flutter _sftpOpen/_sftpTarget parity).
+    // Dock visibility model (per-tab open state): the dock is shown only on a
+    // frontend tab the user explicitly opened SFTP on (_openTabs) AND only
+    // while that tab's focused pane is a CONNECTED SSH session — focusing a
+    // local pane, the settings tab or a dead SSH session suspends the dock
+    // (visual hide only) until a connected SSH focus returns. Switching to a
+    // tab that never opened SFTP shows no dock at all.
     currentTargetTabId() {
         const tab = TabManager.getActive();
         if (!tab || tab.type === 'settings') return null;
         if (tab.splitRoot) {
             const panes = getAllPanes(tab);
             const target = panes.find(p => p.focused) || panes[0];
-            return (target && target.type === 'ssh' && target.tabId) ? target.tabId : null;
+            // connected !== false keeps an undefined (not-yet-flipped) flag
+            // usable — same tri-state read as the disconnect-reason listener.
+            return (target && target.type === 'ssh' && target.tabId && target.connected !== false) ? target.tabId : null;
         }
-        return (tab.type === 'ssh' && tab.tabId) ? tab.tabId : null;
+        return (tab.type === 'ssh' && tab.tabId && tab.connected !== false) ? tab.tabId : null;
     },
 
     toggleFromBar() {
@@ -260,15 +288,18 @@ const SFTP = {
     },
 
     // Re-evaluate the bar-button visibility and the dock binding after focus /
-    // tab / connection changes. Cheap early-outs keep hot paths (pane drag
-    // rebuilds) free of rebinds.
+    // tab / connection changes. Pure REFLECTION of state, never an auto-open:
+    // the dock shows iff the ACTIVE frontend tab is in the open set AND the
+    // focused pane resolves to a connected SSH session; anything else hides
+    // the dock (visual only — no tab's open state or memory is discarded).
+    // Cheap early-outs keep hot paths (pane drag rebuilds) free of rebinds.
     updateTarget() {
         const t = this.currentTargetTabId();
         this._syncToggleBtn();
-        if (!this._userOpen) return;
-        if (!t) { if (this.isOpen) this._suspend(); return; }
+        const active = TabManager.getActive();
+        if (!active || !this._openTabs.has(active.id) || !t) { if (this.isOpen) this._suspend(); return; }
         if (this.isOpen && this._tabId === t) return;
-        this.open(t);
+        this._bind(t);
     },
 
     _syncToggleBtn() {
@@ -279,18 +310,17 @@ const SFTP = {
         btn.classList.toggle('on', this.isOpen && this._tabId === t);
     },
 
-    // Hide without touching the user's toggle state: retire the view generation
-    // so in-flight responses of the hidden view are dropped, then rebind fresh on
-    // the next updateTarget with an SSH target. Deliberate contract: while the
-    // dock is suspended, a teardown of the bound session still routes through
-    // close() (_closeSftpForSessions), which resets _userOpen — a suspended
-    // view must never resurrect over a destroyed session.
+    // Visual hide without touching any tab's open state or any session's
+    // directory memory: retire the view generation so in-flight responses of
+    // the hidden view are dropped, then rebind fresh on the next updateTarget
+    // with an eligible target (the restore re-reads pin/_lastPath, which are
+    // recorded at listing success and so never need a suspend-time snapshot).
+    // Deliberate contract: a teardown of the bound session never routes
+    // through here — tab close/reconnect clear the tab's open state
+    // (forgetTabState), a pane close keeps it and lets the next updateTarget
+    // rebind (forgetSession) — a hidden view can never resurrect over a
+    // destroyed session.
     _suspend() {
-        // Remember where the suspended view was browsing so restoring the
-        // SAME session returns to it (a pinned path still takes precedence).
-        // A restore navigation may still be IN FLIGHT (this._path is the '/'
-        // placeholder until it settles) — record its destination instead.
-        this._suspendedPath = { tabId: this._tabId, path: this._pendingRestorePath || this._path };
         this._setDockVisible(false);
         this._viewEpoch++;
         this._viewReq = null;
@@ -413,6 +443,39 @@ const SFTP = {
         _sftpAnimating = false;
     },
 
+    // Frontend-tab teardown (tab close, reconnect discard): the tab's open
+    // state and the directory memory of the listed backend sessions go. The
+    // dock itself is NOT touched here — the caller closes it through
+    // _closeSftpForSessions when the dying tab is the bound one, so other
+    // tabs' docks always survive.
+    forgetTabState(tabId, sessionIds) {
+        this._openTabs.delete(tabId);
+        for (const s of sessionIds || []) {
+            if (s) delete this._lastPath[s];
+        }
+    },
+
+    // Backend-session teardown while its tab survives (pane close): the dying
+    // session's memory goes; the tab's open state survives and the next
+    // updateTarget rebinds to the remaining focused connected pane or hides
+    // the dock. Invariant: when the dock is still bound to the dying session
+    // (the no-live-sibling case), its in-flight requests are retired HERE, at
+    // the moment the memory entry is deleted — a late navigate response must
+    // never re-create `_lastPath` for an already-forgotten session, whatever
+    // visual path (rebind or the ≤200ms fade transient, resolved by
+    // closeTab/_exitSplit) settles the dock afterwards.
+    forgetSession(sessionId) {
+        if (!sessionId) return;
+        delete this._lastPath[sessionId];
+        if (this._tabId === sessionId) {
+            this._viewEpoch++;
+            this._reqSeq++;
+            this._viewReq = null;
+            this._refreshQueued = null;
+            this._refreshInFlight = null;
+        }
+    },
+
     async navigate(path, opts) {
         if (!this._tabId) return;
         // A dead binding can only fail: keep the explicit dead state on
@@ -464,6 +527,10 @@ const SFTP = {
                 return;
             }
             this._path = path;
+            // Per-session directory memory: only a listing the panel actually
+            // rendered counts, so suspended/superseded in-flight results never
+            // corrupt it.
+            this._lastPath[myTab] = path;
             // directories first, then alphabetical by name within each kind
             this._files = (files || []).sort((a, b) => {
                 if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
@@ -508,8 +575,12 @@ const SFTP = {
     // panel's last valid listing or — when the panel never obtained one (fresh
     // open, pinned reopen, follow that superseded the initial listing request) —
     // show an honest failure state instead of the previous session's rows or a
-    // misleading "empty directory".
+    // misleading "empty directory". A restore-from-memory navigation failing
+    // means the remembered directory is gone: its record is dropped so the
+    // next open self-heals to a fresh sftp-open (old one-shot-suspend parity;
+    // a pinned path is an explicit user decision and keeps failing loudly).
     _navFailed(msg, opts) {
+        if (opts && opts.restore) delete this._lastPath[this._tabId];
         showToast('无法访问: ' + msg, true);
         if (!this._listed) {
             document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载失败</div>';
