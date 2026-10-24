@@ -476,26 +476,81 @@ function _installLinkHandler(term) {
 }
 
 // ── OSC 52 clipboard provider ──
+let _osc52PermissionGeneration = 0;
+let _osc52PermissionEnabled;
+
+function _syncOsc52Permission() {
+    const enabled = _settingsConfig.osc52 !== false;
+    if (_osc52PermissionEnabled !== enabled) {
+        _osc52PermissionEnabled = enabled;
+        _osc52PermissionGeneration++;
+    }
+    return enabled;
+}
+
 // Tauri: goes through a Rust command (system clipboard, not subject to WebView2's
 // user-gesture restriction — OSC 52 is triggered by terminal output, and
 // navigator.clipboard throws NotAllowedError outside a gesture)
 // Electron: goes through the native clipboard (synchronous, wrapped in a Promise to match the addon interface)
 function _createClipboardAddon() {
     const isTauri = !!(window.__TAURI__ && window.__TAURI__.event);
+    let term, activeRequest = null, disposed = false;
+    _syncOsc52Permission();
+    const allowed = () => {
+        if (!_syncOsc52Permission() || disposed || !activeRequest) return false;
+        if (activeRequest.generation !== _osc52PermissionGeneration) return false;
+        const owner = _resolveTermOwner(term)?.owner;
+        return !!owner && !!activeRequest.backend && owner.tabId === activeRequest.backend && !owner._sessionFailed;
+    };
     const provider = {
         readText: (clipboard) => {
-            if (clipboard !== 'c') return Promise.resolve('');
+            if (clipboard !== 'c' || !allowed()) return Promise.resolve('');
             if (isTauri) return ipcRenderer.invoke('clipboard-read-text').catch(() => '');
             return Promise.resolve(require('electron').clipboard.readText());
         },
         writeText: (clipboard, text) => {
-            if (clipboard !== 'c') return Promise.resolve();
+            if (clipboard !== 'c' || !allowed()) return Promise.resolve();
             if (isTauri) return ipcRenderer.invoke('clipboard-write-text', { text }).catch(() => {});
             require('electron').clipboard.writeText(text);
             return Promise.resolve();
         },
     };
-    return new ClipboardAddon(undefined, provider);
+    const addon = new ClipboardAddon(undefined, provider);
+    return {
+        activate(terminal) {
+            term = terminal;
+            // The bundled addon uses only parser registration and input on
+            // this facade. Guard both ends of its asynchronous query without
+            // relying on private addon methods or modifying the vendor.
+            addon.activate({
+                parser: { registerOscHandler: (id, handler) => term.parser.registerOscHandler(id, data => {
+                    _syncOsc52Permission();
+                    activeRequest = {
+                        generation: _osc52PermissionGeneration,
+                        backend: _resolveTermOwner(term)?.owner?.tabId,
+                    };
+                    if (!allowed()) { activeRequest = null; return true; }
+                    // xterm suspends this parser until the returned promise
+                    // settles, so the token belongs to exactly one request.
+                    const finish = () => { activeRequest = null; return true; };
+                    try {
+                        const result = handler(data);
+                        return result && typeof result.then === 'function' ? result.then(finish, finish) : finish();
+                    } catch (e) { return finish(); }
+                }) },
+                input(data, userInput) {
+                    // A disable/re-enable, close, or reconnect invalidates a
+                    // pending read even if its native request already finished.
+                    if (allowed()) term.input(data, userInput);
+                },
+            });
+        },
+        dispose() {
+            disposed = true;
+            activeRequest = null;
+            addon.dispose?.();
+        },
+    };
 }
 
 // Shortcut passthrough handler (single entry point): the CURRENT command
@@ -769,10 +824,8 @@ function wireTerminal(tab, tabId) {
     let fitAddon, searchAddon;
     try { fitAddon = new FitAddon(); term.loadAddon(fitAddon); } catch(e) { console.warn('FitAddon init failed:', e); }
     try { searchAddon = new SearchAddon(); term.loadAddon(searchAddon); } catch(e) { console.warn('SearchAddon init failed:', e); }
-    // OSC 52 clipboard support
-    if (_settingsConfig.osc52 !== false) {
-        try { term.loadAddon(_createClipboardAddon()); } catch(e) { console.warn('ClipboardAddon init failed:', e); }
-    }
+    // Keep one permission-gated handler installed across live setting changes.
+    try { term.loadAddon(_createClipboardAddon()); } catch(e) { console.warn('ClipboardAddon init failed:', e); }
     try { term.loadAddon(_createWebLinksAddon(term)); } catch(e) { console.warn('WebLinksAddon init failed:', e); }
     _wireSearchAddon(term, searchAddon);
 
@@ -874,14 +927,16 @@ function wireTerminal(tab, tabId) {
         _pasteFromClipboardInto(term);
     });
 
-    if (ptyBuffers[tabId]) {
-        term.write(ptyBuffers[tabId]);
-        delete ptyBuffers[tabId];
-    }
-
     if (_settingsConfig.restoreLocalContent && tab._contentBuffer) {
         const replay = replayPayload(tab._contentBuffer);
         if (replay) term.write(replay);
+    }
+
+    // Both writes share xterm's ordered queue. History is display-only, so
+    // live input remains usable while it parses and live output follows it.
+    if (ptyBuffers[tabId]) {
+        term.write(ptyBuffers[tabId]);
+        delete ptyBuffers[tabId];
     }
 
     if (TabManager.activeId === tab.id) {
@@ -1001,10 +1056,8 @@ function wireTerminalToPane(tab, pane) {
     let fitAddon, searchAddon;
     try { fitAddon = new FitAddon(); term.loadAddon(fitAddon); } catch(e) { console.warn('FitAddon init failed:', e); }
     try { searchAddon = new SearchAddon(); term.loadAddon(searchAddon); } catch(e) { console.warn('SearchAddon init failed:', e); }
-    // OSC 52 clipboard support
-    if (_settingsConfig.osc52 !== false) {
-        try { term.loadAddon(_createClipboardAddon()); } catch(e) { console.warn('ClipboardAddon init failed:', e); }
-    }
+    // Keep one permission-gated handler installed across live setting changes.
+    try { term.loadAddon(_createClipboardAddon()); } catch(e) { console.warn('ClipboardAddon init failed:', e); }
     try { term.loadAddon(_createWebLinksAddon(term)); } catch(e) { console.warn('WebLinksAddon init failed:', e); }
     _wireSearchAddon(term, searchAddon);
 

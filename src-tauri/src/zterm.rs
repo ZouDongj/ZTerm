@@ -9018,64 +9018,207 @@ mod tests {
 
     #[test]
     fn bash_rc_wrapper_end_to_end() {
-        // Run the RC wrapper with a real bash (skipped when no bash on this machine):
-        // verify the generated rc file makes the shell emit a parseable OSC 7 cwd. HOME is isolated to avoid polluting the test machine's user config.
-        let bash = [
-            "bash",
-            "D:/Program Files/Git/bin/bash.exe",
-            "C:/Program Files/Git/bin/bash.exe",
-        ]
-        .iter()
-        .find(|p| {
-            std::process::Command::new(p)
-                .arg("--version")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        });
+        use std::io::Write;
+        use std::path::{Path, PathBuf};
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+        fn shell_path(path: &Path) -> String {
+            let text = path.to_str().expect("UTF-8 fixture path");
+            if cfg!(windows) {
+                let text = text
+                    .strip_prefix(r"\\?\")
+                    .unwrap_or(text)
+                    .replace('\\', "/");
+                assert!(
+                    text.len() > 2 && text.as_bytes()[1] == b':',
+                    "drive path required"
+                );
+                format!("/{}{}", text[..1].to_ascii_lowercase(), &text[2..])
+            } else {
+                text.to_owned()
+            }
+        }
+
+        fn quote(text: &str) -> String {
+            format!("'{}'", text.replace('\'', "'\\''"))
+        }
+
+        struct Scratch {
+            root: PathBuf,
+            path: PathBuf,
+        }
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                // Never remove a parent or a path redirected outside this fixture.
+                if let Ok(path) = self.path.canonicalize() {
+                    if path.parent() == Some(self.root.as_path()) {
+                        let _ = std::fs::remove_dir_all(path);
+                    }
+                }
+            }
+        }
+
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+        }
+
+        // Start the actual interpreter so timeout cleanup owns the Bash process.
+        // Avoid PATH's WindowsApps/WSL launcher and all machine startup hooks.
+        let candidates: &[&str] = if cfg!(windows) {
+            &[
+                "D:/Program Files/Git/usr/bin/bash.exe",
+                "C:/Program Files/Git/usr/bin/bash.exe",
+            ]
+        } else {
+            &["/bin/bash", "/usr/bin/bash"]
+        };
+        let bash = candidates.iter().map(Path::new).find(|path| path.is_file());
         let Some(bash) = bash else {
-            eprintln!("skip: no bash on this machine");
+            eprintln!("skip: no supported native bash on this machine");
             return;
         };
+
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .expect("canonical checkout");
+        let root = checkout.join("artifacts/e2e-tmp");
+        std::fs::create_dir_all(&root).expect("create fixture root");
+        let root = root.canonicalize().expect("canonical fixture root");
+        assert!(
+            root.starts_with(&checkout),
+            "fixture root must stay in checkout"
+        );
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = root.join(format!("bash-wrapper-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&dir).expect("create unique fixture directory");
+        let scratch = Scratch {
+            root,
+            path: dir.canonicalize().unwrap(),
+        };
+        let dir = &scratch.path;
+        let home = dir.join("home");
+        std::fs::create_dir(&home).expect("create isolated home");
+        let profile = dir.join("system profile");
+        std::fs::write(&profile, b"printf '__ZT_PROFILE__\\n'\n").unwrap();
+        std::fs::write(home.join(".bashrc"), b"printf '__ZT_BASHRC__\\n'\n").unwrap();
+        let rcfile = dir.join("generated rc");
+
+        // Only relocate the two external paths; execute the generated wrapper itself.
         let (files, exec) = cwd_wrapper_files("/bin/bash", "e2e-test").expect("bash wrapper");
         assert_eq!(files.len(), 1);
-        assert!(exec.contains("exec bash --rcfile"), "exec 命令: {exec}");
-        let (_, rc_content) = &files[0];
-        let dir = std::env::temp_dir().join("zterm-cwd-wrapper-test");
-        let _ = std::fs::create_dir_all(&dir);
-        let win_rc = dir.join("rcfile");
-        std::fs::write(&win_rc, rc_content).expect("write rc");
-        let home = dir.join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        let mut child = std::process::Command::new(bash)
-            .arg("--rcfile")
-            .arg(&win_rc)
-            .arg("-i")
-            .env("HOME", &home)
+        let (remote_path, rc_content) = &files[0];
+        assert_eq!(exec, format!("exec bash --rcfile {remote_path} -i"));
+        let rc = String::from_utf8(rc_content.clone()).expect("UTF-8 wrapper");
+        let source_line = "[ -f /etc/profile ] && . /etc/profile\n";
+        let cleanup_line = format!("rm -f {remote_path}\n");
+        assert_eq!(
+            rc.matches(source_line).count(),
+            1,
+            "profile template changed"
+        );
+        assert_eq!(
+            rc.matches(&cleanup_line).count(),
+            1,
+            "cleanup template changed"
+        );
+        let quoted_profile = quote(&shell_path(&profile));
+        let rc = rc
+            .replace(
+                source_line,
+                &format!("[ -f {quoted_profile} ] && . {quoted_profile}\n"),
+            )
+            .replace(
+                &cleanup_line,
+                &format!("rm -f {}\n", quote(&shell_path(&rcfile))),
+            );
+        assert!(!rc.contains("/etc/profile") && !rc.contains(remote_path));
+        std::fs::write(&rcfile, rc).expect("write isolated wrapper");
+
+        let stdout = dir.join("stdout");
+        let stderr = dir.join("stderr");
+        let mut command = std::process::Command::new(bash);
+        // Source after --norc startup so even a compiled-in system bashrc is bypassed.
+        // Bash still dispatches PROMPT_COMMAND; this is a wrapper-behavior fixture,
+        // not a remote exec/PTY startup-argv test.
+        command
+            .args(["--noprofile", "--norc", "-i"])
+            .env_clear()
+            .env("HOME", shell_path(&home))
+            .env("HISTFILE", shell_path(&home.join("history")))
+            .env("HISTSIZE", "0")
+            .env("HISTFILESIZE", "0")
+            .env("TEMP", dir)
+            .env("TMP", dir)
+            .env("TMPDIR", shell_path(dir))
+            .current_dir(&home)
             .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn bash");
-        use std::io::Write;
+            .stdout(std::fs::File::create(&stdout).unwrap())
+            .stderr(std::fs::File::create(&stderr).unwrap());
+        if cfg!(windows) {
+            let git_root = bash.ancestors().nth(3).expect("Git installation root");
+            command.env(
+                "PATH",
+                std::env::join_paths([git_root.join("usr/bin"), git_root.join("bin")]).unwrap(),
+            );
+            if let Some(system_root) = std::env::var_os("SystemRoot") {
+                command.env("SystemRoot", system_root);
+            }
+        } else {
+            command.env("PATH", "/usr/bin:/bin");
+        }
+        let mut child = OwnedChild(command.spawn().expect("spawn isolated bash"));
+        let input = format!(
+            ". {}\nprintf '__ZT_COLOR__%s\\n' \"$COLORTERM\"\nexit\n",
+            quote(&shell_path(&rcfile))
+        );
         child
+            .0
             .stdin
             .take()
             .unwrap()
-            .write_all(b"exit\n")
+            .write_all(input.as_bytes())
             .expect("feed stdin");
-        let out = child.wait_with_output().expect("wait bash");
-        let text = String::from_utf8_lossy(&out.stdout);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.0.try_wait().expect("poll bash") {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "isolated bash timed out");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let text = std::fs::read_to_string(stdout).expect("read bash output");
+        let errors = std::fs::read_to_string(stderr).expect("read bash errors");
+        assert!(status.success(), "bash failed: {status}: {errors}");
         assert!(
-            text.contains("\x1b]7;file://"),
-            "bash 未输出 OSC 7：{}",
-            text.escape_debug().take(300).collect::<String>()
+            text.contains("__ZT_PROFILE__"),
+            "fixture system profile was not sourced"
         );
-        let cwd = parse_osc7_cwd(&text).expect("解析 OSC 7 失败");
-        assert!(cwd.starts_with('/'), "cwd 应为绝对路径: {cwd}");
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            text.contains("__ZT_BASHRC__"),
+            "fixture user bashrc was not sourced"
+        );
+        assert!(
+            text.contains("__ZT_COLOR__truecolor"),
+            "wrapper environment was not applied"
+        );
+        let cwd = parse_osc7_cwd(&text).expect("wrapper did not emit a parseable OSC 7 cwd");
+        assert_eq!(
+            cwd,
+            shell_path(&home),
+            "wrapper must report the isolated cwd"
+        );
+        assert!(!rcfile.exists(), "wrapper must remove its own fixture file");
     }
 
     #[test]

@@ -95,13 +95,76 @@ function truncateAtLastAltBalance(text) {
 // refreshes.
 const REPLAY_EPILOGUE = '\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x0f\x1b[0m\x1b[?25h\r\n';
 
+// Saved output is an untrusted protocol stream, not a display snapshot.
+// Reconstruct only text and rendering controls: SGR, cursor/erase/scroll/tab
+// operations, character sets, and cursor visibility / balanced alt screens.
+// OSC (including titles, links, colors and clipboard), control strings, bells,
+// queries, window operations and input modes are deliberately not restored.
+// Scan the complete bounded tail, so chunk boundaries cannot hide a sequence;
+// incomplete controls are dropped before the epilogue and next live output.
+function displayOnlyReplay(text) {
+    let out = '';
+    let i = 0;
+    while (i < text.length) {
+        const code = text.charCodeAt(i);
+        const escape = code === 0x1b;
+        const next = escape ? text[i + 1] : '';
+        const csi = next === '[' || code === 0x9b;
+        const osc = next === ']' || code === 0x9d;
+        const controlString = osc || (escape && 'PX^_'.includes(next || '\0'))
+            || [0x90, 0x98, 0x9e, 0x9f].includes(code);
+        if (controlString) {
+            i += escape ? 2 : 1;
+            while (i < text.length) {
+                const current = text.charCodeAt(i++);
+                if ((osc && current === 7) || current === 0x9c || current === 0x18 || current === 0x1a) break;
+                if (current === 0x1b && text[i] === '\\') { i++; break; }
+            }
+            continue;
+        }
+        if (csi) {
+            const start = i + (escape ? 2 : 1);
+            i = start;
+            while (i < text.length && text.charCodeAt(i) >= 0x20 && text.charCodeAt(i) <= 0x3f) i++;
+            const final = text.charCodeAt(i);
+            if (final >= 0x40 && final <= 0x7e) {
+                const body = text.slice(start, ++i);
+                if (/^[\d;:]*m$/.test(body)
+                    || /^[\d;]*[ABCDEFGHIJKLMPSTXZ`abdefgrsu]$/.test(body)
+                    || /^\?(?:25|1049)[hl]$/.test(body)) out += '\x1b[' + body;
+            }
+            // A malformed sequence ends before the next character, which is
+            // scanned again (especially ESC/C1 starting another sequence).
+            continue;
+        }
+        if (escape) {
+            const start = ++i;
+            while (i < text.length && text.charCodeAt(i) >= 0x20 && text.charCodeAt(i) <= 0x2f) i++;
+            const final = text.charCodeAt(i);
+            if (final >= 0x30 && final <= 0x7e) {
+                const body = text.slice(start, ++i);
+                if (/^[78DEHM]$/.test(body) || /^[()*+\-.\/][0-9A-Za-z]$/.test(body)) out += '\x1b' + body;
+            }
+            continue;
+        }
+        i++;
+        if (code === 0x84) out += '\x1bD';
+        else if (code === 0x85) out += '\x1bE';
+        else if (code === 0x88) out += '\x1bH';
+        else if (code === 0x8d) out += '\x1bM';
+        else if ((code >= 0x20 && !(code >= 0x7f && code <= 0x9f)) || (code >= 8 && code <= 15)) out += text[i - 1];
+    }
+    return out;
+}
+
 // Build the bytes written into the fresh terminal on restore. Empty content
 // replays nothing (no lone epilogue polluting a clean shell banner).
 function replayPayload(saved) {
-    const text = truncateAtLastAltBalance(normalizeRestoredContent(saved));
+    const tail = appendContentTail('', normalizeRestoredContent(saved));
+    const text = truncateAtLastAltBalance(displayOnlyReplay(tail));
     return text ? text + REPLAY_EPILOGUE : '';
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { appendContentTail, normalizeRestoredContent, truncateAtLastAltBalance, replayPayload, REPLAY_EPILOGUE, MAX_CONTENT_TAIL };
+    module.exports = { appendContentTail, normalizeRestoredContent, truncateAtLastAltBalance, displayOnlyReplay, replayPayload, REPLAY_EPILOGUE, MAX_CONTENT_TAIL };
 }

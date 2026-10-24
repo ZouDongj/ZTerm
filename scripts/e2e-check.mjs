@@ -193,8 +193,51 @@ function moveWindowOffDesktop(child) {
 // (unexpected early throw, unhandled rejection): never leave a PTY tree behind.
 process.on('exit', () => killExisting());
 
+function isolatedShellArgs(command, args = []) {
+  const name = String(command || 'powershell.exe').replaceAll('\\', '/').split('/').pop().toLowerCase();
+  if (/^(powershell|pwsh)(\.exe)?$/.test(name)) {
+    return ['-NoProfile', ...args.filter(arg => !/^-noprofile$/i.test(arg))];
+  }
+  if (/^cmd(\.exe)?$/.test(name)) return ['/d', ...args.filter(arg => !/^\/d$/i.test(arg))];
+  if (/^bash(\.exe)?$/.test(name)) {
+    return ['--noprofile', '--norc', ...args.filter(arg => !['--noprofile', '--norc', '--login', '-l'].includes(arg))];
+  }
+  throw new Error(`E2E shell has no isolated startup policy: ${name}`);
+}
+
+function prepareIsolatedShellConfig() {
+  const config = existsSync(DATA_CONFIG) ? JSON.parse(readFileSync(DATA_CONFIG, 'utf8')) : {};
+  const protect = (owner, inheritedCommand) => {
+    if (!owner || typeof owner !== 'object') return;
+    const command = owner.command || inheritedCommand || 'powershell.exe';
+    if (owner.splitRoot) { protect(owner.splitRoot, command); return; }
+    if (Array.isArray(owner.children)) { owner.children.forEach(child => protect(child, command)); return; }
+    if (owner.type === 'ssh' || owner.paneType === 'ssh') return;
+    owner.args = isolatedShellArgs(command, owner.args || []);
+  };
+  if (!Array.isArray(config.lastTabs) || config.lastTabs.length === 0) {
+    config.lastTabs = [{ name: 'PowerShell', type: 'local', command: 'powershell.exe', args: ['-NoProfile'] }];
+  }
+  config.lastTabs.forEach(tab => protect(tab));
+  writeFileSync(DATA_CONFIG, JSON.stringify(config), 'utf8');
+}
+
+async function installIsolatedShellGuard(cdp) {
+  await waitForValue(cdp, `typeof _ptyCreatePayload === 'function' && typeof _settingsConfig === 'object'`, true, 20000);
+  await cdp.eval(`(() => {
+    const isolateArgs = ${isolatedShellArgs.toString()};
+    const original = _ptyCreatePayload;
+    _ptyCreatePayload = function(shell, args, cwd, requestId) {
+      return original(shell, isolateArgs(shell, args || []), cwd, requestId);
+    };
+  })()`);
+}
+
 function startApp() {
   if (ownedChild) throw new Error('Previous owned process has not been released');
+  // USERPROFILE must remain valid for WebView2. Isolate shell startup explicitly
+  // instead of allowing restored shells to execute the operator's profiles.
+  prepareIsolatedShellConfig();
   // Fresh, unique browser profile per launch: WebView2 browser processes on
   // this machine can outlive their host for a long while, and a relaunch
   // onto the same profile attaches to the half-dead browser — the debug
@@ -391,6 +434,10 @@ async function main() {
     if (resolve(runtimeData.current).toLowerCase() !== resolve(dirname(DATA_CONFIG)).toLowerCase()) {
       throw new Error('Connected runtime is not using the isolated E2E configuration');
     }
+    // All new local PTYs still use the real product payload builder; only shell
+    // startup flags are restricted by this test fixture. Existing restored
+    // sessions were protected on disk before launch by startApp().
+    await installIsolatedShellGuard(cdp);
 
     // 0. Startup splash: correct structure (icon + green-dot animation only)
     // plus auto fade-out after the first frame (wait at most 5s); force-hide
@@ -4905,6 +4952,7 @@ async function main() {
       });
       const c2 = new Cdp(url);
       await c2.connect();
+      await installIsolatedShellGuard(c2);
       return c2;
     }
     // Window state restore is triggered by renderer-ready (runs async after

@@ -1032,6 +1032,7 @@ function saveTerminal() {
 
     const config = { cursor, scrollback, bell, cursorBlink, wordSeparators, autoCopy, rightClickPaste, richTextCopy, smartCopy, osc52, restoreLocalContent, defaultShell, startupDir, updateProxy, hiddenProfiles };
     _settingsConfig = { ..._settingsConfig, ...config };
+    if (typeof _syncOsc52Permission === 'function') _syncOsc52Permission();
     persistSettings();
 
     TabManager.tabs.forEach(t => {
@@ -1113,6 +1114,7 @@ async function loadSettings() {
                 ...(full.appearance || {}),
                 shortcuts: full.shortcuts || {},
             };
+            if (typeof _syncOsc52Permission === 'function') _syncOsc52Permission();
             // Restore persisted statusbar visibility as soon as config is in
             if (typeof applyChromeFlags === 'function') applyChromeFlags();
             applyStatusbarVisibility();
@@ -1120,6 +1122,7 @@ async function loadSettings() {
         }
     } catch(e) { console.error('[loadSettings]', e); }
     _settingsConfig = { cursor: 'bar', scrollback: 10000, bell: 'off', cursorBlink: true, autoCopy: true, rightClickPaste: true, fontFamily: '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace', fontSize: 16, lineHeight: 1.125, fontWeight: '400', fontWeightBold: '600', accentColor: '#61afef', theme: 'dark', animations: true, showStatusDot: true, paneRing: false, panelEdge: true, sftpMaterial: false, restoreLocalContent: false, smartCopy: true, osc52: true, richTextCopy: false };
+    if (typeof _syncOsc52Permission === 'function') _syncOsc52Permission();
     if (typeof applyChromeFlags === 'function') applyChromeFlags();
     applyStatusbarVisibility();
 }

@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const {
     appendContentTail, normalizeRestoredContent, truncateAtLastAltBalance,
-    replayPayload, REPLAY_EPILOGUE, MAX_CONTENT_TAIL,
+    displayOnlyReplay, replayPayload, REPLAY_EPILOGUE, MAX_CONTENT_TAIL,
 } = require('../src/renderer/restore-content.js');
 
 // ── appendContentTail: chunk boundaries are not line boundaries ──
@@ -126,4 +126,28 @@ test('append: default cap bounds the tail at MAX_CONTENT_TAIL', () => {
     assert.ok(tail.length <= MAX_CONTENT_TAIL);
     // The window starts 2 chars into line 2; the newline advance lands exactly at line 3.
     assert.equal(tail, line);
+});
+
+test('display replay retains ANSI rendering while removing requests and input modes', () => {
+    const display = '\x1b[31mred\x1b[0m\r\n\x1b[2D\x1b[K\x1b7\x1b8\x1b(0line\x1b(B';
+    assert.equal(displayOnlyReplay(display), display);
+    const requests = '\x1b[6n\x1b[c\x1b[>0c\x1b[?25$p\x1b[18t\x1b[?2004h\x1b[>1u';
+    assert.equal(displayOnlyReplay('before' + requests + 'after'), 'beforeafter');
+});
+
+test('display replay handles C1 strings, controls, cancellation and printable payload tails safely', () => {
+    assert.equal(displayOnlyReplay('a\x9d52;c;?\x9cb\x90$qm\x9cc'), 'abc');
+    assert.equal(displayOnlyReplay('a\x98ignored\x9cb\x9eignored\x9cc\x9fignored\x9cd'), 'abcd');
+    assert.equal(displayOnlyReplay('\x9b31mred\x9b0m\x9b6n'), '\x1b[31mred\x1b[0m');
+    assert.equal(displayOnlyReplay('a\x1b]2;old\x18b\x1bP$qm\x1ac'), 'abc');
+    // Capture may start midway through a discarded control payload. It may
+    // display as literal text, but its later controls still cannot execute.
+    assert.equal(displayOnlyReplay('52;c;?\x07\x1b[6nvisible'), '52;c;?visible');
+});
+
+test('incomplete control tails cannot consume the epilogue or the next live output', () => {
+    for (const tail of ['\x1b', '\x1b[', '\x1b[31;', '\x1b(', '\x1b]52;c;', '\x1bP$q', '\x9d52;c;', '\x9b31;']) {
+        assert.equal(replayPayload('visible' + tail), 'visible' + REPLAY_EPILOGUE, JSON.stringify(tail));
+    }
+    assert.equal(displayOnlyReplay('a\x1b[12\x1b]52;c;?\x07b'), 'ab');
 });
