@@ -3,6 +3,8 @@
 // Canonicalize an absolute remote path for upload-conflict comparisons:
 // collapse duplicate slashes, drop '.' segments, resolve '..' lexically
 // (never above the root) and strip the trailing slash ('/' itself stays '/').
+// This is a conservative conflict heuristic, never a mutation path: remote
+// symlinks can make lexically equal strings resolve to different directories.
 // Case is preserved — remote filesystems may be case-sensitive. Non-absolute
 // or non-string input is returned unchanged so exotic pass-through values
 // keep their existing comparison semantics.
@@ -911,10 +913,19 @@ const SFTP = {
     // owner = { tabId, path } captured when the batch started: every file in the
     // batch targets that session/path even if the panel closes or rebinds to
     // another session mid-batch (transfers are background work by design).
-    // The joined path is normalized so a manually typed owner path ('/srv/app/',
-    // '/srv/./app') yields the same canonical target the gate compares with.
+    // Mutation paths retain the server's interpretation of every component,
+    // especially symlink/..; comparison normalization never rewrites them.
     _uploadRemotePath(owner, filename) {
-        return normalizeRemotePath((owner.path === '/' ? '' : owner.path) + '/' + filename);
+        return owner.path + (owner.path.endsWith('/') ? '' : '/') + filename;
+    },
+
+    _captureUploadOwner() {
+        if (!this.isOpen || !this._tabId || this._sessionDead) return null;
+        if (!this._listed || (this._viewReq && this._viewReq.user)) {
+            showToast('目录列表尚未加载，无法上传', true);
+            return null;
+        }
+        return { tabId: this._tabId, path: this._path, names: new Set(this._files.map(f => f.name)) };
     },
     async uploadLocal(localPath, owner) {
         const filename = localPath.split(/[\\/]/).pop();
@@ -973,24 +984,22 @@ const SFTP = {
     },
 
     // Best-effort remote same-name detection for an upload batch, judged
-    // against the panel's CURRENT listing of the owner directory plus the
-    // uploads still in flight to that directory (invisible to the listing
-    // until they complete). When the panel no longer displays that directory
-    // (rebound, navigated away, or never listed) the listing can be judged
-    // for nothing, but in-flight targets are known either way — the batch
-    // proceeds unasked only when neither source reports a collision.
+    // against the operation's captured listing plus any newer listing of the
+    // same directory and uploads still in flight. A cwd-follow event or panel
+    // rebind while the picker is open cannot erase a known original conflict.
     _uploadConflictCount(owner, localPaths) {
         // The listing is judged only when the panel really shows the owner
         // directory; textual aliases of the same directory (typed '/srv/app/'
         // vs the canonical cwd follow '/srv/app') must count as equal.
         const onOwnerDir = this._listed && this._tabId === owner.tabId
             && normalizeRemotePath(this._path) === normalizeRemotePath(owner.path);
-        const remote = onOwnerDir ? new Set(this._files.map(f => f.name)) : null;
+        const remote = new Set(owner.names || []);
+        if (onOwnerDir) this._files.forEach(f => remote.add(f.name));
         let count = 0;
         for (const p of (localPaths || [])) {
             const name = String(p).split(/[\\/]/).pop();
             if (!name) continue;
-            if (remote && remote.has(name)) { count++; continue; }
+            if (remote.has(name)) { count++; continue; }
             if (TransferManager.hasPendingUploadTo(owner.tabId, this._uploadRemotePath(owner, name))) count++;
         }
         return count;
@@ -1011,7 +1020,8 @@ const SFTP = {
     async upload() {
         // Snapshot the operation target BEFORE the file-dialog await: the panel
         // may be closed or rebound to another session while the dialog is open.
-        const owner = { tabId: this._tabId, path: this._path };
+        const owner = this._captureUploadOwner();
+        if (!owner) return;
         const result = await ipcRenderer.invoke('show-open-dialog', { properties: ['openFile', 'multiSelections'] });
         if (result.canceled || !result.filePaths.length) return;
         // Same-basename refusal (same-basename files in one batch would
@@ -1545,10 +1555,10 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) =>
 
     // Handle a batch of local paths uniformly: reject folders + upload files one by one
     async function _handleDroppedPaths(paths) {
-        if (!SFTP.isOpen || !SFTP._tabId) return;
         // Same ownership contract as upload(): one snapshot for the whole batch,
         // taken synchronously at drop time (uploads still start concurrently).
-        const owner = { tabId: SFTP._tabId, path: SFTP._path };
+        const owner = SFTP._captureUploadOwner();
+        if (!owner) return;
         // Same-basename refusal as the toolbar upload() (same-basename files
         // in one batch would silently overwrite each other).
         const dups = SFTP._duplicateBasenames(paths);

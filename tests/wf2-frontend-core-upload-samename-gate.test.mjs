@@ -233,10 +233,11 @@ test('normalizeRemotePath canonicalizes slashes, dot segments and trailing slash
     assert.equal(norm(''), '', 'empty input passes through');
     assert.equal(norm(undefined), undefined, 'non-string input passes through');
 
-    // The join itself runs through the normalizer (generation side).
+    // Mutation paths preserve server-side resolution, including symlink/..
+    // components. The comparison heuristic must never rewrite the upload.
     assert.equal(vm.SFTP._uploadRemotePath({ path: '/' }, 'a.txt'), '/a.txt');
     assert.equal(vm.SFTP._uploadRemotePath({ path: '/srv/app/' }, 'a.txt'), '/srv/app/a.txt');
-    assert.equal(vm.SFTP._uploadRemotePath({ path: '/srv/./app/..' }, 'a.txt'), '/srv/a.txt');
+    assert.equal(vm.SFTP._uploadRemotePath({ path: '/srv/./app/..' }, 'a.txt'), '/srv/./app/../a.txt');
 });
 
 test('hasPendingUploadTo compares canonical forms, keeps tab scoping and case sensitivity', async () => {

@@ -404,6 +404,42 @@ function selectSession(sessionId) {
 
 // ── SSH Manager (scheme-A rows shared by settings page and overlay) ──
 let _editingSSHId = null;
+let _sshEditGeneration = 0;
+
+// The backend persists the whole collection. Serialize every mutation and
+// derive its payload only when the preceding write has committed, so a save,
+// rename or deletion cannot republish another operation's stale collection.
+const _sshProfileMutations = [];
+let _sshProfileMutationActive = false;
+
+function _mutateSSHProfiles(mutate) {
+    return new Promise((resolve, reject) => {
+        _sshProfileMutations.push({ mutate, resolve, reject });
+        _drainSSHProfileMutations();
+    });
+}
+
+function _drainSSHProfileMutations() {
+    if (_sshProfileMutationActive || !_sshProfileMutations.length) return;
+    _sshProfileMutationActive = true;
+    const task = _sshProfileMutations.shift();
+    const run = async () => {
+        const current = TabManager.sshProfiles || [];
+        const next = task.mutate(current);
+        if (!next || next === current) return false;
+        await ipcRenderer.invoke('save-ssh-profiles', { sshProfiles: next });
+        TabManager.sshProfiles = next;
+        return true;
+    };
+    const finish = (settle, value) => {
+        _sshProfileMutationActive = false;
+        settle(value);
+        _drainSSHProfileMutations();
+    };
+    // An idle queue dispatches synchronously; callers retain their immediate
+    // action semantics. Rejection releases the queue without changing memory.
+    run().then(value => finish(task.resolve, value), error => finish(task.reject, error));
+}
 
 // Per-container in-memory view state: search query + collapse choices.
 // Collapse state deliberately has no storage contract — it lives here for
@@ -702,28 +738,22 @@ function startRenameGroup(btn, oldName) {
         if (originalOnClick) btn.setAttribute('onclick', originalOnClick);
 
         if (save && newName && newName !== oldName) {
-            const profiles = TabManager.sshProfiles || [];
             // The default group is stored as '' but displayed (and passed
             // here via data-group) as '默认': match on the display name or
             // renaming the default group hits nothing.
-            const next = profiles.map(p => ((p.group || '默认') === oldName) ? { ...p, group: newName } : p);
-            if (next.some((p, i) => p !== profiles[i])) {
-                // Persist BEFORE touching in-memory state (P3-01): a failed
-                // write must leave the profile list as it was. And await the
-                // invoke — the old send + once('ssh-profiles-saved') flow
-                // updated memory immediately and orphaned its listener when
-                // the write failed.
-                ipcRenderer.invoke('save-ssh-profiles', { sshProfiles: next }).then(() => {
-                    TabManager.sshProfiles = next;
+            _mutateSSHProfiles(profiles => {
+                const next = profiles.map(p => ((p.group || '默认') === oldName) ? { ...p, group: newName } : p);
+                return next.some((p, i) => p !== profiles[i]) ? next : null;
+            }).then(changed => {
+                if (changed) {
                     renderSSHManager();
                     showToast('分组已重命名');
-                }).catch((e) => {
-                    showToast('SSH 分组重命名失败: ' + ((e && e.message) || e || 'unknown'), true);
-                    // The row already shows the new name (the input was
-                    // swapped for a span above): re-render the truthful list.
-                    renderSSHManager();
-                });
-            }
+                }
+            }).catch((e) => {
+                showToast('SSH 分组重命名失败: ' + ((e && e.message) || e || 'unknown'), true);
+                // Replace the optimistic row label with the committed state.
+                renderSSHManager();
+            });
         }
     };
 
@@ -844,24 +874,26 @@ async function _savePasswordInline() {
     if (authSel && authSel.value === '密钥') return;
     const password = document.getElementById('ssh-edit-password').value;
     if (!password || !_editingSSHId) return;
+    const profileId = _editingSSHId;
+    const editGeneration = _sshEditGeneration;
     try {
         const result = await ipcRenderer.invoke('encrypt-password', { plaintext: password });
         if (result.error) {
             showToast('密码加密失败: ' + result.error, true);
             return;
         }
-        let profiles = [...(TabManager.sshProfiles || [])];
-        const idx = profiles.findIndex(p => p.id === _editingSSHId);
-        if (idx >= 0) {
-            // Persist BEFORE touching in-memory state (same rule as
-            // saveSSHEdit): a failed write must leave the profile list
-            // consistent with what a restart reloads. The replacement object
-            // keeps the live profile untouched until the write succeeds.
+        const changed = await _mutateSSHProfiles(current => {
+            const idx = current.findIndex(p => p.id === profileId);
+            if (idx < 0) return null;
+            const profiles = [...current];
             profiles[idx] = { ...profiles[idx], encryptedPassword: result.encrypted };
-            await ipcRenderer.invoke('save-ssh-profiles', { sshProfiles: profiles });
-            TabManager.sshProfiles = profiles;
-            _sshPwdDirty = false;
-            _renderPasswordField('view');
+            return profiles;
+        });
+        if (changed) {
+            if (_sshEditGeneration === editGeneration && _editingSSHId === profileId) {
+                _sshPwdDirty = false;
+                _renderPasswordField('view');
+            }
             showToast('密码已保存');
         }
     } catch(e) {
@@ -1223,6 +1255,7 @@ function clearSSHTemplateSearch() {
 }
 
 function openSSHEdit(isNew, profileId) {
+    _sshEditGeneration++;
     _editingSSHId = isNew ? null : profileId;
     _sshTemplatePwd = '';
     document.getElementById('ssh-edit-title').textContent = isNew ? '添加 SSH 连接' : '编辑 SSH 连接';
@@ -1648,10 +1681,15 @@ function collectLoginScripts() {
 }
 
 function closeSSHEdit() {
+    _sshEditGeneration++;
     closeOverlay('overlay-ssh-edit');
 }
 
 async function saveSSHEdit() {
+    const profileId = _editingSSHId;
+    const editGeneration = _sshEditGeneration;
+    const templatePassword = _sshTemplatePwd || '';
+    const loginScripts = collectLoginScripts();
     const name = document.getElementById('ssh-edit-name').value.trim();
     const host = document.getElementById('ssh-edit-host').value.trim();
     const port = parseInt(document.getElementById('ssh-edit-port').value) || 22;
@@ -1674,40 +1712,33 @@ async function saveSSHEdit() {
     }
 
     const doSave = async (encryptedPassword) => {
-        let profiles = [...(TabManager.sshProfiles || [])];
-        const profile = {
-            id: _editingSSHId || ('ssh_' + Date.now()),
-            name, group, host, port, username, authType,
-            encryptedPassword: encryptedPassword || '',
-            privateKeyPath: authType === 'key' ? privateKeyPath : '',
-            note, followCwd, clearOnConnect,
-            loginScripts: collectLoginScripts(),
-        };
-
-        if (_editingSSHId) {
-            const idx = profiles.findIndex(p => p.id === _editingSSHId);
-            if (idx >= 0) {
-                profile.id = _editingSSHId;
-                profiles[idx] = profile;
-            } else {
-                profiles.push(profile);
-            }
-        } else {
-            profiles.push(profile);
-        }
-
-        // Persist BEFORE touching in-memory state: a failed write must leave
-        // the profile list (and the dialog) as it was — silently updating
-        // memory here reverts on restart.
         try {
-            await ipcRenderer.invoke('save-ssh-profiles', { sshProfiles: profiles });
+            const changed = await _mutateSSHProfiles(current => {
+                const idx = profileId ? current.findIndex(p => p.id === profileId) : -1;
+                // A pending edit cannot resurrect a profile deleted while
+                // encryption or an earlier persistence operation was pending.
+                if (profileId && idx < 0) return null;
+                const profile = {
+                    id: profileId || ('ssh_' + Date.now()),
+                    name, group, host, port, username, authType,
+                    encryptedPassword: encryptedPassword !== undefined ? encryptedPassword
+                        : (profileId ? current[idx].encryptedPassword || '' : templatePassword),
+                    privateKeyPath: authType === 'key' ? privateKeyPath : '',
+                    note, followCwd, clearOnConnect,
+                    loginScripts,
+                };
+                const profiles = [...current];
+                if (profileId) profiles[idx] = profile;
+                else profiles.push(profile);
+                return profiles;
+            });
+            if (!changed) return;
         } catch (e) {
             showToast('SSH 连接保存失败: ' + ((e && e.message) || e || 'unknown'), true);
             return;
         }
-        TabManager.sshProfiles = profiles;
         renderSSHManager();
-        closeSSHEdit();
+        if (_sshEditGeneration === editGeneration && _editingSSHId === profileId) closeSSHEdit();
         showToast('SSH 连接已保存');
     };
 
@@ -1725,7 +1756,7 @@ async function saveSSHEdit() {
     } else {
         // No new password typed: editing keeps the profile's own ciphertext;
         // a template-created profile keeps the template's carried ciphertext.
-        await doSave(_editingSSHId ? (TabManager.sshProfiles.find(p => p.id === _editingSSHId) || {}).encryptedPassword || '' : _sshTemplatePwd || '');
+        await doSave();
     }
 }
 
@@ -1767,18 +1798,12 @@ function connectSSHProfile(profileId) {
 
 function deleteSSHProfile(id) {
     showConfirm('确定删除此 SSH 连接？', async () => {
-        const profiles = (TabManager.sshProfiles || []).filter(p => p.id !== id);
-        // Persist first via the invoke result. The old send +
-        // once('ssh-profiles-saved') flow updated memory immediately and
-        // ORPHANED the listener when the write failed — the next unrelated
-        // save then fired a spurious "已删除" toast.
         try {
-            await ipcRenderer.invoke('save-ssh-profiles', { sshProfiles: profiles });
+            await _mutateSSHProfiles(profiles => profiles.filter(p => p.id !== id));
         } catch (e) {
             showToast('SSH 连接删除失败: ' + ((e && e.message) || e || 'unknown'), true);
             return;
         }
-        TabManager.sshProfiles = profiles;
         renderSSHManager();
         showToast('SSH 连接已删除');
     });

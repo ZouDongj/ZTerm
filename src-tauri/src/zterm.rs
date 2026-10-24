@@ -1650,10 +1650,7 @@ where
     // The channel open itself is also reply-bounded: a wedged connection
     // would otherwise park this await forever (the handle has no internal
     // timeout for it).
-    let mut channel = match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        handle.channel_open_session(),
-    )
+    let mut channel = match tokio::time::timeout(SSH_SFTP_STEP_TIMEOUT, handle.channel_open_session())
     .await
     {
         Ok(Ok(c)) => c,
@@ -1669,11 +1666,21 @@ where
     // whether the server has the subsystem at all. Wait for that reply so a
     // server without SFTP reports Subsystem here instead of a confusing
     // handshake failure on a dead channel (issue #29's exact scenario).
-    channel
-        .request_subsystem(true, "sftp")
-        .await
-        .map_err(|e| (SftpOpenStage::Subsystem, format!("{e}")))?;
-    let granted = match tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    match tokio::time::timeout(SSH_SFTP_STEP_TIMEOUT, channel.request_subsystem(true, "sftp")).await {
+        Ok(Ok(())) => {}
+        result => {
+            // A blocked sender also needs a finite deadline. Keep ownership
+            // until an explicit close has been attempted; raw Channel drop
+            // alone does not release the server-side channel.
+            let _ = tokio::time::timeout(SSH_SFTP_STEP_TIMEOUT, channel.close()).await;
+            let detail = match result {
+                Ok(Err(error)) => error.to_string(),
+                _ => "could not send the subsystem request within 10s".to_string(),
+            };
+            return Err((SftpOpenStage::Subsystem, detail));
+        }
+    }
+    let granted = match tokio::time::timeout(SSH_SFTP_STEP_TIMEOUT, async {
         loop {
             match channel.wait().await {
                 Some(russh::ChannelMsg::Success) => break true,
@@ -1691,7 +1698,7 @@ where
             // Explicit close: dropping a russh Channel without close leaves
             // the server-side channel open until the connection dies, and
             // repeated SFTP retries then pile up against MaxSessions.
-            let _ = channel.close().await;
+            let _ = tokio::time::timeout(SSH_SFTP_STEP_TIMEOUT, channel.close()).await;
             return Err((
                 SftpOpenStage::Subsystem,
                 "no reply to the subsystem request within 10s".into(),
@@ -1699,13 +1706,15 @@ where
         }
     };
     if !granted {
-        let _ = channel.close().await;
+        let _ = tokio::time::timeout(SSH_SFTP_STEP_TIMEOUT, channel.close()).await;
         return Err((
             SftpOpenStage::Subsystem,
             "the server rejected the \"sftp\" subsystem request".into(),
         ));
     }
     let stream = channel.into_stream();
+    // russh-sftp 2.3 bounds init and optional limits discovery separately by
+    // its default 10s request timeout. ChannelStream owns close-on-drop.
     russh_sftp::client::SftpSession::new(stream)
         .await
         .map(Arc::new)
@@ -2012,50 +2021,113 @@ where
     .await
 }
 
-/// Move a transfer's cancel registration from the dead channel's registry
-/// onto the one owned by the session generation that serves the rebuilt
-/// channel, so a cancel issued after the rebuild still reaches this
-/// transfer. No-op-safe when both registries are the same map.
-fn migrate_cancel_registration(
-    from: &Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
-    to: &Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
-    transfer_id_key: &str,
-    cancelled: &Arc<std::sync::atomic::AtomicBool>,
-) {
-    from.lock().remove(transfer_id_key);
-    to.lock().insert(transfer_id_key.to_string(), cancelled.clone());
+type TransferCancels = Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>;
+
+/// Own one registration from before channel preparation until file cleanup.
+/// Pointer-checked cleanup cannot remove a successor operation with the same id.
+#[derive(Debug)]
+struct TransferRegistration {
+    cancels: TransferCancels,
+    key: String,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Drop a transfer's cancel registration outright: the rebuild failed and
-/// nothing will serve this transfer, so the registry must not keep it.
-fn clear_cancel_registration(
-    cancels: &Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
-    transfer_id_key: &str,
-) {
-    cancels.lock().remove(transfer_id_key);
+impl TransferRegistration {
+    fn new(cancels: TransferCancels, key: String) -> Result<Self, String> {
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let mut map = cancels.lock();
+            if map.contains_key(&key) {
+                return Err("Transfer already registered".to_string());
+            }
+            map.insert(key.clone(), cancelled.clone());
+        }
+        Ok(Self { cancels, key, cancelled })
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("Transfer cancelled".to_string());
+        }
+        Ok(())
+    }
+
+    fn check_registry(&self, current: &TransferCancels) -> Result<(), String> {
+        self.check()?;
+        if !Arc::ptr_eq(&self.cancels, current) {
+            return Err("SFTP transfer not available (session replaced)".to_string());
+        }
+        Ok(())
+    }
+
+    async fn prepare<T, F>(&self, preparation: F) -> Result<T, String>
+    where
+        F: std::future::Future<Output = Result<T, String>>,
+    {
+        self.check()?;
+        // Channel setup owns a raw russh Channel until subsystem acceptance.
+        // It must reach its bounded success/failure cleanup rather than being
+        // dropped by cancellation while that channel still needs explicit close.
+        let result = preparation.await;
+        self.check()?;
+        result
+    }
+}
+
+impl Drop for TransferRegistration {
+    fn drop(&mut self) {
+        let mut map = self.cancels.lock();
+        if map.get(&self.key).is_some_and(|flag| Arc::ptr_eq(flag, &self.cancelled)) {
+            map.remove(&self.key);
+        }
+    }
+}
+
+fn transfer_registry(state: &SessionMap, tab_id: &str) -> Result<TransferCancels, String> {
+    match state.lock().get(tab_id) {
+        Some(SessionType::Ssh(session)) => Ok(session.transfer_cancels.clone()),
+        _ => Err("SFTP transfer not available (no SSH session)".to_string()),
+    }
+}
+
+async fn register_and_prepare_transfer<T, F>(
+    cancels: TransferCancels,
+    key: String,
+    preparation: F,
+) -> Result<(T, TransferRegistration), String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    let registration = TransferRegistration::new(cancels, key)?;
+    let result = registration.prepare(preparation).await?;
+    Ok((result, registration))
+}
+
+fn cancel_registered_transfer(cancels: &TransferCancels, key: &str) -> bool {
+    if let Some(flag) = cancels.lock().get(key) {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
 }
 
 /// Transfer init with one rebuild on mid-session channel death (4a): when
 /// the init proves the cached channel died, evict it, rebuild once via
 /// ensure_sftp_transfer and retry the init on the fresh channel — no byte
 /// has moved at init, so the retry cannot duplicate transfer state. The
-/// cancel registration moves onto the session generation that serves the
-/// retry, and the returned channel/cancels are the ones the transfer must
-/// use. A rebuild failure keeps the ensure error surface (invoke error).
-#[allow(clippy::too_many_arguments)]
+/// registration stays with its original SSH generation. A channel rebuild
+/// must not retarget the operation onto a replacement SSH session.
 async fn transfer_init_with_rebuild<T, F, Fut>(
     app: &AppHandle,
     state: &SessionMap,
     tab_id: &str,
-    transfer_id_key: &str,
-    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+    registration: &TransferRegistration,
     sftp: Arc<russh_sftp::client::SftpSession>,
-    cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
     init: F,
 ) -> Result<
     (
         Arc<russh_sftp::client::SftpSession>,
-        Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
         Result<T, SftpOpFailure>,
     ),
     String,
@@ -2064,27 +2136,24 @@ where
     F: Fn(Arc<russh_sftp::client::SftpSession>) -> Fut,
     Fut: std::future::Future<Output = Result<T, SftpOpFailure>>,
 {
+    registration.check()?;
     let first = init(sftp.clone()).await;
     match &first {
         Err(e) if e.channel_dead => {}
-        _ => return Ok((sftp, cancels, first)),
+        _ => return Ok((sftp, first)),
     }
+    registration.check()?;
     forget_dead_sftp_channel(state, tab_id, &sftp);
-    match ensure_sftp_transfer(state, tab_id).await {
+    match registration.prepare(ensure_sftp_transfer(state, tab_id)).await {
         Ok((rebuilt, rebuilt_cancels)) => {
-            // Move the cancel registration onto the session generation that
-            // actually serves the retry.
-            migrate_cancel_registration(&cancels, &rebuilt_cancels, transfer_id_key, cancelled);
+            registration.check_registry(&rebuilt_cancels)?;
             let retry = init(rebuilt.clone()).await;
             if retry.is_ok() {
                 let _ = app.emit("sftp-channel-rebuilt", json!({ "tabId": tab_id }));
             }
-            Ok((rebuilt, rebuilt_cancels, retry))
+            Ok((rebuilt, retry))
         }
-        Err(m) => {
-            clear_cancel_registration(&cancels, transfer_id_key);
-            Err(m)
-        }
+        Err(m) => Err(m),
     }
 }
 
@@ -5533,49 +5602,56 @@ pub async fn sftp_download(
         .unwrap_or(0);
     let transfer_id_key = transfer_id_num.to_string();
 
-    let (sftp, cancels) =
-        ensure_sftp_transfer(&state, tab_id).await?;
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    {
-        let mut c = cancels.lock();
-        c.insert(transfer_id_key.clone(), cancelled.clone());
-    }
+    let prepared = register_and_prepare_transfer(
+        transfer_registry(&state, tab_id)?,
+        transfer_id_key,
+        ensure_sftp_transfer(&state, tab_id),
+    )
+    .await;
+    let ((sftp, cancels), registration) = match prepared {
+        Ok(value) => value,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    registration.check_registry(&cancels)?;
+    let cancelled = registration.cancelled.clone();
 
     // Clean up the cancel registry when init (opening remote/local files) fails,
     // so dead entries don't accumulate over a long run
-    let init = |s: Arc<russh_sftp::client::SftpSession>| async move {
-        use russh_sftp::protocol::OpenFlags;
-        let file = s
-            .open_with_flags(remote_path, OpenFlags::READ)
-            .await
-            .map_err(|e| SftpOpFailure::sftp_step("open", e))?;
-        let metadata = file
-            .metadata()
-            .await
-            .map_err(|e| SftpOpFailure::sftp_step("metadata", e))?;
-        // Write to a local temp file first and rename on success — on cancel/failure
-        // the temp file is deleted, so a partial file never masquerades as complete
-        let tmp_local = format!("{}.zterm-tmp-{}", local_path, transfer_id_num);
-        let local = tokio::fs::File::create(&tmp_local)
-            .await
-            .map_err(|e| SftpOpFailure::other(format!("create: {e}")))?;
-        Ok((file, metadata, tmp_local, local))
+    let init = |s: Arc<russh_sftp::client::SftpSession>| {
+        let cancelled = cancelled.clone();
+        async move {
+            use russh_sftp::protocol::OpenFlags;
+            check_transfer_init_cancelled(&cancelled)?;
+            let file = s
+                .open_with_flags(remote_path, OpenFlags::READ)
+                .await
+                .map_err(|e| SftpOpFailure::sftp_step("open", e))?;
+            let metadata = file
+                .metadata()
+                .await
+                .map_err(|e| SftpOpFailure::sftp_step("metadata", e))?;
+            check_transfer_init_cancelled(&cancelled)?;
+            // Write to a local temp file first and rename on success; errors
+            // remove the temp so partial data never masquerades as complete.
+            let tmp_local = format!("{}.zterm-tmp-{}", local_path, transfer_id_num);
+            let local = tokio::fs::File::create(&tmp_local)
+                .await
+                .map_err(|e| SftpOpFailure::other(format!("create: {e}")))?;
+            Ok((file, metadata, tmp_local, local))
+        }
     };
-    let (_sftp, cancels, init_result) = transfer_init_with_rebuild(
+    let (_sftp, init_result) = transfer_init_with_rebuild(
         &app,
         &state,
         tab_id,
-        &transfer_id_key,
-        &cancelled,
+        &registration,
         sftp,
-        cancels,
         init,
     )
     .await?;
     let (mut file, metadata, tmp_local, mut local) = match init_result {
         Ok(v) => v,
         Err(e) => {
-            cancels.lock().remove(&transfer_id_key);
             return Ok(json!({ "error": e.message }));
         }
     };
@@ -5585,8 +5661,6 @@ pub async fn sftp_download(
     let app2 = app.clone();
     let tid = tab_id.to_string();
     let tid_num = transfer_id_num; // number for JSON event
-    let key = transfer_id_key.clone();
-    let cancels3 = cancels.clone();
     let local_final = local_path.to_string(); // 'static, for the rename
     tokio::spawn(async move {
         let result = async {
@@ -5626,6 +5700,7 @@ pub async fn sftp_download(
             }
             // Atomically move into place on success
             local.sync_all().await.map_err(|e| format!("sync: {e}"))?;
+            registration.check()?;
             drop(local);
             tokio::fs::rename(&tmp_local, &local_final)
                 .await
@@ -5637,11 +5712,8 @@ pub async fn sftp_download(
         if result.is_err() {
             let _ = tokio::fs::remove_file(&tmp_local).await;
         }
+        drop(registration);
         let _ = done_tx.send(result);
-        {
-            let mut c = cancels3.lock();
-            c.remove(&key);
-        }
     });
 
     let result = done_rx.await.unwrap_or(Err("Transfer failed".to_string()));
@@ -5707,6 +5779,13 @@ async fn finalize_upload_rename(
     Ok(())
 }
 
+fn check_transfer_init_cancelled(cancelled: &std::sync::atomic::AtomicBool) -> Result<(), SftpOpFailure> {
+    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(SftpOpFailure::other("Transfer cancelled".to_string()));
+    }
+    Ok(())
+}
+
 /// sftp_upload's init phase, split out for unit testing (same precedent as
 /// finalize_upload_rename): validates the local source, then creates the
 /// remote `.zterm-tmp-<id>` the transfer loop writes into. A failure AFTER
@@ -5720,6 +5799,7 @@ async fn prepare_upload(
     local_path: &str,
     remote_path: &str,
     transfer_id_num: u64,
+    cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<
     (
         std::fs::Metadata,
@@ -5730,6 +5810,7 @@ async fn prepare_upload(
     SftpOpFailure,
 > {
     use russh_sftp::protocol::OpenFlags;
+    check_transfer_init_cancelled(cancelled)?;
     // Reject local directories (drag-drop upload only checks synchronously in the frontend; this is the backstop, matching the Electron version's behavior)
     let local_meta = tokio::fs::metadata(local_path)
         .await
@@ -5741,6 +5822,7 @@ async fn prepare_upload(
     // the remote temp file is deleted, so no partial file remains (and TRUNCATE never clobbers an existing same-name file)
     let tmp_remote = format!("{}.zterm-tmp-{}", remote_path, transfer_id_num);
     let opened: Result<_, SftpOpFailure> = async {
+        check_transfer_init_cancelled(cancelled)?;
         let file = sftp
             .open_with_flags(
                 &tmp_remote,
@@ -5748,6 +5830,7 @@ async fn prepare_upload(
             )
             .await
             .map_err(|e| SftpOpFailure::sftp_step("open", e))?;
+        check_transfer_init_cancelled(cancelled)?;
         let local = tokio::fs::File::open(local_path)
             .await
             .map_err(|e| SftpOpFailure::other(format!("open: {e}")))?;
@@ -5788,34 +5871,39 @@ pub async fn sftp_upload(
         .unwrap_or(0);
     let transfer_id_key = transfer_id_num.to_string();
 
-    let (sftp, cancels) =
-        ensure_sftp_transfer(&state, tab_id).await?;
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    {
-        let mut c = cancels.lock();
-        c.insert(transfer_id_key.clone(), cancelled.clone());
-    }
+    let prepared = register_and_prepare_transfer(
+        transfer_registry(&state, tab_id)?,
+        transfer_id_key,
+        ensure_sftp_transfer(&state, tab_id),
+    )
+    .await;
+    let ((sftp, cancels), registration) = match prepared {
+        Ok(value) => value,
+        Err(error) => return Ok(json!({ "error": error })),
+    };
+    registration.check_registry(&cancels)?;
+    let cancelled = registration.cancelled.clone();
 
     // Same-directory backup name finalize_upload_rename swaps the old file
     // aside to; carries the transfer id like the temp name so concurrent
     // uploads of one destination cannot collide on it.
     let remote_backup = format!("{}.zterm-bak-{}", remote_path, transfer_id_num);
     // Clean up the cancel registry when init fails
-    let (sftp, cancels, init_result) = transfer_init_with_rebuild(
+    let (sftp, init_result) = transfer_init_with_rebuild(
         &app,
         &state,
         tab_id,
-        &transfer_id_key,
-        &cancelled,
+        &registration,
         sftp,
-        cancels,
-        |s| async move { prepare_upload(&s, local_path, remote_path, transfer_id_num).await },
+        |s| {
+            let cancelled = cancelled.clone();
+            async move { prepare_upload(&s, local_path, remote_path, transfer_id_num, &cancelled).await }
+        },
     )
     .await?;
     let (local_meta, tmp_remote, mut file, mut local) = match init_result {
         Ok(v) => v,
         Err(e) => {
-            cancels.lock().remove(&transfer_id_key);
             return Ok(json!({ "error": e.message }));
         }
     };
@@ -5825,8 +5913,6 @@ pub async fn sftp_upload(
     let app2 = app.clone();
     let tid = tab_id.to_string();
     let tid_num = transfer_id_num;
-    let key = transfer_id_key.clone();
-    let cancels3 = cancels.clone();
     let sftp2 = sftp.clone();
     let remote_final = remote_path.to_string(); // 'static, for the rename
     tokio::spawn(async move {
@@ -5863,6 +5949,7 @@ pub async fn sftp_upload(
                 );
             }
             file.sync_all().await.map_err(|e| format!("sync: {e}"))?;
+            registration.check()?;
             drop(file);
             // Atomically move into place on success
             finalize_upload_rename(&sftp2, &tmp_remote, &remote_final, &remote_backup).await?;
@@ -5873,11 +5960,8 @@ pub async fn sftp_upload(
         if result.is_err() {
             let _ = sftp2.remove_file(&tmp_remote).await;
         }
+        drop(registration);
         let _ = done_tx.send(result);
-        {
-            let mut c = cancels3.lock();
-            c.remove(&key);
-        }
     });
 
     let result = done_rx.await.unwrap_or(Err("Transfer failed".to_string()));
@@ -5902,12 +5986,9 @@ pub fn sftp_cancel_transfer(
     let transfer_id = transfer_id_str; // for HashMap key
     let map = state.lock();
     if let Some(SessionType::Ssh(s)) = map.get(tab_id) {
-        let cancels = s.transfer_cancels.lock();
-        if let Some(c) = cancels.get(&transfer_id) {
-            c.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
+        return Ok(json!({ "ok": cancel_registered_transfer(&s.transfer_cancels, &transfer_id) }));
     }
-    Ok(json!({ "ok": true }))
+    Ok(json!({ "ok": false }))
 }
 
 #[tauri::command]
@@ -8054,6 +8135,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_init_cancelled_before_file_access_leaves_no_temp() {
+        let dir = config_test_dir("sftp-init-cancelled");
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let result = prepare_upload(
+            &sftp,
+            dir.join("missing-source.txt").to_str().unwrap(),
+            "dest.txt",
+            31,
+            &cancelled,
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("cancelled init must not access either file"),
+            Err(error) => error,
+        };
+        assert_eq!(error.message, "Transfer cancelled");
+        assert!(!dir.join("dest.txt.zterm-tmp-31").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn upload_init_failure_removes_the_remote_temp() {
         // The open reply is lost after the server already created the temp
         // file (a link dropping mid-init): prepare_upload must run the same
@@ -8064,7 +8167,7 @@ mod tests {
         let local = dir.join("local.bin");
         std::fs::write(&local, b"data").unwrap();
         failures.fail_opens_for("dest.txt.zterm-tmp-7");
-        let err = match prepare_upload(&sftp, local.to_str().unwrap(), "dest.txt", 7).await {
+        let err = match prepare_upload(&sftp, local.to_str().unwrap(), "dest.txt", 7, &std::sync::atomic::AtomicBool::new(false)).await {
             Ok(_) => panic!("the injected open failure must fail init"),
             Err(e) => e,
         };
@@ -8084,7 +8187,7 @@ mod tests {
         let (sftp, _failures) = test_sftp_session(dir.clone()).await;
         let local_dir = dir.join("srcdir");
         std::fs::create_dir(&local_dir).unwrap();
-        let err = match prepare_upload(&sftp, local_dir.to_str().unwrap(), "dest.txt", 3).await {
+        let err = match prepare_upload(&sftp, local_dir.to_str().unwrap(), "dest.txt", 3, &std::sync::atomic::AtomicBool::new(false)).await {
             Ok(_) => panic!("a directory source must fail init"),
             Err(e) => e,
         };
@@ -8134,40 +8237,105 @@ mod tests {
     }
 
     #[test]
-    fn transfer_init_rebuild_migrates_the_cancel_registration() {
-        let old: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let new: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        old.lock().insert("t-1".to_string(), flag.clone());
-        migrate_cancel_registration(&old, &new, "t-1", &flag);
-        assert!(
-            !old.lock().contains_key("t-1"),
-            "the dead channel's registry must not keep the transfer"
-        );
-        assert!(
-            new.lock()
-                .get("t-1")
-                .is_some_and(|f| Arc::ptr_eq(f, &flag)),
-            "the rebuilt generation's registry must hold the same flag"
-        );
-        // Same-map migration (session generation unchanged) keeps the entry.
-        migrate_cancel_registration(&new, &new, "t-1", &flag);
-        assert!(new.lock().get("t-1").is_some_and(|f| Arc::ptr_eq(f, &flag)));
+    fn transfer_registration_rejects_replacement_sessions_and_duplicate_ids() {
+        let original = Arc::new(Mutex::new(HashMap::new()));
+        let replacement = Arc::new(Mutex::new(HashMap::new()));
+        let registration = TransferRegistration::new(original.clone(), "1".to_string()).unwrap();
+        assert!(registration.check_registry(&original).is_ok());
+        assert!(registration.check_registry(&replacement).is_err());
+        assert!(TransferRegistration::new(original.clone(), "1".to_string()).is_err());
+        assert!(!cancel_registered_transfer(&original, "missing"));
+        assert!(cancel_registered_transfer(&original, "1"));
+        assert_eq!(registration.check().unwrap_err(), "Transfer cancelled");
     }
 
     #[test]
-    fn transfer_init_rebuild_failure_clears_the_cancel_registration() {
-        let cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        cancels.lock().insert("t-1".to_string(), flag);
-        clear_cancel_registration(&cancels, "t-1");
-        assert!(
-            !cancels.lock().contains_key("t-1"),
-            "a failed rebuild must not leave the transfer registered"
-        );
+    fn transfer_registration_cleanup_removes_only_its_owned_entry() {
+        let registry = Arc::new(Mutex::new(HashMap::new()));
+        let registration = TransferRegistration::new(registry.clone(), "1".to_string()).unwrap();
+        let successor = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        registry.lock().insert("1".to_string(), successor.clone());
+        drop(registration);
+        assert!(registry.lock().get("1").is_some_and(|flag| Arc::ptr_eq(flag, &successor)));
+        registry.lock().remove("1");
+        drop(TransferRegistration::new(registry.clone(), "2".to_string()).unwrap());
+        assert!(registry.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn transfer_registration_cancellation_during_channel_prepare_prevents_file_init() {
+        for direction in ["upload", "download"] {
+            let registry = Arc::new(Mutex::new(HashMap::new()));
+            let (started_tx, started_rx) = oneshot::channel();
+            let (resume_tx, resume_rx) = oneshot::channel();
+            let file_init = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let registry2 = registry.clone();
+            let file_init2 = file_init.clone();
+            let task = tokio::spawn(async move {
+                let (_, registration) = register_and_prepare_transfer(registry2, direction.to_string(), async {
+                    let _ = started_tx.send(());
+                    let _ = resume_rx.await;
+                    Ok(())
+                }).await?;
+                file_init2.store(true, std::sync::atomic::Ordering::Relaxed);
+                drop(registration);
+                Ok::<(), String>(())
+            });
+            started_rx.await.unwrap();
+            assert!(cancel_registered_transfer(&registry, direction));
+            let _ = resume_tx.send(());
+            assert_eq!(task.await.unwrap().unwrap_err(), "Transfer cancelled");
+            assert!(!file_init.load(std::sync::atomic::Ordering::Relaxed));
+            assert!(registry.lock().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn transfer_registration_cancel_keeps_channel_preparation_alive_until_cleanup() {
+        let registry = Arc::new(Mutex::new(HashMap::new()));
+        let (started_tx, started_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let cleanup_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cleanup2 = cleanup_finished.clone();
+        let registry2 = registry.clone();
+        let mut task = tokio::spawn(async move {
+            register_and_prepare_transfer(registry2, "pending-channel".to_string(), async {
+                let _ = started_tx.send(());
+                let _ = resume_rx.await;
+                // Models the bounded channel-setup path sending its explicit
+                // close before returning. Dropping this future skips that close.
+                cleanup2.store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }).await
+        });
+        started_rx.await.unwrap();
+        assert!(cancel_registered_transfer(&registry, "pending-channel"));
+        assert!(tokio::time::timeout(CANCEL_POLL_INTERVAL * 2, &mut task).await.is_err(),
+            "cancellation must retain the channel preparation future until cleanup");
+        assert!(registry.lock().contains_key("pending-channel"));
+        let _ = resume_tx.send(());
+        assert_eq!(task.await.unwrap().unwrap_err(), "Transfer cancelled");
+        assert!(cleanup_finished.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(registry.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn transfer_registration_failed_prepare_cleans_up_and_cancelled_rebuild_never_starts() {
+        let registry = Arc::new(Mutex::new(HashMap::new()));
+        let result = register_and_prepare_transfer(registry.clone(), "1".to_string(), async {
+            Err::<(), _>("channel failed".to_string())
+        }).await;
+        assert_eq!(result.unwrap_err(), "channel failed");
+        assert!(registry.lock().is_empty());
+
+        let (_, registration) = register_and_prepare_transfer(registry.clone(), "2".to_string(), async { Ok(()) }).await.unwrap();
+        assert!(cancel_registered_transfer(&registry, "2"));
+        let mut polled = false;
+        let result = registration.prepare(async { polled = true; Ok(()) }).await;
+        assert_eq!(result.unwrap_err(), "Transfer cancelled");
+        assert!(!polled);
+        drop(registration);
+        assert!(registry.lock().is_empty());
     }
 
     #[tokio::test]
