@@ -804,6 +804,36 @@ function _installTerminalBehavior(term, perceivedCaret) {
     try { window.__imeCaretAnchor?.patchTerminal(term, { perceivedCaret }); } catch(e) { console.warn('IME anchor patch failed:', e); }
 }
 
+function _wireTerminalBell(term) {
+    let notificationPending = false;
+    term.onBell(() => {
+        const mode = _settingsConfig.bell || 'off';
+        if (mode === 'off') return;
+        // A terminal can move between tabs and panes without being rewired.
+        const resolved = _resolveTermOwner(term);
+        if (!resolved) return;
+        const { tab, owner } = resolved;
+        const foreground = TabManager.activeId === tab.id &&
+            (!tab.splitRoot || owner.focused) && document.hasFocus?.() !== false;
+        if ((mode === 'notification' || mode === 'notification+flash') &&
+            !foreground && !notificationPending) {
+            const label = resolveTabDisplayName(tab, [owner]) || '终端';
+            showToast(label + '：终端程序请求关注', false, 'info');
+            notificationPending = true;
+            setTimeout(() => { notificationPending = false; }, 2500);
+        }
+        // Flash is an explicit visual preference, including in the foreground.
+        if (mode === 'flash' || mode === 'notification+flash') {
+            const tabEl = document.querySelector(`.tab[data-tab="${tab.id}"]`);
+            if (tabEl) {
+                clearTimeout(tabEl._bellFlashTimer);
+                tabEl.classList.add('bell-flash');
+                tabEl._bellFlashTimer = setTimeout(() => tabEl.classList.remove('bell-flash'), 2000);
+            }
+        }
+    });
+}
+
 // ── Terminal wiring (shared by PTY and SSH) ──
 function wireTerminal(tab, tabId) {
     tab.tabId = tabId;
@@ -879,15 +909,7 @@ function wireTerminal(tab, tabId) {
     _bindSyncExitOnClick(tab, term.element, term);
 
     // ── Bell notification ──
-    term.onBell(() => {
-        const bell = _settingsConfig.bell || 'off';
-        if (bell === 'off') return;
-        if (bell !== 'flash') showToast((tab.name || '终端') + ' 响铃');
-        if (bell === 'flash' || bell === 'notification+flash') {
-            const tabEl = document.querySelector(`.tab[data-tab="${tab.id}"]`);
-            if (tabEl) { tabEl.classList.add('bell-flash'); setTimeout(() => tabEl.classList.remove('bell-flash'), 2000); }
-        }
-    });
+    _wireTerminalBell(term);
 
     // ── Select to copy (with smart wrap handling) ──
     term.onSelectionChange(() => {
@@ -1137,15 +1159,7 @@ function wireTerminalToPane(tab, pane) {
     _bindSyncExitOnClick(tab, term.element, term);
 
     // ── Bell notification ──
-    term.onBell(() => {
-        const bell = _settingsConfig.bell || 'off';
-        if (bell === 'off') return;
-        if (bell !== 'flash') showToast((tab.name || '终端') + ' 响铃');
-        if (bell === 'flash' || bell === 'notification+flash') {
-            const tabEl = document.querySelector(`.tab[data-tab="${tab.id}"]`);
-            if (tabEl) { tabEl.classList.add('bell-flash'); setTimeout(() => tabEl.classList.remove('bell-flash'), 2000); }
-        }
-    });
+    _wireTerminalBell(term);
 
     // ── Select to copy (with smart wrap handling) ──
     term.onSelectionChange(() => {

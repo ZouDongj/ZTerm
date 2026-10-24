@@ -96,14 +96,18 @@ test('U-09: the sticky SSH edit footer carries a 1px same-color seam cover', () 
 
 // ── U-12: SFTP path editor keeps field chrome, no layout jump ──
 
-test('U-12: pathbar is pinned and the editor keeps the 20px field box', () => {
-  assert.ok(ruleBody('.sftp-pathbar').includes('min-height:36px'), 'address row keeps the crumb-mode height');
+test('U-12: path editor and breadcrumb share a stable content height', () => {
+  const bar = ruleBody('.sftp-pathbar');
+  const crumbs = ruleBody('.sftp-breadcrumb');
   const input = ruleBody('.sftp-path-input');
-  for (const decl of ['height:20px', 'border-radius:10px', 'background:var(--field-bg)', 'font-size:12px']) {
-    assert.ok(input.includes(decl), `path input missing ${decl}`);
-  }
-  assert.equal(ruleBody('.sftp-path-input:focus').trim(), 'box-shadow:var(--field-focus)',
-    'inset field ring replaces the global outer ring');
+  const contentHeight = Number(/(?:^|;)height:(\d+)px/.exec(input)[1]);
+  const crumbHeight = Number(/min-height:(\d+)px/.exec(crumbs)[1]);
+  const barHeight = Number(/min-height:(\d+)px/.exec(bar)[1]);
+  assert.equal(crumbHeight, contentHeight, 'both modes reserve the same content box');
+  assert.equal(barHeight, contentHeight + 6 + 10, 'the address row includes its unchanged vertical padding');
+  assert.ok(contentHeight >= 28, 'editor has space above and below the text');
+  assert.ok(input.includes('font-family:inherit'), 'editor uses the surrounding UI font');
+  assert.ok(ruleBody('.sftp-path-input:focus').includes('box-shadow:inset'), 'focus stays within the field');
 });
 
 // ── U-13: transfer flyout anchors below the titlebar token ──

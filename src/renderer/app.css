@@ -696,11 +696,11 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
    leading root crumb carries the row's only glyph (a hard drive); entry:
    single click on empty space / a separator / the "…" crumb, or
    double-click anywhere. */
-.sftp-pathbar{display:flex;align-items:center;padding:6px 18px 10px;min-height:36px;flex-shrink:0}
+.sftp-pathbar{display:flex;align-items:center;padding:6px 18px 10px;min-height:44px;flex-shrink:0}
 /* line-height is pinned so a text crumb's box is deterministic (16px line +
    2px padding top and bottom = 20px); the root glyph gets the same 20px box
    so the icon and the 12px text share one optical centerline. */
-.sftp-breadcrumb{display:flex;align-items:center;gap:4px;flex:1;min-width:0;font-size:12px;line-height:16px;color:var(--text-2);overflow:hidden;white-space:nowrap;user-select:none}
+.sftp-breadcrumb{display:flex;align-items:center;gap:4px;flex:1;min-width:0;min-height:28px;font-size:12px;line-height:16px;color:var(--text-2);overflow:hidden;white-space:nowrap;user-select:none}
 .sftp-breadcrumb span{cursor:pointer;padding:2px 6px;border-radius:5px;transition:all 0.12s;flex-shrink:0}
 /* Overlong paths: middle segments collapse into a "…" crumb (root and the
    current directory stay visible); a still-overlong trailing segment ends
@@ -722,12 +722,10 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .sftp-breadcrumb .seg-root:hover{color:var(--text-1)}
 .sftp-breadcrumb .seg-root svg{display:block;width:14px;height:14px;flex:none;pointer-events:none}
 .sftp-breadcrumb .more{color:var(--text-3)}
-/* Edit mode: the input swaps in as a real field with the same 20px box the
-   crumbs occupy (field fill, 12px text, pill radius, inset focus ring), so
-   the address row keeps its height instead of jumping. The specific :focus
-   rule replaces the global input:focus-visible outer ring for this input. */
-.sftp-path-input{flex:1;min-width:0;width:100%;height:20px;background:var(--field-bg);border:none;border-radius:10px;padding:0 6px;color:var(--text-1);font-size:12px;font-family:inherit;outline:none}
-.sftp-path-input:focus{box-shadow:var(--field-focus)}
+/* Both address modes share a 28px content box. The compact rectangular
+   editor follows the sidebar typography without moving the toolbar. */
+.sftp-path-input{appearance:none;flex:1;min-width:0;width:100%;height:28px;background:var(--field-bg);border:1px solid var(--stroke);border-radius:6px;padding:0 8px;color:var(--text-1);font-size:13px;line-height:18px;font-weight:400;font-family:inherit;outline:none;transition:border-color .12s,box-shadow .12s}
+.sftp-path-input:focus{border-color:rgba(var(--accent-rgb),.5);box-shadow:inset 0 0 0 1px rgba(var(--accent-rgb),.12)}
 .sftp-actions{display:flex;gap:2px;flex-shrink:0;align-items:center;margin-left:auto}
 .sftp-actions button{width:28px;height:28px;border-radius:8px;border:none;background:transparent;color:var(--text-3);cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all 0.12s;line-height:1;padding:0}
 .sftp-actions button:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
@@ -1114,6 +1112,8 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .toast{position:fixed;bottom:40px;left:50%;transform:translateX(-50%);background:rgb(var(--accent-rgb));color:var(--accent-contrast);padding:8px 18px;border-radius:20px;font-size:12px;font-weight:500;z-index:100;opacity:0;transition:opacity 0.2s;pointer-events:none;display:flex;align-items:center;gap:6px}
 .toast::before{content:'';display:inline-block;width:14px;height:14px;flex-shrink:0;background:currentColor;mask-size:contain;-webkit-mask-size:contain;mask-repeat:no-repeat;-webkit-mask-repeat:no-repeat;mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E")}
 .toast.show{opacity:1}
+.toast.info{background:var(--surface-float);color:var(--text-1);box-shadow:inset 0 0 0 1px var(--stroke),0 4px 16px rgba(0,0,0,.2)}
+.toast.info::before{mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 11v6M12 7h.01'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 11v6M12 7h.01'/%3E%3C/svg%3E")}
 .toast.error{background:#f2b8b5;color:#5f2120}
 .toast.error::before{mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'/%3E%3Cline x1='6' y1='6' x2='18' y2='18'/%3E%3C/svg%3E");-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'/%3E%3Cline x1='6' y1='6' x2='18' y2='18'/%3E%3C/svg%3E")}
 /* Terminal link hover tip: shows the real target URL plus a gesture hint */

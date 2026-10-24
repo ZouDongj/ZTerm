@@ -203,6 +203,46 @@ test('breadcrumb path edit still opens during a background cwd follow (control)'
     assert.equal(vm.SFTP._editingPath, true, 'follow completion preserves the editor');
 });
 
+test('path editing keeps IME confirmation separate from directory navigation', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', []);
+    vm.SFTP._editPath();
+    const input = vm.els.breadcrumb.children.find(child => child.tagName === 'INPUT');
+    assert.equal(input.getAttribute('aria-label'), '远程目录路径');
+    input.value = '/srv/目录';
+    input.dispatch('keydown', { key: 'Enter', isComposing: true,
+        preventDefault() { assert.fail('IME confirmation must remain with the input method'); } });
+    input.dispatch('keydown', { key: 'Enter', keyCode: 229,
+        preventDefault() { assert.fail('IME compatibility event must remain with the input method'); } });
+    assert.equal(vm.pending('sftp-readdir').length, 0);
+    assert.equal(vm.SFTP._editingPath, true);
+    input.dispatch('keydown', { key: 'Enter', preventDefault() {} });
+    await vm.drain();
+    assert.equal(vm.pending('sftp-readdir').length, 1);
+    assert.equal(vm.pending('sftp-readdir')[0].args.path, '/srv/目录');
+    input.dispatch('blur');
+    assert.equal(vm.pending('sftp-readdir').length, 1, 'blur does not commit a second time');
+    vm.settle(vm.pending('sftp-readdir')[0], { files: [] });
+    await vm.drain();
+});
+
+test('path editing Escape and blur cancel without changing the directory', async () => {
+    for (const finish of ['Escape', 'blur']) {
+        const vm = await loadSftpVm();
+        await openOn(vm, 'sessA', '/srv/app', []);
+        vm.SFTP._editPath();
+        const input = vm.els.breadcrumb.children.find(child => child.tagName === 'INPUT');
+        input.value = '/srv/uncommitted';
+        if (finish === 'Escape') {
+            input.dispatch('keydown', { key: 'Escape', preventDefault() {}, stopPropagation() {} });
+        }
+        input.dispatch('blur');
+        assert.equal(vm.pending('sftp-readdir').length, 0);
+        assert.equal(vm.SFTP._path, '/srv/app');
+        assert.equal(vm.SFTP._editingPath, false);
+    }
+});
+
 test('double-click on the address bar preempts the navigation its first click started', async () => {
     // With a long path the address bar is all segments: the gesture's first
     // click navigates (instant breadcrumb semantics), and the dblclick must

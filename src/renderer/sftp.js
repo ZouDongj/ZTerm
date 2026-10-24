@@ -742,6 +742,8 @@ const SFTP = {
         this._editingPath = true;
         const input = document.createElement('input');
         input.className = 'sftp-path-input inline-edit';
+        input.setAttribute('aria-label', '远程目录路径');
+        input.autocomplete = 'off';
         input.value = prefill || this._path || '/';
         input.spellcheck = false;
         el.innerHTML = '';
@@ -766,6 +768,7 @@ const SFTP = {
             }
         };
         input.addEventListener('keydown', (e) => {
+            if (e.isComposing || e.keyCode === 229) return;
             if (e.key === 'Enter') { e.preventDefault(); finish(true); }
             else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
         });
