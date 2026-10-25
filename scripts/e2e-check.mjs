@@ -17,7 +17,7 @@
 
 import { spawn, execFileSync, execFile } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync, mkdirSync, renameSync } from 'node:fs';
+import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync, mkdirSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,8 @@ import { backgroundDesktopIndex, validateFreshDesktopSnapshot, observeDesktopStr
   validateNativeHostHealth, renewNativeLease, createBackgroundLease, backgroundNow,
   stopBackgroundRun, readHostProcessDiagnostic } from './e2e-background-policy.mjs';
 import { connectVerifiedEndpoint } from './e2e-ownership.mjs';
+import { requireBackgroundCapability } from './e2e-background-capability.mjs';
+import { writeBackgroundJson } from './e2e-background-json.mjs';
 
 const SOURCE_EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
 let EXE = SOURCE_EXE;
@@ -113,6 +115,7 @@ function restoreConfig() {
 // that as a failure instead of silently assuming a clean state.
 function killExisting() {
   stopBackgroundObserver();
+  if (!sandbox && !ownedChild) return true;
   const child = ownedChild;
   const result = killOwnedRuntime({
     child,
@@ -142,12 +145,6 @@ function resolveVdHelper() {
   if (!existsSync(out)) throw new Error('Background observer compilation produced no executable');
   vdHelperExe = out;
   return out;
-}
-
-function writeBackgroundJson(path, value) {
-  const temporary = path + '.tmp';
-  writeFileSync(temporary, JSON.stringify(value), 'utf8');
-  renameSync(temporary, path);
 }
 
 async function inspectDesktop() {
@@ -207,7 +204,7 @@ function renewBackgroundLease() {
   const run = backgroundRun;
   if (run.binding) renewNativeLease({
     readStatus: () => readNativeStatus(run), expected: nativeExpected(run),
-    renew: () => writeBackgroundJson(run.leasePath, createBackgroundLease(run.binding)),
+    renew: () => writeBackgroundJson(run.leasePath, createBackgroundLease(run.binding), assertBackgroundHealthy),
   });
 }
 
@@ -295,6 +292,7 @@ async function installIsolatedShellGuard(cdp) {
 
 async function startApp() {
   if (ownedChild) throw new Error('Previous owned process has not been released');
+  await requireBackgroundCapability(EXE);
   // USERPROFILE must remain valid for WebView2. Isolate shell startup explicitly
   // instead of allowing restored shells to execute the operator's profiles.
   prepareIsolatedShellConfig();
@@ -447,6 +445,7 @@ async function waitForValue(cdp, expression, expected, timeoutMs = 8000, mode = 
 
 async function main() {
   if (!existsSync(SOURCE_EXE)) throw new Error(`exe 不存在: ${SOURCE_EXE}`);
+  await requireBackgroundCapability(SOURCE_EXE);
   // The complete launch plan BASE..BASE+LAUNCH_PLAN-1 must be free. Discovery
   // is READ-ONLY: holders are never killed (an image name proves nothing —
   // the user may run their own ZTerm or WebView2 on these ports). Shift the

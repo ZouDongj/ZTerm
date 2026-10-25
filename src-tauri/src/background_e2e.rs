@@ -13,6 +13,7 @@ const LEASE_LIMIT: Duration = Duration::from_secs(5);
 const RUN_LIMIT: Duration = Duration::from_secs(3600);
 const FAILURE_EXIT_LIMIT: Duration = Duration::from_secs(2);
 const CLOCK_DOMAIN: &str = "windows-boot-ms";
+const PROTOCOL_MARKER: &str = "ZTERM_E2E_BACKGROUND_PROTOCOL_V1_WINDOWS_BOOT_MS";
 
 fn background_now() -> u64 {
     #[cfg(windows)]
@@ -115,6 +116,7 @@ fn write_status(rt: &Runtime, mut status: Value) -> Result<(), String> {
     status["hwnd"] = json!(format!("0x{:x}", rt.hwnd.load(Ordering::SeqCst)));
     status["targetDesktopId"] = json!(rt.policy.target_desktop_id.to_ascii_lowercase());
     status["clockDomain"] = json!(CLOCK_DOMAIN);
+    status["backgroundProtocol"] = json!(PROTOCOL_MARKER);
     let path = marker(rt, "status");
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, serde_json::to_vec(&status).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
