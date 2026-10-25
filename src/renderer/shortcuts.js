@@ -611,7 +611,8 @@ function _renderUpdateReady(tag) {
 // Rust (update_http.rs), independent of any error display wording.
 function _friendlyUpdateError(raw) {
     const s = (raw && raw !== '未知错误') ? String(raw) : '';
-    if (s.includes('invalid update proxy')) return '更新代理地址无效（仅支持 http/https 代理），请在 设置 → 关于 中修正。详细信息：' + s;
+    if (s.includes('TLS-to-proxy')) return '暂不支持 HTTPS 代理，请使用 HTTP 代理端点（仍可访问 HTTPS 更新地址）。详细信息：' + s;
+    if (s.includes('invalid update proxy')) return '更新代理地址无效（仅支持 HTTP 代理），请在 设置 → 关于 中修正。详细信息：' + s;
     const m = /\[(\w+)\]/.exec(s);
     const tag = m && m[1];
     let msg = '';

@@ -14,7 +14,7 @@
 //! only to that explicit proxy.
 //!
 //! Proxy resolution order (mirrors the previous ureq-based stack):
-//!   1. explicit `terminal.updateProxy` (http/https only; socks rejected)
+//!   1. explicit `terminal.updateProxy` (HTTP proxy endpoints; TLS-to-proxy unsupported)
 //!   2. HTTPS_PROXY / HTTP_PROXY / ALL_PROXY env vars (NO_PROXY respected)
 //!   3. WinINET current-user config: PAC (per-URL resolution) or static
 //!      registry proxy (per-protocol entries collapsed to the https= entry)
@@ -236,7 +236,7 @@ pub struct ParsedProxy {
 /// message — the config stores it plaintext, but error text travels further
 /// (UI, logs, bug reports).
 pub fn redact_proxy_userinfo(url: &str) -> String {
-    match url.find('@') {
+    match url.rfind('@') {
         Some(at) => {
             let scheme_end = url.find("://").map(|i| i + 3).unwrap_or(0);
             format!("{}***@{}", &url[..scheme_end], &url[at + 1..])
@@ -245,21 +245,19 @@ pub fn redact_proxy_userinfo(url: &str) -> String {
     }
 }
 
-/// Validate and parse an explicit proxy URL: http(s) only (socks is rejected
-/// outright — we cannot speak it) with an optional user:pass@ userinfo used
-/// for Basic auth against the proxy. Error strings are part of the contract:
+/// Validate and parse an explicit HTTP proxy URL with optional user:pass@
+/// userinfo. HTTPS target requests can still use HTTP CONNECT; connecting
+/// to the proxy itself over TLS is a separate, unsupported capability.
+/// Userinfo is used for Basic auth. Error strings are part of the contract:
 /// the "invalid update proxy" prefix is composed by the caller and the
 /// message text is pinned by E2E.
 pub fn parse_explicit_proxy(url: &str) -> Result<ParsedProxy, String> {
     let (scheme, rest) = match url.split_once("://") {
+        Some(("", _)) => return Err("missing proxy scheme".into()),
         Some((s, r)) => (s.to_ascii_lowercase(), r.to_string()),
         None => (String::new(), url.to_string()),
     };
-    if !scheme.is_empty() && scheme != "http" && scheme != "https" {
-        return Err(format!(
-            "only http(s) proxies are supported (got '{scheme}://')"
-        ));
-    }
+    validate_proxy_scheme(&scheme)?;
     let (creds, hostport) = match rest.rfind('@') {
         Some(at) => (Some(rest[..at].to_string()), rest[at + 1..].to_string()),
         None => (None, rest),
@@ -285,7 +283,7 @@ pub fn parse_explicit_proxy(url: &str) -> Result<ParsedProxy, String> {
             if hostport.contains(':') {
                 return Err(format!("invalid proxy address '{hostport}'"));
             }
-            (hostport.clone(), if scheme == "https" { 443 } else { 8080 })
+            (hostport.clone(), 8080)
         }
     };
     // Host sanity: DNS names, IPv4 and bracketed IPv6 only. Free text like
@@ -303,6 +301,14 @@ pub fn parse_explicit_proxy(url: &str) -> Result<ParsedProxy, String> {
     })
 }
 
+fn validate_proxy_scheme(scheme: &str) -> Result<(), String> {
+    match scheme {
+        "" | "http" => Ok(()),
+        "https" => Err("HTTPS proxies require TLS-to-proxy, which is not supported; configure an HTTP proxy endpoint".into()),
+        _ => Err(format!("only HTTP proxies are supported (got '{scheme}://')")),
+    }
+}
+
 /// Full validation of a configured proxy URL with the contract error prefix
 /// (message text is pinned by E2E) and userinfo redaction.
 pub fn validate_proxy_url(url: &str) -> Result<(), String> {
@@ -317,23 +323,40 @@ struct ResolvedProxy {
     bypass: Option<String>,
 }
 
-/// Pick a proxy from the environment (legacy parity with the previous
-/// stack: HTTPS_PROXY / HTTP_PROXY / ALL_PROXY, either case, NO_PROXY
-/// respected).
-fn resolve_env_proxy(lookup: impl Fn(&str) -> Option<String>, target_host: &str) -> Option<String> {
-    let raw = lookup("HTTPS_PROXY")
-        .or_else(|| lookup("https_proxy"))
-        .or_else(|| lookup("HTTP_PROXY"))
-        .or_else(|| lookup("http_proxy"))
-        .or_else(|| lookup("ALL_PROXY"))
-        .or_else(|| lookup("all_proxy"))?;
+/// Pick the first nonblank proxy in the existing HTTPS / HTTP / ALL priority
+/// (uppercase before lowercase), then honor NO_PROXY. Blank values are unset;
+/// a nonblank invalid value is an error rather than a lower-priority fallback.
+fn resolve_env_proxy(
+    lookup: impl Fn(&str) -> Option<String>,
+    target_host: &str,
+) -> Result<Option<String>, String> {
+    let Some(raw) = [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    .into_iter()
+    .filter_map(|name| lookup(name))
+    .find(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
     if no_proxy_matches(
         lookup("NO_PROXY").or_else(|| lookup("no_proxy")),
         target_host,
     ) {
-        return None;
+        return Ok(None);
     }
-    parse_explicit_proxy(raw.trim()).ok().map(|p| p.server)
+    parse_explicit_proxy(raw.trim())
+        .map(|proxy| Some(proxy.server))
+        .map_err(|error| {
+            format!(
+                "invalid update proxy '{}': {error}",
+                redact_proxy_userinfo(raw.trim())
+            )
+        })
 }
 
 /// True when the NO_PROXY list (comma-separated hosts/domains, `*` for all)
@@ -356,10 +379,26 @@ fn no_proxy_matches(no_proxy: Option<String>, host: &str) -> bool {
 /// Collapse a WinINET static ProxyServer value to a single `host:port`.
 /// Registry per-protocol form ("http=a:80;https=b:443") uses the https=
 /// entry (falling back to http=); a bare value passes through.
-fn collapse_wininet_static(raw: &str) -> Option<String> {
+fn collapse_wininet_static(raw: &str) -> Result<Option<String>, String> {
     let raw = raw.trim();
     if raw.is_empty() {
-        return None;
+        return Ok(None);
+    }
+    // Recognize a leading URL before scanning per-target selectors: userinfo
+    // can contain '=', which must not turn an unsupported URL into direct access.
+    if let Some((scheme, address)) = raw.split_once("://") {
+        if !scheme.contains(['=', ';']) {
+            if scheme.is_empty() {
+                return Err("invalid update proxy: missing proxy scheme".into());
+            }
+            validate_proxy_scheme(&scheme.to_ascii_lowercase()).map_err(|error| {
+                format!(
+                    "invalid update proxy '{}': {error}",
+                    redact_proxy_userinfo(raw)
+                )
+            })?;
+            return Ok(Some(address.to_string()));
+        }
     }
     if raw.contains('=') {
         let mut https = None;
@@ -374,33 +413,34 @@ fn collapse_wininet_static(raw: &str) -> Option<String> {
                 }
             }
         }
-        return collapse_wininet_static(&https.or(http)?);
+        return match https.or(http) {
+            Some(value) => collapse_wininet_static(&value),
+            None => Ok(None),
+        };
     }
-    let stripped = raw
-        .strip_prefix("http://")
-        .or_else(|| raw.strip_prefix("https://"))
-        .unwrap_or(raw);
-    Some(stripped.to_string())
+    // Native WinINET/PAC server lists are not proxy URL schemes. In particular
+    // https= selects an HTTP proxy for HTTPS targets, not a TLS-to-proxy link.
+    Ok(Some(raw.to_string()))
 }
 
 /// Resolve the effective proxy under ProxyChoice::Auto: env vars, then the
 /// user's WinINET configuration (PAC per-URL, else static registry proxy),
 /// else direct. A PAC/WPAD failure degrades to direct — the same behavior a
 /// browser shows when the script is unreachable.
-fn resolve_auto_proxy(session: Handle, url: &str, host: &str) -> ResolvedProxy {
-    if let Some(server) = resolve_env_proxy(|name| std::env::var(name).ok(), host) {
-        return ResolvedProxy {
+fn resolve_auto_proxy(session: Handle, url: &str, host: &str) -> Result<ResolvedProxy, String> {
+    if let Some(server) = resolve_env_proxy(|name| std::env::var(name).ok(), host)? {
+        return Ok(ResolvedProxy {
             server: Some(server),
             bypass: None,
-        };
+        });
     }
     unsafe {
         let mut cfg = WINHTTP_CURRENT_USER_IE_PROXY_CONFIG::default();
         if WinHttpGetIEProxyConfigForCurrentUser(&mut cfg).is_err() {
-            return ResolvedProxy {
+            return Ok(ResolvedProxy {
                 server: None,
                 bypass: None,
-            };
+            });
         }
         let auto_config_url = from_wide(cfg.lpszAutoConfigUrl);
         let static_proxy = from_wide(cfg.lpszProxy);
@@ -432,28 +472,28 @@ fn resolve_auto_proxy(session: Handle, url: &str, host: &str) -> ResolvedProxy {
                 let bypass = from_wide(info.lpszProxyBypass);
                 free_winhttp_string(info.lpszProxy);
                 free_winhttp_string(info.lpszProxyBypass);
-                return ResolvedProxy {
-                    server: collapse_wininet_static(&server),
+                return Ok(ResolvedProxy {
+                    server: collapse_wininet_static(&server)?,
                     bypass: if bypass.is_empty() {
                         None
                     } else {
                         Some(bypass)
                     },
-                };
+                });
             }
-            return ResolvedProxy {
+            return Ok(ResolvedProxy {
                 server: None,
                 bypass: None,
-            };
+            });
         }
-        ResolvedProxy {
-            server: collapse_wininet_static(&static_proxy),
+        Ok(ResolvedProxy {
+            server: collapse_wininet_static(&static_proxy)?,
             bypass: if bypass.is_empty() {
                 None
             } else {
                 Some(bypass)
             },
-        }
+        })
     }
 }
 
@@ -535,9 +575,8 @@ fn send_get(
     let parts = crack_url(url)?;
 
     // Validate/crack the explicit override before opening any handle, so a
-    // bad value cannot leak a session on its error path. Both http:// and
-    // https:// proxy URLs are dialed as plain HTTP proxies (CONNECT
-    // tunneling); a TLS-to-proxy link is not supported.
+    // bad value cannot leak a session on its error path. Only HTTP proxy
+    // endpoints are supported; HTTPS targets use CONNECT through them.
     let mut explicit_basic: Option<(String, String)> = None;
     let mut proxy_server_w: Vec<u16> = Vec::new();
     let mut proxy_bypass_w: Vec<u16> = Vec::new();
@@ -570,7 +609,13 @@ fn send_get(
         if let ProxyChoice::Auto = proxy {
             // NO_PROXY only suppresses the env-var layer; the WinINET
             // (PAC/static) chain is independent and still applies.
-            let resolved = resolve_auto_proxy(session, url, &parts.host);
+            let resolved = match resolve_auto_proxy(session, url, &parts.host) {
+                Ok(resolved) => resolved,
+                Err(detail) => {
+                    close_handle(session);
+                    return Err(HttpFail { tag: "other", detail });
+                }
+            };
             if let Some(server) = resolved.server {
                 proxy_server_w = to_wide(&server);
                 if let Some(b) = resolved.bypass {
@@ -829,21 +874,36 @@ mod tests {
     #[test]
     fn explicit_proxy_rejects_socks() {
         let e = parse_explicit_proxy("socks5://127.0.0.1:1080").unwrap_err();
-        assert!(e.contains("only http(s) proxies are supported"), "{e}");
+        assert!(e.contains("only HTTP proxies are supported"), "{e}");
     }
 
     #[test]
-    fn explicit_proxy_without_port_uses_scheme_default() {
+    fn explicit_proxy_rejects_https_transport_without_exposing_userinfo() {
+        for raw in [
+            "https://proxy.corp:443",
+            "HTTPS://proxy.corp",
+            "https://fixture-user:fixture-secret@proxy.corp:8443",
+        ] {
+            let error = validate_proxy_url(raw).expect_err("TLS-to-proxy is not implemented");
+            assert!(error.contains("invalid update proxy"));
+            assert!(error.contains("TLS-to-proxy"));
+            assert!(!error.contains("fixture-secret"));
+        }
+    }
+
+    #[test]
+    fn explicit_http_proxy_without_port_keeps_existing_default() {
         let p = parse_explicit_proxy("proxy.corp").unwrap();
         assert_eq!(p.server, "proxy.corp:8080");
-        let p = parse_explicit_proxy("https://proxy.corp").unwrap();
-        assert_eq!(p.server, "proxy.corp:443");
+        let p = parse_explicit_proxy("http://proxy.corp").unwrap();
+        assert_eq!(p.server, "proxy.corp:8080");
     }
 
     #[test]
     fn explicit_proxy_rejects_empty_host() {
         assert!(parse_explicit_proxy(":8080").is_err());
         assert!(parse_explicit_proxy("http://").is_err());
+        assert!(parse_explicit_proxy("://proxy.corp").is_err());
     }
 
     #[test]
@@ -859,6 +919,7 @@ mod tests {
         assert_eq!(r, "http://***@proxy.corp:8080");
         assert!(!r.contains("s3cret"));
         assert_eq!(redact_proxy_userinfo("proxy.corp:8080"), "proxy.corp:8080");
+        assert_eq!(redact_proxy_userinfo("https://fixture-user:fixture-@-secret@proxy.corp:443"), "https://***@proxy.corp:443");
     }
 
     #[test]
@@ -885,20 +946,20 @@ mod tests {
     fn wininet_per_protocol_collapses_to_https_entry() {
         let raw = "http=10.0.0.1:80;https=10.0.0.2:443;socks=10.0.0.3:1080";
         assert_eq!(
-            collapse_wininet_static(raw).as_deref(),
+            collapse_wininet_static(raw).unwrap().as_deref(),
             Some("10.0.0.2:443")
         );
         // https= missing falls back to http=
         assert_eq!(
-            collapse_wininet_static("http=10.0.0.1:80;ftp=1.2.3.4:21").as_deref(),
+            collapse_wininet_static("http=10.0.0.1:80;ftp=1.2.3.4:21").unwrap().as_deref(),
             Some("10.0.0.1:80")
         );
         // bare value passes through, scheme stripped
         assert_eq!(
-            collapse_wininet_static("http://proxy.corp:8080").as_deref(),
+            collapse_wininet_static("http://proxy.corp:8080").unwrap().as_deref(),
             Some("proxy.corp:8080")
         );
-        assert_eq!(collapse_wininet_static("  "), None);
+        assert_eq!(collapse_wininet_static("  ").unwrap(), None);
     }
 
     #[test]
@@ -920,7 +981,7 @@ mod tests {
             _ => None,
         };
         assert_eq!(
-            resolve_env_proxy(vars, "api.github.com").as_deref(),
+            resolve_env_proxy(vars, "api.github.com").unwrap().as_deref(),
             Some("https-proxy.corp:8443")
         );
         let vars2 = |name: &str| match name {
@@ -928,7 +989,132 @@ mod tests {
             "NO_PROXY" => Some(".github.com".to_string()),
             _ => None,
         };
-        assert!(resolve_env_proxy(vars2, "api.github.com").is_none());
+        assert!(resolve_env_proxy(vars2, "api.github.com").unwrap().is_none());
+    }
+
+    #[test]
+    fn env_proxy_blank_values_are_unconfigured() {
+        for variable in [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            for value in ["", " \t\r\n "] {
+                let selected = resolve_env_proxy(
+                    |name| (name == variable).then(|| value.to_string()),
+                    "updates.fixture.invalid",
+                );
+                assert_eq!(
+                    selected,
+                    Ok(None),
+                    "blank {variable} must permit system/direct fallback"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn env_proxy_blank_high_priority_keeps_valid_lower_priority() {
+        let lower_case_https = resolve_env_proxy(
+            |name| match name {
+                "HTTPS_PROXY" => Some("   ".into()),
+                "https_proxy" => Some(" http://lower-case.fixture:8081 ".into()),
+                "HTTP_PROXY" => Some("http://http.fixture:8082".into()),
+                _ => None,
+            },
+            "updates.fixture.invalid",
+        )
+        .unwrap();
+        assert_eq!(lower_case_https.as_deref(), Some("lower-case.fixture:8081"));
+        let http = resolve_env_proxy(
+            |name| match name {
+                "HTTPS_PROXY" | "https_proxy" => Some(String::new()),
+                "HTTP_PROXY" => Some("http://http.fixture:8082".into()),
+                "ALL_PROXY" => Some("http://all.fixture:8083".into()),
+                _ => None,
+            },
+            "updates.fixture.invalid",
+        )
+        .unwrap();
+        assert_eq!(http.as_deref(), Some("http.fixture:8082"));
+        let all = resolve_env_proxy(
+            |name| match name {
+                "HTTPS_PROXY" | "https_proxy" | "HTTP_PROXY" | "http_proxy" => Some(" \t ".into()),
+                "ALL_PROXY" => Some("http://all.fixture:8083".into()),
+                _ => None,
+            },
+            "updates.fixture.invalid",
+        )
+        .unwrap();
+        assert_eq!(all.as_deref(), Some("all.fixture:8083"));
+    }
+
+    #[test]
+    fn env_proxy_https_url_is_an_error_not_a_silent_direct_fallback() {
+        let error = resolve_env_proxy(
+            |name| match name {
+                "HTTPS_PROXY" => Some("https://fixture-user:fixture-secret@proxy.corp:443".into()),
+                "HTTP_PROXY" => Some("http://different-proxy:8080".into()),
+                _ => None,
+            },
+            "updates.fixture.invalid",
+        )
+        .unwrap_err();
+        assert!(error.contains("TLS-to-proxy"));
+        assert!(!error.contains("fixture-secret"));
+        assert!(resolve_env_proxy(
+            |name| match name {
+                "HTTPS_PROXY" => Some("https://proxy.corp:443".into()),
+                "NO_PROXY" => Some("updates.fixture.invalid".into()),
+                _ => None,
+            },
+            "updates.fixture.invalid"
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn wininet_https_urls_are_not_stripped_but_target_selectors_remain_supported() {
+        for value in [
+            "https://proxy.corp:443",
+            "https://fixture-user:fixture=secret@proxy.corp:443",
+            "http=ordinary:80;https=https://proxy.corp:443",
+        ] {
+            assert!(collapse_wininet_static(value)
+                .unwrap_err()
+                .contains("TLS-to-proxy"));
+        }
+        assert_eq!(
+            collapse_wininet_static("http=ordinary:80;https=secure-target-proxy:443")
+                .unwrap()
+                .as_deref(),
+            Some("secure-target-proxy:443")
+        );
+        assert_eq!(
+            collapse_wininet_static("proxy-one:80;proxy-two:81")
+                .unwrap()
+                .as_deref(),
+            Some("proxy-one:80;proxy-two:81")
+        );
+    }
+
+    #[test]
+    fn http_proxy_keeps_https_target_support() {
+        assert!(
+            crack_url("https://updates.fixture.invalid/release")
+                .unwrap()
+                .https
+        );
+        assert_eq!(
+            parse_explicit_proxy("http://proxy.corp:8080")
+                .unwrap()
+                .server,
+            "proxy.corp:8080"
+        );
     }
 
     #[test]

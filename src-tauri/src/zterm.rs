@@ -2277,8 +2277,8 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
 
 /// Why the followCwd RC wrapper could not be prepared or started. Each
 /// variant maps to the one-line reason carried by the
-/// sftp-cwd-follow-unavailable event; the connection itself always proceeds
-/// as a plain shell.
+/// sftp-cwd-follow-unavailable event. A confirmed wrapper rejection permits
+/// plain-shell fallback; an unknown startup outcome instead ends the attempt.
 enum CwdFollowUnavailable {
     /// No SFTP channel survived establishment — nothing to upload through.
     NoSftpChannel,
@@ -2345,6 +2345,138 @@ fn rand_suffix() -> String {
         .unwrap_or_default()
         .subsec_nanos();
     format!("{:08x}", nanos)
+}
+
+struct ShellStartup {
+    prefetched: std::collections::VecDeque<russh::ChannelMsg>,
+    wrapper_rejected: bool,
+}
+
+#[derive(Debug)]
+enum ShellStartError {
+    Cancelled,
+    TimedOut,
+    Failed(String),
+}
+
+const SSH_SHELL_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const SSH_SHELL_PRELUDE_BYTES: usize = 256 * 1024;
+const SSH_SHELL_PRELUDE_MESSAGES: usize = 256;
+
+async fn start_shell_requests(
+    channel: &mut russh::Channel<russh::client::Msg>,
+    wrapper: Option<&str>,
+) -> Result<ShellStartup, String> {
+    let mut started = ShellStartup {
+        prefetched: std::collections::VecDeque::new(),
+        wrapper_rejected: false,
+    };
+    let mut waiting_for_wrapper = wrapper.is_some();
+    if let Some(command) = wrapper {
+        channel
+            .exec(true, command)
+            .await
+            .map_err(|error| error.to_string())?;
+    } else {
+        channel
+            .request_shell(true)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    // PTY/env requests use want_reply=false and SFTP owns separate channels,
+    // so this channel has exactly one reply-bearing startup request pending.
+    let mut prelude_bytes = 0usize;
+    loop {
+        match channel.wait().await {
+            Some(russh::ChannelMsg::Success) => return Ok(started),
+            Some(russh::ChannelMsg::Failure) if waiting_for_wrapper => {
+                // Only a confirmed rejection permits another program request.
+                // Unknown outcomes must never replay a login through a second shell.
+                waiting_for_wrapper = false;
+                started.wrapper_rejected = true;
+                channel
+                    .request_shell(true)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            Some(russh::ChannelMsg::Failure) => {
+                return Err("the server rejected the shell request".into())
+            }
+            Some(
+                message @ (russh::ChannelMsg::Data { .. } | russh::ChannelMsg::ExtendedData { .. }),
+            ) => {
+                let bytes = match &message {
+                    russh::ChannelMsg::Data { data }
+                    | russh::ChannelMsg::ExtendedData { data, .. } => data.len(),
+                    _ => unreachable!(),
+                };
+                if bytes > SSH_SHELL_PRELUDE_BYTES.saturating_sub(prelude_bytes)
+                    || started.prefetched.len() >= SSH_SHELL_PRELUDE_MESSAGES
+                {
+                    return Err("excessive output before the shell request was accepted".into());
+                }
+                prelude_bytes += bytes;
+                started.prefetched.push_back(message);
+            }
+            Some(
+                russh::ChannelMsg::Eof
+                | russh::ChannelMsg::Close
+                | russh::ChannelMsg::ExitStatus { .. }
+                | russh::ChannelMsg::ExitSignal { .. },
+            )
+            | None => {
+                return Err("the channel ended before the shell request was accepted".into());
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn start_ssh_shell(
+    channel: &mut russh::Channel<russh::client::Msg>,
+    wrapper: Option<&str>,
+    cancel: &std::sync::atomic::AtomicBool,
+    deadline: tokio::time::Instant,
+) -> Result<ShellStartup, ShellStartError> {
+    let result = if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        Err(ShellStartError::Cancelled)
+    } else if tokio::time::Instant::now() >= deadline {
+        Err(ShellStartError::TimedOut)
+    } else {
+        match establish_cancellable(
+            start_shell_requests(channel, wrapper),
+            cancel,
+            tokio::time::sleep_until(deadline),
+        )
+        .await
+        {
+            EstablishOutcome::Done(result) => result.map_err(ShellStartError::Failed),
+            EstablishOutcome::Cancelled => Err(ShellStartError::Cancelled),
+            EstablishOutcome::TimedOut => Err(ShellStartError::TimedOut),
+        }
+    };
+    let result = if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        Err(ShellStartError::Cancelled)
+    } else if result.is_ok() && tokio::time::Instant::now() >= deadline {
+        Err(ShellStartError::TimedOut)
+    } else {
+        result
+    };
+    if result.is_err() {
+        let _ = tokio::time::timeout(SSH_SHELL_CLEANUP_TIMEOUT, channel.close()).await;
+    }
+    result
+}
+
+async fn next_shell_message(
+    prefetched: &mut std::collections::VecDeque<russh::ChannelMsg>,
+    channel: &mut russh::Channel<russh::client::Msg>,
+) -> Option<russh::ChannelMsg> {
+    if let Some(message) = prefetched.pop_front() {
+        Some(message)
+    } else {
+        channel.wait().await
+    }
 }
 
 /// Parse and validate the SSH port from a profile: must be within 1-65535.
@@ -2712,10 +2844,11 @@ pub async fn ssh_connect(
     let sftp_transfer = established_sftp!(open_sftp_channel(&handle), "SFTP transfer");
 
     // FollowCwd bootstrap: the SFTP-uploaded RC wrapper (started via the exec
-    // channel) is the only supported path. When it cannot be prepared or
-    // started the session degrades to a plain shell and a
+    // channel) is the only supported path. When it cannot be prepared or is
+    // explicitly rejected the session degrades to a plain shell and a
     // sftp-cwd-follow-unavailable event names the cause — follow failure
-    // never blocks or breaks the terminal itself.
+    // does not itself break the terminal. Unknown startup outcomes end the
+    // attempt instead of risking a second shell or replayed login commands.
     let mut exec_cmd = None;
     if follow_cwd {
         // A missing SFTP channel is itself an unavailable cause: route it
@@ -2776,39 +2909,53 @@ pub async fn ssh_connect(
         }
     }
 
-    // Start shell: exec wrapped shell (followCwd) or plain shell. A failed
-    // wrapper exec only means follow is unavailable — degrade to a plain
-    // shell request on the same channel; only when that also fails is the
-    // channel genuinely broken and the connection lost.
-    let mut exec_failed = false;
-    if let Some(ref cmd) = exec_cmd {
-        match established!(channel.exec(true, cmd.as_str()), "shell") {
-            Ok(()) => {}
-            Err(e) => {
-                if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    return Err("cancelled".to_string());
-                }
-                eprintln!("[zterm] followCwd wrapper exec failed: {e}; falling back to a plain shell");
-                let _ = app.emit(
-                    "sftp-cwd-follow-unavailable",
-                    json!({ "tabId": tab_id, "rendererId": renderer_id, "reason": CwdFollowUnavailable::WrapperStartFailed.reason() }),
+    let shell_start = match start_ssh_shell(
+        &mut channel,
+        exec_cmd.as_deref(),
+        &cancel_flag,
+        establish_deadline,
+    )
+    .await
+    {
+        Ok(started) => started,
+        Err(error) => {
+            let _ = tokio::time::timeout(
+                SSH_SHELL_CLEANUP_TIMEOUT,
+                handle.disconnect(
+                    russh::Disconnect::ByApplication,
+                    "ZTerm shell start ended",
+                    "",
+                ),
+            )
+            .await;
+            if matches!(error, ShellStartError::Cancelled)
+                || cancel_flag.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Ok(
+                    json!({ "cancelled": true, "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }),
                 );
-                exec_failed = true;
             }
-        }
-    }
-    if exec_cmd.is_none() || exec_failed {
-        established!(channel.request_shell(true), "shell").map_err(|e| {
-            if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                return "cancelled".to_string();
-            }
+            let message = match error {
+                ShellStartError::TimedOut => {
+                    "SSH shell: no reply before the establishment deadline".to_string()
+                }
+                ShellStartError::Failed(reason) => format!("SSH shell: {reason}"),
+                ShellStartError::Cancelled => unreachable!(),
+            };
             let _ = app.emit(
                 "ssh-error",
-                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": format!("SSH shell: {e}") }),
+                json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id, "error": message }),
             );
-            format!("SSH shell: {e}")
-        })?;
+            return Err(message);
+        }
+    };
+    if shell_start.wrapper_rejected {
+        let _ = app.emit(
+            "sftp-cwd-follow-unavailable",
+            json!({ "tabId": tab_id, "rendererId": renderer_id, "reason": CwdFollowUnavailable::WrapperStartFailed.reason() }),
+        );
     }
+    let mut startup_messages = shell_start.prefetched;
     cancelled!(handle);
 
     // Wrap handle in Arc for writer task & session store (Handle::data takes &self)
@@ -2853,10 +3000,17 @@ pub async fn ssh_connect(
     let cwd = Arc::new(Mutex::new(None::<String>));
     let cwd_reader = Arc::clone(&cwd);
     let reason_reader = Arc::clone(&disconnect_reason);
+    let (reader_start_tx, reader_start_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
+        // Registration and ssh-connected must precede buffered output or a
+        // fast program exit. Cancellation drops the gate without reader events.
+        if reader_start_rx.await.is_err() {
+            return;
+        }
         // Cross-chunk character carry: SSH channel data can split a UTF-8 multi-byte
         // sequence, and per-chunk from_utf8_lossy would turn the halves into U+FFFD (the � replacement char)
         let mut utf8_carry: Vec<u8> = Vec::new();
+        let mut stderr_utf8_carry: Vec<u8> = Vec::new();
         // Cross-chunk OSC 7 window: join chunk tails so a sequence split across data chunks still matches
         let mut osc7_window = String::new();
         // Cross-chunk expect window: login-script prompts split across SSH
@@ -2898,10 +3052,14 @@ pub async fn ssh_connect(
                         }
                     }
                 }
-                msg = channel.wait() => {
+                msg = next_shell_message(&mut startup_messages, &mut channel) => {
                     match msg {
-                        Some(russh::ChannelMsg::Data { ref data }) => {
-                            let text = drain_utf8(&mut utf8_carry, data);
+                        Some(russh::ChannelMsg::Data { ref data }) |
+                        Some(russh::ChannelMsg::ExtendedData { ext: 1, ref data }) => {
+                            let carry = if matches!(msg.as_ref(), Some(russh::ChannelMsg::ExtendedData { .. })) {
+                                &mut stderr_utf8_carry
+                            } else { &mut utf8_carry };
+                            let text = drain_utf8(carry, data);
                             // Feed to login script processor through the cross-chunk
                             // expect window (drop guard before await)
                             let send_texts = {
@@ -3002,6 +3160,7 @@ pub async fn ssh_connect(
         "ssh-connected",
         json!({ "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }),
     );
+    let _ = reader_start_tx.send(());
     Ok(json!({ "tabId": tab_id, "attemptId": attempt_id }))
 }
 
@@ -7795,6 +7954,455 @@ mod tests {
         channels: HashMap<russh::ChannelId, russh::Channel<russh::server::Msg>>,
     }
 
+    #[derive(Clone, Copy)]
+    enum ShellServerMode {
+        RejectExec,
+        RejectBoth,
+        EarlyOutput,
+        AcceptedExit,
+        Stall,
+        Close,
+        Overflow,
+        ManySmallMessages,
+    }
+
+    struct ShellTestServer {
+        mode: ShellServerMode,
+        events: Arc<Mutex<Vec<&'static str>>>,
+        channels: HashMap<russh::ChannelId, russh::Channel<russh::server::Msg>>,
+    }
+
+    impl russh::server::Handler for ShellTestServer {
+        type Error = russh::Error;
+
+        async fn auth_password(
+            &mut self,
+            _user: &str,
+            _password: &str,
+        ) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: russh::Channel<russh::server::Msg>,
+            _session: &mut russh::server::Session,
+        ) -> Result<bool, Self::Error> {
+            self.channels.insert(channel.id(), channel);
+            Ok(true)
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: russh::ChannelId,
+            _command: &[u8],
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            self.events.lock().push("exec");
+            match self.mode {
+                ShellServerMode::RejectExec | ShellServerMode::RejectBoth => {
+                    session.data(channel, b"banner".as_slice())?;
+                    session.channel_failure(channel)?;
+                }
+                ShellServerMode::EarlyOutput => {
+                    session.data(channel, b"first".as_slice())?;
+                    session.extended_data(channel, 1, b"middle".as_slice())?;
+                    session.data(channel, b"last".as_slice())?;
+                    session.channel_success(channel)?;
+                    session.data(channel, b"after".as_slice())?;
+                }
+                ShellServerMode::AcceptedExit => {
+                    session.channel_success(channel)?;
+                    session.exit_status_request(channel, 0)?;
+                    session.eof(channel)?;
+                    session.close(channel)?;
+                }
+                ShellServerMode::Stall => {}
+                ShellServerMode::Close => session.close(channel)?,
+                ShellServerMode::Overflow => {
+                    session.data(channel, vec![b'x'; SSH_SHELL_PRELUDE_BYTES + 1])?;
+                    session.channel_success(channel)?;
+                }
+                ShellServerMode::ManySmallMessages => {
+                    for _ in 0..=SSH_SHELL_PRELUDE_MESSAGES {
+                        session.data(channel, b"x".as_slice())?;
+                    }
+                    session.channel_success(channel)?;
+                }
+            }
+            Ok(())
+        }
+
+        async fn shell_request(
+            &mut self,
+            channel: russh::ChannelId,
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            self.events.lock().push("shell");
+            if matches!(self.mode, ShellServerMode::RejectBoth) {
+                session.channel_failure(channel)?;
+            } else {
+                session.channel_success(channel)?;
+                session.data(channel, b"plain-ready".as_slice())?;
+            }
+            Ok(())
+        }
+
+        async fn channel_close(
+            &mut self,
+            channel: russh::ChannelId,
+            _session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            self.events.lock().push("closed");
+            self.channels.remove(&channel);
+            Ok(())
+        }
+    }
+
+    struct ShellFixture {
+        handle: russh::client::Handle<NoCheckClient>,
+        server: tokio::task::JoinHandle<()>,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl Drop for ShellFixture {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    async fn shell_fixture(mode: ShellServerMode) -> ShellFixture {
+        let host_key =
+            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+                .unwrap();
+        let config = Arc::new(russh::server::Config {
+            keys: vec![host_key],
+            methods: russh::MethodSet::from(&[russh::MethodKind::Password][..]),
+            ..Default::default()
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let handler = ShellTestServer {
+            mode,
+            events: events.clone(),
+            channels: HashMap::new(),
+        };
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            if let Ok(session) = russh::server::run_stream(config, server_side, handler).await {
+                let _ = session.await;
+            }
+        });
+        let mut handle = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            russh::client::connect_stream(
+                Arc::new(russh::client::Config::default()),
+                client_side,
+                NoCheckClient,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle.authenticate_password("fixture", "fixture-password")
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .success());
+        ShellFixture {
+            handle,
+            server,
+            events,
+        }
+    }
+
+    async fn shell_event(fixture: &ShellFixture, event: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !fixture.events.lock().contains(&event) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("fixture event deadline");
+    }
+
+    async fn shell_outputs(
+        started: &mut ShellStartup,
+        channel: &mut russh::Channel<russh::client::Msg>,
+        count: usize,
+    ) -> Vec<(u32, String)> {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let mut output = Vec::new();
+            while output.len() < count {
+                match next_shell_message(&mut started.prefetched, channel).await {
+                    Some(russh::ChannelMsg::Data { data }) => {
+                        output.push((0, String::from_utf8_lossy(&data).into_owned()))
+                    }
+                    Some(russh::ChannelMsg::ExtendedData { ext, data }) => {
+                        output.push((ext, String::from_utf8_lossy(&data).into_owned()))
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+            output
+        })
+        .await
+        .expect("fixture output deadline")
+    }
+
+    #[tokio::test]
+    async fn ssh_shell_start_rejected_exec_falls_back_once() {
+        let fixture = shell_fixture(ShellServerMode::RejectExec).await;
+        let mut channel = fixture.handle.channel_open_session().await.unwrap();
+        channel
+            .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
+            .await
+            .unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut started = start_ssh_shell(
+            &mut channel,
+            Some("fixture-wrapper"),
+            &cancel,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        shell_event(&fixture, "exec").await;
+        assert!(
+            started.wrapper_rejected,
+            "remote rejection must trigger plain-shell fallback"
+        );
+        assert_eq!(
+            shell_outputs(&mut started, &mut channel, 2).await,
+            [(0, "banner".into()), (0, "plain-ready".into())]
+        );
+        assert_eq!(*fixture.events.lock(), ["exec", "shell"]);
+        channel.close().await.unwrap();
+        shell_event(&fixture, "closed").await;
+    }
+
+    #[tokio::test]
+    async fn ssh_shell_start_preserves_early_stdout_stderr_order_once() {
+        let fixture = shell_fixture(ShellServerMode::EarlyOutput).await;
+        let mut channel = fixture.handle.channel_open_session().await.unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut started = start_ssh_shell(
+            &mut channel,
+            Some("fixture-wrapper"),
+            &cancel,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            shell_outputs(&mut started, &mut channel, 4).await,
+            [
+                (0, "first".into()),
+                (1, "middle".into()),
+                (0, "last".into()),
+                (0, "after".into())
+            ]
+        );
+        assert!(!started.wrapper_rejected);
+        assert_eq!(*fixture.events.lock(), ["exec"]);
+        channel.close().await.unwrap();
+        shell_event(&fixture, "closed").await;
+    }
+
+    #[tokio::test]
+    async fn ssh_shell_start_accepted_program_exit_never_replays_shell() {
+        let fixture = shell_fixture(ShellServerMode::AcceptedExit).await;
+        let mut channel = fixture.handle.channel_open_session().await.unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut started = start_ssh_shell(
+            &mut channel,
+            Some("fixture-wrapper"),
+            &cancel,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        let mut exited = false;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                match next_shell_message(&mut started.prefetched, &mut channel).await {
+                    Some(russh::ChannelMsg::ExitStatus { exit_status: 0 }) => exited = true,
+                    Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) | None => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(exited);
+        assert!(!started.wrapper_rejected);
+        assert_eq!(
+            fixture
+                .events
+                .lock()
+                .iter()
+                .filter(|event| **event == "exec")
+                .count(),
+            1
+        );
+        assert!(!fixture.events.lock().contains(&"shell"));
+    }
+
+    #[tokio::test]
+    async fn ssh_shell_start_unknown_timeout_closes_without_fallback() {
+        let fixture = shell_fixture(ShellServerMode::Stall).await;
+        let mut channel = fixture.handle.channel_open_session().await.unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let result = start_ssh_shell(
+            &mut channel,
+            Some("fixture-wrapper"),
+            &cancel,
+            tokio::time::Instant::now() + std::time::Duration::from_millis(80),
+        )
+        .await;
+        assert!(matches!(result, Err(ShellStartError::TimedOut)));
+        shell_event(&fixture, "closed").await;
+        assert!(!fixture.events.lock().contains(&"shell"));
+    }
+
+    #[tokio::test]
+    async fn ssh_shell_start_cancelled_wait_closes_without_fallback() {
+        let fixture = shell_fixture(ShellServerMode::Stall).await;
+        let mut channel = fixture.handle.channel_open_session().await.unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let (result, ()) = tokio::join!(
+            start_ssh_shell(
+                &mut channel,
+                Some("fixture-wrapper"),
+                &cancel,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(1)
+            ),
+            async {
+                shell_event(&fixture, "exec").await;
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            },
+        );
+        assert!(matches!(result, Err(ShellStartError::Cancelled)));
+        shell_event(&fixture, "closed").await;
+        assert!(!fixture.events.lock().contains(&"shell"));
+    }
+
+    #[tokio::test]
+    async fn ssh_shell_start_rejected_plain_shell_is_not_connected() {
+        let fixture = shell_fixture(ShellServerMode::RejectBoth).await;
+        let mut channel = fixture.handle.channel_open_session().await.unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let result = start_ssh_shell(
+            &mut channel,
+            Some("fixture-wrapper"),
+            &cancel,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(result, Err(ShellStartError::Failed(_))));
+        shell_event(&fixture, "closed").await;
+        assert_eq!(*fixture.events.lock(), ["exec", "shell", "closed"]);
+    }
+
+    #[tokio::test]
+    async fn ssh_shell_start_closed_before_reply_never_falls_back() {
+        let fixture = shell_fixture(ShellServerMode::Close).await;
+        let mut channel = fixture.handle.channel_open_session().await.unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let result = start_ssh_shell(
+            &mut channel,
+            Some("fixture-wrapper"),
+            &cancel,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(result, Err(ShellStartError::Failed(_))));
+        assert!(!fixture.events.lock().contains(&"shell"));
+    }
+
+    #[tokio::test]
+    async fn ssh_shell_start_output_before_acceptance_is_bounded() {
+        let fixture = shell_fixture(ShellServerMode::Overflow).await;
+        let mut channel = fixture.handle.channel_open_session().await.unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let result = start_ssh_shell(
+            &mut channel,
+            Some("fixture-wrapper"),
+            &cancel,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(result, Err(ShellStartError::Failed(_))));
+        shell_event(&fixture, "closed").await;
+        assert!(!fixture.events.lock().contains(&"shell"));
+    }
+
+    #[tokio::test]
+    async fn ssh_shell_start_small_message_count_is_bounded() {
+        let fixture = shell_fixture(ShellServerMode::ManySmallMessages).await;
+        let mut channel = fixture.handle.channel_open_session().await.unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let result = start_ssh_shell(
+            &mut channel,
+            Some("fixture-wrapper"),
+            &cancel,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(matches!(result, Err(ShellStartError::Failed(_))));
+        shell_event(&fixture, "closed").await;
+        assert!(!fixture.events.lock().contains(&"shell"));
+    }
+
+    #[tokio::test]
+    async fn ssh_shell_start_cancelled_or_expired_attempt_sends_no_program_request() {
+        for already_cancelled in [true, false] {
+            let fixture = shell_fixture(ShellServerMode::Stall).await;
+            let mut channel = fixture.handle.channel_open_session().await.unwrap();
+            let cancel = std::sync::atomic::AtomicBool::new(already_cancelled);
+            let result = start_ssh_shell(
+                &mut channel,
+                Some("fixture-wrapper"),
+                &cancel,
+                tokio::time::Instant::now(),
+            )
+            .await;
+            if already_cancelled {
+                assert!(matches!(result, Err(ShellStartError::Cancelled)));
+            } else {
+                assert!(matches!(result, Err(ShellStartError::TimedOut)));
+            }
+            shell_event(&fixture, "closed").await;
+            assert_eq!(*fixture.events.lock(), ["closed"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_shell_start_plain_shell_still_waits_for_acceptance() {
+        let fixture = shell_fixture(ShellServerMode::EarlyOutput).await;
+        let mut channel = fixture.handle.channel_open_session().await.unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mut started = start_ssh_shell(
+            &mut channel,
+            None,
+            &cancel,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert!(!started.wrapper_rejected);
+        assert_eq!(
+            shell_outputs(&mut started, &mut channel, 1).await,
+            [(0, "plain-ready".into())]
+        );
+        assert_eq!(*fixture.events.lock(), ["shell"]);
+        channel.close().await.unwrap();
+        shell_event(&fixture, "closed").await;
+    }
+
     impl russh::server::Handler for SftpTestServer {
         type Error = russh::Error;
 
@@ -9830,10 +10438,11 @@ mod tests {
     fn update_proxy_validation() {
         let validate = crate::update_http::validate_proxy_url;
         assert!(validate("http://127.0.0.1:7890").is_ok());
-        assert!(validate("https://proxy.corp:8443").is_ok());
+        let err = validate("https://proxy.corp:8443").unwrap_err();
+        assert!(err.contains("invalid update proxy") && err.contains("TLS-to-proxy"), "{err}");
         assert!(validate("localhost:7890").is_ok()); // schemeless defaults to http
         let err = validate("socks5://127.0.0.1:1080").unwrap_err();
-        assert!(err.contains("only http(s)"), "{err}");
+        assert!(err.contains("only HTTP proxies"), "{err}");
         let err = validate("not a url").unwrap_err();
         assert!(err.contains("invalid update proxy"), "{err}");
     }
