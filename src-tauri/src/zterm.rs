@@ -3441,21 +3441,13 @@ pub fn save_window_state(state: &WindowState) {
 // of the main process's on_page_load, so the listener is guaranteed ready when the event fires — a lost event would leave the splash stuck on screen
 #[tauri::command]
 pub fn renderer_ready(app: AppHandle) -> Result<(), String> {
+    if crate::background_e2e::renderer_ready() { return Ok(()); }
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
     // If the main process's 5s fallback already showed the window (renderer-ready arrived late), only restore state; don't re-emit the fade-in
     let already_visible = window.is_visible().unwrap_or(false);
-    // Restore the window state from last close (position/size/maximized, Tabby-style)
-    if let Some(ws) = load_window_state() {
-        if window_position_visible(ws.x, ws.y, ws.width, ws.height, &window) {
-            let _ = window.set_position(tauri::PhysicalPosition::new(ws.x, ws.y));
-            let _ = window.set_size(tauri::PhysicalSize::new(ws.width, ws.height));
-        }
-        if ws.maximized {
-            let _ = window.maximize();
-        }
-    }
+    restore_window_state(&window);
     if already_visible {
         return Ok(());
     }
@@ -3464,6 +3456,16 @@ pub fn renderer_ready(app: AppHandle) -> Result<(), String> {
     // Tell the renderer to play the startup animation (its listener is registered, so the event cannot be lost)
     let _ = app.emit("window-shown", json!({}));
     Ok(())
+}
+
+pub(crate) fn restore_window_state(window: &tauri::WebviewWindow) {
+    if let Some(ws) = load_window_state() {
+        if window_position_visible(ws.x, ws.y, ws.width, ws.height, window) {
+            let _ = window.set_position(tauri::PhysicalPosition::new(ws.x, ws.y));
+            let _ = window.set_size(tauri::PhysicalSize::new(ws.width, ws.height));
+        }
+        if ws.maximized { let _ = window.maximize(); }
+    }
 }
 
 // Monitor rectangle (plain data, unit-testable)
@@ -3511,14 +3513,17 @@ pub fn window_position_visible(
 // ── Window control commands ──
 
 #[tauri::command]
-pub fn window_minimize(app: AppHandle) {
+pub fn window_minimize(app: AppHandle) -> Result<(), String> {
+    crate::background_e2e::require_released()?;
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.minimize();
     }
+    Ok(())
 }
 
 #[tauri::command]
-pub fn window_maximize(app: AppHandle) {
+pub fn window_maximize(app: AppHandle) -> Result<(), String> {
+    crate::background_e2e::require_released()?;
     if let Some(w) = app.get_webview_window("main") {
         let maximized = w.is_maximized().unwrap_or(false);
         if maximized {
@@ -3529,6 +3534,7 @@ pub fn window_maximize(app: AppHandle) {
         // Tell the renderer to update the icon
         let _ = app.emit("window-state-changed", json!({ "maximized": !maximized }));
     }
+    Ok(())
 }
 
 #[tauri::command]

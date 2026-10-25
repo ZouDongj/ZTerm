@@ -51,6 +51,8 @@ Run `npm test` for Rust and frontend unit tests. The default pre-commit gate is 
 
 The [E2E runner](scripts/e2e-check.mjs) requires a Windows desktop session and working WebView2. It copies the tested executable into a fresh sandbox, isolates application data and the browser profile, and drives runtime interaction through the debugging protocol. A unit-test pass does not establish native UI behavior.
 
+Keep the configured test virtual desktop inactive before running E2E (desktop 2 by default). The runner verifies placement and keeps its test window non-activating, including during minimize and restore checks. Missing, stale, or conflicting isolation evidence stops the run; there is no foreground fallback, and the runner does not switch the user's desktop. Normal application launches are unaffected.
+
 ## Data and security
 
 Configuration is stored as `config.json`. Debug builds default to `%APPDATA%\ZTerm`; release builds default to a `data` directory beside the executable. A custom directory selected through settings is resolved through the `dataDir` pointer in `%APPDATA%\ZTerm\config.json`. These rules are implemented by `resolve_data_dir` in [zterm.rs](src-tauri/src/zterm.rs).

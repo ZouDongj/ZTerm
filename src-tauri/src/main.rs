@@ -5,6 +5,7 @@
 
 mod update_http;
 mod zterm;
+mod background_e2e;
 
 use serde_json::json;
 use std::sync::Arc;
@@ -86,6 +87,7 @@ async fn main() {
             zterm::renderer_ready,
         ])
         .setup(|app| {
+            background_e2e::configure().map_err(std::io::Error::other)?;
             // Register the global AppHandle (used to emit events such as config-corrupted)
             zterm::init_app_handle(app.handle());
             // Data dir migration: if the default dir (packaged build = install dir/data) has no config but the anchor location does, copy it
@@ -114,6 +116,8 @@ async fn main() {
             // Stay hidden until the window state is restored — otherwise the window
             // flashes at the default size, then jumps from windowed to maximized
             .visible(false)
+            .focused(!background_e2e::enabled())
+            .focusable(!background_e2e::enabled())
             // Disable WebView2 form autofill (the white suggestion popup shown while typing);
             // a terminal has no use for browser-style autofill
             .general_autofill_enabled(false)
@@ -142,6 +146,8 @@ async fn main() {
             .devtools(cfg!(debug_assertions))
             .build()?;
 
+            background_e2e::install(&window, app.handle()).map_err(std::io::Error::other)?;
+
             #[cfg(windows)]
             disable_browser_accelerator_keys(&window);
 
@@ -150,7 +156,7 @@ async fn main() {
             // loaded and registered its window-shown listener — an earlier emit would strand the splash screen
             #[cfg(debug_assertions)]
             {
-                window.open_devtools();
+                if !background_e2e::enabled() { window.open_devtools(); }
             }
             // On close, notify the renderer to save state; also save the window state (position/size/maximized)
             let handle = app.handle().clone();
@@ -218,6 +224,7 @@ async fn main() {
             let app_fallback = app.handle().clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(5));
+                if background_e2e::enabled() { return; }
                 match win_fallback.is_visible() {
                     Ok(false) | Err(_) => {
                         let _ = win_fallback.show();

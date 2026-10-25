@@ -15,13 +15,18 @@
 // Exit code: 0 when all checks pass, 1 on any failure.
 // Dependencies: Node 22+ (global fetch / WebSocket); no third-party packages.
 
-import { spawn, execSync, execFileSync } from 'node:child_process';
+import { spawn, execFileSync, execFile } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync, mkdirSync } from 'node:fs';
+import { existsSync, copyFileSync, rmSync, readFileSync, writeFileSync, statSync, mkdirSync, renameSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { createE2eSandbox, restartOwnedApp, killOwnedRuntime, verifyCdpEndpointOwnership, acquireVerifiedPage, probeDebugPortRange } from './e2e-isolation.mjs';
+import { randomUUID } from 'node:crypto';
+import { createE2eSandbox, restartOwnedApp, killOwnedRuntime, probeDebugPortRange } from './e2e-isolation.mjs';
+import { backgroundDesktopIndex, validateFreshDesktopSnapshot, observeDesktopStream, completeBackgroundHandshake,
+  validateNativeHostHealth, renewNativeLease, createBackgroundLease, backgroundNow,
+  stopBackgroundRun, readHostProcessDiagnostic } from './e2e-background-policy.mjs';
+import { connectVerifiedEndpoint } from './e2e-ownership.mjs';
 
 const SOURCE_EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
 let EXE = SOURCE_EXE;
@@ -44,20 +49,13 @@ let ownedChild = null;
 let launchCount = 0;
 
 // ── Virtual-desktop isolation ──
-// E2E launches would otherwise pop the app window onto the user's ACTIVE
-// virtual desktop and disturb their work. ZTERM_E2E_DESKTOP selects a 1-based
-// desktop number as shown in Task View (default "2"); "off"/"0" disables
-// isolation. The helper scripts/e2e-vdesktop-move.cs is compiled lazily into
-// the run sandbox and moves each launched window without switching desktops;
-// any compile/lookup problem warns once and falls back to launching on the
-// current desktop.
+// The app owns placement of its permanently disabled HWND. The helper only
+// observes desktop/foreground identity; missing proof never permits fallback.
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const DESKTOP_CFG = (process.env.ZTERM_E2E_DESKTOP ?? '2').trim().toLowerCase();
-const DESKTOP_ISOLATION = DESKTOP_CFG !== 'off' && DESKTOP_CFG !== '0';
-const DESKTOP_INDEX = DESKTOP_ISOLATION ? Number(DESKTOP_CFG) - 1 : -1;
-let vdHelperTried = false;
+const DESKTOP_INDEX = backgroundDesktopIndex(process.env.ZTERM_E2E_DESKTOP ?? '2');
 let vdHelperExe = null;
-let vdWarned = false;
+let backgroundRun = null;
+let backgroundFailure = null;
 
 // ── Launch the exe (with WebView2 remote debugging) ──
 let DATA_CONFIG = null;
@@ -114,6 +112,7 @@ function restoreConfig() {
 // established, or { ok: false, reasons } — restarts and the final gate treat
 // that as a failure instead of silently assuming a clean state.
 function killExisting() {
+  stopBackgroundObserver();
   const child = ownedChild;
   const result = killOwnedRuntime({
     child,
@@ -128,65 +127,126 @@ function killExisting() {
   if (result.hostDisposition === 'dead' || result.hostDisposition === 'killed') ownedChild = null;
   return result;
 }
-// Compile the virtual-desktop move helper into the run sandbox, once per run
-// (sandbox cleanup then removes it automatically). csc wants native Windows
-// paths; resolve/join already yield them. Returns the helper path, or null
-// after a one-time warning when isolation is unusable.
+// Compile a read-only observer before any app launch. No foreground fallback.
 function resolveVdHelper() {
-  if (vdHelperTried) return vdHelperExe;
-  vdHelperTried = true;
-  const fail = (reason) => { console.warn(`[e2e] desktop isolation unavailable: ${reason}`); return null; };
-  if (!Number.isInteger(DESKTOP_INDEX) || DESKTOP_INDEX < 0) {
-    return fail(`ZTERM_E2E_DESKTOP must be a 1-based desktop number, got '${process.env.ZTERM_E2E_DESKTOP}'`);
-  }
+  if (vdHelperExe) return vdHelperExe;
   const src = join(SCRIPT_DIR, 'e2e-vdesktop-move.cs');
-  if (!existsSync(src)) return fail(`helper source missing: ${src}`);
+  if (!existsSync(src)) throw new Error('Background observer source missing');
   const windir = process.env.WINDIR || 'C:\\Windows';
   const csc = [join(windir, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe'),
-               join(windir, 'Microsoft.NET', 'Framework', 'v4.0.30319', 'csc.exe')].find(existsSync);
-  if (!csc) return fail('csc.exe not found under Microsoft.NET Framework(64) v4.0.30319');
-  const out = join(sandbox.directory, 'e2e-vdesktop-move.exe');
-  try {
-    execFileSync(csc, ['/nologo', '/target:exe', `/out:${out}`, src], { stdio: 'pipe', timeout: 60000 });
-  } catch (e) {
-    return fail(`csc failed: ${String(e.message).split('\n')[0]}`);
-  }
-  vdHelperExe = existsSync(out) ? out : null;
-  if (!vdHelperExe) fail('csc produced no output exe');
-  return vdHelperExe;
+    join(windir, 'Microsoft.NET', 'Framework', 'v4.0.30319', 'csc.exe')].find(existsSync);
+  if (!csc) throw new Error('Background observer compiler unavailable');
+  const out = join(sandbox.directory, 'e2e-desktop-observer.exe');
+  execFileSync(csc, ['/nologo', '/target:exe', '/platform:x64', '/out:' + out, src],
+    { stdio: 'pipe', timeout: 60000, windowsHide: true });
+  if (!existsSync(out)) throw new Error('Background observer compilation produced no executable');
+  vdHelperExe = out;
+  return out;
 }
 
-// Fire-and-forget: move the freshly launched window to the configured
-// virtual desktop. Never awaited and never allowed to reject the launch; the
-// helper is detached + unref'd so it cannot keep this process alive, and it
-// needs no explicit kill — its process watchdog exits it within ~250 ms of
-// the app dying, and its own 30 s retry budget bounds it absolutely.
-function moveWindowOffDesktop(child) {
-  const helper = resolveVdHelper();
-  if (!helper || !child.pid) return;
-  const desktopNo = DESKTOP_INDEX + 1;
-  // Runtime failures warn once per run: a broken helper must not spam one
-  // warning per launch.
-  const warnOnce = (msg) => { if (!vdWarned) { vdWarned = true; console.warn(msg); } };
-  let proc;
-  try {
-    // The exe path lets the helper verify the pid really is the app it was
-    // asked to move (pid-reuse guard); same value startApp spawns.
-    proc = spawn(helper, [String(child.pid), String(DESKTOP_INDEX), String(EXE)], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch (e) {
-    warnOnce(`[e2e] window move to desktop ${desktopNo} failed to start: ${e.message}`);
-    return;
-  }
-  let out = '';
-  proc.stdout.on('data', (d) => { out += d; });
-  proc.on('exit', (code) => {
-    const line = out.trim().split('\n').pop() || '';
-    if (code === 0) console.log(`[e2e] window moved to desktop ${desktopNo}${line ? ` (${line})` : ''}`);
-    else warnOnce(`[e2e] window move to desktop ${desktopNo} failed (exit ${code})${line ? `: ${line}` : ''}`);
+function writeBackgroundJson(path, value) {
+  const temporary = path + '.tmp';
+  writeFileSync(temporary, JSON.stringify(value), 'utf8');
+  renameSync(temporary, path);
+}
+
+async function inspectDesktop() {
+  const output = await new Promise((resolveOutput, reject) => {
+    execFile(resolveVdHelper(), ['inspect', String(DESKTOP_INDEX)],
+      { encoding: 'utf8', windowsHide: true, timeout: 3000 },
+      (error, stdout) => error ? reject(error) : resolveOutput(stdout));
   });
-  proc.on('error', () => {});
-  proc.unref();
-  proc.stdout.unref?.();
+  return validateFreshDesktopSnapshot(JSON.parse(output.trim()));
+}
+
+function stopBackgroundObserver(reason = new Error('Owned background runtime stopped')) {
+  const run = backgroundRun;
+  if (!run) return;
+  stopBackgroundRun(run, reason, error => console.error('[e2e] observer cleanup failed: ' + error.message));
+  backgroundRun = null;
+}
+
+function failBackground(error) {
+  if (backgroundFailure) return;
+  backgroundFailure = error instanceof Error ? error : new Error(String(error));
+  console.error('[e2e] background isolation failed: ' + (backgroundFailure.stack || backgroundFailure.message));
+  // Withdraw the lease and reject pending CDP work before any blocking OS query.
+  stopBackgroundObserver(backgroundFailure);
+  try {
+    const stopped = killExisting();
+    if (stopped !== true) console.error('[e2e] owned cleanup incomplete: ' + stopped.reasons.join('; '));
+  } catch (cleanupError) { console.error('[e2e] owned cleanup failed: ' + cleanupError.message); }
+}
+
+function nativeExpected(run) {
+  return { ...run.binding, targetDesktopId: run.baseline.targetDesktopId, released: run.released };
+}
+
+function readNativeStatus(run) {
+  return JSON.parse(readFileSync(run.statusPath, 'utf8'));
+}
+
+function assertBackgroundHealthy() {
+  if (backgroundFailure) throw backgroundFailure;
+  const run = backgroundRun;
+  if (!run || run.stopping || !run.observation) {
+    throw new Error('Fresh background observer proof is unavailable');
+  }
+  const desktop = run.observation.assertHealthy();
+  if (run.binding) {
+    if (!ownedChild || ownedChild.pid !== run.binding.pid || ownedChild.exitCode !== null || ownedChild.signalCode != null) {
+      throw new Error('Owned background host exited');
+    }
+    validateNativeHostHealth(readNativeStatus(run), nativeExpected(run));
+  }
+  return desktop;
+}
+
+function renewBackgroundLease() {
+  assertBackgroundHealthy();
+  const run = backgroundRun;
+  if (run.binding) renewNativeLease({
+    readStatus: () => readNativeStatus(run), expected: nativeExpected(run),
+    renew: () => writeBackgroundJson(run.leasePath, createBackgroundLease(run.binding)),
+  });
+}
+
+async function beginBackgroundObserver(baseline, token) {
+  if (backgroundFailure) throw backgroundFailure;
+  const helper = resolveVdHelper();
+  const startedAt = backgroundNow();
+  const observer = spawn(helper, ['watch', String(DESKTOP_INDEX), String(process.pid)],
+    { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const run = { baseline, token, observer, observation: null, stopping: false, released: false,
+    leasePath: join(sandbox.directory, 'background-' + token + '.lease.json'),
+    statusPath: join(sandbox.directory, 'background-' + token + '.status.json'),
+    binding: null, timer: null, abortController: new AbortController() };
+  backgroundRun = run;
+  run.observation = observeDesktopStream({
+    observer, baseline, startedAt, getOwnedPid: () => ownedChild?.pid,
+    requireSameForeground: () => !run.released, onFailure: failBackground,
+  });
+  await run.observation.ready;
+  assertBackgroundHealthy();
+  run.timer = setInterval(() => {
+    if (run.stopping) return;
+    try { renewBackgroundLease(); } catch (error) { failBackground(error); }
+  }, 250);
+}
+
+async function waitForBackgroundPhase(path, phase) {
+  const deadline = Date.now() + 25000;
+  while (Date.now() < deadline) {
+    assertBackgroundHealthy();
+    if (!ownedChild || ownedChild.exitCode !== null || ownedChild.signalCode != null) throw new Error('Background host exited before release');
+    if (existsSync(path)) {
+      const status = JSON.parse(readFileSync(path, 'utf8'));
+      if (status.phase === 'failed') throw new Error(status.error || 'Background host refused isolation');
+      if (status.phase === phase) return status;
+    }
+    await sleep(100);
+  }
+  throw new Error('Background host timed out waiting for ' + phase);
 }
 
 // Safety net for exit paths that skip the explicit killExisting() calls
@@ -233,7 +293,7 @@ async function installIsolatedShellGuard(cdp) {
   })()`);
 }
 
-function startApp() {
+async function startApp() {
   if (ownedChild) throw new Error('Previous owned process has not been released');
   // USERPROFILE must remain valid for WebView2. Isolate shell startup explicitly
   // instead of allowing restored shells to execute the operator's profiles.
@@ -256,13 +316,23 @@ function startApp() {
       : `${o.port}（${o.holders.map((h) => `${h.pid}:${h.name ?? '未知进程'}`).join('/')}，不会被终止）`;
     throw new Error(`调试端口 ${detail} 在启动前被占用；拒绝在非自有端口上启动`);
   }
+  const baseline = await inspectDesktop();
+  const token = randomUUID();
+  const policyPath = join(sandbox.directory, 'background-' + token + '.json');
+  const statusPath = join(sandbox.directory, 'background-' + token + '.status.json');
+  const releasePath = join(sandbox.directory, 'background-' + token + '.release.json');
+  writeBackgroundJson(policyPath, { token, targetDesktopId: baseline.targetDesktopId });
+  await beginBackgroundObserver(baseline, token);
+  assertBackgroundHealthy();
   const child = spawn(EXE, [], {
     detached: true,
+    windowsHide: true,
     stdio: 'ignore',
     env: {
       ...process.env,
       APPDATA: sandbox.appData,
       LOCALAPPDATA: sandbox.appData,
+      ZTERM_E2E_BACKGROUND_POLICY: policyPath,
       // The anti-throttling flags keep rAF/rendering/timers running while the
       // window sits on a non-visible virtual desktop (occlusion would
       // otherwise throttle Chromium and break frame-sampling probes).
@@ -271,9 +341,27 @@ function startApp() {
     },
   });
   ownedChild = child;
-  child.on('error', error => console.error('[e2e] isolated launch failed:', error.message));
+  child.on('error', error => { if (!child.pid) ownedChild = null; failBackground(error); });
   child.unref();
-  if (DESKTOP_ISOLATION) moveWindowOffDesktop(child);
+  try {
+    await completeBackgroundHandshake({
+      baseline, expected: { token, pid: child.pid, targetDesktopId: baseline.targetDesktopId },
+      readPlacement: () => waitForBackgroundPhase(statusPath, 'placed'),
+      inspect: inspectDesktop,
+      release: async binding => {
+        backgroundRun.binding = binding;
+        renewBackgroundLease();
+        writeBackgroundJson(releasePath, binding);
+      },
+      readShown: () => waitForBackgroundPhase(statusPath, 'shown'),
+    });
+    const final = assertBackgroundHealthy();
+    backgroundRun.released = true;
+    console.log('[e2e] background placement/release verified: ' + JSON.stringify({ pid: child.pid, baseline, final }));
+  } catch (error) {
+    failBackground(error);
+    throw error;
+  }
 }
 
 async function assertUnusedPort(port) {
@@ -286,10 +374,13 @@ async function assertUnusedPort(port) {
 }
 
 async function waitForPage(timeoutMs = 30000) {
+  assertBackgroundHealthy();
+  const signal = backgroundRun.abortController.signal;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    assertBackgroundHealthy();
     try {
-      const res = await fetch(`http://127.0.0.1:${launchPort}/json`);
+      const res = await fetch(`http://127.0.0.1:${launchPort}/json`, { signal: AbortSignal.any([signal, AbortSignal.timeout(1000)]) });
       if (res.ok) {
         const pages = await res.json();
         const page = pages.find((p) => p.type === 'page' && p.url.includes('renderer.html'));
@@ -301,54 +392,33 @@ async function waitForPage(timeoutMs = 30000) {
   // Diagnostics: process and debug-port state, to tell "exe never started"
   // apart from "WebView2 unavailable"
   let procInfo = '(不可用)';
-  try { procInfo = execSync('tasklist /FI "IMAGENAME eq zterm.exe" /FO CSV /NH', { encoding: 'utf8' }).trim() || '(无 zterm 进程)'; } catch {}
+  assertBackgroundHealthy();
+  try { procInfo = await readHostProcessDiagnostic(execFile, signal); } catch {}
   let portInfo = '(不可用)';
-  try { const r = await fetch(`http://127.0.0.1:${launchPort}/json/version`); portInfo = r.ok ? '调试端口已开放' : `HTTP ${r.status}`; } catch { portInfo = '调试端口未开放'; }
+  try { const r = await fetch(`http://127.0.0.1:${launchPort}/json/version`, { signal: AbortSignal.any([signal, AbortSignal.timeout(1000)]) }); portInfo = r.ok ? '调试端口已开放' : `HTTP ${r.status}`; } catch { portInfo = '调试端口未开放'; }
   // Target list: distinguishes "port served by a stale browser" (empty or
   // foreign targets) from "app alive but renderer stuck" (targets present,
   // renderer.html missing).
   let targetsInfo = '(不可用)';
   try {
-    const r = await fetch(`http://127.0.0.1:${launchPort}/json`);
+    const r = await fetch(`http://127.0.0.1:${launchPort}/json`, { signal: AbortSignal.any([signal, AbortSignal.timeout(1000)]) });
     const list = await r.json();
     targetsInfo = list.length ? list.map(t => `${t.type}:${String(t.url).slice(0, 90)}`).join(' | ') : '(空目标列表)';
   } catch { targetsInfo = '(目标列表获取失败)'; }
   throw new Error(`页面在 ${timeoutMs}ms 内未就绪。进程: ${procInfo}; ${portInfo}; 目标: ${targetsInfo}`);
 }
 
-// ── CDP session ──
-class Cdp {
-  constructor(wsUrl) { this.wsUrl = wsUrl; this.id = 0; this.pending = new Map(); }
-  async connect() {
-    this.ws = new WebSocket(this.wsUrl);
-    this.ws.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.id && this.pending.has(msg.id)) {
-        const p = this.pending.get(msg.id);
-        this.pending.delete(msg.id);
-        msg.error ? p.reject(new Error(msg.error.message)) : p.resolve(msg.result);
-      }
-    };
-    await new Promise((res, rej) => { this.ws.onopen = res; this.ws.onerror = rej; });
-    await this.send('Runtime.enable');
-  }
-  send(method, params = {}) {
-    return new Promise((resolve, reject) => {
-      const id = ++this.id;
-      this.pending.set(id, { resolve, reject });
-      this.ws.send(JSON.stringify({ id, method, params }));
-    });
-  }
-  async eval(expression) {
-    const r = await this.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
-    if (r.exceptionDetails) {
-      const d = r.exceptionDetails;
-      const desc = d.exception?.description || d.text || 'unknown';
-      throw new Error(`JS 异常: ${String(desc).split('\n').slice(0, 3).join(' | ')}`);
-    }
-    return r.result?.value;
-  }
-  close() { try { this.ws.close(); } catch {} }
+async function connectOwnedPage() {
+  const run = backgroundRun;
+  const child = ownedChild;
+  const port = launchPort;
+  return connectVerifiedEndpoint({
+    discover: () => waitForPage(), port, executable: EXE, sandboxDirectory: sandbox.directory,
+    child, signal: run?.abortController.signal,
+    isCurrent: () => backgroundRun === run && ownedChild === child && launchPort === port && !run?.stopping,
+    assertHealthy: assertBackgroundHealthy,
+    onDuration: result => console.log('[e2e] endpoint ownership verification: ' + JSON.stringify(result)),
+  });
 }
 
 // ── Checks ──
@@ -401,7 +471,7 @@ async function main() {
 
   killExisting();
   backupConfig();
-  startApp();
+  await startApp();
   // Identity gate BEFORE any attach/evaluate: /json discovery is harmless,
   // but a CDP session on a replaced/foreign endpoint could interfere with
   // someone else's instance (Runtime.evaluate vs real SSH sessions is a
@@ -409,16 +479,7 @@ async function main() {
   // discovered endpoint's own loopback address/port. The later
   // get-data-dir-info check stays as an independent in-page guard, not the
   // ownership proof.
-  const wsUrl = await acquireVerifiedPage({
-    discover: () => waitForPage(),
-    expectedPort: launchPort,
-    // sandbox.directory enables the profile fallback: the WebView2 loader can
-    // parent the browser outside the host tree (observed via explorer.exe),
-    // which alone must not refuse a provably owned endpoint.
-    verify: (port) => verifyCdpEndpointOwnership(port, ownedChild, EXE, sandbox.directory),
-  });
-  const cdp = new Cdp(wsUrl);
-  await cdp.connect();
+  const cdp = await connectOwnedPage();
 
   try {
     // Wait for the page to fully load (the CDP page is connectable as soon as
@@ -533,26 +594,13 @@ async function main() {
     const minimized = await waitForValue(cdp, `window.__TAURI__.window.getCurrentWindow().isMinimized().then(r => r)`, true, 8000);
     check('点击最小化后窗口最小化', minimized === true, `isMinimized=${minimized}`);
 
-    // Restore the window: prefer direct CDP window ops (avoids the Tauri ACL limits on unminimize)
-    let restored = false;
-    try {
-      const { windowId } = await cdp.send('Browser.getWindowForTarget');
-      await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
-      restored = true;
-    } catch {}
-    if (!restored) {
-      // Fallback: maximizing a minimized window on Windows restores it first
-      await cdp.eval(`document.getElementById('win-maximize').click()`);
-      await sleep(1500);
-    }
+    // Exercise the real product action on the persistently disabled host.
+    // Browser.setWindowBounds can target another native HWND and is forbidden.
+    await cdp.eval(`document.getElementById('win-maximize').click()`);
+    await sleep(1500);
     await sleep(1000);
 
-    // 5. Maximize button: click → maximized (when the CDP restore succeeded we
-    // click from the normal state; otherwise the fallback already restored and maximized)
-    if (restored) {
-      await cdp.eval(`document.getElementById('win-maximize').click()`);
-      await sleep(1500);
-    }
+    // 5. The product maximize action must restore and maximize the minimized host.
     const maximizedNow = await cdp.eval(`window.__TAURI__.window.getCurrentWindow().isMaximized().then(r => r)`);
     check('点击最大化后窗口最大化', maximizedNow === true, `isMaximized=${maximizedNow}`);
     await cdp.eval(`document.getElementById('win-maximize').click()`);
@@ -4945,13 +4993,7 @@ async function main() {
       } });
       // Same pre-attach identity gate (destination binding + ownership,
       // including the sandbox-profile fallback) as the initial connection.
-      const url = await acquireVerifiedPage({
-        discover: () => waitForPage(),
-        expectedPort: launchPort,
-        verify: (port) => verifyCdpEndpointOwnership(port, ownedChild, EXE, sandbox.directory),
-      });
-      const c2 = new Cdp(url);
-      await c2.connect();
+      const c2 = await connectOwnedPage();
       await installIsolatedShellGuard(c2);
       return c2;
     }
@@ -5086,6 +5128,7 @@ async function main() {
     if (stopped !== true) throw new Error(`Owned runtime cleanup failed: ${stopped.reasons.join('; ')}`);
   }
 
+  if (backgroundFailure) throw backgroundFailure;
   const failed = results.filter((r) => !r.pass);
   console.log(`\n${results.length - failed.length}/${results.length} 项通过`);
   if (failed.length > 0) {
@@ -5095,4 +5138,4 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(`E2E 失败: ${e.message}`); killExisting(); restoreConfig(); process.exit(1); });
+main().catch((e) => { console.error(`E2E 失败: ${e.stack || e.message}`); killExisting(); restoreConfig(); process.exit(1); });
