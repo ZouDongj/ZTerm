@@ -109,33 +109,104 @@ function buildHighlightEndSeq(rule, state) {
     return seq;
 }
 
-// Find the ranges of all ANSI escape sequences in a string:
-// CSI (\x1b[ through final byte 0x40–0x7E), OSC (\x1b] through BEL or ST), other (ESC + 1 char)
-function _getEscapeRanges(s) {
+const MAX_HIGHLIGHT_CSI_PARAMS = 1024;
+
+function createHighlightStreamState(sgr) {
+    return { mode: 'ground', params: '', overflow: false, intermediate: false,
+        sgr: sgr || createSgrState(), sgrKnown: true, alternate: false };
+}
+
+// A lexer, not a terminal emulator: identify bytes unsafe for decoration and
+// track only the rendition/modes highlighting needs. String payloads are never
+// retained. CSI collection has a fixed cap, even for an unterminated sequence.
+function scanHighlightLine(line, state, disableAlternate = false) {
     const ranges = [];
-    for (let i = 0; i < s.length; i++) {
-        if (s[i] !== '\x1b') continue;
-        const next = s[i + 1];
-        if (next === '[') {
-            // CSI: through the final byte
-            let j = i + 2;
-            while (j < s.length && !(s.charCodeAt(j) >= 0x40 && s.charCodeAt(j) <= 0x7E)) j++;
-            ranges.push({ start: i, end: Math.min(j + 1, s.length) });
-            i = j;
-        } else if (next === ']') {
-            // OSC: through BEL(\x07) or ST(\x1b\\)
-            let j = i + 2;
-            while (j < s.length && s[j] !== '\x07' && !(s[j] === '\x1b' && s[j + 1] === '\\')) j++;
-            const end = s[j] === '\x07' ? j + 1 : (j < s.length ? j + 2 : s.length);
-            ranges.push({ start: i, end });
-            i = end - 1;
+    const changes = [];
+    const enter = mode => {
+        state.mode = mode;
+        state.params = '';
+        state.overflow = false;
+        state.intermediate = false;
+    };
+    const snapshot = end => changes.push({ end, sgr: { ...state.sgr } });
+    for (let i = 0; i < line.length; i++) {
+        const code = line.charCodeAt(i);
+        const ch = line[i];
+        const control = code < 0x20 || (code >= 0x7f && code <= 0x9f);
+        if (state.mode !== 'ground' || control || !state.sgrKnown || (disableAlternate && state.alternate)) {
+            const last = ranges[ranges.length - 1];
+            if (last && last.end === i) last.end++;
+            else ranges.push({ start: i, end: i + 1 });
+        }
+        // These transitions apply in every state. ESC also begins the
+        // two-byte ST terminator, including when its backslash arrives later.
+        if (code === 0x1b) { enter('escape'); continue; }
+        if (code === 0x18 || code === 0x1a || code === 0x9c) { enter('ground'); continue; }
+        if (code >= 0x80 && code <= 0x9f) {
+            enter(code === 0x9b ? 'csi' : code === 0x9d ? 'osc' :
+                (code === 0x90 || code === 0x98 || code === 0x9e || code === 0x9f) ? 'string' : 'ground');
+            continue;
+        }
+        if (state.mode === 'osc' && code === 0x07) { enter('ground'); continue; }
+        if (code < 0x20 || code === 0x7f) continue;
+        if (state.mode === 'osc' || state.mode === 'string') continue;
+        if (state.mode === 'escape' || state.mode === 'escape-intermediate') {
+            if (code >= 0x20 && code <= 0x2f) { state.mode = 'escape-intermediate'; continue; }
+            if (code < 0x30 || code > 0x7e) continue;
+            if (state.mode === 'escape') {
+                if (ch === '[') { enter('csi'); continue; }
+                if (ch === ']') { enter('osc'); continue; }
+                if (ch === 'P' || ch === 'X' || ch === '^' || ch === '_') { enter('string'); continue; }
+                if (ch === 'c') {
+                    Object.assign(state.sgr, createSgrState());
+                    state.sgrKnown = true;
+                    state.alternate = false;
+                    snapshot(i + 1);
+                }
+            }
+            enter('ground');
+            continue;
+        }
+        if (state.mode !== 'csi') continue;
+        if (code >= 0x40 && code <= 0x7e) {
+            if (!state.intermediate && ch === 'm' && !/^[<=>?]/.test(state.params)) {
+                const values = state.params.split(';');
+                // Match the bundled parser's 32 signed-31-bit parameter
+                // slots. Truncated/clamped values are not a safe baseline.
+                if (!state.overflow && /^[0-9;]*$/.test(state.params) &&
+                    values.length <= 32 && values.every(value => Number(value) <= 0x7fffffff)) {
+                    // An unambiguous leading reset recovers after an SGR we
+                    // could not track; color components containing zero do not.
+                    const first = values[0];
+                    if (first === '' || Number(first) === 0) state.sgrKnown = true;
+                    applySgrParams(state.sgr, state.params);
+                } else {
+                    // Keep output untouched until a known reset rather than
+                    // restoring a guessed rendition after an unsupported SGR.
+                    state.sgrKnown = false;
+                }
+                snapshot(i + 1);
+            }
+            if (!state.overflow && !state.intermediate && (ch === 'h' || ch === 'l') && /^\?[0-9;]*$/.test(state.params)) {
+                const modes = state.params.slice(1).split(';').slice(0, 32).map(Number);
+                if (modes.some(mode => mode === 47 || mode === 1047 || mode === 1049)) state.alternate = ch === 'h';
+            }
+            enter('ground');
+        } else if (code >= 0x20 && code <= 0x2f) {
+            state.intermediate = true;
+        } else if (code >= 0x30 && code <= 0x3f && !state.intermediate) {
+            if (state.params.length < MAX_HIGHLIGHT_CSI_PARAMS) state.params += ch;
+            else state.overflow = true;
         } else {
-            // Other ESC sequences (charset switches etc.): skip ESC + 1 char
-            ranges.push({ start: i, end: Math.min(i + 2, s.length) });
-            i += 1;
+            // Invalid CSI input remains protected through its final byte.
+            state.intermediate = true;
         }
     }
-    return ranges;
+    return { ranges, changes };
+}
+
+function _getEscapeRanges(s) {
+    return scanHighlightLine(s, createHighlightStreamState()).ranges;
 }
 
 function _getHighlightBeginSeq(rule) {
@@ -173,21 +244,11 @@ function normalizeHighlightColor(hex) {
     return /^#[0-9a-f]{6}$/i.test(hex) ? hex : null;
 }
 
-function applyHighlightToLine(line, rules, carriedState) {
+function applyHighlightToLine(line, rules, carriedState, streamState, disableAlternate = false) {
     if (!line) return line;
-    // Cross-chunk baseline (issue #9 residual): snapshot the rendition carried
-    // into this line — it drives the restore sequences below — then advance
-    // the caller's baseline past this line. Advancing happens on lines with no
-    // match too, so the next line/chunk starts from the correct state. The
-    // injection is restore-neutral for the tracked attributes (a match never
-    // contains an escape sequence and the end sequence re-emits the
-    // match-start rendition), so scanning the ORIGINAL line keeps the baseline
-    // identical to what the terminal holds after the injected output.
-    let startState = null;
-    if (carriedState) {
-        startState = { ...carriedState };
-        advanceSgrState(carriedState, line);
-    }
+    const stream = streamState || createHighlightStreamState(carriedState);
+    const startState = { ...stream.sgr };
+    const { ranges, changes } = scanHighlightLine(line, stream, disableAlternate);
     // Collect all matches from each rule
     const matches = [];
     for (const rule of rules) {
@@ -200,14 +261,25 @@ function applyHighlightToLine(line, rules, carriedState) {
         }
     }
     if (matches.length === 0) return line;
-    // Drop all matches inside ANSI sequences (CSI/OSC/other) — injecting color codes into an OSC would break the sequence and the matched text would leak into visible output
-    const escapeRanges = _getEscapeRanges(line);
-    const validMatches = matches.filter(m => !escapeRanges.some(r => m.start < r.end && m.end > r.start));
+    // Regexes still see the original whole line, preserving anchors and
+    // overlap semantics. Only matches wholly outside protected spans may paint.
+    const validMatches = matches.filter(m => {
+        if (m.start === m.end) {
+            if (m.start === line.length && (stream.mode !== 'ground' || !stream.sgrKnown || (disableAlternate && stream.alternate))) return false;
+            return !ranges.some(r => m.start >= r.start && m.start < r.end);
+        }
+        return !ranges.some(r => m.start < r.end && m.end > r.start);
+    });
     if (validMatches.length === 0) return line;
     // Sort by start position, first match wins on overlap
     validMatches.sort((a, b) => a.start - b.start);
     // SGR state at each match start drives the restore sequence (issue #9).
-    const states = sgrStatesAt(line, validMatches.map(m => m.start), startState);
+    let stateAtMatch = startState;
+    let nextChange = 0;
+    const states = validMatches.map(m => {
+        while (nextChange < changes.length && changes[nextChange].end <= m.start) stateAtMatch = changes[nextChange++].sgr;
+        return stateAtMatch;
+    });
     // Build result with ANSI color injection
     let result = '';
     let last = 0;
@@ -233,6 +305,9 @@ if (typeof module !== 'undefined' && module.exports) {
         buildHighlightEndSeq,
         applyHighlightToLine,
         normalizeHighlightColor,
+        createHighlightStreamState,
+        scanHighlightLine,
+        MAX_HIGHLIGHT_CSI_PARAMS,
         _getEscapeRanges,
         _getHighlightBeginSeq,
         _hexToRgb,

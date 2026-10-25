@@ -211,11 +211,19 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
                 // the session so a later collapse can resume capture safely.
                 if (data.includes('\x1b[?1049h')) pane._altScreen = true;
                 if (data.includes('\x1b[?1049l')) pane._altScreen = false;
+                // Advance stream state even before the terminal mounts; raw
+                // pending bytes are replayed in order when it becomes ready.
+                const highlighted = applyHighlight(data, tabId);
                 if (pane.term) {
-                    pane.term.write(applyHighlight(data, tabId),
+                    pane.term.write(highlighted,
                         _outputParsed(pane, inkSeq, diagnostic));
                 } else {
-                    let _b = ptyBuffers[tabId] || ''; _b += data; if (_b.length > 1048576) _b = _b.slice(-524288); ptyBuffers[tabId] = _b;
+                    let pending = (ptyBuffers[tabId] || '') + data;
+                    if (pending.length > 1048576) {
+                        pending = pending.slice(-524288);
+                        resetHighlightStateFromBuffer(pending, tabId);
+                    }
+                    ptyBuffers[tabId] = pending;
                 }
                 return;
             }
@@ -235,15 +243,21 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
             if (data.includes('\x1b[?1049h')) tab._altScreen = true;
             if (data.includes('\x1b[?1049l')) tab._altScreen = false;
             if (!tab._altScreen) tab._contentBuffer = appendContentTail(tab._contentBuffer, data);
+            const highlighted = applyHighlight(data, tabId);
             if (tab.term) {
                 if (ptyBuffers[tabId]) {
                     tab.term.write(ptyBuffers[tabId]);
                     delete ptyBuffers[tabId];
                 }
-                tab.term.write(applyHighlight(data, tabId),
+                tab.term.write(highlighted,
                     _outputParsed(tab, inkSeq, diagnostic));
             } else {
-                let _b = ptyBuffers[tabId] || ''; _b += data; if (_b.length > 1048576) _b = _b.slice(-524288); ptyBuffers[tabId] = _b;
+                let pending = (ptyBuffers[tabId] || '') + data;
+                if (pending.length > 1048576) {
+                    pending = pending.slice(-524288);
+                    resetHighlightStateFromBuffer(pending, tabId);
+                }
+                ptyBuffers[tabId] = pending;
             }
             return;
         }
