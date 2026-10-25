@@ -207,6 +207,10 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
                 // the full stream in order; ptyBuffers then holds repaired bytes.
                 if (typeof data === 'string' && data) data = _conPtyCaretFix(pane, data, pane.type || tab.type);
                 diagnostics?.filtered(diagnostic, data);
+                // Split content is not captured, but its screen state follows
+                // the session so a later collapse can resume capture safely.
+                if (data.includes('\x1b[?1049h')) pane._altScreen = true;
+                if (data.includes('\x1b[?1049l')) pane._altScreen = false;
                 if (pane.term) {
                     pane.term.write(applyHighlight(data, tabId),
                         _outputParsed(pane, inkSeq, diagnostic));
@@ -632,7 +636,7 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, attemptId, error }) => 
                 _cancelSshAttemptOf(tab, tab.tabId, 'ssh-disconnect'); // same identity-exact discard
                 delete ptyBuffers[tab.tabId];
                 delete tab._caretFilter; // same as the pane branch above
-                tab._altScreen = false;
+                // The retry keeps the terminal, including its screen capture gate.
             }
             tab.tabId = null;
             tab._sessionFailed = true; // same liveness marker as the pane branch

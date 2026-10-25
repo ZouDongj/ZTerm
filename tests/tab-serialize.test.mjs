@@ -30,13 +30,33 @@ test('serializeSplitNode local 叶子', () => {
     assert.equal(out.sshHost, undefined);
 });
 
-test('serializeSplitNode ssh 叶子（type 与 _sshHost 两种标记）', () => {
+test('serializeSplitNode recognizes explicit SSH and legacy untyped host metadata', () => {
     const byType = serializeSplitNode({ id: 'p1', type: 'ssh', name: 'prod', _sshHost: 'h', _sshPort: 22, _sshUser: 'u', _sshProfileId: 's1', _command: 'x' });
     assert.equal(byType.paneType, 'ssh');
     assert.equal(byType.command, '', 'ssh 叶子不保存 command');
     assert.deepEqual(byType.args, []);
-    const byHost = serializeSplitNode({ id: 'p2', type: 'local', name: 'x', _sshHost: 'h2' });
-    assert.equal(byHost.paneType, 'ssh', '_sshHost 存在时视为 ssh');
+    const byHost = serializeSplitNode({ id: 'p2', name: 'x', _sshHost: 'h2' });
+    assert.equal(byHost.paneType, 'ssh', 'host inference is retained for legacy nodes without type');
+    const restoredLegacy = deser({ sshHost: 'legacy', sshPort: 2222, sshUser: 'user' });
+    assert.equal(restoredLegacy.type, 'ssh');
+    assert.equal(restoredLegacy._sshHost, 'legacy');
+    assert.equal(restoredLegacy._sshPort, 2222);
+    assert.equal(restoredLegacy._sshUser, 'user');
+});
+
+test('explicit local type rejects stray SSH metadata in both persistence directions', () => {
+    const saved = serializeSplitNode({ type: 'local', name: 'Bash', _command: 'bash.exe', _args: ['--login'],
+        _sshHost: 'foreign', _sshPort: 2222, _sshUser: 'other', _sshProfileId: 'foreign-profile' });
+    assert.equal(saved.paneType, 'local');
+    assert.equal(saved.command, 'bash.exe');
+    assert.deepEqual(saved.args, ['--login']);
+    for (const key of ['sshHost', 'sshPort', 'sshUser', 'sshProfileId']) assert.equal(saved[key], undefined);
+    const restored = deser({ paneType: 'local', command: 'bash.exe', args: ['--login'],
+        sshHost: 'foreign', sshPort: 2222, sshUser: 'other', sshProfileId: 'foreign-profile' });
+    assert.equal(restored.type, 'local');
+    assert.equal(restored._command, 'bash.exe');
+    assert.deepEqual(restored._args, ['--login']);
+    for (const key of ['_sshHost', '_sshPort', '_sshUser', '_sshProfileId']) assert.equal(restored[key], undefined);
 });
 
 test('serializeSplitNode 容器递归', () => {

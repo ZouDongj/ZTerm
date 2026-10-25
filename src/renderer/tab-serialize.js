@@ -28,7 +28,8 @@ function serializeSplitNode(node) {
         };
     }
     if (node._closing) return null;
-    const isSSH = node.type === 'ssh' || !!node._sshHost;
+    // Host inference is only for legacy nodes without an explicit type.
+    const isSSH = node.type === 'ssh' || (!node.type && !!node._sshHost);
     return {
         type: 'leaf',
         name: node.name,
@@ -37,10 +38,10 @@ function serializeSplitNode(node) {
         // marker the tool-name overlay would outrank the user's name on the
         // restored split (resolveTabDisplayName).
         ...(node._manualName ? { manualName: true } : {}),
-        sshHost: node._sshHost,
-        sshPort: node._sshPort,
-        sshUser: node._sshUser,
-        sshProfileId: node._sshProfileId,
+        sshHost: isSSH ? node._sshHost : undefined,
+        sshPort: isSSH ? node._sshPort : undefined,
+        sshUser: isSSH ? node._sshUser : undefined,
+        sshProfileId: isSSH ? node._sshProfileId : undefined,
         command: isSSH ? '' : (node._command || ''),
         args: isSSH ? [] : (node._args || []),
     };
@@ -63,7 +64,7 @@ function deserializeSplitNode(saved, opts) {
         };
     }
     const id = opts.nextPaneId();
-    const isSSH = saved.paneType === 'ssh' || !!saved.sshHost;
+    const isSSH = saved.paneType === 'ssh' || (!saved.paneType && !!saved.sshHost);
     return {
         id, requestId: id,
         tabId: null, term: null, fitAddon: null, focused: false,
@@ -71,8 +72,10 @@ function deserializeSplitNode(saved, opts) {
         type: isSSH ? 'ssh' : (saved.paneType || 'local'),
         connected: !isSSH, // local starts online immediately; SSH waits for the handshake
         ...(saved.manualName === true ? { _manualName: true } : {}),
-        _sshHost: saved.sshHost, _sshPort: saved.sshPort, _sshUser: saved.sshUser,
-        _sshProfileId: saved.sshProfileId,
+        _sshHost: isSSH ? saved.sshHost : undefined,
+        _sshPort: isSSH ? saved.sshPort : undefined,
+        _sshUser: isSSH ? saved.sshUser : undefined,
+        _sshProfileId: isSSH ? saved.sshProfileId : undefined,
         _command: isSSH ? '' : (saved.command || ''),
         _args: isSSH ? [] : (saved.args || []),
     };

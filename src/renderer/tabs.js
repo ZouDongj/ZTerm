@@ -1365,6 +1365,8 @@ const TabManager = {
         _cancelSshAttemptOf(tab, tab.tabId, 'ssh-disconnect');
         if (_clearOnConnect(tab, null)) {
             if (tab.term) { try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(tab.term); tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
+            // Reset at display teardown, before any new-session output arrives.
+            tab._altScreen = false;
             const wrap = document.getElementById('wrap_' + id);
             if (wrap) { if (wrap._resizeObserver) wrap._resizeObserver.disconnect(); wrap.remove(); }
             // Explicitly release ptyBuffers (the old tabId is never reused by a new connection; otherwise buffers pile up 1MB+)
@@ -1443,6 +1445,8 @@ const TabManager = {
         _cancelSshAttemptOf(pane, pane.tabId, 'ssh-disconnect');
         if (_clearOnConnect(tab, pane)) {
             if (pane.term) { try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(pane.term); pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
+            // A kept terminal retains its gate; a cleared terminal starts normal.
+            pane._altScreen = false;
             const body = document.getElementById('pane-body_' + pane.id);
             if (body) body.innerHTML = '';
             // Explicitly release ptyBuffers
@@ -1816,11 +1820,20 @@ const TabManager = {
     // ── Split pane support (Tabby-aligned absolute model) ──
     _createContainer(orientation) { return { orientation, children: [], ratios: [] }; },
 
+    _resetSplitCapture(tab, owner) {
+        // Split sessions do not capture restore content. Every boundary drops
+        // the old tab snapshot; the live terminal buffer stays untouched. The
+        // resumed gate belongs to the surviving session, not the container.
+        tab._contentBuffer = '';
+        tab._altScreen = owner?._altScreen === true;
+    },
+
     _newPaneData(tab, srcPane) {
         const id = 'p_' + (this._paneCounter++);
-        // Prefer srcPane fields (a split inherits from the focused pane), fall back to the tab
+        // Clone the chosen session, never a different pane's container identity.
         const src = srcPane || tab;
-        const isLocal = (src.type || tab.type || 'local') !== 'ssh';
+        const paneType = src.type || ((src._sshHost || src.host) ? 'ssh' : 'local');
+        const isLocal = paneType !== 'ssh';
         return {
             id,
             requestId: id,
@@ -1830,13 +1843,13 @@ const TabManager = {
             focused: false,
             // Pane name prefers srcPane.name (keeps the original pane name on drag-in/clone), otherwise tab.name (first split)
             name: srcPane ? (srcPane.name || '') : tab.name,
-            type: src.type || (isLocal ? 'local' : 'ssh'),
+            type: paneType,
             connected: isLocal || src.connected,
-            _sshHost: src._sshHost || src.host,
-            _sshPort: src._sshPort || src.port,
-            _sshUser: src._sshUser || src.user,
-            _sshCredId: src._sshCredId || src._credId,
-            _sshProfileId: src._sshProfileId || src.sshProfileId,
+            _sshHost: isLocal ? undefined : (src._sshHost || src.host),
+            _sshPort: isLocal ? undefined : (src._sshPort || src.port),
+            _sshUser: isLocal ? undefined : (src._sshUser || src.user),
+            _sshCredId: isLocal ? undefined : (src._sshCredId || src._credId),
+            _sshProfileId: isLocal ? undefined : (src._sshProfileId || src.sshProfileId),
             _command: isLocal ? (src._command || src.command || '') : '',
             _args: isLocal ? (src._args || src.args || []) : [],
         };
@@ -1870,6 +1883,7 @@ const TabManager = {
             existing.fitAddon = tab.fitAddon;
             existing._smoothCursor = tab._smoothCursor;
             existing.tabId = tab.tabId;
+            existing._altScreen = tab._altScreen === true;
             existing.focused = false;
             // An in-flight SSH attempt follows its session onto the pane
             // (identity transfer; migrations never create attempts).
@@ -1901,6 +1915,7 @@ const TabManager = {
             const newPane = this._newPaneData(tab);
             const isH = side === 'l' || side === 'r';
             tab.splitRoot = this._createContainer(isH ? 'h' : 'v');
+            this._resetSplitCapture(tab);
             // A manual rename names the single session, not the future split
             // container: the custom name already moved onto the `existing` pane
             // (_newPaneData takes tab.name), so dropping the rename lock lets
@@ -1931,7 +1946,7 @@ const TabManager = {
         if (!focused) return;
         const newPane = this._newPaneData(tab, focused);
         // Kept as a fallback: when the tab lacks a credential, inherit from focused (defensive; _newPaneData normally covers this)
-        if (!tab._credId && !newPane._sshCredId && focused._sshCredId) {
+        if (newPane.type === 'ssh' && !tab._credId && !newPane._sshCredId && focused._sshCredId) {
             newPane._sshHost = focused._sshHost || tab.host;
             newPane._sshPort = focused._sshPort || tab.port;
             newPane._sshUser = focused._sshUser || tab.user;
@@ -2697,6 +2712,7 @@ const TabManager = {
             tabId: pane.tabId,
             splitRoot: null,
         };
+        this._resetSplitCapture(nt, pane);
         // An extracted pane carrying a demoted rename becomes a locked single
         // tab again — the manual name named its session, not the split it
         // happened to sit in.
@@ -2744,6 +2760,7 @@ const TabManager = {
         } else if (rem.length === 1) {
             const rp = rem[0];
             st.splitRoot = null;
+            this._resetSplitCapture(st, rp);
             // The collapse ends sync input with the split: a leftover flag
             // would silently resume broadcasting on the next re-split (and
             // fire the exit-on-click toast on a tab that shows no split).
@@ -2845,6 +2862,7 @@ const TabManager = {
         let mt = null, mf = null, mid = null, sc = null, msc = null, mconn = false, mfailed = false, mconnecting = false, merrored = false;
         let paneName = sourceTab.name, paneType = sourceTab.type || 'local';
         let toolName = sourceTab._toolName;
+        let manualName = sourceTab._customName === true;
         // The wrapper whose in-flight SSH attempt must follow the moved
         // session: the FOCUSED PANE for a split source (that object leaves
         // the tree below; the source tab keeps only the surviving panes),
@@ -2876,15 +2894,17 @@ const TabManager = {
             // would hold two listeners (the old pane's + np's) and every keypress would fire twice
             if (focused._onDataDisp) { focused._onDataDisp.dispose(); focused._onDataDisp = null; }
             paneName = focused.name || sourceTab.name;
-            paneType = focused.type || sourceTab.type || 'local';
+            paneType = focused.type || (focused._sshHost ? 'ssh' : 'local');
             toolName = focused._toolName;
+            manualName = focused._manualName === true;
             paneCommand = focused._command || '';
             paneArgs = focused._args || [];
-            sshHost = focused._sshHost || sourceTab.host;
-            sshPort = focused._sshPort || sourceTab.port;
-            sshUser = focused._sshUser || sourceTab.user;
-            sshCredId = focused._sshCredId || sourceTab._credId;
-            sshProfileId = focused._sshProfileId || sourceTab.sshProfileId;
+            // The container can describe a different session in a mixed split.
+            sshHost = focused._sshHost;
+            sshPort = focused._sshPort;
+            sshUser = focused._sshUser;
+            sshCredId = focused._sshCredId;
+            sshProfileId = focused._sshProfileId;
             const parent = getParentOf(sourceTab, focused);
             if (parent) {
                 const idx = parent.children.indexOf(focused);
@@ -2912,6 +2932,7 @@ const TabManager = {
                         sourceTab._smoothCursor = rp._smoothCursor;
                         sourceTab.tabId = rp.tabId;
                         sourceTab.splitRoot = null;
+                        this._resetSplitCapture(sourceTab, rp);
                         // Same collapse rule as _extractPaneToTab: sync input
                         // dies with the split tree.
                         sourceTab.syncInput = false;
@@ -2996,6 +3017,7 @@ const TabManager = {
             fp.fitAddon = targetTab.fitAddon;
             fp._smoothCursor = targetTab._smoothCursor;
             fp.tabId = targetTab.tabId;
+            fp._altScreen = targetTab._altScreen === true;
             fp.focused = false;
             // Same transfer rule as the first-split promotion: the target's
             // existing session keeps its liveness marker on the fp pane.
@@ -3019,6 +3041,7 @@ const TabManager = {
             // Same transfer rule as the terminal: the tool-provided name moves onto fp.
             if (targetTab._toolName !== undefined) { fp._toolName = targetTab._toolName; delete targetTab._toolName; }
             targetTab.splitRoot = this._createContainer('h');
+            this._resetSplitCapture(targetTab);
             // Same rename demotion as addPaneRelativeTo's first split: the
             // custom name moved onto fp via _newPaneData(targetTab), so the
             // lock must go for the tab to join its pane names again. The
@@ -3038,6 +3061,8 @@ const TabManager = {
             requestId: 'p_' + (this._paneCounter - 1),
             term: mt, fitAddon: mf, _smoothCursor: msc, tabId: mid, focused: true,
             name: paneName, type: paneType,
+            ...(manualName ? { _manualName: true } : {}),
+            _altScreen: movedOwner._altScreen === true,
             connected: mconn,
             // Known-failed liveness marker travels with the moved session
             // (ipc.js owns its lifecycle; see the ssh-error/pty-exit handlers)
@@ -3046,8 +3071,11 @@ const TabManager = {
             // moved session too — same rule as the liveness marker above.
             _sshConnecting: mconnecting,
             _sshErrored: merrored,
-            _sshHost: sshHost, _sshPort: sshPort, _sshUser: sshUser,
-            _sshCredId: sshCredId, _sshProfileId: sshProfileId,
+            _sshHost: paneType === 'ssh' ? sshHost : undefined,
+            _sshPort: paneType === 'ssh' ? sshPort : undefined,
+            _sshUser: paneType === 'ssh' ? sshUser : undefined,
+            _sshCredId: paneType === 'ssh' ? sshCredId : undefined,
+            _sshProfileId: paneType === 'ssh' ? sshProfileId : undefined,
             // From the MOVED session (paneCommand/paneArgs), not the source
             // tab's command/args; an empty args array is meaningful and must
             // not be replaced by another owner's args
@@ -3148,11 +3176,7 @@ const TabManager = {
                 _sendInputForTerm(tab.term, data);
             });
         }
-        // Split panes are not captured (the pane branch of the pty-output
-        // router never appends), so on unsplit the buffer can only hold
-        // stale single-tab content from before the split — reset it so that
-        // content cannot resurrect on a later restore.
-        tab._contentBuffer = '';
+        this._resetSplitCapture(tab, fp);
         // Disconnect pane-body resize observers before dropping the split
         // subtree (Blink retains observed nodes and their DOM subtrees).
         all.forEach(p => { const body = document.getElementById('pane-body_' + p.id); if (body && body._resizeObserver) body._resizeObserver.disconnect(); });
