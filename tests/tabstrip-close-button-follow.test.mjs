@@ -35,7 +35,8 @@ function instrumentEl(el) {
     el._animateCalls = [];
     el.animate = (keyframes, options) => {
         const anim = {
-            id: '', keyframes, options, cancelled: false,
+            id: '', keyframes, options, cancelled: false, finished: false,
+            finish() { this.finished = true; },
             cancel() {
                 this.cancelled = true;
                 const i = el._animations.indexOf(this);
@@ -70,6 +71,104 @@ function stripFixture(ctx, count = 3) {
     instrumentEl(menuBtn);
     return { bar, vp, addBtn, menuBtn };
 }
+
+// Complete only the strip-owned WAAPI slides, then let the real render
+// re-anchor the completed hold through its near-equal inline fast path.
+// Fixed inert tab widths supply the layout measurement missing from the VM.
+function inlineCloseHold(ctx, fixture) {
+    const { vp, addBtn, menuBtn } = fixture;
+    const createElement = ctx.document.createElement;
+    ctx.document.createElement = (...args) => {
+        const el = createElement(...args);
+        Object.defineProperty(el, 'offsetWidth', { configurable: true,
+            get: () => el.classList.contains('tab') ? (parseFloat(el.style.width) || 110) : 0 });
+        return el;
+    };
+    vp.querySelectorAll('.tab').forEach(el => { el.offsetWidth = 110; });
+    for (const btn of [addBtn, menuBtn]) {
+        btn.getBoundingClientRect = () => {
+            const own = liveStripSlides(btn).at(-1);
+            const transform = own?.finished ? own.keyframes.at(-1).transform : btn.style.transform;
+            const x = Number(String(transform || '').match(/^translateX\((-?[\d.]+)px\)$/)?.[1] || 0);
+            return { left: 300 + x, right: 326 + x, top: 0, bottom: 26, width: 26, height: 26 };
+        };
+    }
+    ctx.TabManager.switchTo('t3');
+    ctx.TabManager.closeTab('t1'); // close a background tab without an active-tab reflow
+    for (const btn of [addBtn, menuBtn]) {
+        for (const animation of liveStripSlides(btn)) animation.finish();
+    }
+    ctx.TabManager.render();
+    assert.ok(ctx.TabManager._closingTabs.has('t1'), 'the real re-anchor runs inside the close window');
+    for (const btn of [addBtn, menuBtn]) {
+        assert.equal(btn.style.transform, 'translateX(-112px)', 'the actual inline fast path owns one 110px slot plus gap');
+        assert.equal(liveStripSlides(btn).length, 0, 'this is the inline path, not an unfinished WAAPI slide');
+    }
+}
+
+test('final removal clears the real re-anchor inline hold and leaves unrelated animations alive', () => {
+    const ctx = loadVm();
+    const fixture = stripFixture(ctx);
+    inlineCloseHold(ctx, fixture);
+    ctx.TabManager.render(); // a second close-window render continues the same near-equal hold
+    for (const btn of [fixture.addBtn, fixture.menuBtn]) {
+        assert.equal(btn.style.transform, 'translateX(-112px)', 're-anchoring neither drops nor doubles the inline offset');
+        assert.equal(liveStripSlides(btn).length, 0, 'continuation stays on the real inline fast path');
+    }
+    const unrelated = [fixture.addBtn, fixture.menuBtn].map(btn => {
+        const animation = btn.animate([{ opacity: 1 }, { opacity: 0.5 }], { duration: 1000 });
+        animation.id = 'unrelated-feedback';
+        return animation;
+    });
+    ctx.__tq.advance(200); // actual doRemove + final render
+    assert.equal(ctx.TabManager._closingTabs.size, 0);
+    for (const [index, btn] of [fixture.addBtn, fixture.menuBtn].entries()) {
+        assert.equal(btn.style.transform, '', 'no strip-owned inline offset may survive the final settle');
+        assert.equal(unrelated[index].cancelled, false, 'unrelated feedback is not strip-owned');
+    }
+});
+
+test('owned inline close holds restore a previous unrelated inline transform', () => {
+    const ctx = loadVm();
+    const fixture = stripFixture(ctx);
+    fixture.addBtn.style.transform = 'rotate(4deg)';
+    fixture.menuBtn.style.transform = 'scale(0.9)';
+    inlineCloseHold(ctx, fixture);
+    ctx.__tq.advance(200);
+    assert.equal(fixture.addBtn.style.transform, 'rotate(4deg)');
+    assert.equal(fixture.menuBtn.style.transform, 'scale(0.9)');
+});
+
+test('a later unrelated inline replacement is preserved at the final close settle', () => {
+    const ctx = loadVm();
+    const fixture = stripFixture(ctx);
+    inlineCloseHold(ctx, fixture);
+    fixture.addBtn.style.transform = 'translateY(5px)';
+    fixture.menuBtn.style.transform = 'rotate(7deg)';
+    ctx.__tq.advance(200);
+    assert.equal(fixture.addBtn.style.transform, 'translateY(5px)');
+    assert.equal(fixture.menuBtn.style.transform, 'rotate(7deg)');
+});
+
+test('strip cancellation and drag guards preserve unowned transforms and animations', () => {
+    const ctx = loadVm();
+    const fixture = stripFixture(ctx);
+    const dragged = fixture.vp.querySelector('.tab[data-tab="t1"]');
+    const elements = [fixture.addBtn, fixture.menuBtn, dragged];
+    for (const el of elements) {
+        el.style.transform = 'translateX(41px)';
+        const animation = el.animate([{ opacity: 1 }, { opacity: 0.5 }], { duration: 1000 });
+        animation.id = 'unrelated-drag-feedback';
+        ctx._cancelStripSlides(el);
+        assert.equal(el.style.transform, 'translateX(41px)');
+        assert.equal(animation.cancelled, false);
+    }
+    ctx.TabManager._dragTab = { sourceTabId: 't1' };
+    ctx.TabManager._closingTabs.add('t2');
+    ctx.TabManager._reholdStripButtonSlides(fixture.vp, new Map());
+    ctx.TabManager._reholdStripSlides(fixture.vp, new Map());
+    for (const el of elements) assert.equal(el.style.transform, 'translateX(41px)', 'drag owns these transforms');
+});
 
 test('close initiation slides the add/menu buttons along with the follower tabs', () => {
     const ctx = loadVm();

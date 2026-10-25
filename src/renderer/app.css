@@ -1124,6 +1124,9 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 
 /* Confirm dialog */
 #confirm-msg{white-space:pre-line;word-break:break-all}
+#confirm-msg.execution-review{max-height:min(55vh,440px);overflow:auto;text-align:left;white-space:pre-wrap;font-size:13px;line-height:1.6}
+.execution-remember{display:flex;align-items:center;gap:8px;margin-top:14px;color:var(--text-2);font-size:12px;line-height:1.5}
+.execution-remember input{accent-color:var(--accent)}
 .btn-danger{background:rgba(242,184,181,0.18);border:1px solid rgba(242,184,181,0.18);color:#eed2d0;padding:8px 20px;border-radius:20px;font-size:13px;cursor:pointer;transition:all 0.12s;font-family:inherit}
 .btn-danger:hover{background:rgba(242,184,181,0.28);border-color:rgba(242,184,181,0.28);color:#fef0ef}
 

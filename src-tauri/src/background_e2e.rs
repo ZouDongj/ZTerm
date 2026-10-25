@@ -48,6 +48,26 @@ static RUNTIME: OnceLock<Option<Runtime>> = OnceLock::new();
 fn runtime() -> Option<&'static Runtime> { RUNTIME.get().and_then(Option::as_ref) }
 pub fn enabled() -> bool { runtime().is_some() }
 
+pub fn execution_grant_store() -> Result<Option<PathBuf>, String> {
+    execution_grant_store_from(RUNTIME.get(), lease_valid)
+}
+
+fn execution_grant_store_from(state: Option<&Option<Runtime>>, valid_lease: impl FnOnce(&Runtime) -> bool) -> Result<Option<PathBuf>, String> {
+    let configured = state.ok_or("background policy has not been initialized")?;
+    let Some(rt) = configured else { return Ok(None); };
+    let phase = *rt.phase.lock();
+    let elapsed = rt.started.elapsed();
+    if rt.terminating.load(Ordering::SeqCst) || phase == Phase::Failed || elapsed > RUN_LIMIT
+        || (phase != Phase::Shown && elapsed > STARTUP_LIMIT)
+        || !rt.root.is_absolute() || !valid_guid(&rt.policy.token) || !valid_guid(&rt.policy.target_desktop_id)
+        || (matches!(phase, Phase::Showing | Phase::Shown) && !valid_lease(rt)) {
+        return Err("background execution storage requires a valid owned runtime".into());
+    }
+    // configure binds this canonical root to the owned executable and policy.
+    // Select storage before restore can prepare a launch; this grants no trust.
+    Ok(Some(rt.root.join("execution-trust.v1.bin")))
+}
+
 fn valid_guid(text: &str) -> bool {
     text != "00000000-0000-0000-0000-000000000000" && text.len() == 36 && text.bytes().enumerate().all(|(index, byte)| {
         if [8, 13, 18, 23].contains(&index) { byte == b'-' } else { byte.is_ascii_hexdigit() }
@@ -499,6 +519,49 @@ mod tests {
         for value in ["", "../release", "11111111111111111111111111111111", "zzzzzzzz-1111-1111-1111-111111111111"] {
             assert!(!valid_guid(value));
         }
+    }
+
+    #[test]
+    fn background_execution_store_uses_only_its_initialized_owned_root() {
+        assert!(execution_grant_store_from(None, |_| true).is_err());
+        assert_eq!(execution_grant_store_from(Some(&None), |_| true).unwrap(), None);
+        let configured = Some(Runtime {
+            policy: Policy { token: "11111111-1111-1111-1111-111111111111".into(), target_desktop_id: "22222222-2222-2222-2222-222222222222".into() },
+            root: PathBuf::from(r"D:\inert-owned-sandbox"), phase: parking_lot::Mutex::new(Phase::Hidden),
+            status_write: parking_lot::Mutex::new(()), ready: AtomicBool::new(false), terminating: AtomicBool::new(false),
+            hwnd: AtomicUsize::new(0), started: Instant::now(),
+        });
+        assert_eq!(execution_grant_store_from(Some(&configured), |_| false).unwrap(),
+            Some(PathBuf::from(r"D:\inert-owned-sandbox\execution-trust.v1.bin")));
+        let rt = configured.as_ref().unwrap();
+        *rt.phase.lock() = Phase::Shown;
+        assert!(execution_grant_store_from(Some(&configured), |_| false).is_err());
+        assert!(execution_grant_store_from(Some(&configured), |_| true).unwrap().is_some());
+        rt.terminating.store(true, Ordering::SeqCst);
+        assert!(execution_grant_store_from(Some(&configured), |_| true).is_err());
+    }
+
+    #[test]
+    fn background_execution_store_deadlines_match_the_native_guard() {
+        let configured = |phase, age| Some(Runtime {
+            policy: Policy { token: "11111111-1111-1111-1111-111111111111".into(), target_desktop_id: "22222222-2222-2222-2222-222222222222".into() },
+            root: PathBuf::from(r"D:\inert-owned-sandbox"), phase: parking_lot::Mutex::new(phase),
+            status_write: parking_lot::Mutex::new(()), ready: AtomicBool::new(false), terminating: AtomicBool::new(false),
+            hwnd: AtomicUsize::new(0), started: Instant::now() - age,
+        });
+        for phase in [Phase::Hidden, Phase::Registered, Phase::Placed] {
+            let fresh = configured(phase, STARTUP_LIMIT - Duration::from_secs(1));
+            assert!(execution_grant_store_from(Some(&fresh), |_| panic!("pre-show bootstrap must not query a lease")).unwrap().is_some());
+        }
+        for phase in [Phase::Hidden, Phase::Registered, Phase::Placed, Phase::Showing] {
+            let expired = configured(phase, STARTUP_LIMIT + Duration::from_secs(1));
+            assert!(execution_grant_store_from(Some(&expired), |_| true).is_err(), "expired pre-show runtime must be rejected");
+        }
+        let shown = configured(Phase::Shown, STARTUP_LIMIT + Duration::from_secs(1));
+        assert!(execution_grant_store_from(Some(&shown), |_| true).unwrap().is_some());
+        assert!(execution_grant_store_from(Some(&shown), |_| false).is_err());
+        let expired = configured(Phase::Shown, RUN_LIMIT + Duration::from_secs(1));
+        assert!(execution_grant_store_from(Some(&expired), |_| true).is_err());
     }
 
     #[test]

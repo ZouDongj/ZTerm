@@ -120,6 +120,12 @@
 
     send: function(channel) {
       var args = Array.prototype.slice.call(arguments, 1);
+      if (channel === 'pty-create' && window.ZTermExecutionTrust) {
+        window.ZTermExecutionTrust.startLocal(args[0], function(payload) {
+          return doInvoke(channel, { args: [payload] });
+        }).catch(function(error) { console.error('[startup authorization]', error); });
+        return;
+      }
       if (channel === 'pty-input' && window.ZTermDiagnostics?.enabled && args[0]) {
         var diagnosticInputId = window.ZTermDiagnostics.inputSent(args[0].tabId, args[0].data);
         if (diagnosticInputId != null) args[0] = Object.assign({}, args[0], { diagnosticInputId: diagnosticInputId });

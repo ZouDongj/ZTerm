@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod update_http;
+mod execution_trust;
 mod zterm;
 mod background_e2e;
 
@@ -37,6 +38,9 @@ async fn main() {
         .manage(pending_conns)
         .invoke_handler(tauri::generate_handler![
             zterm::get_profiles,
+            zterm::prepare_execution,
+            zterm::decide_execution,
+            zterm::cancel_execution,
             zterm::pty_create,
             zterm::pty_input,
             zterm::pty_diagnostics,

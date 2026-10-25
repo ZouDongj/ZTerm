@@ -7,8 +7,23 @@ const GAP_PX = 8; // fixed pixel gap between panes
 // never touches unrelated animations (CSS color transitions, bell flash)
 // living on the same element.
 const STRIP_SLIDE_ID = 'zterm-strip-slide';
+const _stripInlineHolds = new WeakMap();
+
+function _holdStripSlideInline(el, transform) {
+    if (!el.style) return;
+    const previous = el.style.transform || '';
+    el.style.transform = transform;
+    _stripInlineHolds.set(el, { value: el.style.transform, previous });
+}
 
 function _cancelStripSlides(el) {
+    const inline = _stripInlineHolds.get(el);
+    if (inline) {
+        _stripInlineHolds.delete(el);
+        // Another feature may have replaced the inline transform meanwhile.
+        // Restore only the value still owned by this strip slide.
+        if (el.style && el.style.transform === inline.value) el.style.transform = inline.previous;
+    }
     if (!el.getAnimations) return;
     try { el.getAnimations().forEach(a => { if (a.id === STRIP_SLIDE_ID) a.cancel(); }); } catch (e) {}
 }
@@ -103,6 +118,7 @@ function _enqueueSshConnect(profile, token) {
         sshAttempts.onRpcTerminal(token, 'failed', null, 'ssh-connect: missing host or username');
         return;
     }
+    const schedule = (authorization) => {
     _sshConnectChain = _sshConnectChain.then(() => new Promise((release) => {
         // Unsent requests of closed/replaced owners never start: the owner
         // binding tracks migrations, and closing cancels the attempt.
@@ -127,11 +143,19 @@ function _enqueueSshConnect(profile, token) {
         // this point, cancelling an attempt retires it immediately (it has
         // no native counterpart that could ever answer).
         sshAttempts.markInvoked(token);
-        ipcRenderer.invoke('ssh-connect', { profile, attemptId: token }).then(
-            (r) => { sshAttempts.onRpcTerminal(token, r && r.cancelled ? 'cancelled' : 'ok', r && r.tabId); finish(); },
-            (e) => { sshAttempts.onRpcTerminal(token, 'failed', null, String(e)); finish(); },
+        ipcRenderer.invoke('ssh-connect', { profile: authorization?.payload || profile, attemptId: token,
+            ...(authorization ? { executionOwner: authorization.executionOwner, executionTicket: authorization.executionTicket } : {}) }).then(
+            (r) => { if (typeof ZTermExecutionTrust !== 'undefined') ZTermExecutionTrust.finish('ssh:' + token); sshAttempts.onRpcTerminal(token, r && r.cancelled ? 'cancelled' : 'ok', r && r.tabId); finish(); },
+            (e) => { if (typeof ZTermExecutionTrust !== 'undefined') ZTermExecutionTrust.finish('ssh:' + token); sshAttempts.onRpcTerminal(token, 'failed', null, String(e)); finish(); },
         );
     }));
+    };
+    // Human confirmation precedes the serialized handshake slot and its budget.
+    if (typeof ZTermExecutionTrust !== 'undefined') {
+        ZTermExecutionTrust.authorizeSsh(profile, token).then(schedule, error => {
+            sshAttempts.onRpcTerminal(token, 'failed', null, String(error?.message || error));
+        });
+    } else schedule(null); // Minimal renderer fixtures; the native boundary still denies missing tickets.
 }
 
 // Cancel the SSH attempt an owner currently awaits, by immutable identity:
@@ -142,6 +166,7 @@ function _enqueueSshConnect(profile, token) {
 // 'ssh-disconnect' for reconnect/retry, matching the existing producers.
 function _cancelSshAttemptOf(owner, backendId, channel) {
     if (!owner) return;
+    if (typeof ZTermExecutionTrust !== 'undefined') ZTermExecutionTrust.cancelOwner(owner);
     const token = sshAttempts.ownerAttempt(owner);
     if (!token && !backendId) return;
     const payload = {};
@@ -1096,6 +1121,7 @@ const TabManager = {
             document.getElementById('settings-pane')?.classList.remove('active');
         }
         this._closingTabs.add(id);
+        if (typeof ZTermExecutionTrust !== 'undefined') ZTermExecutionTrust.cancelOwner(tab);
         // A hover expansion on the dying tab lapses here: leaving the id set
         // would make the next hovered tab skip its 150ms dwell (the "already
         // expanded, retarget immediately" branch) even though the strip is
@@ -1685,7 +1711,7 @@ const TabManager = {
             el._stripSlideHeld = true;
             _cancelStripSlides(el);
             if (Math.abs(from - to) < 0.5) {
-                if (el.style) el.style.transform = `translateX(${to}px)`;
+                _holdStripSlideInline(el, `translateX(${to}px)`);
                 return;
             }
             try {
@@ -1726,7 +1752,7 @@ const TabManager = {
             const from = prev == null ? 0 : prev - layoutLeft;
             const to = -cumDx;
             if (Math.abs(from - to) < 0.5) {
-                if (btn.style) btn.style.transform = `translateX(${to}px)`;
+                _holdStripSlideInline(btn, `translateX(${to}px)`);
                 continue;
             }
             try {
@@ -2482,6 +2508,7 @@ const TabManager = {
         // live session.
         if (pane._closing) return;
         pane._closing = true;
+        if (typeof ZTermExecutionTrust !== 'undefined') ZTermExecutionTrust.cancelOwner(pane);
         if (tab._maximizedPaneId === paneId) tab._maximizedPaneId = null;
         // The pane's session is destroyed below: its directory memory goes,
         // but the tab's dock open state survives — the updateTarget call
@@ -3132,6 +3159,7 @@ const TabManager = {
         const all = getAllPanes(tab);
         const fp = all[0];
         all.forEach((p, i) => {
+            if (i > 0 && typeof ZTermExecutionTrust !== 'undefined') ZTermExecutionTrust.cancelOwner(p);
             if (i > 0 && p.tabId) {
                 this._markClosed(p.tabId);
                 // Attempt identity carries the pending cancel — see _closePane.

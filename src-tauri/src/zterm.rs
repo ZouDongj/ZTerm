@@ -354,13 +354,16 @@ pub struct PendingGuard {
 
 impl PendingGuard {
     pub fn new(pm: PendingMap, attempt: String, backend: String) -> Self {
+        Self::with_cancel_flag(pm, attempt, backend, Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+
+    pub(crate) fn with_cancel_flag(pm: PendingMap, attempt: String, backend: String, cancel: Arc<std::sync::atomic::AtomicBool>) -> Self {
         // The SAME cancel Arc is inserted into the registry and retained
         // here. A concurrent cancel_pending(Attempt(token)) between this
         // insert and any later use sets THIS flag; the task must observe it
         // at its checkpoints. Re-looking the entry up would race: the entry
         // may already be removed-and-cancelled, and a fresh false fallback
         // would discard the cancellation.
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         pm.lock().insert(
             attempt.clone(),
             PendingConnection {
@@ -761,6 +764,56 @@ pub type CredentialStore = Arc<Mutex<HashMap<String, Credential>>>;
 pub struct Credential {
     password: Option<String>,
     private_key_path: Option<String>,
+    authorization: crate::execution_trust::AuthSource,
+}
+
+fn execution_auth_source(profile: &Value, credentials: &CredentialStore) -> Result<crate::execution_trust::AuthSource, String> {
+    let Some(id) = profile.get("credentialId").and_then(Value::as_str).filter(|id| !id.is_empty()) else {
+        return Ok(crate::execution_trust::AuthSource::none());
+    };
+    credentials.lock().get(id).map(|credential| credential.authorization.clone())
+        .ok_or_else(|| "startup credential was revoked or is unavailable".into())
+}
+
+#[tauri::command]
+pub fn prepare_execution(app: AppHandle, cred_state: State<'_, CredentialStore>, args: Vec<Value>) -> Result<Value, String> {
+    let request = args.first().cloned().unwrap_or(json!({}));
+    let kind = request.get("kind").and_then(Value::as_str).unwrap_or("");
+    let owner = request.get("owner").and_then(Value::as_str).unwrap_or("");
+    let payload = request.get("payload").cloned().unwrap_or(json!({}));
+    let result = (|| {
+        let auth = if kind == "ssh" { execution_auth_source(&payload, &cred_state)? } else { crate::execution_trust::AuthSource::none() };
+        crate::execution_trust::prepare(kind, owner, &payload, auth)
+    })();
+    if let Err(ref error) = result {
+        if kind == "local" {
+            let _ = app.emit("pty-created", json!({ "tabId":"", "requestId":payload.get("requestId"), "executionOwner":owner, "spawnError":error }));
+        }
+    }
+    result
+}
+
+#[tauri::command]
+pub fn decide_execution(args: Vec<Value>) -> Result<Value, String> {
+    let request = args.first().cloned().unwrap_or(json!({}));
+    crate::execution_trust::decide(
+        request.get("challengeId").and_then(Value::as_str).unwrap_or(""),
+        request.get("allow").and_then(Value::as_bool).unwrap_or(false),
+        request.get("remember").and_then(Value::as_bool).unwrap_or(false),
+    )
+}
+
+#[tauri::command]
+pub fn cancel_execution(app: AppHandle, args: Vec<Value>) -> Result<(), String> {
+    let request = args.first().cloned().unwrap_or(json!({}));
+    let owner = request.get("owner").and_then(Value::as_str).unwrap_or("");
+    crate::execution_trust::cancel(owner)?;
+    if owner.starts_with("local:") {
+        if let Some(request_id) = request.get("requestId").and_then(Value::as_str) {
+            let _ = app.emit("pty-created", json!({ "tabId":"", "requestId":request_id, "executionOwner":owner, "spawnError":"启动已取消或授权已失效" }));
+        }
+    }
+    Ok(())
 }
 
 // ── Config helpers ──
@@ -1386,7 +1439,16 @@ pub async fn pty_create(
     state: State<'_, SessionMap>,
     args: Vec<Value>,
 ) -> Result<Value, String> {
-    let params = args.into_iter().next().unwrap_or(json!({}));
+    let requested = args.into_iter().next().unwrap_or(json!({}));
+    let execution = match crate::execution_trust::take_local(&requested) {
+        Ok(execution) => execution,
+        Err(error) => {
+            let _ = app.emit("pty-created", json!({ "tabId":"", "requestId":requested.get("requestId"), "executionOwner":requested.get("executionOwner"), "spawnError":error }));
+            return Err(error);
+        }
+    };
+    let params = &execution.payload;
+    let execution_owner = requested.get("executionOwner").and_then(Value::as_str).unwrap_or("");
     let shell = params
         .get("shell")
         .and_then(|v| v.as_str())
@@ -1432,7 +1494,7 @@ pub async fn pty_create(
     let emit_spawn_error = |app: &AppHandle, request_id: &str, msg: &str| {
         let _ = app.emit(
             "pty-created",
-            json!({ "tabId": "", "requestId": request_id, "spawnError": msg }),
+            json!({ "tabId": "", "requestId": request_id, "executionOwner":execution_owner, "spawnError": msg }),
         );
     };
 
@@ -1464,10 +1526,8 @@ pub async fn pty_create(
     // aware TUI apps (which key on COLORTERM) enable their direct-color paths.
     cmd.env("COLORTERM", "truecolor");
 
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| {
+    let child = execution.start(|| {
+        pair.slave.spawn_command(cmd).map_err(|e| {
             // os error 267 ("The directory name is invalid") is the common
             // case: the profile's startup directory no longer exists. Name
             // the cwd so the user knows what to fix instead of a blank tab.
@@ -1475,9 +1535,12 @@ pub async fn pty_create(
                 Some(dir) => format!("spawn failed (cwd: {dir}): {e}"),
                 None => format!("spawn failed: {e}"),
             };
-            emit_spawn_error(&app, &request_id, &msg);
             msg
-        })?;
+        })
+    }).map_err(|msg| {
+        emit_spawn_error(&app, &request_id, &msg);
+        msg
+    })?;
     let mut reader = pair
         .master
         .try_clone_reader()
@@ -1518,7 +1581,7 @@ pub async fn pty_create(
     }
     let _ = app.emit(
         "pty-created",
-        json!({ "tabId": tab_id, "requestId": request_id }),
+        json!({ "tabId": tab_id, "requestId": request_id, "executionOwner":execution_owner }),
     );
 
     let writer = Arc::new(Mutex::new(Some(writer)));
@@ -1612,21 +1675,6 @@ pub async fn pty_create(
 }
 
 // ── Command: ssh_connect (emits ssh-connecting → ssh-connected / ssh-error) ──
-
-/// Resolve the credential: returns (password, private key path); both None means no credential.
-fn resolve_ssh_credential(
-    profile: &Value,
-    cred_store: &CredentialStore,
-) -> (Option<String>, Option<String>) {
-    // credentialId takes priority
-    if let Some(cred_id) = profile.get("credentialId").and_then(|v| v.as_str()) {
-        let store = cred_store.lock();
-        if let Some(cred) = store.get(cred_id) {
-            return (cred.password.clone(), cred.private_key_path.clone());
-        }
-    }
-    (None, None)
-}
 
 /// Which stage of SFTP channel establishment failed (issue #29). The panel
 /// toast names the stage so "the server has no SFTP subsystem" is
@@ -2483,7 +2531,7 @@ async fn next_shell_message(
 /// Values above 65535 are rejected with the offending value in the message —
 /// a bare `as u16` would silently truncate them (70000 becomes 4464), pointing
 /// the connection and every error report at the wrong port.
-fn parse_ssh_port(profile: &Value) -> Result<u16, String> {
+pub(crate) fn parse_ssh_port(profile: &Value) -> Result<u16, String> {
     let raw = profile.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
     if raw == 0 {
         return Err("ssh-connect: missing or invalid port".into());
@@ -2506,8 +2554,25 @@ pub async fn ssh_connect(
     args: Vec<Value>,
 ) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
-    let empty_obj = json!({});
-    let profile = params.get("profile").unwrap_or(&empty_obj);
+    let requested_profile = params.get("profile").cloned().unwrap_or(json!({}));
+    let expected_owner = format!("ssh:{}", params.get("attemptId").and_then(Value::as_str).unwrap_or(""));
+    if params.get("executionOwner").and_then(Value::as_str) != Some(expected_owner.as_str()) {
+        return Err("startup authorization belongs to another SSH attempt".into());
+    }
+    let (auth, password, key_path) = {
+        let credentials = cred_state.lock();
+        if let Some(id) = requested_profile.get("credentialId").and_then(Value::as_str).filter(|id| !id.is_empty()) {
+            let credential = credentials.get(id).ok_or("startup credential was revoked or is unavailable")?;
+            (credential.authorization.clone(), credential.password.clone(), credential.private_key_path.clone())
+        } else { (crate::execution_trust::AuthSource::none(), None, None) }
+    };
+    let execution = crate::execution_trust::take_ssh(
+        &requested_profile,
+        params.get("executionOwner").and_then(Value::as_str).unwrap_or(""),
+        params.get("executionTicket").and_then(Value::as_str).unwrap_or(""),
+        &auth,
+    )?;
+    let profile = &execution.payload;
     let renderer_id = params
         .get("rendererId")
         .and_then(|v| v.as_str())
@@ -2580,11 +2645,16 @@ pub async fn ssh_connect(
     // removes the entry and sets the flag; re-looking it up would miss the
     // removal and fall back to a fresh false flag, discarding the
     // cancellation.
-    let _guard = PendingGuard::new(
+    // Gate cancellation and this handoff share one decision lock. The exact
+    // same flag remains reachable through both guards during establishment.
+    // Lock order is execution gate -> pending registry; pending cleanup never
+    // acquires the execution gate.
+    let _guard = execution.start(|| Ok(PendingGuard::with_cancel_flag(
         Arc::clone(&*pending_state.inner()),
         attempt_id.clone(),
         tab_id.clone(),
-    );
+        execution.cancel_flag(),
+    )))?;
     let cancel_flag = _guard.cancel_flag();
     let _ = app.emit(
         "ssh-connecting",
@@ -2604,8 +2674,8 @@ pub async fn ssh_connect(
         };
     }
 
-    // Resolve credential (password or private key path)
-    let (password, key_path) = resolve_ssh_credential(profile, &cred_state);
+    // Credential provenance and values were snapshotted together before the
+    // authorization ticket was consumed; a second lookup cannot change them.
 
     // Connect via russh — use mut handle for auth/channel (needs &mut self)
     let addr = format!("{}:{}", host, port);
@@ -5333,7 +5403,7 @@ fn base64_encode_bytes(data: &[u8]) -> String {
 
 // ── DPAPI password encryption (parity with Electron safeStorage) ──
 
-fn dpapi_encrypt(plaintext: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn dpapi_encrypt(plaintext: &str) -> Result<Vec<u8>, String> {
     unsafe {
         use winapi::um::dpapi::{CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN};
         use winapi::um::wincrypt::DATA_BLOB;
@@ -5367,7 +5437,7 @@ fn dpapi_encrypt(plaintext: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-fn dpapi_decrypt(data: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn dpapi_decrypt(data: &[u8]) -> Result<Vec<u8>, String> {
     unsafe {
         use winapi::um::dpapi::{CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN};
         use winapi::um::wincrypt::DATA_BLOB;
@@ -5522,9 +5592,21 @@ fn credential_from_encrypted(encrypted_pwd: &str, key_path: &str) -> Result<Cred
     } else {
         None
     };
+    // Provenance identifies the encrypted source, never the decrypted password.
+    // Legacy plaintext-compatible encodings remain usable but cannot create a
+    // reusable startup grant. Key references include their relative-path base.
+    let rememberable = encrypted_pwd.is_empty() || encrypted_pwd.starts_with("dpapi:");
+    let source = if rememberable {
+        json!({ "encryptedSource":encrypted_pwd, "keyPath":key_path,
+            "keyBase":if key_path.is_empty() || PathBuf::from(key_path).is_absolute() { String::new() }
+                else { std::env::current_dir().map_err(|_| json!({"error":"credential path base is unavailable"}))?.to_string_lossy().to_string() } })
+    } else {
+        json!({ "ephemeral":crate::execution_trust::nonce().map_err(|_| json!({"error":"credential provenance could not be generated"}))?, "keyPath":key_path })
+    };
     Ok(Credential {
         password,
         private_key_path,
+        authorization: crate::execution_trust::AuthSource { identity: source, rememberable },
     })
 }
 
@@ -10740,6 +10822,24 @@ mod tests {
         // Neither field: a credential with no secret at all (agent auth).
         let cred = credential_from_encrypted("", "").expect("empty");
         assert!(cred.password.is_none() && cred.private_key_path.is_none());
+    }
+
+    #[test]
+    fn execution_credential_provenance_never_uses_decrypted_password_as_identity() {
+        let plaintext = "synthetic-r03-secret";
+        let legacy = base64_encode_bytes(plaintext.as_bytes());
+        let first = credential_from_encrypted(&legacy, "").unwrap();
+        let second = credential_from_encrypted(&legacy, "").unwrap();
+        assert!(!first.authorization.rememberable);
+        assert_ne!(first.authorization.identity, second.authorization.identity);
+        let identity = first.authorization.identity.to_string();
+        assert!(!identity.contains(plaintext));
+        assert!(!identity.contains(&legacy));
+        let encrypted = format!("dpapi:{}", base64_encode_bytes(&dpapi_encrypt(plaintext).unwrap()));
+        let current = credential_from_encrypted(&encrypted, "").unwrap();
+        assert!(current.authorization.rememberable);
+        assert_eq!(current.authorization.identity["encryptedSource"], encrypted);
+        assert!(!current.authorization.identity.to_string().contains(plaintext));
     }
 
     #[test]

@@ -6429,6 +6429,7 @@ dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
  "arboard",
+ "hmac 0.12.1",
  "parking_lot",
  "portable-pty",
  "rand 0.10.2",

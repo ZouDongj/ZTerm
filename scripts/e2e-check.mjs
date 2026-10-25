@@ -29,6 +29,7 @@ import { backgroundDesktopIndex, validateFreshDesktopSnapshot, observeDesktopStr
 import { connectVerifiedEndpoint } from './e2e-ownership.mjs';
 import { requireBackgroundCapability } from './e2e-background-capability.mjs';
 import { writeBackgroundJson } from './e2e-background-json.mjs';
+import { consentCancellationPassed, executionConsent, createSshFailureApproval, createUiSshFixture, createSshFailureEndpoint } from './e2e-execution-fixtures.mjs';
 
 const SOURCE_EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
 let EXE = SOURCE_EXE;
@@ -479,6 +480,7 @@ async function main() {
   // get-data-dir-info check stays as an independent in-page guard, not the
   // ownership proof.
   const cdp = await connectOwnedPage();
+  let sshFailureEndpoint = null;
 
   try {
     // Wait for the page to fully load (the CDP page is connectable as soon as
@@ -920,25 +922,89 @@ async function main() {
     await cdp.eval(`closeSettingsTab()`);
     await sleep(800);
 
-    // 11. SSH failure path: connect to an address that refuses immediately →
+    // 11. SSH failure path: an owned listener closes before authentication →
     // the ssh-error event is handled and the frontend does not crash. Count
     // ssh-error directly via the Tauri event API (does not depend on transient
     // UI state like toasts — more stable)
+    sshFailureEndpoint = await createSshFailureEndpoint();
+    const consentGrantPath = join(sandbox.directory, 'execution-trust.v1.bin');
+    if (existsSync(consentGrantPath)) throw new Error('Native consent fixture sandbox already contains remembered grants');
+    const consentEndpoint = JSON.stringify({ host: sshFailureEndpoint.host, port: sshFailureEndpoint.port });
+    const consentRead = `(${executionConsent.toString()})(document, ${consentEndpoint})`;
     await cdp.eval(`window.__sshErrCount = 0; window.__TAURI__.event.listen('ssh-error', () => { window.__sshErrCount = (window.__sshErrCount || 0) + 1; })`);
-    await cdp.eval(`
+    const consentAttempt = await cdp.eval(`
       (() => {
         const existing = TabManager.tabs.find(t => t.type === 'ssh');
         if (existing) TabManager.closeTab(existing.id);
         TabManager.sshProfiles = TabManager.sshProfiles || [];
         TabManager.sshProfiles.push({
-          id: 'e2e-fail', name: 'E2E Fail', type: 'ssh', host: '127.0.0.1', port: 1,
+          id: 'e2e-fail', name: 'E2E Fail', type: 'ssh', host: '127.0.0.1', port: ${sshFailureEndpoint.port},
           username: 'e2e', password: '', encryptedPassword: '', privateKeyPath: '',
         });
         connectSSHProfile('e2e-fail');
-        return true;
+        const tab = TabManager.tabs.find(t => t.sshProfileId === 'e2e-fail');
+        return { tabId: tab.id, attemptId: sshAttempts.ownerAttempt(tab) };
       })()
     `);
+    if (!consentAttempt?.tabId || !consentAttempt?.attemptId) throw new Error('Native consent fixture has no attempt owner');
+    await waitForValue(cdp, `(${consentRead}).shown`, true, 15000);
+    const cancelledConsent = await cdp.eval(`(${executionConsent.toString()})(document, ${consentEndpoint}, 'cancel')`);
+    check('执行授权：真实 SSH 确认默认不记忆，取消前没有连接', cancelledConsent.shown === true &&
+      cancelledConsent.rememberPresent === true && cancelledConsent.rememberChecked === false &&
+      cancelledConsent.allowLabel === '仅本次允许' && sshFailureEndpoint.state.connections === 0,
+      JSON.stringify({ ...cancelledConsent, connections: sshFailureEndpoint.state.connections }));
+    const consentCancellationReady = await waitForValue(cdp, `(() => {
+      const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(consentAttempt.tabId)});
+      const token = ${JSON.stringify(consentAttempt.attemptId)};
+      return !document.getElementById('overlay-confirm').classList.contains('open') &&
+        !sshAttempts.ownerWants(token) && !sshAttempts.ownerOf(token) && !sshAttempts.ownerAttempt(tab) &&
+        sshAttempts.finalState(token) != null;
+    })()`, true, 15000);
+    const consentRetirement = await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(consentAttempt.tabId)});
+      const token = ${JSON.stringify(consentAttempt.attemptId)};
+      return { tabPresent: !!tab, dialogClosed: !document.getElementById('overlay-confirm').classList.contains('open'),
+        ownerWants: sshAttempts.ownerWants(token), ownerBound: !!sshAttempts.ownerOf(token), ownerPending: !!sshAttempts.ownerAttempt(tab),
+        finalState: sshAttempts.finalState(token), errors: window.__sshErrCount };
+    })()`);
+    const consentCancellationOk = consentCancellationPassed(consentCancellationReady, consentRetirement, sshFailureEndpoint.state.connections);
+    check('执行授权：取消后 owner 已退役且没有原生连接', consentCancellationOk,
+      JSON.stringify({ ...consentRetirement, settled: consentCancellationReady, connections: sshFailureEndpoint.state.connections }));
+    if (!consentCancellationOk) throw new Error('Real Cancel did not retire its owner before cleanup');
+    // These idempotent calls are cleanup only. They cannot supply acceptance
+    // evidence for the product Cancel button above.
+    await cdp.eval(`(async () => {
+      const token = ${JSON.stringify(consentAttempt.attemptId)};
+      await ZTermExecutionTrust.cancel('ssh:' + token);
+      await ipcRenderer.invoke('ssh-disconnect', { attemptId: token });
+    })()`);
+    if (sshFailureEndpoint.state.connections !== 0) throw new Error('Cancelled consent reached the owned loopback listener');
+    await cdp.eval(`TabManager.reconnectTab(${JSON.stringify(consentAttempt.tabId)})`);
+    await waitForValue(cdp, `(${consentRead}).shown`, true, 15000);
+    const reconnectedConsent = await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(consentAttempt.tabId)});
+      return { attemptId: sshAttempts.ownerAttempt(tab), previousRetired: !sshAttempts.ownerWants(${JSON.stringify(consentAttempt.attemptId)}) };
+    })()`);
+    if (!reconnectedConsent.attemptId || reconnectedConsent.attemptId === consentAttempt.attemptId || !reconnectedConsent.previousRetired) {
+      throw new Error('Consent reconnect did not create a fresh attempt owner');
+    }
+    const allowedConsent = await cdp.eval(`(() => {
+      const reviewed = (${executionConsent.toString()})(document, ${consentEndpoint}, 'allow-once');
+      // The first decision comes from the real product button. Only future
+      // retry preparations may use the narrow native one-use fixture helper.
+      window.__sshFailPrev = ipcRenderer.invoke;
+      window.__sshFailApproval = (${createSshFailureApproval.toString()})(window.__sshFailPrev, ${consentEndpoint});
+      ipcRenderer.invoke = window.__sshFailApproval.invoke;
+      return reviewed;
+    })()`);
+    await waitForValue(cdp, `!document.getElementById('overlay-confirm').classList.contains('open')`, true, 5000);
     const sshErrCount = await waitForValue(cdp, `window.__sshErrCount`, (v) => v > 0, 40000, 'gt0');
+    const consentGrantAbsent = !existsSync(consentGrantPath);
+    check('执行授权：真实仅本次允许按钮经过原生决定后连接', allowedConsent.shown === true &&
+      allowedConsent.rememberPresent === true && allowedConsent.rememberChecked === false &&
+      allowedConsent.allowLabel === '仅本次允许' && sshFailureEndpoint.state.connections > 0 && consentGrantAbsent,
+      JSON.stringify({ ...allowedConsent, connections: sshFailureEndpoint.state.connections, attemptId: reconnectedConsent.attemptId, grantFileAbsent: consentGrantAbsent }));
+    if (!consentGrantAbsent) throw new Error('One-time consent created a remembered grant in the owned sandbox');
     const sshTabAlive = await cdp.eval(`TabManager.tabs.some(t => t.type === 'ssh')`);
     const appAlive = await cdp.eval(`typeof TabManager.getActive === 'function'`);
     check('SSH 连接失败被处理且前端存活', sshTabAlive && appAlive && sshErrCount > 0,
@@ -1179,23 +1245,17 @@ async function main() {
     //      the button into freshly built headers only — a pane that
     //      disconnected after its node existed never gained the button, a
     //      reconnect never dropped it, and _applySshConnecting left a stale
-    //      dot. Everything here is the real lifecycle: only the ssh-connect
-    //      invoke is stubbed, and ONLY for the fixture profile
+    //      dot. Everything here is the real lifecycle: authorization transport
+    //      and ssh-connect are stubbed ONLY for the fixture profile
     //      (host 'stub.invalid'), so no dial ever leaves the renderer and the
-    //      section-11 retry loop against 127.0.0.1:1 keeps its real behavior.
+    //      section-11 retry loop against the owned listener stays native.
     //      Events travel the real Tauri channel into ipc.js, the attempt
     //      registry applies connecting/connected through the rpc applier, and
     //      the assertions read the real DOM.
     await cdp.eval(`(() => {
       window.__sshStubPrev = ipcRenderer.invoke;
-      window.__sshStub = { calls: 0 };
-      ipcRenderer.invoke = (cmd, args) => {
-        if (cmd === 'ssh-connect' && args && args.profile && args.profile.host === 'stub.invalid') {
-          window.__sshStub.calls++;
-          return Promise.resolve({ tabId: 'e2e-ssh-stub-' + window.__sshStub.calls });
-        }
-        return window.__sshStubPrev(cmd, args);
-      };
+      window.__sshStub = (${createUiSshFixture.toString()})(window.__sshStubPrev);
+      ipcRenderer.invoke = window.__sshStub.invoke;
       TabManager.sshProfiles = TabManager.sshProfiles || [];
       TabManager.sshProfiles.push({
         id: 'e2e-ssh-stub', name: 'E2E SSH Stub', type: 'ssh', host: 'stub.invalid', port: 22,
@@ -1345,6 +1405,7 @@ async function main() {
         ipcRenderer.invoke = window.__sshStubPrev;
         r.invokeRestored = ipcRenderer.invoke === window.__sshStubPrev;
         r.stubCalls = window.__sshStub.calls;
+        r.stubPrepares = window.__sshStub.prepares;
         return r;
       })()`).catch(e => ({ evalError: String(e && e.message || e) }));
       await sleep(900); // let the staggered tab removals settle
@@ -1356,7 +1417,7 @@ async function main() {
       await cdp.eval(`(() => { delete window.__sshStub; delete window.__sshStubPrev; return true; })()`).catch(() => null);
       check('U-01/U-06 fixture 清理：stub invoke 恢复、标签与 profile 移除',
         !!hdrCleanup && hdrCleanup.invokeRestored === true && hdrCleanup.profileGone === true &&
-        !hdrCleanup.evalError && !hdrCleanup.sshCloseErr && !hdrCleanup.localCloseErr && hdrCleanup.stubCalls >= 2 &&
+        !hdrCleanup.evalError && !hdrCleanup.sshCloseErr && !hdrCleanup.localCloseErr && hdrCleanup.stubCalls >= 2 && hdrCleanup.stubPrepares >= hdrCleanup.stubCalls &&
         !!hdrResidual && hdrResidual.sshGone === true && hdrResidual.localGone === true && hdrResidual.paneBtns === 0,
         JSON.stringify({ hdrCleanup, hdrResidual }));
     } finally {
@@ -1377,7 +1438,7 @@ async function main() {
 
     // 12. SFTP panel: open → panel visible → close
     // Section 11 leaves a real retry chain (backoff 2s/5s/10s) running against
-    // 127.0.0.1:1: every ssh-error landing in the retry branch calls
+    // the owned loopback listener: every ssh-error in the retry branch calls
     // SFTP.updateTarget() (ipc.js), which re-reads the ACTIVE tab against the
     // per-tab open set and suspends a dock whose active tab shows no connected
     // SSH target — including this section's artificial 'e2e-dummy-tab'
@@ -1395,6 +1456,28 @@ async function main() {
       return true;
     })()`);
     await sleep(300); // let an in-flight attempt's terminal error land before the window
+    const nativeFixtureCleanup = await cdp.eval(`(async () => {
+      const targets = TabManager.tabs.filter(t => t.type === 'ssh' && t.host === '127.0.0.1' && Number(t.port) === ${sshFailureEndpoint.port});
+      const identities = targets.map(t => ({ attemptId: sshAttempts.ownerAttempt(t), tabId: t.tabId }));
+      for (const tab of targets) TabManager.closeTab(tab.id);
+      for (const identity of identities) {
+        if (identity.attemptId) await ipcRenderer.invoke('cancel-execution', { owner: 'ssh:' + identity.attemptId });
+        if (identity.attemptId || identity.tabId) await ipcRenderer.invoke('ssh-disconnect', identity);
+      }
+      TabManager.sshProfiles = (TabManager.sshProfiles || []).filter(p => p.id !== 'e2e-fail');
+      const approval = window.__sshFailApproval;
+      await approval.cancelAll();
+      const restored = ipcRenderer.invoke === approval.invoke;
+      if (!restored) throw new Error('Native SSH fixture transport was not restored by the UI fixture');
+      ipcRenderer.invoke = window.__sshFailPrev;
+      delete window.__sshFailApproval; delete window.__sshFailPrev;
+      return { restored, retired: targets.length, prepares: approval.prepares, approvals: approval.approvals };
+    })()`);
+    check('SSH native fixture 使用一次授权并恢复 transport', nativeFixtureCleanup.restored === true &&
+      nativeFixtureCleanup.retired > 0 && nativeFixtureCleanup.approvals > 0 && nativeFixtureCleanup.prepares >= nativeFixtureCleanup.approvals &&
+      sshFailureEndpoint.state.connections > 0 && sshFailureEndpoint.state.error === null,
+      JSON.stringify({ ...nativeFixtureCleanup, endpoint: sshFailureEndpoint.state }));
+    await sleep(400); // settle the fixture tab removal before the artificial SFTP binding
     await cdp.eval(`SFTP.open('e2e-dummy-tab')`);
     await sleep(800);
     const sftpOpen = await cdp.eval(`document.getElementById('overlay-sftp').classList.contains('open')`);
@@ -5121,6 +5204,7 @@ async function main() {
     cdp.close();
     const stopped = killExisting();
     restoreConfig();
+    await sshFailureEndpoint?.close();
     // Anything other than exactly true — owned kill failure or an explicit
     // incomplete-cleanup report (unproven live holder on a launch port) —
     // fails the run; uncertain cleanup is never treated as success.

@@ -21,7 +21,7 @@ parking_lot = "0.12"
 regex = "1"
 russh = { version = "0.60", features = ["aws-lc-rs"] }
 anyhow = "1"
-winapi = { version = "0.3", features = ["dpapi", "minwindef", "ntdef", "shellapi", "winbase", "wincrypt", "wingdi", "winnt", "winreg", "winuser"] }
+winapi = { version = "0.3", features = ["bcrypt", "combaseapi", "dpapi", "fileapi", "handleapi", "knownfolders", "minwindef", "ntdef", "processthreadsapi", "securitybaseapi", "shellapi", "shlobj", "sysinfoapi", "winbase", "wincrypt", "wingdi", "winnt", "winreg", "winuser"] }
 arboard = "3"
 # Electron safeStorage compatibility (OSCrypt AES-GCM decryption)
 aes-gcm = "0.10"
@@ -33,6 +33,8 @@ windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_
 # Update installer integrity check (sha256 of the downloaded setup exe).
 # Already in the lockfile as an indirect dep; declared here for direct use.
 sha2 = "0.10"
+# Already locked through the SSH stack; keyed grants never store a password hash.
+hmac = "0.12"
 # Disable WebView2's built-in browser accelerator keys (Ctrl+F/P/R, F5, F12,
 # Ctrl+J downloads popup, ...) via ICoreWebView2Settings3. Versions are pinned
 # by the lockfile to the same ones wry 0.55 pulls in, so no tree changes.

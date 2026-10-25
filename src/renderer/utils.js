@@ -168,6 +168,7 @@ function showConfirm(msg, onOk, okText) {
     // safe default so terminal keys (incl. Enter) cannot reach behind it.
     _focusConfirmSafeDefault(cancelBtn);
     _activeConfirmCleanup = cleanup;
+    return cleanup;
 }
 
 // ── Smart copy helpers ──

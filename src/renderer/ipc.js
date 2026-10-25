@@ -265,7 +265,11 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
 });
 
 // ── IPC: PTY created (local) ──
-ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError }) => {
+ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError, executionOwner }) => {
+    if (typeof ZTermExecutionTrust !== 'undefined' && !ZTermExecutionTrust.acceptLocalResult(requestId, executionOwner)) {
+        if (tabId) ipcRenderer.send('pty-destroy', { tabId });
+        return;
+    }
     if (requestId) {
         for (const tab of TabManager.tabs) {
             // A tab inside its close window cancelled its pending requests at
