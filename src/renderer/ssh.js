@@ -876,10 +876,11 @@ async function _savePasswordInline() {
     if (!password || !_editingSSHId) return;
     const profileId = _editingSSHId;
     const editGeneration = _sshEditGeneration;
+    const isCurrentEdit = () => _sshEditGeneration === editGeneration && _editingSSHId === profileId;
     try {
         const result = await ipcRenderer.invoke('encrypt-password', { plaintext: password });
         if (result.error) {
-            showToast('密码加密失败: ' + result.error, true);
+            if (isCurrentEdit()) showToast('密码加密失败: ' + result.error, true);
             return;
         }
         const changed = await _mutateSSHProfiles(current => {
@@ -889,15 +890,13 @@ async function _savePasswordInline() {
             profiles[idx] = { ...profiles[idx], encryptedPassword: result.encrypted };
             return profiles;
         });
-        if (changed) {
-            if (_sshEditGeneration === editGeneration && _editingSSHId === profileId) {
-                _sshPwdDirty = false;
-                _renderPasswordField('view');
-            }
+        if (changed && isCurrentEdit()) {
+            _sshPwdDirty = false;
+            _renderPasswordField('view');
             showToast('密码已保存');
         }
     } catch(e) {
-        showToast('密码保存失败: ' + e.message, true);
+        if (isCurrentEdit()) showToast('密码保存失败: ' + e.message, true);
     }
 }
 
@@ -1688,6 +1687,7 @@ function closeSSHEdit() {
 async function saveSSHEdit() {
     const profileId = _editingSSHId;
     const editGeneration = _sshEditGeneration;
+    const isCurrentEdit = () => _sshEditGeneration === editGeneration && _editingSSHId === profileId;
     const templatePassword = _sshTemplatePwd || '';
     const loginScripts = collectLoginScripts();
     const name = document.getElementById('ssh-edit-name').value.trim();
@@ -1734,11 +1734,12 @@ async function saveSSHEdit() {
             });
             if (!changed) return;
         } catch (e) {
-            showToast('SSH 连接保存失败: ' + ((e && e.message) || e || 'unknown'), true);
+            if (isCurrentEdit()) showToast('SSH 连接保存失败: ' + ((e && e.message) || e || 'unknown'), true);
             return;
         }
+        if (!isCurrentEdit()) return;
         renderSSHManager();
-        if (_sshEditGeneration === editGeneration && _editingSSHId === profileId) closeSSHEdit();
+        closeSSHEdit();
         showToast('SSH 连接已保存');
     };
 
@@ -1746,12 +1747,12 @@ async function saveSSHEdit() {
         try {
             const result = await ipcRenderer.invoke('encrypt-password', { plaintext: password });
             if (result.error) {
-                showToast('密码加密失败: ' + result.error, true);
+                if (isCurrentEdit()) showToast('密码加密失败: ' + result.error, true);
                 return;
             }
             await doSave(result.encrypted);
         } catch(e) {
-            showToast('密码加密失败', true);
+            if (isCurrentEdit()) showToast('密码加密失败', true);
         }
     } else {
         // No new password typed: editing keeps the profile's own ciphertext;

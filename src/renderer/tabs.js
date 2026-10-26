@@ -201,6 +201,17 @@ function _credIdStillReferenced(tabs, credId, excludePane) {
     return false;
 }
 
+function _adoptPaneFieldsIntoTab(tab, pane) {
+    const previousCredId = tab._credId;
+    adoptPaneFieldsIntoTab(tab, pane);
+    // Adoption may replace or clear the container's credential reference.
+    // Release a displaced handle only when no live owner remains.
+    if (previousCredId && previousCredId !== tab._credId
+        && !_credIdStillReferenced(TabManager.tabs, previousCredId)) {
+        ipcRenderer.send('revoke-credential', { credId: previousCredId });
+    }
+}
+
 function _sshConnectWithCredentials(tab, pane) {
     const isPane = !!pane;
     // One NEW attempt per initiated connect: reconnect/retry callers cancel
@@ -2747,7 +2758,7 @@ const TabManager = {
         // Session identity (type/ssh fields/command/args/credential) is adopted
         // from the extracted pane's own session — the source tab's fields may
         // belong to a different session and must not leak into the new tab
-        adoptPaneFieldsIntoTab(nt, pane);
+        _adoptPaneFieldsIntoTab(nt, pane);
         // An in-flight SSH attempt follows its session onto the extracted
         // tab: the attempt keeps its immutable token/backend identity, only
         // the owner binding moves (close/reconnect of the extracted wrapper
@@ -2814,7 +2825,7 @@ const TabManager = {
             }
             // Session identity follows the surviving pane — the tab's old
             // host/user/credential may belong to the extracted session
-            adoptPaneFieldsIntoTab(st, rp);
+            _adoptPaneFieldsIntoTab(st, rp);
             st._smoothCursor = rp._smoothCursor ?? null;
             if (rp._toolName !== undefined) st._toolName = rp._toolName; else delete st._toolName;
             if (st.term) {
@@ -2974,7 +2985,7 @@ const TabManager = {
                         // Session identity follows the surviving pane — the
                         // tab's old host/credential/command may belong to the
                         // moved session
-                        adoptPaneFieldsIntoTab(sourceTab, rp);
+                        _adoptPaneFieldsIntoTab(sourceTab, rp);
                         if (rp._toolName !== undefined) sourceTab._toolName = rp._toolName; else delete sourceTab._toolName;
                         if (sourceTab.term) {
                             sourceTab._onDataDisp = sourceTab.term.onData(data => {
@@ -3176,7 +3187,7 @@ const TabManager = {
             if (fp.tabId) delete tab._ptyRequestId;
             else tab._ptyRequestId = fp.requestId;
             sshAttempts.transferPendingAttempt(fp, tab);
-            adoptPaneFieldsIntoTab(tab, fp);
+            _adoptPaneFieldsIntoTab(tab, fp);
         }
         tab.term = fp?.term || null;
         tab.fitAddon = fp?.fitAddon || null;

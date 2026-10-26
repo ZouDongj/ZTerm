@@ -58,6 +58,112 @@ test('an SSH pane keeps its own connection and credential through another SSH co
     assert.equal(restored._sshProfileId, 'source-profile');
 });
 
+function collapseCredentialFixture(route, survivorType, {
+    shareContainerCredential = false,
+    survivorCredential = 'survivor-credential',
+    preserveContainerCredential = false,
+} = {}) {
+    const ctx = loadVm();
+    const { tab, p1, p2 } = wiredSplitTab(ctx, 'container', 'ssh_departing', '', 'ssh_survivor', '', {
+        type: 'ssh', host: 'container.example', port: 22, user: 'container-user',
+        sshProfileId: 'container-profile', _credId: 'container-credential',
+    });
+    p1._sshCredId = shareContainerCredential ? 'container-credential' : 'departing-credential';
+    if (survivorType === 'ssh') {
+        Object.assign(p2, {
+            type: 'ssh', _sshHost: 'survivor.example', _sshPort: 2200, _sshUser: 'survivor-user',
+            _sshProfileId: 'survivor-profile', _sshCredId: survivorCredential, _command: '', _args: [],
+        });
+    } else {
+        Object.assign(p2, {
+            type: 'local', _sshHost: undefined, _sshPort: undefined, _sshUser: undefined,
+            _sshProfileId: undefined, _sshCredId: undefined, _command: 'bash.exe', _args: ['--login'],
+        });
+    }
+    const holder = preserveContainerCredential ? wiredTab(ctx, 'credential-holder', 'ssh_holder', '', {
+        type: 'ssh', host: 'holder.example', user: 'holder-user', _credId: 'container-credential',
+    }) : null;
+    if (route === 'extract') ctx.TabManager._extractPaneToTab(tab.id, p1.id);
+    else if (route === 'move') {
+        const target = wiredTab(ctx, 'target', 'local_target');
+        ctx.TabManager._focusPane(tab, p1.id);
+        ctx.TabManager._moveTerminalToTab(tab.id, target.id, 'r', null);
+    } else {
+        ctx.TabManager._closePane(tab.id, p1.id);
+        ctx.__tq.advance(250);
+    }
+    return { ctx, tab, holder };
+}
+
+function credentialRevokes(ctx, credId) {
+    return ctx.__sends.filter(s => s.cmd === 'revoke-credential' && s.payload?.credId === credId).length;
+}
+
+for (const route of ['extract', 'move', 'close']) {
+    test(`${route}-collapse onto a local survivor clears SSH metadata and releases the stale container credential`, () => {
+        const { ctx, tab } = collapseCredentialFixture(route, 'local');
+        assert.equal(tab.type, 'local');
+        for (const key of ['host', 'port', 'user', 'sshProfileId', '_credId',
+            '_sshHost', '_sshPort', '_sshUser', '_sshProfileId', '_sshCredId']) {
+            assert.equal(tab[key], undefined, `${key} must not survive local adoption`);
+        }
+        assert.equal(tab.command, 'bash.exe');
+        assert.deepEqual(Array.from(tab.args), ['--login']);
+        assert.equal(credentialRevokes(ctx, 'container-credential'), 1,
+            'the dropped container handle is released exactly once');
+    });
+
+    test(`${route}-collapse onto an SSH survivor releases a different displaced container credential`, () => {
+        const { ctx, tab } = collapseCredentialFixture(route, 'ssh');
+        assert.equal(tab.type, 'ssh');
+        assert.equal(tab.host, 'survivor.example');
+        assert.equal(tab.port, 2200);
+        assert.equal(tab.user, 'survivor-user');
+        assert.equal(tab.sshProfileId, 'survivor-profile');
+        assert.equal(tab._credId, 'survivor-credential');
+        assert.equal(credentialRevokes(ctx, 'container-credential'), 1,
+            'the displaced container handle is released exactly once');
+        assert.equal(credentialRevokes(ctx, 'survivor-credential'), 0,
+            'the adopted SSH credential remains live');
+    });
+
+    test(`${route}-collapse onto an SSH survivor sharing the container credential never revokes it`, () => {
+        const { ctx, tab } = collapseCredentialFixture(route, 'ssh', {
+            survivorCredential: 'container-credential',
+        });
+        assert.equal(tab.type, 'ssh');
+        assert.equal(tab.host, 'survivor.example');
+        assert.equal(tab._credId, 'container-credential');
+        assert.equal(credentialRevokes(ctx, 'container-credential'), 0,
+            'the surviving session still uses the container handle');
+    });
+
+    test(`${route}-collapse preserves a displaced credential shared by another live tab`, () => {
+        const { ctx, tab, holder } = collapseCredentialFixture(route, 'ssh', {
+            preserveContainerCredential: true,
+        });
+        assert.equal(tab._credId, 'survivor-credential');
+        assert.equal(holder._credId, 'container-credential');
+        assert.equal(credentialRevokes(ctx, 'container-credential'), 0,
+            'another live wrapper prevents premature revocation');
+        ctx.TabManager.closeTab(holder.id);
+        ctx.__tq.advance(1000);
+        assert.equal(credentialRevokes(ctx, 'container-credential'), 1,
+            'the last live owner releases the shared handle exactly once');
+        assert.equal(credentialRevokes(ctx, 'survivor-credential'), 0,
+            'the survivor credential is unrelated and remains live');
+    });
+}
+
+test('extract-collapse onto a local survivor preserves a credential still used by the extracted SSH tab', () => {
+    const { ctx, tab } = collapseCredentialFixture('extract', 'local', { shareContainerCredential: true });
+    const extracted = ctx.TabManager.tabs.find(candidate => candidate.tabId === 'ssh_departing');
+    assert.equal(extracted._credId, 'container-credential');
+    assert.equal(tab._credId, undefined);
+    assert.equal(credentialRevokes(ctx, 'container-credential'), 0,
+        'a live SSH owner must retain the shared handle');
+});
+
 test('a manually renamed source keeps priority after move, save, restore and extract', async () => {
     const ctx = loadVm();
     const sourceTab = wiredTab(ctx, 'source', 'local_1');

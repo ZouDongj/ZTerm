@@ -11,7 +11,7 @@
 //   type                       → pane.type ('local' when unset)
 //   host/port/user/sshProfileId → pane._ssh* for SSH; cleared to undefined for local
 //   command/args               → '' / [] for SSH; pane._command / pane._args for local
-//   _credId                    → pane._sshCredId wins, tab._credId kept when the pane has none
+//   _credId                    → pane._sshCredId wins for SSH (tab fallback); cleared for local
 //   connected                  → paneConnectedState(pane) — the adopted session's state
 //   _sessionFailed             → pane._sessionFailed (known-failed liveness marker)
 //   _sshConnecting/_sshErrored → pane flags (busy ring / error dot follow the session)
@@ -48,7 +48,7 @@ function adoptPaneFieldsIntoTab(tab, pane) {
         tab.command = pane._command || '';
         tab.args = pane._args || [];
     }
-    tab._credId = pane._sshCredId || tab._credId;
+    tab._credId = pane.type === 'ssh' ? (pane._sshCredId || tab._credId) : undefined;
     // Status dot and reconnect entry must describe the ADOPTED session, not
     // the container it happened to live in.
     tab.connected = paneConnectedState(pane);

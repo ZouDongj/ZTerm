@@ -180,6 +180,39 @@ function profilePersistenceFixture() {
     return { ctx, saves };
 }
 
+for (const method of ['_savePasswordInline', 'saveSSHEdit']) {
+    for (const outcome of ['success', 'error']) {
+        test(`${method} suppresses stale ${outcome} UI after an editor switch without retargeting persistence`, async () => {
+            const { ctx, saves } = profilePersistenceFixture();
+            ctx.openSSHEdit(false, 'A');
+            if (method === 'saveSSHEdit') ctx.document.getElementById('ssh-pwd-edit-btn').onclick();
+            ctx.document.getElementById('ssh-edit-password').value = 'synthetic-A-password';
+            const save = ctx[method]();
+            await nextTurn();
+            assert.equal(saves.length, 1, 'the original profile operation reached persistence');
+
+            ctx.closeSSHEdit();
+            ctx.openSSHEdit(false, 'B');
+            const toastCount = ctx.__toasts.length;
+            let managerRenders = 0;
+            ctx.renderSSHManager = () => { managerRenders++; };
+            if (outcome === 'success') saves[0].resolve({});
+            else saves[0].reject(new Error('synthetic stale write failure'));
+            await save;
+
+            assert.equal(saves[0].profiles.find(p => p.id === 'A').encryptedPassword, 'new-A',
+                'persistence still targets the originating profile');
+            assert.equal(saves[0].profiles.find(p => p.id === 'B').encryptedPassword, 'old-B');
+            assert.equal(ctx.TabManager.sshProfiles.find(p => p.id === 'A').encryptedPassword,
+                outcome === 'success' ? 'new-A' : 'old-A');
+            assert.equal(ctx.document.getElementById('ssh-edit-host').value, 'host-b',
+                'the newer editor remains active');
+            assert.equal(ctx.__toasts.length, toastCount, 'no stale toast crosses the editor boundary');
+            assert.equal(managerRenders, 0, 'no stale manager render crosses the editor boundary');
+        });
+    }
+}
+
 test('a second profile save rebases on the first save committed during the persistence await', async () => {
     const { ctx, saves } = profilePersistenceFixture();
     ctx.openSSHEdit(false, 'A');
