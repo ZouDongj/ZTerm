@@ -100,14 +100,25 @@ test('U-12: path editor and breadcrumb share a stable content height', () => {
   const bar = ruleBody('.sftp-pathbar');
   const crumbs = ruleBody('.sftp-breadcrumb');
   const input = ruleBody('.sftp-path-input');
-  const contentHeight = Number(/(?:^|;)height:(\d+)px/.exec(input)[1]);
-  const crumbHeight = Number(/min-height:(\d+)px/.exec(crumbs)[1]);
-  const barHeight = Number(/min-height:(\d+)px/.exec(bar)[1]);
-  assert.equal(crumbHeight, contentHeight, 'both modes reserve the same content box');
-  assert.equal(barHeight, contentHeight + 6 + 10, 'the address row includes its unchanged vertical padding');
-  assert.ok(contentHeight >= 28, 'editor has space above and below the text');
+  assert.ok(bar.includes('padding:6px 18px 10px'), 'address row keeps its vertical padding');
+  assert.ok(bar.includes('min-height:44px'), 'address row stays 44px in both modes');
+  assert.ok(crumbs.includes('min-height:28px'), 'breadcrumb reserves the 28px content box');
+  assert.ok(crumbs.includes('font-size:12px'), 'breadcrumb keeps its 12px text');
+  assert.ok(crumbs.includes('line-height:16px'), 'breadcrumb keeps its deterministic 16px line box');
+  assert.ok(input.includes('height:28px'), 'editor reserves the same 28px content box');
+  assert.ok(input.includes('background:var(--field-bg)'), 'editor uses the shared field background');
+  assert.ok(input.includes('border:1px solid var(--stroke)'), 'editor uses the shared field stroke');
+  assert.ok(input.includes('border-radius:6px'), 'editor keeps the compact 6px field radius');
+  assert.ok(input.includes('padding:0 8px'), 'editor keeps its horizontal field padding');
+  assert.ok(input.includes('color:var(--text-1)'), 'editor uses the primary field text token');
+  assert.ok(input.includes('font-size:13px'), 'editor uses the sidebar 13px text size');
+  assert.ok(input.includes('line-height:18px'), 'editor keeps its 18px line height');
+  assert.ok(input.includes('font-weight:400'), 'editor keeps regular field text');
   assert.ok(input.includes('font-family:inherit'), 'editor uses the surrounding UI font');
-  assert.ok(ruleBody('.sftp-path-input:focus').includes('box-shadow:inset'), 'focus stays within the field');
+  const focus = ruleBody('.sftp-path-input:focus');
+  assert.ok(focus.includes('border-color:rgba(var(--accent-rgb),.5)'), 'focus uses the exact accent border token');
+  assert.ok(focus.includes('box-shadow:inset 0 0 0 1px rgba(var(--accent-rgb),.12)'),
+    'focus uses the exact inset accent token');
 });
 
 // ── U-13: transfer flyout anchors below the titlebar token ──

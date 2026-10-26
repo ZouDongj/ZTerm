@@ -263,6 +263,17 @@ test('observer birth is captured before spawn rather than after its first sample
   } finally { observation.stop(); }
 });
 
+test('fractional producer reads never future-date a lease within the same native millisecond', () => {
+  const binding = { ...expected, hwnd: placed.hwnd, released: true };
+  for (const fraction of [0.0001, 0.0005, 0.0009]) {
+    const producerUptime = 100 + fraction;
+    const nativeRead = Math.floor(producerUptime * 1000);
+    const lease = createBackgroundLease(binding, backgroundNow(() => producerUptime));
+    assert.equal(lease.renewedAt, nativeRead);
+    assert.ok(lease.renewedAt <= nativeRead, `fraction ${fraction} must not round into the next millisecond`);
+  }
+});
+
 test('wall-clock jumps do not change observer, native health, or lease clock domains', () => {
   const wallNow = Date.now;
   const snapshot = fresh();

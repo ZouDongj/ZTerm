@@ -117,15 +117,12 @@ test('a completed upload no longer counts as in-flight (gate opens again)', asyn
     assert.equal(confirms.length, 0, 'no stale confirmation was requested');
 });
 
-// ── sftp-2: textual path aliases blinded the in-flight gate ──────────────────
-// _path is stored raw, so a manually typed '/srv/app/' (or '/srv/./app') went
-// into the batch owner as-is: the first batch's in-flight target recorded as
-// '/srv/app//a.txt' while the canonical cwd follow '/srv/app' later probed
-// '/srv/app/a.txt' — exact-string comparison missed, and the second batch
-// silently overwrote the first's data. remotePath generation/comparison (and
-// the owner-dir listing check) now run both sides through normalizeRemotePath,
-// which canonicalizes slashes/'.'/'..' but never folds case (remote FS may be
-// case-sensitive).
+// ── sftp-2: textual path aliases must collide without rewriting mutations ───
+// _path stays raw, and upload mutations keep its server-side resolution
+// semantics, including symlink-significant '.'/'..' segments. Only comparisons
+// (in-flight targets and the owner-dir listing check) use normalizeRemotePath:
+// a lexical canonicalization of slashes/'.'/'..' that never folds case. Thus
+// aliases still collide without changing the raw path sent to the server.
 
 // The manual breadcrumb edit's Enter handler, driven through the real editor.
 async function typePath(vm, val) {

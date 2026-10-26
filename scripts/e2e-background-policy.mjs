@@ -4,7 +4,7 @@ import { uptime } from 'node:os';
 export const BACKGROUND_CLOCK_DOMAIN = 'windows-boot-ms';
 
 // On Windows, libuv uses GetTickCount64()/1000.0 for os.uptime().
-export function backgroundNow() { return Math.round(uptime() * 1000); }
+export function backgroundNow(readUptime = uptime) { return Math.floor(readUptime() * 1000); }
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HWND = /^0x[0-9a-f]{1,16}$/i;
