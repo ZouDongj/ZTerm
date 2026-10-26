@@ -86,6 +86,7 @@ async fn main() {
             zterm::register_credential,
             zterm::revoke_credential,
             zterm::quit_ready,
+            zterm::cancel_quit,
             zterm::clipboard_write_text,
             zterm::clipboard_read_text,
             zterm::renderer_ready,
@@ -165,11 +166,10 @@ async fn main() {
             // On close, notify the renderer to save state; also save the window state (position/size/maximized)
             let handle = app.handle().clone();
             let win_for_state = window.clone();
-            // Set once a close was intercepted and the renderer was asked to
-            // save: later close requests (repeated Alt+F4) only re-prevent,
-            // without a duplicate save emit or a second force-exit timer.
-            let quit_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let quit_flag = Arc::clone(&quit_requested);
+            // Quit attempts are generation-based (zterm::begin_quit): later close
+            // requests (repeated Alt+F4) only re-prevent while an attempt is
+            // active; cancelling a failed save or retrying invalidates older
+            // watchdog tokens instead of leaving a latched quit flag.
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     let maximized = win_for_state.is_maximized().unwrap_or(false);
@@ -210,13 +210,18 @@ async fn main() {
                     // is hung or already gone, the timer force-exits so the
                     // window can never become unclosable.
                     api.prevent_close();
-                    if !quit_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    if let Some(generation) = zterm::begin_quit() {
                         let _ = handle.emit("app-before-quit", json!({}));
-                        std::thread::spawn(|| {
+                        std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_secs(
                                 QUIT_FORCE_EXIT_SECS,
                             ));
-                            std::process::exit(0);
+                            // Exit only while this attempt is still active: a
+                            // cancelled save or a retry invalidates the token,
+                            // so a stale watchdog cannot kill the process.
+                            if zterm::quit_force_exit_pending(generation) {
+                                std::process::exit(0);
+                            }
                         });
                     }
                 }

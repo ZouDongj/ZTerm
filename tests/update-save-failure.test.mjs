@@ -7,15 +7,18 @@ const main = fs.readFileSync(new URL('../src/renderer/main.js', import.meta.url)
 const shortcuts = fs.readFileSync(new URL('../src/renderer/shortcuts.js', import.meta.url), 'utf8');
 const settings = fs.readFileSync(new URL('../src/renderer/settings.js', import.meta.url), 'utf8');
 const save = main.match(/function saveConfig\(\) \{[\s\S]*?\n\}/)?.[0];
+const beforeQuit = main.match(/async function _handleBeforeQuit\(\) \{[\s\S]*?\n\}/)?.[0];
 const apply = shortcuts.match(/async function _doApplyUpdate\(\) \{[\s\S]*?\n\}/)?.[0];
 const persist = settings.match(/function persistSettings\(\) \{[\s\S]*?\n\}/)?.[0];
-assert.ok(save && apply, 'exercise the production save and update functions');
+assert.ok(save && beforeQuit && apply, 'exercise the production save, quit, and update functions');
 
 function fixture(invoke) {
     const calls = [];
     const errors = [];
     const descriptions = [];
     const toasts = [];
+    const sent = [];
+    const confirmations = [];
     const button = { disabled: false, textContent: '重启并安装' };
     const context = vm.createContext({
         console: { error: (...args) => errors.push(args) },
@@ -23,15 +26,19 @@ function fixture(invoke) {
         _settingsConfig: {},
         serializeSplitNode: () => { throw new Error('unexpected split fixture'); },
         document: { getElementById: id => id === 'btn-update-apply' ? button : null },
-        ipcRenderer: { invoke: (command, payload) => {
-            calls.push(command);
-            return invoke(command, payload);
-        } },
+        ipcRenderer: {
+            invoke: (command, payload) => {
+                calls.push(command);
+                return invoke(command, payload);
+            },
+            send: (command, payload) => sent.push({ command, payload }),
+        },
         _setUpdateDesc: (text, color) => descriptions.push({ text, color }),
         showToast: (...args) => toasts.push(args),
+        showConfirm: (message, onOk, okText) => confirmations.push({ message, onOk, okText }),
     });
-    vm.runInContext(`${save}\n${apply}`, context);
-    return { context, calls, errors, descriptions, toasts, button };
+    vm.runInContext(`${save}\n${beforeQuit}\n${apply}`, context);
+    return { context, calls, errors, descriptions, toasts, sent, confirmations, button };
 }
 
 test('saveConfig rejects to a waiting caller and logs the actual failure', async () => {
@@ -128,4 +135,43 @@ test('a failed final settings snapshot blocks update before saving tabs or insta
     assert.deepEqual(f.calls, ['save-appearance', 'save-terminal-settings']);
     assert.equal(f.button.disabled, false);
     assert.match(f.descriptions.at(-1).text, /synthetic settings write failure/);
+});
+
+test('successful ordinary quit saves once and sends quit-ready', async () => {
+    const f = fixture(() => Promise.resolve());
+    await f.context._handleBeforeQuit();
+    assert.deepEqual(f.calls, ['save-last-tabs']);
+    assert.deepEqual(f.sent.map(call => call.command), ['quit-ready']);
+    assert.deepEqual(f.confirmations, []);
+});
+
+test('failed ordinary-quit save cancels quit, shows an actionable error, and permits retry', async () => {
+    let fails = true;
+    const f = fixture(command => command === 'save-last-tabs' && fails
+        ? Promise.reject(new Error('synthetic quit save failure')) : Promise.resolve());
+    await f.context._handleBeforeQuit();
+    assert.deepEqual(f.calls, ['save-last-tabs', 'cancel-quit']);
+    assert.deepEqual(f.sent, [], 'a failed save must never send quit-ready');
+    assert.match(f.toasts.at(-1)[0], /已取消退出/);
+    assert.match(f.toasts.at(-1)[0], /写入权限和可用空间/);
+    assert.match(f.toasts.at(-1)[0], /synthetic quit save failure/);
+    assert.equal(f.confirmations.length, 1);
+    assert.match(f.confirmations[0].message, /修复问题后重试/);
+
+    fails = false;
+    await f.context._handleBeforeQuit();
+    assert.deepEqual(f.calls, ['save-last-tabs', 'cancel-quit', 'save-last-tabs']);
+    assert.deepEqual(f.sent.map(call => call.command), ['quit-ready']);
+});
+
+test('only the deliberate discard action can quit after a failed final save', async () => {
+    const f = fixture(command => command === 'save-last-tabs'
+        ? Promise.reject(new Error('synthetic quit save failure')) : Promise.resolve());
+    await f.context._handleBeforeQuit();
+    assert.deepEqual(f.sent, []);
+    assert.equal(f.confirmations[0].okText, '放弃未保存状态并退出');
+
+    f.confirmations[0].onOk();
+    assert.deepEqual(f.sent.map(call => call.command), ['quit-ready']);
+    assert.deepEqual(f.calls, ['save-last-tabs', 'cancel-quit'], 'discard must not retry the save');
 });

@@ -353,6 +353,7 @@ pub struct PendingGuard {
 }
 
 impl PendingGuard {
+    #[cfg(test)]
     pub fn new(pm: PendingMap, attempt: String, backend: String) -> Self {
         Self::with_cancel_flag(pm, attempt, backend, Arc::new(std::sync::atomic::AtomicBool::new(false)))
     }
@@ -969,8 +970,8 @@ fn load_config() -> Value {
 
 /// Data-dir config first; when it is missing entirely or cannot be READ (an
 /// IO condition, not corruption), read the anchor's recovery copy back.
-/// A readable primary still wins, so writing only this recovery copy is not
-/// reported as a successful save. Split from path resolution for unit tests.
+/// A readable primary still wins; save_config uses this same precedence to
+/// decide whether an anchor-only write is authoritative. Split for unit tests.
 fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
     // True when an existing config file could not be read (IO failure): the
     // defaults below are then not known to be safe to save over it.
@@ -1128,8 +1129,6 @@ fn save_config_to(
         let _ = std::fs::create_dir_all(parent);
     }
     let content = serde_json::to_string_pretty(config).unwrap_or_default();
-    // Only the authoritative path can complete a save. A recovery mirror is
-    // not a successful save: later reads may still prefer an older primary.
     let primary_error = match atomic_write_config(path, &content) {
         Ok(()) => return Ok(()),
         Err(error) => error,
@@ -1140,8 +1139,13 @@ fn save_config_to(
             path.display()
         ));
     }
-    // Retain a recovery copy without changing the active data directory or
-    // claiming that subsequent reads will use this copy.
+    // Only a missing primary makes the anchor unconditionally authoritative.
+    // An existing unreadable primary can become readable again and expose its
+    // stale contents on a later load, so that case must remain a loud failure.
+    let primary_missing_before_fallback = matches!(
+        std::fs::read_to_string(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    );
     eprintln!(
         "[zterm] write {} failed, attempting a recovery copy in the anchor",
         path.display()
@@ -1168,10 +1172,22 @@ fn save_config_to(
         anchor,
         &serde_json::to_string_pretty(&merged).unwrap_or_default(),
     ) {
-        Ok(()) => Err(format!(
-            "write config to {} failed: {primary_error}; a recovery copy was saved to {}, but the active configuration was not saved",
-            path.display(), anchor.display()
-        )),
+        Ok(()) => {
+            // Recheck after the anchor write so a primary that appeared during
+            // the fallback cannot be hidden by a false success.
+            let primary_missing_after_fallback = matches!(
+                std::fs::read_to_string(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            );
+            if primary_missing_before_fallback && primary_missing_after_fallback {
+                Ok(())
+            } else {
+                Err(format!(
+                    "write config to {} failed: {primary_error}; a recovery copy was saved to {}, but the active configuration was not saved",
+                    path.display(), anchor.display()
+                ))
+            }
+        }
         Err(error) => Err(format!(
             "write config to {} failed: {primary_error}; the anchor recovery copy also failed: {error}",
             path.display()
@@ -2414,6 +2430,7 @@ const SSH_SHELL_PRELUDE_MESSAGES: usize = 256;
 async fn start_shell_requests(
     channel: &mut russh::Channel<russh::client::Msg>,
     wrapper: Option<&str>,
+    wrapper_rejected: &std::sync::atomic::AtomicBool,
 ) -> Result<ShellStartup, String> {
     let mut started = ShellStartup {
         prefetched: std::collections::VecDeque::new(),
@@ -2442,6 +2459,7 @@ async fn start_shell_requests(
                 // Unknown outcomes must never replay a login through a second shell.
                 waiting_for_wrapper = false;
                 started.wrapper_rejected = true;
+                wrapper_rejected.store(true, std::sync::atomic::Ordering::Relaxed);
                 channel
                     .request_shell(true)
                     .await
@@ -2480,11 +2498,12 @@ async fn start_shell_requests(
     }
 }
 
-async fn start_ssh_shell(
+async fn start_ssh_shell_tracking_rejection(
     channel: &mut russh::Channel<russh::client::Msg>,
     wrapper: Option<&str>,
     cancel: &std::sync::atomic::AtomicBool,
     deadline: tokio::time::Instant,
+    wrapper_rejected: &std::sync::atomic::AtomicBool,
 ) -> Result<ShellStartup, ShellStartError> {
     let result = if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         Err(ShellStartError::Cancelled)
@@ -2492,7 +2511,7 @@ async fn start_ssh_shell(
         Err(ShellStartError::TimedOut)
     } else {
         match establish_cancellable(
-            start_shell_requests(channel, wrapper),
+            start_shell_requests(channel, wrapper, wrapper_rejected),
             cancel,
             tokio::time::sleep_until(deadline),
         )
@@ -2514,6 +2533,24 @@ async fn start_ssh_shell(
         let _ = tokio::time::timeout(SSH_SHELL_CLEANUP_TIMEOUT, channel.close()).await;
     }
     result
+}
+
+#[cfg(test)]
+async fn start_ssh_shell(
+    channel: &mut russh::Channel<russh::client::Msg>,
+    wrapper: Option<&str>,
+    cancel: &std::sync::atomic::AtomicBool,
+    deadline: tokio::time::Instant,
+) -> Result<ShellStartup, ShellStartError> {
+    let wrapper_rejected = std::sync::atomic::AtomicBool::new(false);
+    start_ssh_shell_tracking_rejection(
+        channel,
+        wrapper,
+        cancel,
+        deadline,
+        &wrapper_rejected,
+    )
+    .await
 }
 
 async fn next_shell_message(
@@ -2979,14 +3016,28 @@ pub async fn ssh_connect(
         }
     }
 
-    let shell_start = match start_ssh_shell(
+    let wrapper_rejected = std::sync::atomic::AtomicBool::new(false);
+    let shell_start_result = start_ssh_shell_tracking_rejection(
         &mut channel,
         exec_cmd.as_deref(),
         &cancel_flag,
         establish_deadline,
+        &wrapper_rejected,
     )
-    .await
-    {
+    .await;
+    let confirmed_wrapper_rejection = wrapper_rejected.load(std::sync::atomic::Ordering::Relaxed)
+        || shell_start_result
+            .as_ref()
+            .map_or(false, |started| started.wrapper_rejected);
+    if confirmed_wrapper_rejection {
+        // The refusal was confirmed even if the fallback later failed, timed
+        // out, or was cancelled. This is the only emission site for that cause.
+        let _ = app.emit(
+            "sftp-cwd-follow-unavailable",
+            json!({ "tabId": tab_id, "rendererId": renderer_id, "reason": CwdFollowUnavailable::WrapperStartFailed.reason() }),
+        );
+    }
+    let shell_start = match shell_start_result {
         Ok(started) => started,
         Err(error) => {
             let _ = tokio::time::timeout(
@@ -3019,12 +3070,6 @@ pub async fn ssh_connect(
             return Err(message);
         }
     };
-    if shell_start.wrapper_rejected {
-        let _ = app.emit(
-            "sftp-cwd-follow-unavailable",
-            json!({ "tabId": tab_id, "rendererId": renderer_id, "reason": CwdFollowUnavailable::WrapperStartFailed.reason() }),
-        );
-    }
     let mut startup_messages = shell_start.prefetched;
     cancelled!(handle);
 
@@ -6342,6 +6387,49 @@ pub async fn show_save_dialog(app: AppHandle, args: Vec<Value>) -> Result<Value,
 
 // ── Quit ready ──
 
+#[derive(Default)]
+struct QuitFlowState {
+    requested: bool,
+    generation: u64,
+}
+
+static QUIT_FLOW_STATE: parking_lot::Mutex<QuitFlowState> =
+    parking_lot::Mutex::new(QuitFlowState { requested: false, generation: 0 });
+
+fn begin_quit_in(state: &mut QuitFlowState) -> Option<u64> {
+    if state.requested {
+        return None;
+    }
+    state.requested = true;
+    state.generation = state.generation.wrapping_add(1);
+    Some(state.generation)
+}
+
+fn cancel_quit_in(state: &mut QuitFlowState) {
+    state.requested = false;
+    state.generation = state.generation.wrapping_add(1);
+}
+
+fn quit_force_exit_pending_in(state: &QuitFlowState, generation: u64) -> bool {
+    state.requested && state.generation == generation
+}
+
+/// Start one graceful-quit attempt, or return None when one is already active.
+pub fn begin_quit() -> Option<u64> {
+    begin_quit_in(&mut QUIT_FLOW_STATE.lock())
+}
+
+/// Abort the active attempt and invalidate every watchdog token issued so far.
+#[tauri::command]
+pub fn cancel_quit() {
+    cancel_quit_in(&mut QUIT_FLOW_STATE.lock());
+}
+
+/// A watchdog may exit only for the still-active attempt that created it.
+pub fn quit_force_exit_pending(generation: u64) -> bool {
+    quit_force_exit_pending_in(&QUIT_FLOW_STATE.lock(), generation)
+}
+
 #[tauri::command]
 pub fn quit_ready() -> Value {
     std::process::exit(0);
@@ -6885,6 +6973,26 @@ mod tests {
             }
             other => panic!("expected Mismatch, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn quit_watchdog_cancellation_invalidates_old_attempt_and_permits_retry() {
+        let mut state = QuitFlowState::default();
+        let first = begin_quit_in(&mut state).unwrap();
+        assert!(quit_force_exit_pending_in(&state, first));
+        assert!(begin_quit_in(&mut state).is_none());
+
+        cancel_quit_in(&mut state);
+        assert!(!quit_force_exit_pending_in(&state, first));
+
+        let second = begin_quit_in(&mut state).unwrap();
+        assert_ne!(first, second);
+        assert!(!quit_force_exit_pending_in(&state, first));
+        assert!(quit_force_exit_pending_in(&state, second));
+
+        cancel_quit_in(&mut state);
+        assert!(!quit_force_exit_pending_in(&state, second));
+        assert!(begin_quit_in(&mut state).is_some());
     }
 
     #[test]
@@ -8338,14 +8446,17 @@ mod tests {
         let fixture = shell_fixture(ShellServerMode::Stall).await;
         let mut channel = fixture.handle.channel_open_session().await.unwrap();
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        let result = start_ssh_shell(
+        let wrapper_rejected = std::sync::atomic::AtomicBool::new(false);
+        let result = start_ssh_shell_tracking_rejection(
             &mut channel,
             Some("fixture-wrapper"),
             &cancel,
             tokio::time::Instant::now() + std::time::Duration::from_millis(80),
+            &wrapper_rejected,
         )
         .await;
         assert!(matches!(result, Err(ShellStartError::TimedOut)));
+        assert!(!wrapper_rejected.load(std::sync::atomic::Ordering::Relaxed));
         shell_event(&fixture, "closed").await;
         assert!(!fixture.events.lock().contains(&"shell"));
     }
@@ -8355,12 +8466,14 @@ mod tests {
         let fixture = shell_fixture(ShellServerMode::Stall).await;
         let mut channel = fixture.handle.channel_open_session().await.unwrap();
         let cancel = std::sync::atomic::AtomicBool::new(false);
+        let wrapper_rejected = std::sync::atomic::AtomicBool::new(false);
         let (result, ()) = tokio::join!(
-            start_ssh_shell(
+            start_ssh_shell_tracking_rejection(
                 &mut channel,
                 Some("fixture-wrapper"),
                 &cancel,
-                tokio::time::Instant::now() + std::time::Duration::from_secs(1)
+                tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+                &wrapper_rejected,
             ),
             async {
                 shell_event(&fixture, "exec").await;
@@ -8368,6 +8481,7 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(ShellStartError::Cancelled)));
+        assert!(!wrapper_rejected.load(std::sync::atomic::Ordering::Relaxed));
         shell_event(&fixture, "closed").await;
         assert!(!fixture.events.lock().contains(&"shell"));
     }
@@ -8377,14 +8491,17 @@ mod tests {
         let fixture = shell_fixture(ShellServerMode::RejectBoth).await;
         let mut channel = fixture.handle.channel_open_session().await.unwrap();
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        let result = start_ssh_shell(
+        let wrapper_rejected = std::sync::atomic::AtomicBool::new(false);
+        let result = start_ssh_shell_tracking_rejection(
             &mut channel,
             Some("fixture-wrapper"),
             &cancel,
             tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            &wrapper_rejected,
         )
         .await;
         assert!(matches!(result, Err(ShellStartError::Failed(_))));
+        assert!(wrapper_rejected.load(std::sync::atomic::Ordering::Relaxed));
         shell_event(&fixture, "closed").await;
         assert_eq!(*fixture.events.lock(), ["exec", "shell", "closed"]);
     }
@@ -10867,6 +10984,69 @@ mod tests {
         let legacy = format!("tauri:{}", base64_encode_bytes("plainpw".as_bytes()));
         let cred = credential_from_encrypted(&legacy, "").expect("legacy plaintext");
         assert_eq!(cred.password.as_deref(), Some("plainpw"));
+    }
+
+    #[test]
+    fn missing_primary_write_failure_succeeds_through_authoritative_anchor() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let dir = config_test_dir("missing-primary-anchor-success");
+        let primary = dir.join("data/config.json");
+        let anchor = dir.join("anchor/config.json");
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        // A directory at the temp path makes the primary atomic write fail
+        // without creating a primary config, matching an unwritable data dir.
+        std::fs::create_dir(primary.with_extension("json.tmp")).unwrap();
+        let mut config = load_config_from(&primary, &anchor);
+        assert_eq!(config, default_config());
+        config["appearance"]["fontSize"] = json!(20);
+
+        save_config_to(&primary, &anchor, &config).unwrap();
+
+        assert!(!primary.exists());
+        let reloaded = load_config_from(&primary, &anchor);
+        assert_eq!(reloaded["appearance"]["fontSize"], 20);
+        assert!(!CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn unreadable_primary_write_failure_stays_loud_when_stale_primary_can_return() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let dir = config_test_dir("unreadable-primary-anchor-failure");
+        let primary = dir.join("data/config.json");
+        let anchor = dir.join("anchor/config.json");
+        write_config_to_dir(
+            primary.parent().unwrap(),
+            &json!({ "appearance": { "fontSize": 12 } }),
+        )
+        .unwrap();
+        write_config_to_dir(
+            anchor.parent().unwrap(),
+            &json!({ "appearance": { "fontSize": 18 } }),
+        )
+        .unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&primary)
+            .unwrap();
+        let mut config = load_config_from(&primary, &anchor);
+        assert_eq!(config["appearance"]["fontSize"], 18);
+        config["appearance"]["fontSize"] = json!(20);
+
+        let error = save_config_to(&primary, &anchor, &config).unwrap_err();
+        assert!(error.contains("active configuration was not saved"), "{error}");
+        let recovery: Value =
+            serde_json::from_str(&std::fs::read_to_string(&anchor).unwrap()).unwrap();
+        assert_eq!(recovery["appearance"]["fontSize"], 20);
+
+        drop(lock);
+        assert_eq!(load_config_from(&primary, &anchor)["appearance"]["fontSize"], 12);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

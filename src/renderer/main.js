@@ -144,11 +144,24 @@ function saveConfig() {
 
 setInterval(() => { saveConfig(); }, 15000);
 
-// The main process grants one final save before the window closes (app-before-quit → quit-ready)
-ipcRenderer.on('app-before-quit', async () => {
-    try { await saveConfig(); } catch(e) {}
+// The main process grants one final save before the window closes. A failed
+// save aborts the native quit attempt; only the explicit discard action may
+// bypass persistence after that failure.
+async function _handleBeforeQuit() {
+    try { await saveConfig(); } catch(e) {
+        const raw = e && e.message ? e.message : String(e);
+        try { await ipcRenderer.invoke('cancel-quit'); } catch (cancelError) {
+            console.error('[cancel-quit]', cancelError);
+        }
+        showToast('退出前保存失败，已取消退出。请检查配置目录的写入权限和可用空间后重试：' + raw, true);
+        showConfirm('退出前保存失败：' + raw + '\n退出已取消，可关闭此提示并修复问题后重试。也可以明确放弃本次未保存的状态并退出。', () => {
+            ipcRenderer.send('quit-ready');
+        }, '放弃未保存状态并退出');
+        return;
+    }
     ipcRenderer.send('quit-ready');
-});
+}
+ipcRenderer.on('app-before-quit', _handleBeforeQuit);
 
 // Startup animation: once the window state (position/size/maximized) has been restored and the window shown,
 // the main process emits this event to trigger the .window fade-in (a restrained 0.4s so startup does not feel abrupt)

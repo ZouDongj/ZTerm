@@ -330,7 +330,7 @@ fn resolve_env_proxy(
     lookup: impl Fn(&str) -> Option<String>,
     target_host: &str,
 ) -> Result<Option<String>, String> {
-    let Some(raw) = [
+    let Some((name, raw)) = [
         "HTTPS_PROXY",
         "https_proxy",
         "HTTP_PROXY",
@@ -339,8 +339,8 @@ fn resolve_env_proxy(
         "all_proxy",
     ]
     .into_iter()
-    .filter_map(|name| lookup(name))
-    .find(|value| !value.trim().is_empty()) else {
+    .filter_map(|name| lookup(name).map(|value| (name, value)))
+    .find(|(_, value)| !value.trim().is_empty()) else {
         return Ok(None);
     };
     if no_proxy_matches(
@@ -353,7 +353,7 @@ fn resolve_env_proxy(
         .map(|proxy| Some(proxy.server))
         .map_err(|error| {
             format!(
-                "invalid update proxy '{}': {error}",
+                "invalid update proxy environment {name} '{}': {error}",
                 redact_proxy_userinfo(raw.trim())
             )
         })
@@ -1053,6 +1053,21 @@ mod tests {
     }
 
     #[test]
+    fn env_proxy_parse_error_names_source_and_redacts_userinfo() {
+        let error = resolve_env_proxy(
+            |name| match name {
+                "HTTP_PROXY" => Some("socks5://alice:fixture-secret@proxy.corp:1080".into()),
+                _ => None,
+            },
+            "updates.fixture.invalid",
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid update proxy environment HTTP_PROXY"), "{error}");
+        assert!(error.contains("only HTTP proxies"), "{error}");
+        assert!(!error.contains("fixture-secret"), "{error}");
+    }
+
+    #[test]
     fn env_proxy_https_url_is_an_error_not_a_silent_direct_fallback() {
         let error = resolve_env_proxy(
             |name| match name {
@@ -1063,6 +1078,7 @@ mod tests {
             "updates.fixture.invalid",
         )
         .unwrap_err();
+        assert!(error.contains("invalid update proxy environment HTTPS_PROXY"));
         assert!(error.contains("TLS-to-proxy"));
         assert!(!error.contains("fixture-secret"));
         assert!(resolve_env_proxy(

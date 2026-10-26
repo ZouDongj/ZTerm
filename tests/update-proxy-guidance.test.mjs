@@ -16,9 +16,18 @@ test('unsupported TLS proxy guidance distinguishes proxy transport from HTTPS ta
     assert.match(message, /仍可访问 HTTPS 更新地址/);
 });
 
-test('other invalid proxy errors describe the supported HTTP proxy scheme', () => {
+test('explicit invalid proxy errors direct the user to the configured setting', () => {
     const message = context._friendlyUpdateError("invalid update proxy 'not a url': invalid host");
     assert.match(message, /仅支持 HTTP 代理/);
+    assert.match(message, /设置 → 关于/);
+    assert.match(message, /not a url/);
+});
+
+test('environment proxy errors name the variable instead of the blank setting', () => {
+    const message = context._friendlyUpdateError("invalid update proxy environment HTTPS_PROXY 'not a url': invalid host");
+    assert.match(message, /环境变量 HTTPS_PROXY/);
+    assert.match(message, /修正或清除该环境变量/);
+    assert.doesNotMatch(message, /设置 → 关于/);
     assert.match(message, /not a url/);
 });
 
