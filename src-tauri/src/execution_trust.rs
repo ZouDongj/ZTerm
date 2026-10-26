@@ -1,6 +1,6 @@
 //! Shared configuration is data, not permission to execute on another account.
-//! Tickets bind one immutable launch to one live owner. Persistent grants are
-//! keyed fingerprints sealed with CurrentUser DPAPI in a Windows Known Folder.
+//! Tickets bind one immutable launch to one live owner. Persistent SSH grants
+//! are keyed fingerprints sealed with CurrentUser DPAPI in a Windows Known Folder.
 
 use hmac::{Hmac, Mac};
 use parking_lot::Mutex;
@@ -37,6 +37,7 @@ struct Context {
     store: PathBuf,
     default_cwd: PathBuf,
     system: PathBuf,
+    git_bash: Vec<PathBuf>,
     current: PathBuf,
     search: Vec<PathBuf>,
     elevated: bool,
@@ -202,6 +203,25 @@ fn known_folder(id: &winapi::shared::guiddef::GUID) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn git_bash_paths() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for variable in ["ProgramFiles", "ProgramW6432"] {
+        if let Some(value) = std::env::var_os(variable).filter(|value| !value.is_empty()) {
+            roots.push(PathBuf::from(value));
+        }
+    }
+    if roots.is_empty() { roots.push(PathBuf::from(r"C:\Program Files")); }
+    if let Some(value) = std::env::var_os("ProgramFiles(x86)").filter(|value| !value.is_empty()) {
+        roots.push(PathBuf::from(value));
+    }
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        let path = root.join("Git/bin/bash.exe");
+        if !paths.iter().any(|existing| path_key(existing) == path_key(&path)) { paths.push(path); }
+    }
+    paths
+}
+
 #[cfg(windows)]
 fn context() -> Result<Context, String> {
     use winapi::um::knownfolders::{FOLDERID_LocalAppData, FOLDERID_Profile};
@@ -227,6 +247,7 @@ fn context() -> Result<Context, String> {
         })?,
         default_cwd: known_folder(&FOLDERID_Profile)?,
         system: PathBuf::from(String::from_utf16_lossy(&system[..len])),
+        git_bash: git_bash_paths(),
         current: std::env::current_dir().map_err(|_| "current directory is unavailable")?,
         search: std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect(),
         elevated: elevation.TokenIsElevated != 0,
@@ -425,18 +446,21 @@ fn make_record(kind: &str, owner: &str, payload: &Value, auth: AuthSource, conte
         let program = canonical_local(&program, false)?;
         let is_powershell = path_key(&program) == path_key(&context.system.join("WindowsPowerShell/v1.0/powershell.exe"));
         let is_cmd = path_key(&program) == path_key(&context.system.join("cmd.exe"));
-        let harmless_args = shell_args.iter().all(|arg| {
+        let is_git_bash = context.git_bash.iter().any(|path| path_key(&program) == path_key(path));
+        let harmless_system_args = shell_args.iter().all(|arg| {
             let arg = arg.to_ascii_lowercase();
             (is_powershell && ["-noprofile", "-nologo", "-noexit"].contains(&arg.as_str())) || (is_cmd && ["/d", "/q"].contains(&arg.as_str()))
         });
-        let safe = (is_powershell || is_cmd) && harmless_args && path_key(&cwd) == path_key(&context.default_cwd);
+        let harmless_git_args = shell_args.iter().all(|arg| ["-i", "-l", "--login", "-il", "-li"].contains(&arg.as_str()));
+        let safe = (((is_powershell || is_cmd) && harmless_system_args) || (is_git_bash && harmless_git_args)) && path_key(&cwd) == path_key(&context.default_cwd);
         let digest = if safe { None } else { Some(file_digest(executable_file(&program)?.file.as_mut().ok_or("missing executable")?)?) };
         frozen["shell"] = json!(program.to_string_lossy());
         frozen["args"] = json!(shell_args);
         frozen["cwd"] = json!(cwd.to_string_lossy());
-        let description = format!("共享启动配置需要本账户确认。\n程序：{}\n参数：{}\n目录：{}{}",
+        let mut description = format!("共享启动配置需要本账户确认。\n程序：{}\n参数：{}\n目录：{}{}",
             quoted(&program.to_string_lossy()), shell_args.iter().map(|arg| quoted(arg)).collect::<Vec<_>>().join(" "), quoted(&cwd.to_string_lossy()),
-            if context.elevated { "\n将以管理员权限运行；授权仅限本次。" } else { "\n如需以后自动启动，可选择记住此配置；更改后会再次确认。" });
+            if context.elevated { "\n将以管理员权限运行；授权仅限本次。" } else if safe { "\n如需以后自动启动，可选择记住此配置；更改后会再次确认。" } else { "" });
+        if !safe { description.push_str("\n自定义本地启动的授权仅限本次；标准 shell 可直接启动，SSH 连接可记住授权。"); }
         (json!({"version":1,"kind":"local","program":path_key(&program),"image":digest,"args":shell_args,"cwd":path_key(&cwd),"elevated":context.elevated}), description, safe)
     } else if kind == "ssh" {
         let host = original.get("host").and_then(Value::as_str).unwrap_or("").trim();
@@ -469,7 +493,7 @@ fn make_record(kind: &str, owner: &str, payload: &Value, auth: AuthSource, conte
     } else { return Err("unknown startup kind".into()); };
     if description.len() > 65536 { return Err("startup description is too large to review".into()); }
     Ok(Record { owner: owner.into(), kind: kind.into(), original, frozen, descriptor, description, auth: auth.clone(),
-        safe_builtin, rememberable: !context.elevated && auth.rememberable, expires: Instant::now() + LIFETIME })
+        safe_builtin, rememberable: !context.elevated && auth.rememberable && (kind != "local" || safe_builtin), expires: Instant::now() + LIFETIME })
 }
 
 fn load_database(path: &Path) -> Result<Option<Database>, String> {
@@ -522,7 +546,11 @@ fn prepare_record(mut record: Record, store: &Path, registry: &Mutex<Gate>) -> R
 
 pub fn decide(challenge: &str, allow: bool, remember: bool) -> Result<Value, String> {
     let context = context()?;
-    let mut gate = gate().lock();
+    decide_record(challenge, allow, remember, &context, gate())
+}
+
+fn decide_record(challenge: &str, allow: bool, remember: bool, context: &Context, registry: &Mutex<Gate>) -> Result<Value, String> {
+    let mut gate = registry.lock();
     let Some(record) = gate.review(challenge, allow, context.elevated)? else { return Ok(json!({"cancelled":true})); };
     let mut warning = None;
     if remember && record.rememberable {
@@ -683,8 +711,14 @@ mod tests {
             std::fs::write(system.join("WindowsPowerShell/v1.0/powershell.exe"), b"inert system shell fixture").unwrap();
             let program = root.join("custom shell.exe");
             std::fs::write(&program, b"inert executable fixture; never launched").unwrap();
+            let git_bash = root.join("Program Files/Git/bin/bash.exe");
+            let git_bash_x86 = root.join("Program Files (x86)/Git/bin/bash.exe");
+            for path in [&git_bash, &git_bash_x86] {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"inert Git Bash fixture").unwrap();
+            }
             let context = Context { store: root.join("account/grants.bin"), default_cwd: home,
-                system, current: root.clone(), search: vec![root.clone()], elevated: false };
+                system, git_bash: vec![git_bash, git_bash_x86], current: root.clone(), search: vec![root.clone()], elevated: false };
             Self { root, context, program }
         }
         fn local(&self, owner: &str) -> Record {
@@ -728,6 +762,110 @@ mod tests {
         }
         let cwd = fixture.root.join("another"); std::fs::create_dir(&cwd).unwrap();
         assert!(!make_record("local", "local:cwd", &json!({"shell":"cmd.exe","args":["/d"],"cwd":cwd}), AuthSource::none(), &fixture.context).unwrap().safe_builtin);
+    }
+
+    #[test]
+    fn execution_trust_custom_local_launches_are_one_time_even_when_remember_requested() {
+        let fixture = Fixture::new();
+        let registry = Mutex::new(Gate::default());
+        let record = fixture.local("local:custom-decision");
+        assert!(!record.safe_builtin);
+        assert!(!record.rememberable);
+        assert!(record.description.contains("自定义本地启动的授权仅限本次；标准 shell 可直接启动，SSH 连接可记住授权。"));
+        assert!(!record.description.contains("可选择记住此配置"));
+        let original = record.original.clone();
+        let challenge = prepare_record(record, &fixture.context.store, &registry).unwrap();
+        assert_eq!(challenge["canRemember"], json!(false));
+        assert!(challenge.get("ticket").is_none());
+        let approved = decide_record(challenge["challengeId"].as_str().unwrap(), true, true, &fixture.context, &registry).unwrap();
+        let ticket = approved["ticket"].as_str().unwrap().to_owned();
+        assert!(!ticket.is_empty());
+        assert!(!fixture.context.store.exists());
+        registry.lock().take("local", "local:custom-decision", &ticket, &original, &AuthSource::none()).unwrap();
+        assert!(registry.lock().take("local", "local:custom-decision", &ticket, &original, &AuthSource::none()).is_err());
+        assert!(!fixture.context.store.exists());
+    }
+
+    #[test]
+    fn execution_trust_powershell_file_is_a_one_time_custom_local_launch() {
+        let fixture = Fixture::new();
+        let record = make_record("local", "local:powershell-file", &json!({"shell":"powershell.exe","args":["-File","x.ps1"]}), AuthSource::none(), &fixture.context).unwrap();
+        assert!(!record.safe_builtin);
+        assert!(!record.rememberable);
+        assert!(record.description.contains("自定义本地启动的授权仅限本次"));
+    }
+
+    #[test]
+    fn execution_trust_only_program_files_git_bash_harmless_args_are_safe_builtin() {
+        let fixture = Fixture::new();
+        let cases = [json!([]), json!(["-i","-l"]), json!(["--login"]), json!(["-il"]), json!(["-li"])];
+        for (path_index, program) in fixture.context.git_bash.clone().into_iter().enumerate() {
+            for (arg_index, args) in cases.clone().into_iter().enumerate() {
+                let record = make_record("local", &format!("local:git-{path_index}-{arg_index}"), &json!({"shell":program.clone(),"args":args}), AuthSource::none(), &fixture.context).unwrap();
+                assert!(record.safe_builtin);
+                assert!(record.rememberable);
+                let response = prepare_record(record, &fixture.context.store, &Mutex::new(Gate::default())).unwrap();
+                assert!(response.get("ticket").is_some());
+                assert!(response.get("challengeId").is_none());
+                assert!(!fixture.context.store.exists());
+            }
+        }
+        let program = fixture.context.git_bash[0].clone();
+        let record = make_record("local", "local:git-command", &json!({"shell":program.clone(),"args":["-c","echo hi"]}), AuthSource::none(), &fixture.context).unwrap();
+        assert!(!record.safe_builtin);
+        assert!(!record.rememberable);
+        let cwd = fixture.root.join("git-cwd");
+        std::fs::create_dir(&cwd).unwrap();
+        let record = make_record("local", "local:git-cwd", &json!({"shell":program,"args":["-i"],"cwd":cwd}), AuthSource::none(), &fixture.context).unwrap();
+        assert!(!record.safe_builtin);
+        assert!(!record.rememberable);
+        let other_bash = fixture.root.join("bash.exe");
+        std::fs::write(&other_bash, b"inert non-standard bash fixture").unwrap();
+        let record = make_record("local", "local:other-bash", &json!({"shell":other_bash,"args":["-i","-l"]}), AuthSource::none(), &fixture.context).unwrap();
+        assert!(!record.safe_builtin);
+        assert!(!record.rememberable);
+    }
+
+    #[test]
+    fn execution_trust_legacy_custom_local_grants_are_inert() {
+        let fixture = Fixture::new();
+        let record = fixture.local("local:legacy-grant");
+        let mut database = Database::new().unwrap();
+        database.grants.push(database.fingerprint(&record.descriptor).unwrap());
+        save_database(&fixture.context.store, &database).unwrap();
+        let response = prepare_record(record, &fixture.context.store, &Mutex::new(Gate::default())).unwrap();
+        assert!(response.get("challengeId").is_some());
+        assert!(response.get("ticket").is_none());
+        assert_eq!(response["canRemember"], json!(false));
+    }
+
+    #[test]
+    fn execution_trust_ssh_definitions_remain_rememberable() {
+        let fixture = Fixture::new();
+        let auth = AuthSource { identity: json!({"kind":"key","keyPath":"","credentialId":"fixture-provenance"}), rememberable: true };
+        let profile = json!({"host":"192.0.2.10","port":22,"username":"fixture","followCwd":false,"loginScripts":[]});
+        let record = make_record("ssh", "ssh:remembered", &profile, auth, &fixture.context).unwrap();
+        assert!(record.rememberable);
+        let mut database = Database::new().unwrap();
+        database.grants.push(database.fingerprint(&record.descriptor).unwrap());
+        save_database(&fixture.context.store, &database).unwrap();
+        let response = prepare_record(record, &fixture.context.store, &Mutex::new(Gate::default())).unwrap();
+        assert!(response.get("ticket").is_some());
+        assert!(response.get("challengeId").is_none());
+    }
+
+    #[test]
+    fn execution_trust_safe_builtin_system_shells_remain_tickets_without_dialogs() {
+        let fixture = Fixture::new();
+        for (index, (shell, args)) in [("powershell.exe", json!(["-NoProfile","-NoLogo"])), ("cmd.exe", json!(["/d","/q"]))].into_iter().enumerate() {
+            let record = make_record("local", &format!("local:safe-system-{index}"), &json!({"shell":shell,"args":args}), AuthSource::none(), &fixture.context).unwrap();
+            assert!(record.safe_builtin);
+            assert!(record.rememberable);
+            let response = prepare_record(record, &fixture.context.store, &Mutex::new(Gate::default())).unwrap();
+            assert!(response.get("ticket").is_some());
+            assert!(response.get("challengeId").is_none());
+        }
+        assert!(!fixture.context.store.exists());
     }
 
     #[test]
@@ -947,24 +1085,20 @@ mod tests {
     }
 
     #[test]
-    fn execution_trust_descriptor_changes_require_new_account_keyed_grants() {
+    fn execution_trust_ssh_descriptor_changes_require_new_account_keyed_grants() {
         let fixture = Fixture::new();
         let database = Database::new().unwrap();
-        let record = fixture.local("local:stable");
-        let fingerprint = database.fingerprint(&record.descriptor).unwrap();
-        for (field, value) in [("args",json!(["--other"])),("cwd",json!("D:\\other")),("elevated",json!(true)),("program",json!("D:\\other.exe"))] {
-            let mut changed = record.descriptor.clone(); changed[field] = value;
-            assert_ne!(database.fingerprint(&changed).unwrap(), fingerprint);
-        }
-        assert_ne!(Database::new().unwrap().fingerprint(&record.descriptor).unwrap(), fingerprint);
-        let auth = AuthSource { identity: json!({"encryptedSource":"OPAQUE_DPAPI_SOURCE","keyPath":""}), rememberable: true };
-        let profile = json!({"host":"192.0.2.10","port":22,"username":"fixture","loginScripts":[{"expect":"","send":"echo fixture"}]});
+        let auth = AuthSource { identity: json!({"encryptedSource":"OPAQUE_DPAPI_SOURCE","keyPath":"","credentialId":"fixture"}), rememberable: true };
+        let profile = json!({"host":"192.0.2.10","port":22,"username":"fixture","followCwd":false,"loginScripts":[{"expect":"","send":"echo fixture"}]});
         let ssh = make_record("ssh", "ssh:attempt", &profile, auth.clone(), &fixture.context).unwrap();
         let key = database.fingerprint(&ssh.descriptor).unwrap();
-        for (field, value) in [("host",json!("192.0.2.11")),("username",json!("other")),("loginScripts",json!([]))] {
+        for (field, value) in [("host",json!("192.0.2.11")),("port",json!(2222)),("username",json!("other")),("followCwd",json!(true)),("loginScripts",json!([]))] {
             let mut changed = profile.clone(); changed[field] = value;
             assert_ne!(database.fingerprint(&make_record("ssh","ssh:next",&changed,auth.clone(),&fixture.context).unwrap().descriptor).unwrap(), key);
         }
+        let mut provenance = auth.clone(); provenance.identity["credentialId"] = json!("other");
+        assert_ne!(database.fingerprint(&make_record("ssh","ssh:provenance",&profile,provenance,&fixture.context).unwrap().descriptor).unwrap(), key);
+        assert_ne!(Database::new().unwrap().fingerprint(&ssh.descriptor).unwrap(), key);
         let mut renamed = profile.clone(); renamed["name"] = json!("a harmless display rename");
         assert_eq!(database.fingerprint(&make_record("ssh","ssh:renamed",&renamed,auth,&fixture.context).unwrap().descriptor).unwrap(), key);
     }
@@ -973,12 +1107,12 @@ mod tests {
     fn execution_trust_account_store_is_sealed_and_tampering_is_not_trust() {
         let fixture = Fixture::new();
         let mut database = Database::new().unwrap();
-        let record = fixture.local("local:store");
+        let record = make_record("ssh", "ssh:store", &json!({"host":"192.0.2.10","port":22,"username":"fixture"}), AuthSource::none(), &fixture.context).unwrap();
         database.grants.push(database.fingerprint(&record.descriptor).unwrap());
         save_database(&fixture.context.store, &database).unwrap();
         let bytes = std::fs::read(&fixture.context.store).unwrap();
-        assert!(!String::from_utf8_lossy(&bytes).contains("custom shell"));
-        assert!(!serde_json::to_string(&database).unwrap().contains("--fixture"));
+        assert!(!String::from_utf8_lossy(&bytes).contains("192.0.2.10"));
+        assert!(!serde_json::to_string(&database).unwrap().contains("192.0.2.10"));
         assert_eq!(load_database(&fixture.context.store).unwrap().unwrap().grants, database.grants);
         std::fs::write(&fixture.context.store, b"foreign or tampered DPAPI data").unwrap();
         assert!(load_database(&fixture.context.store).is_err());

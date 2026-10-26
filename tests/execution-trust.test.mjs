@@ -6,7 +6,7 @@ import vm from 'node:vm';
 const read = name => fs.readFileSync(new URL('../src/' + name, import.meta.url), 'utf8');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-function fixture(handler = () => Promise.resolve({ challengeId: 'challenge', description: 'fixture command', canRemember: true })) {
+function fixture(handler = () => Promise.resolve({ challengeId: 'challenge', description: 'fixture command', canRemember: false })) {
     const calls = [], toasts = [], confirms = [], intervals = new Map();
     let timerId = 0, nonce = 0;
     const elements = new Map();
@@ -78,13 +78,14 @@ function localResults(f) {
 
 test('unapproved local startup sends no launch before explicit confirmation', async () => {
     const f = fixture((name) => Promise.resolve(name === 'prepare-execution'
-        ? { challengeId: 'one', description: '<script>fixture</script>', canRemember: true } : { ticket: 'approved' }));
+        ? { challengeId: 'one', description: '<script>fixture</script>', canRemember: false } : { ticket: 'approved' }));
     const launches = [];
     const request = { requestId: 'local-owner', shell: 'fixture.exe', args: ['original'], cwd: 'D:/fixture' };
     const running = f.broker.startLocal(request, payload => { launches.push(payload); return Promise.resolve(); });
     await tick();
     assert.equal(launches.length, 0);
     assert.equal(f.confirms[0].message, '<script>fixture</script>', 'the existing confirm renderer receives plain text');
+    assert.equal(f.elements.get('confirm-msg').after, undefined, 'custom local approval has no remember checkbox');
     request.args[0] = 'mutated';
     f.confirms[0].approve();
     await running;
@@ -95,24 +96,27 @@ test('unapproved local startup sends no launch before explicit confirmation', as
         { challengeId: 'one', allow: true, remember: false });
 });
 
-test('remember is explicit and the decision carries no mutable execution payload', async () => {
+test('SSH remember is explicit and the decision carries no mutable execution payload', async () => {
     const f = fixture(name => Promise.resolve(name === 'prepare-execution'
         ? { challengeId: 'one', description: 'fixture', canRemember: true } : { ticket: 'approved' }));
-    const running = f.broker.startLocal({ requestId: 'local-owner', shell: 'fixture.exe' }, () => Promise.resolve());
+    const running = f.broker.authorizeSsh({ host: '192.0.2.10', port: 22, username: 'fixture' }, 'remember');
     await tick();
     const label = f.elements.get('confirm-msg').after;
     label.children[0].checked = true;
     label.children[0].change();
     assert.equal(f.elements.get('confirm-ok').textContent, '允许并记住');
     f.confirms[0].approve();
-    await running;
-    assert.equal(f.calls.find(call => call.name === 'decide-execution').payload.remember, true);
+    const authorized = await running;
+    assert.deepEqual(JSON.parse(JSON.stringify(f.calls.find(call => call.name === 'decide-execution').payload)),
+        { challengeId: 'one', allow: true, remember: true });
+    assert.equal(authorized.executionOwner, 'ssh:remember');
+    assert.equal(authorized.executionTicket, 'approved');
     assert.equal(label.removed, true);
 });
 
 test('closing a local owner cancels its challenge and stale approval cannot launch', async () => {
     const f = fixture(name => Promise.resolve(name === 'prepare-execution'
-        ? { challengeId: 'one', description: 'fixture', canRemember: true } : { ticket: 'approved' }));
+        ? { challengeId: 'one', description: 'fixture', canRemember: false } : { ticket: 'approved' }));
     let launches = 0;
     const running = f.broker.startLocal({ requestId: 'local-owner', shell: 'fixture.exe' }, () => { launches++; });
     await tick();
