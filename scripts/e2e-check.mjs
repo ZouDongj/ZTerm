@@ -2293,6 +2293,63 @@ async function main() {
         }
       } catch (e) { console.log(`[e2e] screenshot ${name} failed: ${e.message}`); }
     }
+    // Editor and confirmation actions share one left-to-right contract. These
+    // probes only open and cancel isolated UI; they never submit an edit,
+    // authorize execution, or open a connection.
+    const dialogActionCases = [
+      { name: 'ssh-edit', overlay: 'overlay-ssh-edit', open: 'openSSHEdit(true)',
+        primary: '#ssh-edit-save-btn', cancel: '#overlay-ssh-edit .ssh-edit-footer .btn-outline' },
+      { name: 'quick-command', overlay: 'overlay-qc-edit', open: 'openQCEdit(true)',
+        primary: '#overlay-qc-edit .btn-primary', cancel: '#overlay-qc-edit .btn-outline' },
+      { name: 'highlight', overlay: 'overlay-highlight-edit', open: 'openHighlightEdit(true)',
+        primary: '#overlay-highlight-edit .btn-primary', cancel: '#overlay-highlight-edit .btn-outline' },
+      { name: 'shared-confirm', overlay: 'overlay-confirm',
+        open: "showConfirm('按钮顺序验证', () => {}, '确认')", primary: '#confirm-ok', cancel: '#confirm-cancel' },
+      { name: 'color-picker', overlay: 'color-picker-overlay', open: "openColorPicker('#61afef', () => {})",
+        primary: '.color-picker-ok', cancel: '.color-picker-cancel' },
+    ];
+    const dialogActionResults = [];
+    for (const dialog of dialogActionCases) {
+      const geometry = await cdp.eval(`(async () => {
+        closeAllOverlays();
+        closeColorPicker();
+        ${dialog.open};
+        await new Promise(requestAnimationFrame);
+        const overlay = document.getElementById(${JSON.stringify(dialog.overlay)});
+        const primary = document.querySelector(${JSON.stringify(dialog.primary)});
+        const cancel = document.querySelector(${JSON.stringify(dialog.cancel)});
+        const primaryRect = primary?.getBoundingClientRect();
+        const cancelRect = cancel?.getBoundingClientRect();
+        return {
+          opened: overlay?.classList.contains('open') === true,
+          primaryBeforeCancel: !!(primary?.compareDocumentPosition(cancel) & Node.DOCUMENT_POSITION_FOLLOWING),
+          primaryRight: primaryRect?.right,
+          cancelLeft: cancelRect?.left,
+          primaryWidth: primaryRect?.width,
+          primaryHeight: primaryRect?.height,
+          cancelWidth: cancelRect?.width,
+          cancelHeight: cancelRect?.height,
+          primaryLabel: primary?.textContent,
+          cancelLabel: cancel?.textContent,
+          cancelFocused: document.activeElement === cancel,
+        };
+      })()`).catch(e => ({ error: String(e) }));
+      dialogActionResults.push({ name: dialog.name, ...geometry });
+      await shot('dialog-actions-' + dialog.name);
+      const dismissed = await cdp.eval(`(() => {
+        document.querySelector(${JSON.stringify(dialog.cancel)})?.click();
+        return !document.getElementById(${JSON.stringify(dialog.overlay)}).classList.contains('open');
+      })()`).catch(() => false);
+      dialogActionResults[dialogActionResults.length - 1].dismissed = dismissed;
+    }
+    check('编辑与确认弹窗：主操作在左、取消在右且默认焦点安全',
+      dialogActionResults.every(r => r.opened === true && r.primaryBeforeCancel === true &&
+        r.primaryWidth > 0 && r.primaryHeight > 0 && r.cancelWidth > 0 && r.cancelHeight > 0 &&
+        r.primaryRight <= r.cancelLeft && r.dismissed === true &&
+        (r.name !== 'shared-confirm' || r.cancelFocused === true)),
+      JSON.stringify(dialogActionResults));
+    await cdp.eval(`closeAllOverlays(); closeColorPicker(); 'dialog-order-clean'`);
+
     const sshFxCount = await cdp.eval(`(() => {
       TabManager.sshProfiles = [
         { id: 'e2essh1', name: '', host: '192.0.2.10', port: 22, username: 'deploy', group: '生产', authType: 'password' },
