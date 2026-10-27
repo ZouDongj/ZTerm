@@ -30,6 +30,7 @@ import { connectVerifiedEndpoint } from './e2e-ownership.mjs';
 import { requireBackgroundCapability } from './e2e-background-capability.mjs';
 import { writeBackgroundJson } from './e2e-background-json.mjs';
 import { consentCancellationPassed, executionConsent, createSshFailureApproval, createUiSshFixture, createSshFailureEndpoint } from './e2e-execution-fixtures.mjs';
+import { runWebglAtlasChecks } from './e2e-webgl-atlas.mjs';
 
 const SOURCE_EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
 let EXE = SOURCE_EXE;
@@ -335,7 +336,7 @@ async function startApp() {
       // The anti-throttling flags keep rAF/rendering/timers running while the
       // window sits on a non-visible virtual desktop (occlusion would
       // otherwise throttle Chromium and break frame-sampling probes).
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${launchPort} --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${launchPort} --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling${Number(process.env.ZTERM_E2E_FORCE_DPR) > 0 ? ` --force-device-scale-factor=${Number(process.env.ZTERM_E2E_FORCE_DPR)}` : ''}`,
       WEBVIEW2_USER_DATA_FOLDER: udf,
     },
   });
@@ -563,6 +564,18 @@ async function main() {
     }
     if (!splashGone) await cdp.eval(`hideStartupSplash()`);
     check('启动界面首帧渲染后自动淡出', splashGone === true, `splash存在=${splashExists}, 自动移除=${splashGone}`);
+
+    await waitForValue(cdp, `(() => { const tab = TabManager.getActive(); return !!tab && (tab.term || getAllPanes(tab).some(p => p.term)); })()`, true, 20000);
+    await runWebglAtlasChecks(cdp, check, {
+      defaultAtlasCap: process.env.ZTERM_E2E_WEBGL_DEFAULT_CAP === '1',
+      deviceScaleFactor: Number(process.env.ZTERM_E2E_WEBGL_DPR) || 0,
+    });
+    if (process.env.ZTERM_E2E_WEBGL_ONLY === '1') {
+      const failed = results.filter(r => !r.pass);
+      console.log(`WebGL-only: ${results.length - failed.length}/${results.length} checks passed`);
+      if (failed.length) throw new Error('WebGL-only checks failed: ' + failed.map(r => r.name).join(', '));
+      return;
+    }
 
     // 1. CSP: 'unsafe-inline' must actually be in effect (not pushed out by a
     // Tauri-injected hash). Fetching the page itself can fail sporadically

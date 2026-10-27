@@ -21,7 +21,7 @@
           u = 0;
         class g extends n.Disposable {
           constructor(e, t, i) {
-            super(), this._terminal = e, this._gl = t, this._dimensions = i, this._activeBuffer = 0, this._vertices = {
+            super(), this._terminal = e, this._gl = t, this._dimensions = i, this._activeBuffer = 0, this._lastAtlasLayoutVersion = -1, this._vertices = {
               count: 0,
               attributes: new Float32Array(0),
               attributesBuffers: [new Float32Array(0), new Float32Array(0)]
@@ -48,7 +48,17 @@
             o.enable(o.BLEND), o.blendFunc(o.SRC_ALPHA, o.ONE_MINUS_SRC_ALPHA), this.handleResize();
           }
           beginFrame() {
-            return !this._atlas || this._atlas.beginFrame();
+            if (!this._atlas) return !0;
+            const e = this._atlas.pageLayoutVersion !== this._lastAtlasLayoutVersion;
+            return this._lastAtlasLayoutVersion = this._atlas.pageLayoutVersion, e;
+          }
+          // Non-consuming companion to beginFrame: reports how far the atlas
+          // page layout has moved past the version this renderer confirmed at
+          // the start of the current pass. renderRows checks it after each
+          // model update so mid-pass merges or texture clears never leak into
+          // a draw; calling this acknowledges nothing.
+          atlasLayoutVersionDelta() {
+            return this._atlas ? this._atlas.pageLayoutVersion - this._lastAtlasLayoutVersion : 0;
           }
           updateCell(e, t, i, s, r, o, n, a) {
             this._updateCell(this._vertices.attributes, e, t, i, s, r, o, n, a);
@@ -72,6 +82,10 @@
           render(e) {
             if (!this._atlas) return;
             const t = this._gl;
+            // Direct adapter draws can restructure the atlas after the base
+            // pass. Rebind stale textures without consuming the layout version
+            // that the next full model rebuild still needs to observe.
+            this.atlasLayoutVersionDelta() > 0 && this.invalidateAtlasTextures();
             t.useProgram(this._program), t.bindVertexArray(this._vertexArrayObject), this._activeBuffer = (this._activeBuffer + 1) % 2;
             const i = this._vertices.attributesBuffers[this._activeBuffer];
             let s = 0;
@@ -85,7 +99,18 @@
             t.drawElementsInstanced(t.TRIANGLE_STRIP, 4, t.UNSIGNED_BYTE, 0, s / h);
           }
           setAtlas(e) {
-            this._atlas = e;
+            // A new atlas instance invalidates the observed layout version so
+            // the next beginFrame forces a full-viewport rebuild.
+            this._atlas = e, this._lastAtlasLayoutVersion = -1;
+            this.invalidateAtlasTextures();
+          }
+          // Merges and atlas clears replace page objects wholesale, and a
+          // replacement page's per-page version counter can coincide with the
+          // bound one (unlike upstream master, AtlasPage.version here is not
+          // globally monotonic), which would make render() skip the texImage2D
+          // upload and leave stale texture pixels on the GPU. Resetting every
+          // bound version forces a full re-upload on the next render.
+          invalidateAtlasTextures() {
             for (const e of this._atlasTextures) e.version = -1;
           }
           _bindAtlasPageTexture(e, t, i) {
@@ -345,7 +370,34 @@
               this._updateDimensions(), this._refreshCharAtlas(), this._isAttached = !0;
             }
             for (const i of this._renderLayers) i.handleGridChanged(this._terminal, e, t);
-            this._glyphRenderer.value && this._rectangleRenderer.value && (this._glyphRenderer.value.beginFrame() ? (this._clearModel(!0), this._updateModel(0, this._terminal.rows - 1)) : this._updateModel(e, t), this._rectangleRenderer.value.renderBackgrounds(), this._glyphRenderer.value.render(this._model), this._cursorBlinkStateManager.value && !this._cursorBlinkStateManager.value.isCursorVisible || this._rectangleRenderer.value.renderCursor());
+            const n = this._glyphRenderer.value,
+              a = this._rectangleRenderer.value;
+            if (!n || !a) return;
+            // beginFrame confirms this renderer's view of the atlas page
+            // layout and reports whether the layout moved since the last
+            // confirmed frame. The state is per renderer, so two terminals
+            // sharing one atlas each confirm on their own.
+            let r = n.beginFrame();
+            r ? (this._clearModel(!0), this._updateModel(0, this._terminal.rows - 1)) : this._updateModel(e, t);
+            // A model update can itself restructure the atlas mid-pass (page
+            // merges while rasterizing new glyphs, or a texture clear), which
+            // rewrites glyphs already written to the vertex buffer this frame.
+            // Repeat a full clear plus a full-viewport rebuild until one pass
+            // runs against an unchanged layout, and only then draw. Every
+            // glyph a pass rasterizes ends up cached in sync JS, so passes
+            // converge; no retry cap is imposed because a capped stale draw
+            // is exactly the bug being fixed.
+            for (; n.atlasLayoutVersionDelta() > 0;) n.beginFrame(), this._clearModel(!0), this._updateModel(0, this._terminal.rows - 1), r = !0;
+            // _clearModel does not reset the rectangle renderer, and the final
+            // full _updateModel skips updateBackgrounds when no cell changed
+            // (e.g. an all-zero model right after a clear), so rebuild the
+            // background rectangles explicitly from the final stable model.
+            // The cursor is already rebuilt by that same final full update.
+            // Any layout invalidation this frame (r) also replaced atlas page
+            // objects; since per-page versions can collide with the bound
+            // ones, force a full texture rebind before the glyph draw.
+            r && (a.updateBackgrounds(this._model), n.invalidateAtlasTextures());
+            a.renderBackgrounds(), n.render(this._model), this._cursorBlinkStateManager.value && !this._cursorBlinkStateManager.value.isCursorVisible || a.renderCursor();
           }
           _updateCursorBlink() {
             this._terminal.options.cursorBlink ? this._cursorBlinkStateManager.value = new n.CursorBlinkStateManager(() => {
@@ -389,8 +441,11 @@
           _updateDimensions() {
             this._charSizeService.width && this._charSizeService.height && (this.dimensions.device.char.width = Math.floor(this._charSizeService.width * this._devicePixelRatio), this.dimensions.device.char.height = Math.ceil(this._charSizeService.height * this._devicePixelRatio), this.dimensions.device.cell.height = Math.floor(this.dimensions.device.char.height * this._optionsService.rawOptions.lineHeight), this.dimensions.device.char.top = 1 === this._optionsService.rawOptions.lineHeight ? 0 : Math.round((this.dimensions.device.cell.height - this.dimensions.device.char.height) / 2), this.dimensions.device.cell.width = this.dimensions.device.char.width + Math.round(this._optionsService.rawOptions.letterSpacing), this.dimensions.device.char.left = Math.floor(this._optionsService.rawOptions.letterSpacing / 2), this.dimensions.device.canvas.height = this._terminal.rows * this.dimensions.device.cell.height, this.dimensions.device.canvas.width = this._terminal.cols * this.dimensions.device.cell.width, this.dimensions.css.canvas.height = Math.round(this.dimensions.device.canvas.height / this._devicePixelRatio), this.dimensions.css.canvas.width = Math.round(this.dimensions.device.canvas.width / this._devicePixelRatio), this.dimensions.css.cell.height = this.dimensions.device.cell.height / this._devicePixelRatio, this.dimensions.css.cell.width = this.dimensions.device.cell.width / this._devicePixelRatio);
           }
-          _setCanvasDevicePixelDimensions(e, t) {
-            this._canvas.width === e && this._canvas.height === t || (this._canvas.width = e, this._canvas.height = t, this._requestRedrawViewport());
+          _setCanvasDevicePixelDimensions() {
+            // Fractional CSS geometry can round below the integer terminal
+            // grid; keep glyphs and cursor scissor on that same grid.
+            const width = this.dimensions.device.canvas.width, height = this.dimensions.device.canvas.height;
+            this._canvas.width === width && this._canvas.height === height || (this._canvas.width = width, this._canvas.height = height, this._requestRedrawViewport());
           }
           _requestRedrawViewport() {
             this._onRequestRedraw.fire({
@@ -2047,7 +2102,7 @@
               left: 0,
               bottom: 0,
               right: 0
-            }, this._workAttributeData = new c.AttributeData(), this._textureSize = 512, this._onAddTextureAtlasCanvas = new a.EventEmitter(), this.onAddTextureAtlasCanvas = this._onAddTextureAtlasCanvas.event, this._onRemoveTextureAtlasCanvas = new a.EventEmitter(), this.onRemoveTextureAtlasCanvas = this._onRemoveTextureAtlasCanvas.event, this._requestClearModel = !1, this._createNewPage(), this._tmpCanvas = p(e, 4 * this._config.deviceCellWidth + 4, this._config.deviceCellHeight + 4), this._tmpCtx = (0, o.throwIfFalsy)(this._tmpCanvas.getContext("2d", {
+            }, this._workAttributeData = new c.AttributeData(), this._textureSize = 512, this._onAddTextureAtlasCanvas = new a.EventEmitter(), this.onAddTextureAtlasCanvas = this._onAddTextureAtlasCanvas.event, this._onRemoveTextureAtlasCanvas = new a.EventEmitter(), this.onRemoveTextureAtlasCanvas = this._onRemoveTextureAtlasCanvas.event, this._pageLayoutVersion = 0, this._createNewPage(), this._tmpCanvas = p(e, 4 * this._config.deviceCellWidth + 4, this._config.deviceCellHeight + 4), this._tmpCtx = (0, o.throwIfFalsy)(this._tmpCanvas.getContext("2d", {
               alpha: this._config.allowTransparency,
               willReadFrequently: !0
             }));
@@ -2068,13 +2123,20 @@
               }
             });
           }
-          beginFrame() {
-            return this._requestClearModel;
+          // Monotonic layout generation for the page structure: bumped once
+          // when a page merge finishes renumbering pages, and once when
+          // clearTexture actually clears pages and the glyph cache. Plain page
+          // additions and no-op clears leave it unchanged. Each GlyphRenderer
+          // tracks the version it confirmed, so renderers sharing one atlas
+          // detect layout changes independently.
+          get pageLayoutVersion() {
+            return this._pageLayoutVersion;
           }
           clearTexture() {
             if (0 !== this._pages[0].currentRow.x || 0 !== this._pages[0].currentRow.y) {
               for (const e of this._pages) e.clear();
               this._cacheMap.clear(), this._cacheMapCombined.clear(), this._didWarmUp = !1;
+              this._pageLayoutVersion++;
             }
           }
           _createNewPage() {
@@ -2089,7 +2151,7 @@
                 n = this._mergePages(s, o);
               n.version++;
               for (let e = r.length - 1; e >= 0; e--) this._deletePage(r[e]);
-              this.pages.push(n), this._requestClearModel = !0, this._onAddTextureAtlasCanvas.fire(n.canvas);
+              this.pages.push(n), this._pageLayoutVersion++, this._onAddTextureAtlasCanvas.fire(n.canvas);
             }
             const e = new v(this._document, this._textureSize);
             return this._pages.push(e), this._activePages.push(e), this._onAddTextureAtlasCanvas.fire(e.canvas), e;

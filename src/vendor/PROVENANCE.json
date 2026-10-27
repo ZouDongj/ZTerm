@@ -20,5 +20,21 @@
     "cssSha256": "b4c263bbbcb6a986fc9a66b1eec7f36ee0e6296f4f08fc5dedc5a5eb36c90cd1"
   },
   "license": "xterm.js and official addon code are distributed under the MIT license; see NOTICE.md.",
-  "note": "No npm dependency or user Tabby profile is used by the candidate page."
+  "note": "No npm dependency or user Tabby profile is used by the candidate page.",
+  "localModifications": [
+    {
+      "file": "addon-webgl.js",
+      "description": "Per-renderer atlas layout generations, full-model stabilization before frame submission, and texture rebinds for base and direct adapter draws.",
+      "upstreamReferences": [
+        "https://github.com/xtermjs/xterm.js/pull/6042",
+        "https://github.com/xtermjs/xterm.js/pull/6055",
+        "https://github.com/xtermjs/xterm.js/blob/master/addons/addon-webgl/src/WebglRenderer.ts"
+      ],
+      "notes": "Selected fixes adapted to the vendored renderer, not a wholesale xterm upgrade. The clearTexture early-return behavior is unchanged."
+    },
+    {
+      "file": "addon-webgl.js",
+      "description": "Keep canvas dimensions on the integer terminal grid when ResizeObserver reports fractional-DPR-rounded sizes, preventing one-device-pixel clipping of glyphs and cursor regions."
+    }
+  ]
 }
