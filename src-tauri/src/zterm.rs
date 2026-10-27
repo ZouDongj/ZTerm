@@ -4575,7 +4575,7 @@ static UPDATE_DL: parking_lot::Mutex<UpdateDlState> =
 /// Pick the unique Windows x64 NSIS setup asset from a GitHub release's
 /// assets array. Returns (name, download_url, size, sha256_hex).
 /// Errors when there is not exactly one candidate, the download URL is
-/// missing, or GitHub did not provide a sha256 digest for the asset.
+/// missing or not absolute HTTPS, or GitHub did not provide a sha256 digest.
 fn select_setup_asset(assets: &[Value]) -> Result<(String, String, u64, String), String> {
     let mut hits: Vec<&Value> = assets
         .iter()
@@ -4609,6 +4609,9 @@ fn select_setup_asset(assets: &[Value]) -> Result<(String, String, u64, String),
         .and_then(|v| v.as_str())
         .ok_or("setup asset missing browser_download_url")?
         .to_string();
+    if !crate::update_http::is_https_url(&url) {
+        return Err("setup asset browser_download_url must be an absolute HTTPS URL".to_string());
+    }
     let size = a.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
     let digest = a.get("digest").and_then(|v| v.as_str()).unwrap_or("");
     let sha = digest
@@ -10482,6 +10485,16 @@ mod tests {
         assert!(select_setup_asset(&no_url)
             .unwrap_err()
             .contains("browser_download_url"));
+        for invalid_url in [
+            "http://example.com/ZTerm_1.0.8_x64-setup.exe",
+            "//example.com/ZTerm_1.0.8_x64-setup.exe",
+            "https://",
+        ] {
+            let mut asset = gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, Some(&sha));
+            asset["browser_download_url"] = json!(invalid_url);
+            let error = select_setup_asset(&[asset]).unwrap_err();
+            assert!(error.contains("absolute HTTPS"), "{invalid_url}: {error}");
+        }
         // Path separators / parent refs in the asset name are rejected (the
         // name is joined into the download dir and spawned as the installer).
         let sha2 = format!("sha256:{}", "e".repeat(64));

@@ -185,6 +185,12 @@ fn free_winhttp_string(pw: PWSTR) {
     }
 }
 
+pub(crate) fn is_https_url(url: &str) -> bool {
+    crack_url(url)
+        .map(|parts| parts.https && !parts.host.is_empty())
+        .unwrap_or(false)
+}
+
 struct UrlParts {
     https: bool,
     host: String,
