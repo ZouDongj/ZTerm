@@ -4,6 +4,7 @@ import { uptime } from 'node:os';
 export const BACKGROUND_CLOCK_DOMAIN = 'windows-boot-ms';
 
 // On Windows, libuv uses GetTickCount64()/1000.0 for os.uptime().
+// Producer leases must not round into the next native millisecond.
 export function backgroundNow(readUptime = uptime) { return Math.floor(readUptime() * 1000); }
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -39,7 +40,9 @@ export function validateDesktopSnapshot(snapshot) {
 
 export function validateFreshDesktopSnapshot(snapshot, now = backgroundNow(), notBefore = 0) {
   validateDesktopSnapshot(snapshot);
-  if (snapshot.observedAt < notBefore || snapshot.observedAt > now
+  // Both producers sample the same native millisecond clock from opposite
+  // sides of a read; only that 1ms quantization boundary is not future proof.
+  if (snapshot.observedAt < notBefore || snapshot.observedAt > now + 1
       || now - snapshot.observedAt > OBSERVATION_MAX_AGE_MS) {
     throw new Error('Fresh background observer proof is unavailable');
   }
@@ -133,6 +136,7 @@ export function validatePlacedHost(status, expected) {
   return status;
 }
 
+// Native health uses the same millisecond sampling boundary as the desktop observer.
 export function validateNativeHostHealth(status, expected, now = backgroundNow()) {
   if (status?.phase === 'failed') throw new Error(status.error || 'Native background guard failed');
   if (!status || status.clockDomain !== BACKGROUND_CLOCK_DOMAIN || status.token !== expected.token || status.pid !== expected.pid || status.hwnd !== expected.hwnd
@@ -142,7 +146,7 @@ export function validateNativeHostHealth(status, expected, now = backgroundNow()
       || typeof status.minimized !== 'boolean' || (status.phase === 'placed' && status.minimized !== true)
       || status.onCurrentDesktop !== false || status.onTargetDesktop !== true
       || status.targetDesktopId?.toLowerCase() !== expected.targetDesktopId.toLowerCase()
-      || !Number.isSafeInteger(status.checkedAt) || status.checkedAt <= 0 || status.checkedAt > now
+      || !Number.isSafeInteger(status.checkedAt) || status.checkedAt <= 0 || status.checkedAt > now + 1
       || now - status.checkedAt > OBSERVATION_MAX_AGE_MS) {
     throw new Error('Fresh owned native guard proof is unavailable');
   }

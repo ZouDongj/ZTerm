@@ -23,6 +23,12 @@ const fresh = replacement => ({ ...baseline, observedAt: backgroundNow(), ...rep
 const observerChild = () => Object.assign(new EventEmitter(), { stdout: new EventEmitter() });
 const emitSample = (observer, replacement) => observer.stdout.emit('data', JSON.stringify(fresh(replacement)) + '\n');
 
+test('snapshot freshness admits only the native millisecond sampling boundary', () => {
+  assert.equal(backgroundNow(() => 131578.6559999999), 131578655);
+  assert.doesNotThrow(() => validateFreshDesktopSnapshot({ ...baseline, observedAt: 10001 }, 10000, 10000));
+  assert.throws(() => validateFreshDesktopSnapshot({ ...baseline, observedAt: 10002 }, 10000, 10000));
+});
+
 test('background mode never interprets off or invalid indices as foreground permission', () => {
   assert.equal(backgroundDesktopIndex(), 1);
   for (const value of ['off', '0', '-1', 'NaN', '', '2.5']) assert.throws(() => backgroundDesktopIndex(value));
@@ -103,7 +109,7 @@ test('nil desktop or ambiguous owner proof cannot release an otherwise placed ho
 test('stale, future, and pre-watch samples cannot establish fresh proof', () => {
   const now = 10000;
   assert.equal(validateFreshDesktopSnapshot({ ...baseline, observedAt: now }, now, now).observedAt, now);
-  for (const observedAt of [now - 1501, now + 1, now - 1]) {
+  for (const observedAt of [now - 1501, now + 2, now - 1]) {
     assert.throws(() => validateFreshDesktopSnapshot({ ...baseline, observedAt }, now, now));
   }
 });
@@ -186,6 +192,9 @@ test('shown proof rejects a still minimized, activatable, hidden, or misplaced h
 test('released native health allows real minimize and restore while preserving every guard', () => {
   const now = 10000;
   const binding = { ...expected, hwnd: placed.hwnd, released: true };
+  const quantized = { ...placed, phase: 'shown', minimized: false, checkedAt: now + 1 };
+  assert.doesNotThrow(() => validateNativeHostHealth(quantized, binding, now));
+  assert.throws(() => validateNativeHostHealth({ ...quantized, checkedAt: now + 2 }, binding, now));
   for (const minimized of [true, false]) {
     const status = { ...placed, phase: 'shown', minimized, checkedAt: now };
     assert.equal(validateNativeHostHealth(status, binding, now), status);
@@ -193,7 +202,7 @@ test('released native health allows real minimize and restore while preserving e
     for (const replacement of [{ disabled: false }, { noActivate: false }, { visible: undefined },
       { onCurrentDesktop: true }, { onTargetDesktop: false }, { token: 'old' }, { pid: 30 },
       { hwnd: '0x9999' }, { targetDesktopId: baseline.currentDesktopId }, { checkedAt: undefined },
-      { checkedAt: now + 1 }, { minimized: null }, { phase: 'placed' }]) {
+      { checkedAt: now + 2 }, { minimized: null }, { phase: 'placed' }]) {
       assert.throws(() => validateNativeHostHealth({ ...status, ...replacement }, binding, now));
     }
   }
