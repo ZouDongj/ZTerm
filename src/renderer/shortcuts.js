@@ -856,6 +856,15 @@ document.addEventListener('keydown', e => {
     if (_shortcutCapture) return; // recording a new shortcut; leave it to the capture listener
     // Escape: closing popups / restoring a maximized pane has top priority; otherwise pass through to xterm (vim etc. need it)
     if (e.key === 'Escape') {
+        // An IME-composition Escape cancels the COMPOSITION, not the dialog.
+        // This capture listener registers before the app menu's own keydown
+        // listener (per-open) and the focused input's handler, so without
+        // this guard a composing Escape pops the modal layer (closing the
+        // menu) before the input/menu IME guards ever see the key. Only a
+        // plain Escape closes layers LIFO. keyCode 229 is the composition
+        // marker, the same convention the inline editors use.
+        // (Synthetic-composition testing only — NOT an OS IME acceptance test.)
+        if (e.isComposing || e.keyCode === 229) return;
         // Escape inside an inline-edit input (SFTP path/mkdir, group rename, etc.)
         // must be handled by the input itself (cancel edit), not close the whole overlay.
         // This listener runs in the capture phase, before the input's keydown, so it must pass through here.

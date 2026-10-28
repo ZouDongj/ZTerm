@@ -63,10 +63,16 @@ function modelBlinkBlur(ctx) {
     return { setInput: (el) => { input = el; }, renders: () => renders };
 }
 
-function renamed(ctx, tabId) {
+function renamed(ctx, tabId, opts) {
     const tab = wiredTab(ctx, tabId, 'local_1', 'content');
     stageRenameDom(ctx, tabId);
-    const blink = modelBlinkBlur(ctx);
+    // noEntryBlur: skip the legacy entry-level blur model. The real trace
+    // (artifacts/e2e-tmp/06-tab-focus-state.log) proved the blur of a
+    // SURVIVING rename fires at the reseat appendChild inside render, not at
+    // render entry; tests that model the reseat must not double-model.
+    const blink = (opts && opts.noEntryBlur)
+        ? { setInput() {}, renders: () => 0 }
+        : modelBlinkBlur(ctx);
     ctx.TabManager.render();
     // The span render() only paints as innerHTML text in the harness — mount
     // it as a real child so the production selector resolves.
@@ -158,4 +164,85 @@ test('clearing the name on a locked single tab releases the lock', () => {
 
     assert.equal(tab._customName, undefined, 'lock released');
     assert.equal(tab.name, 'My Server', 'the last name stays until auto-naming moves it');
+});
+
+// IME composition owns the keyboard while composing: the Enter that confirms
+// a composition candidate (keyCode 229 / isComposing) must neither commit nor
+// cancel the rename — the same guard sftp.js _editPath uses.
+test('IME composition Enter/Escape never commit or cancel the rename', () => {
+    const ctx = loadVm();
+    const { tab, input, blink } = renamed(ctx, 't_rn');
+    input.value = ' composing name';
+
+    const base = blink.renders();
+    input.onkeydown({ key: 'Enter', isComposing: true, keyCode: 229, stopPropagation() {} });
+    assert.equal(tab.name, 't_rn', 'composing Enter must not commit');
+    assert.equal(blink.renders(), base, 'composing Enter must not finish the editor at all');
+    assert.ok(ctx.document.querySelector('.tab-rename-input') || input.parentElement, 'editor still open');
+
+    input.onkeydown({ key: 'Escape', isComposing: true, keyCode: 229, stopPropagation() {} });
+    assert.equal(tab.name, 't_rn', 'composing Escape must not cancel');
+    assert.equal(blink.renders(), base, 'composing Escape must not finish the editor either');
+
+    // A real (non-composing) Enter still commits afterwards. (Local tab
+    // names keep their pre-existing trim — the no-trim contract covers
+    // REMOTE paths only.)
+    input.onkeydown({ key: 'Enter', stopPropagation() {} });
+    assert.equal(tab.name, 'composing name', 'plain Enter commits after composition ends');
+});
+
+// Background renders RE-SEAT the kept rename node (render() re-appends it at
+// its order position). Re-inserting an in-document node is a remove+insert,
+// and in WebView2 that removal fires ONE synchronous blur on the focused
+// input — the real trace (artifacts/e2e-tmp/06-tab-focus-state.log) shows
+// doRemove → render → the reseat appendChild → blur → finish(true) committing
+// the half-typed name. The internal move must not read as the user leaving
+// the field; focus and selection must be restored after it. A REAL external
+// blur keeps the original commit semantics.
+test('a background render reseat never commits the half-typed rename (focus/selection restored)', () => {
+    const ctx = loadVm();
+    const { tab, input } = renamed(ctx, 't_rn', { noEntryBlur: true });
+    input.value = 'HALF';
+    input.selectionStart = 1; input.selectionEnd = 3; // a real caret/selection state
+    ctx.document.activeElement = input;
+
+    // Model Chromium's reseat blur: re-appending an in-document node removes
+    // it first, and that removal blurs the focused element synchronously
+    // (focus falls back to <body> exactly as Blink moves it).
+    const vp = ctx.TabManager._ensureStripChrome() || ctx.document.getElementById('tabbar');
+    const origAppend = vp.appendChild.bind(vp);
+    vp.appendChild = (node) => {
+        if (node && node.parentElement === vp) {
+            const focused = node.querySelector && node.querySelector('.tab-rename-input');
+            if (focused && ctx.document.activeElement === focused) {
+                ctx.document.activeElement = ctx.document.body;
+                if (typeof focused.onblur === 'function') focused.onblur();
+            }
+        }
+        return origAppend(node);
+    };
+
+    ctx.TabManager.render(); // the doRemove-style background render
+    assert.equal(tab.name, 't_rn', 'the reseat blur must not commit the half-typed name');
+    assert.equal(tab._customName, undefined, 'no custom-name lock from the reseat');
+    assert.ok(ctx.document.querySelector('.tab-rename-input'), 'the editor survived the reseat');
+    assert.equal(ctx.document.activeElement, input, 'focus restored onto the editor after the reseat');
+
+    // The editor stays usable afterwards: a plain Enter still commits.
+    input.onkeydown({ key: 'Enter', stopPropagation() {} });
+    assert.equal(tab.name, 'HALF', 'plain Enter commits after the reseat');
+});
+
+// A REAL external blur (the user genuinely clicking away) keeps the original
+// commit semantics — the internal-move guard must not swallow it.
+test('a real external blur after a reseat still commits', () => {
+    const ctx = loadVm();
+    const { tab, input } = renamed(ctx, 't_rn', { noEntryBlur: true });
+    input.value = 'TYPED';
+    ctx.document.activeElement = input;
+    ctx.TabManager.render(); // reseat first (guard exercised)
+    assert.ok(ctx.document.querySelector('.tab-rename-input'), 'editor survived the reseat');
+    ctx.document.activeElement = ctx.document.body;
+    input.onblur(); // a genuine external blur
+    assert.equal(tab.name, 'TYPED', 'external blur commits as before');
 });

@@ -83,11 +83,19 @@ ipcRenderer.on('window-shown', () => _syncMaximizeStateFromWindow());
 // this adds a second layer: turn off autocomplete/autocorrect/spellcheck on all inputs,
 // so dynamically created inputs (login script rows, rename fields, etc.) cannot trigger browser-style suggestion popups
 function _disableFormEnhancements(root) {
-    (root.querySelectorAll ? root.querySelectorAll('input, textarea') : []).forEach(el => {
+    // The guard must reach the ROOT itself too: a MutationObserver record can
+    // hand over the input/textarea node DIRECTLY (no descendants), and a
+    // querySelectorAll-only sweep would miss exactly that node.
+    const targets = [];
+    if (root && root.matches && root.matches('input, textarea')) targets.push(root);
+    if (root.querySelectorAll) {
+        for (const el of root.querySelectorAll('input, textarea')) targets.push(el);
+    }
+    for (const el of targets) {
         if (!el.hasAttribute('autocomplete')) el.setAttribute('autocomplete', 'off');
         if (!el.hasAttribute('autocorrect')) el.setAttribute('autocorrect', 'off');
         if (!el.hasAttribute('spellcheck')) el.setAttribute('spellcheck', 'false');
-    });
+    }
 }
 new MutationObserver(muts => {
     for (const m of muts) {

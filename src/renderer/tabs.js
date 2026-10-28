@@ -1594,7 +1594,44 @@ const TabManager = {
                 // button stay stale until the rename finishes.
                 renameKeep.dataset.tip = this._tabDisplayName(t);
                 renameKeep.classList.toggle('tab-exit', this._closingTabs.has(t.id));
-                vp.appendChild(renameKeep);
+                // Re-inserting the kept node (appendChild on an in-document
+                // node is a remove+insert) fires a SYNCHRONOUS blur on the
+                // focused rename input in WebView2 — observed committing the
+                // half-typed name from a background render (doRemove). Mark
+                // the internal move so the blur handler ignores exactly this
+                // one, then restore focus and selection afterwards. A REAL
+                // external blur keeps its commit semantics: the flag lives
+                // only inside this synchronous block.
+                const renameInput = renameKeep.querySelector('.tab-rename-input');
+                const wasFocused = !!(renameInput && document.activeElement === renameInput);
+                let selStart = null, selEnd = null;
+                if (wasFocused) {
+                    try {
+                        if (typeof renameInput.selectionStart === 'number') {
+                            selStart = renameInput.selectionStart;
+                            selEnd = renameInput.selectionEnd;
+                        }
+                    } catch (e) {}
+                }
+                this._renameReseating = true;
+                try {
+                    vp.appendChild(renameKeep);
+                } finally {
+                    this._renameReseating = false;
+                }
+                if (wasFocused) {
+                    try { renameInput.focus(); } catch (e) {}
+                    if (selStart !== null) {
+                        try {
+                            if (typeof renameInput.setSelectionRange === 'function') {
+                                renameInput.setSelectionRange(selStart, selEnd);
+                            } else {
+                                renameInput.selectionStart = selStart;
+                                renameInput.selectionEnd = selEnd;
+                            }
+                        } catch (e) {}
+                    }
+                }
                 return;
             }
             const div = document.createElement('div');
@@ -1606,7 +1643,10 @@ const TabManager = {
             div.dataset.tip = this._tabDisplayName(t);
             div.onclick = () => this.switchTo(t.id);
             div.ondblclick = (e) => { if (t.type !== 'settings') { e.stopPropagation(); this.startRenameTab(t.id); } };
-            div.oncontextmenu = (e) => { if (t.type !== 'settings') { e.preventDefault(); this.showTabContextMenu(e, t.id); } };
+            // Settings tabs carry no tab actions (no rename/clone/close-others
+            // semantics), but the browser menu must never appear either: the
+            // right-click is suppressed there too.
+            div.oncontextmenu = (e) => { e.preventDefault(); if (t.type !== 'settings') this.showTabContextMenu(e, t.id); };
             // Tab drag (reorder + drag onto the content area to split) uses pointer events:
             // HTML5 draggable is intercepted by Tauri WebView2's window-level DnD handler
             // (dragover never fires, cursor shows no-drop) — same pointer drag as panes (Tabby).
@@ -3805,11 +3845,18 @@ const TabManager = {
             this.render();
         };
         input.onkeydown = (e) => {
+            // IME composition owns the key: a candidate-confirming Enter
+            // must neither commit nor cancel (same guard as sftp.js).
+            if (e.isComposing || e.keyCode === 229) return;
             if (e.key === 'Enter') finish(true);
             if (e.key === 'Escape') finish(false);
             e.stopPropagation();
         };
-        input.onblur = () => finish(true);
+        // A blur during the render()'s internal reseat of this input's node
+        // (WebView2 fires it synchronously on the remove+insert) is NOT the
+        // user leaving the field — render restores focus right after; every
+        // other (real external) blur commits as before.
+        input.onblur = () => { if (this._renameReseating) return; finish(true); };
         input.onclick = (e) => e.stopPropagation();
     },
 

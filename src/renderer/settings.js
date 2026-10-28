@@ -299,8 +299,13 @@ document.addEventListener('keydown', (e) => {
 
 
 function openSettings(page) {
-    // If already open, just switch to it
-    const existing = TabManager.tabs.find(t => t.type === 'settings');
+    // If a live settings tab is already open, just switch to it. A tab whose
+    // close is already committed (inside the exit-animation window) must not
+    // be resurrected: switchTo would re-activate an id doRemove is about to
+    // splice out, and the reopen would land on a terminal instead of the
+    // settings page — create a fresh tab in that case, exactly like the
+    // no-existing-tab path.
+    const existing = TabManager.tabs.find(t => t.type === 'settings' && !TabManager._closingTabs.has(t.id));
     if (existing) { TabManager.switchTo(existing.id); }
     else {
         const id = 't_' + (TabManager._counter++);
@@ -319,7 +324,10 @@ function openSettings(page) {
 }
 
 function closeSettingsTab() {
-    const tab = TabManager.tabs.find(t => t.type === 'settings');
+    // Same race guard as openSettings: only a tab NOT already committed to
+    // close can be closed again (a reopen may have created a fresh settings
+    // tab while an older one is still animating out).
+    const tab = TabManager.tabs.find(t => t.type === 'settings' && !TabManager._closingTabs.has(t.id));
     if (!tab) return;
     TabManager.closeTab(tab.id);
 }
