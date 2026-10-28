@@ -146,18 +146,7 @@ function showConfirm(msg, onOk, okText, tone) {
     const cancelBtn = document.getElementById('confirm-cancel');
     const okBtn = document.getElementById('confirm-ok');
     okBtn.textContent = okText || '删除';
-    // Execution authorization confirms a launch rather than a destructive
-    // action, so it opts into the primary tone; every other consumer keeps
-    // the danger default. Both actions share one geometry (30px tall, 8px
-    // radius) so the allow button lines up with the cancel button; cleanup
-    // restores everything so the next dialog never inherits this one.
     okBtn.className = tone === 'primary' ? 'btn-primary' : 'btn-danger';
-    okBtn.style.height = '30px';
-    okBtn.style.borderRadius = '8px';
-    okBtn.style.padding = '0 16px';
-    okBtn.style.display = 'inline-flex';
-    okBtn.style.alignItems = 'center';
-    okBtn.style.justifyContent = 'center';
 
     const cleanup = () => {
         _activeConfirmCleanup = null;
@@ -165,15 +154,9 @@ function showConfirm(msg, onOk, okText, tone) {
         cancelBtn.removeEventListener('click', onCancel);
         okBtn.removeEventListener('click', onOkClick);
         overlay.querySelector('.overlay-backdrop').removeEventListener('click', onCancel);
-        // Restore the default label, tone and geometry so delete flows are unaffected.
+        // Restore the default label and tone so delete flows are unaffected.
         okBtn.textContent = '删除';
         okBtn.className = 'btn-danger';
-        okBtn.style.height = '';
-        okBtn.style.borderRadius = '';
-        okBtn.style.padding = '';
-        okBtn.style.display = '';
-        okBtn.style.alignItems = '';
-        okBtn.style.justifyContent = '';
         _restoreFocusAfterModal();
     };
     const onCancel = () => cleanup();
@@ -250,17 +233,18 @@ function _getAccentColorAlpha(alpha) {
 // text. ZTerm ships its own urlRegex: same shape as the vendor default plus
 // explicit CJK/full-width boundary ranges in both the body and the trailing
 // class. Everything else non-ASCII stays matchable (CJK ideographs in paths,
-// punycode/Unicode domain labels, ports, query strings), and any-case http(s)
-// schemes are accepted (the backend validator is case-insensitive).
+// punycode hosts, ports, query strings), and any-case http(s) schemes are
+// accepted (the backend validator is case-insensitive). Raw Unicode hostnames
+// remain subject to the vendored validator's host-prefix check.
 const _CJK_URL_BOUNDARY =
-    '\\u2013\\u2014'                 // en dash, em dash
-    + '\\u2018\\u2019\\u201c\\u201d' // curly single/double quotes
-    + '\\u2026'                      // horizontal ellipsis
-    + '\\u3000-\\u303f'              // CJK symbols and punctuation (ideographic space/comma/period, corner/book-title brackets)
+    '\\u2010-\\u2027\\u2030-\\u203e' // dashes, quotes, ellipses and sentence marks
+    + '\\u3000-\\u3004'              // ideographic space, comma, period and ditto marks
+    + '\\u3008-\\u3011\\u3014-\\u301f' // corner/book-title brackets; keep 々〆〇
+    + '\\ufe10-\\ufe1f\\ufe30-\\ufe4f\\ufe50-\\ufe6b' // vertical/small punctuation forms
     + '\\uff01-\\uff0f'              // fullwidth ASCII punctuation !"#$%&'()*+,-./
     + '\\uff1a-\\uff20'              // fullwidth :;<=>?@
     + '\\uff3b-\\uff40'              // fullwidth [\]^_`
-    + '\\uff5b-\\uff65';             // fullwidth {|}~ and halfwidth ideographic marks
+    + '\\uff5b-\\uff64';             // fullwidth {|}~; keep halfwidth middle dot ･
 const _URL_REGEX = new RegExp(
     '[hH][tT][tT][pP][sS]?:[/]{2}'
     + '[^\\s"\'!*(){}|\\\\^<>`' + _CJK_URL_BOUNDARY + ']*'
