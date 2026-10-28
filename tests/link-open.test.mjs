@@ -2,6 +2,7 @@
 // plus the browser glue seam (stubbed document/showConfirm/showToast/ipcRenderer).
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 // The glue installs only when a document global exists — stub the browser
 // surface BEFORE importing the module (the IIFE runs at import time).
@@ -121,4 +122,29 @@ test('invoke: backend {ok:false} and IPC rejection both surface one toast', asyn
     assert.equal(calls.toast.length, toastBefore + 2);
     assert.match(calls.toast[calls.toast.length - 2].msg, /blockedProtocol/);
     assert.match(calls.toast[calls.toast.length - 1].msg, /osOpenFailed/);
+});
+
+// ── Link hover tip contract (app.css) ────────────────────────────────────────
+// The tip is app UI floating over the terminal: the URL line inherits the
+// application UI font (no monospace substitution), while wrapping and the
+// overall size stay restrained.
+const css = readFileSync(new URL('../src/renderer/app.css', import.meta.url), 'utf8');
+const ruleBody = (selector) => {
+    const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = css.match(new RegExp(esc + '\\s*\\{([^}]*)\\}'));
+    assert.ok(m, `rule not found: ${selector}`);
+    return m[1];
+};
+
+test('tip target inherits the app UI font; no monospace substitution', () => {
+    const body = ruleBody('.link-tip-target');
+    assert.ok(body.includes('display:block'), 'target stays on its own line');
+    assert.ok(!/(^|;)\s*font-family\s*:/.test(body),
+        '.link-tip-target must not override font-family — it inherits the app UI font from the tip');
+});
+
+test('tip keeps restrained wrapping and size for long URLs', () => {
+    const body = ruleBody('.link-tip');
+    assert.ok(body.includes('max-width:480px'), 'tip max width stays capped');
+    assert.ok(body.includes('word-break:break-all'), 'long URLs wrap instead of overflowing');
 });

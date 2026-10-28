@@ -23,6 +23,14 @@
   "note": "No npm dependency or user Tabby profile is used by the candidate page.",
   "localModifications": [
     {
+      "file": "xterm.js",
+      "description": "Linkifier mouseup activation compares link text and range instead of object identity, and the linkifier is held in a MutableDisposable so a repeated full open() disposes the previous instance.",
+      "upstreamReferences": [
+        "https://github.com/xtermjs/xterm.js/commit/f764c0ac917ba751d27003390436ba62402007a9"
+      ],
+      "notes": "Backport of the upstream fix only; no dependency upgrade. The same-position activation gate and all other vendored behavior are unchanged."
+    },
+    {
       "file": "addon-webgl.js",
       "description": "Per-renderer atlas layout generations, full-model stabilization before frame submission, and texture rebinds for base and direct adapter draws.",
       "upstreamReferences": [
