@@ -36,6 +36,53 @@
     return Number.isFinite(Number(value)) ? Number(value) : fallback;
   }
 
+  const PASTE_BEGIN = '\x1b[200~';
+  const PASTE_END = '\x1b[201~';
+  // Source-ordered segmentation of one input event into printable text runs
+  // and NONPRINTABLE BARRIERS, in original order. Complete bracketed-paste
+  // wrappers are transparent — the payload joins the text stream exactly
+  // where it was sent; an unterminated wrapper fails closed as a barrier
+  // (half a paste is not a typing unit), and so does every nonprintable
+  // codepoint (newlines included: they never join two printable runs). An
+  // ESC/DEL poisons the rest of the event — the parameter bytes of an escape
+  // sequence are not typed characters. Input bytes themselves are never
+  // altered here; noteInput only observes what was sent.
+  function segmentInputEvent(data) {
+    const segments = [];
+    let text = '';
+    let index = 0;
+    let unterminated = false;
+    while (index < data.length) {
+      const begin = data.indexOf(PASTE_BEGIN, index);
+      if (begin < 0) { text += data.slice(index); break; }
+      const end = data.indexOf(PASTE_END, begin + PASTE_BEGIN.length);
+      if (end < 0) { text += data.slice(index, begin); unterminated = true; break; }
+      text += data.slice(index, begin) + data.slice(begin + PASTE_BEGIN.length, end);
+      index = end + PASTE_END.length;
+    }
+    let run = '';
+    const flush = () => { if (run) { segments.push({ kind: 'text', text: run }); run = ''; } };
+    for (const ch of text) {
+      if (ch === '\x1b' || ch === '\x7f') {
+        flush();
+        segments.push({ kind: 'barrier' });
+        return segments; // poisoned: the rest of the event is not typed text
+      }
+      if (isPrintableChar(ch)) run += ch;
+      else { flush(); segments.push({ kind: 'barrier' }); }
+    }
+    flush();
+    if (unterminated) segments.push({ kind: 'barrier' });
+    return segments;
+  }
+
+  function isPrintableChar(ch) {
+    // Codepoint-level printable test (C0, DEL and C1 controls excluded; every
+    // other codepoint, beyond-BMP included, is printable text input).
+    const cp = ch.codePointAt(0);
+    return cp >= 0x20 && cp !== 0x7f && !(cp >= 0x80 && cp <= 0x9f);
+  }
+
   function createXtermWebglSmoothCursor(options) {
     const terminal = options?.terminal;
     const addon = options?.addon;
@@ -146,6 +193,90 @@
     let echoWriteBatches = []; // [{ seq, at, cells: Set<'row:col'> }], arrival order
     let pendingWriteEcho = false; // evidence for the latest retarget's run
     let echoWriteBufferType = null; // batches are coordinate-bound to their buffer
+
+    // Chunk-level rich write evidence for the same protocol-cursor echo path.
+    // Editors (vim/nvim insert mode) emit plain unsynchronized writes with no
+    // completed unit at all, and a split sync block can retarget before its
+    // unit closes — the unit batches above never see those frames. The
+    // observer reports every chunk's printable cell writes ([y, x, char,
+    // width], outside and inside units); the adapter keeps the newest state
+    // per cell, bound to the buffer it was observed on and to the "frame
+    // epoch" (writes recorded since the last retarget — an echo frame's
+    // write always precedes its own retarget; a write from before the
+    // previous retarget belongs to an older frame and must not classify).
+    const ECHO_CHUNK_CELLS_MAX = 8192;
+    let echoChunkCells = new Map(); // 'y:x' -> { at, char, width, epoch }
+    let echoChunkBufferType = null;
+    let echoChunkEpoch = 0;
+    let pendingChunkEcho = false; // rich echo classification for the latest retarget's run
+    // Bounded ordered queue of recent printable input codepoints, oldest
+    // first, with PER-ENTRY timestamps: entries expire individually and a
+    // newer keystroke never refreshes older ones. The exact merged-input
+    // match consumes from the OLDEST UNCONSUMED entry; single-cell/wrap
+    // positives retire a matching head entry so a later identical repaint
+    // cannot reuse old evidence. Never exposed through diagnostics.
+    const ECHO_INPUT_QUEUE_MAX = 64;
+    const ECHO_INPUT_QUEUE_MS = 1500; // same freshness horizon as write evidence
+    let echoInputQueue = []; // [{ ch, at }]
+
+    function pruneInputQueue() {
+      const now = clock();
+      while (echoInputQueue.length && now - echoInputQueue[0].at > ECHO_INPUT_QUEUE_MS) echoInputQueue.shift();
+      if (echoInputQueue.length > ECHO_INPUT_QUEUE_MAX) {
+        echoInputQueue.splice(0, echoInputQueue.length - ECHO_INPUT_QUEUE_MAX);
+      }
+    }
+
+    function enqueueInputChars(chars) {
+      const at = clock();
+      for (const ch of chars) echoInputQueue.push({ ch, at });
+      pruneInputQueue();
+    }
+
+    // Exact ordered match at the oldest matching run, consumed once. Older
+    // printable commands that produced no echo are retired with the match,
+    // so a mode-change key cannot block a later coalesced frame.
+    function consumeInputRun(chars) {
+      pruneInputQueue();
+      for (let start = 0; start + chars.length <= echoInputQueue.length; start++) {
+        let matches = true;
+        for (let i = 0; i < chars.length; i++) {
+          if (echoInputQueue[start + i].ch !== chars[i]) { matches = false; break; }
+        }
+        if (matches) {
+          echoInputQueue.splice(0, start + chars.length);
+          return true;
+        }
+      }
+      return false;
+    }
+
+    // A single-cell/wrap echo positive retires its input and any older
+    // non-echo commands — bookkeeping only, never a precondition.
+    function retireInputChar(ch) {
+      pruneInputQueue();
+      const index = echoInputQueue.findIndex(entry => entry.ch === ch);
+      if (index !== -1) echoInputQueue.splice(0, index + 1);
+    }
+
+    // A nonprintable input barrier, session reset or coordinate-space
+    // invalidation voids every input-side echo asset at once.
+    function clearInputEchoState() {
+      echoInputCredits = 0;
+      echoWriteBatches = [];
+      pendingWriteEcho = false;
+      echoChunkCells = new Map();
+      pendingChunkEcho = false;
+      echoChunkEpoch += 1;
+      echoInputQueue = [];
+    }
+    // Text of the vacated row as of the previous drawable pass, captured
+    // after EVERY drawable pass (never at retarget time, after new parsing).
+    // Kept PRIVATE next to lastTarget (the public snapshot target stays
+    // {x,y}): the rich echo decision compares it with the row's text at
+    // retarget time — typing inserts or shifts the row, a same-char
+    // navigation rewrite leaves the row text unchanged.
+    let lastTargetRowText = null;
     function noteUnitWrites(info) {
       if (!info || !info.wrote || !info.wrote.length) return;
       const bufferType = terminal.buffer.active.type;
@@ -178,6 +309,144 @@
         if (batch.cells.has(key)) return true;
       }
       return false;
+    }
+
+    function noteChunkWrites(info) {
+      if (!info || !Array.isArray(info.cells)) return;
+      const bufferType = terminal.buffer.active.type;
+      if (bufferType !== echoChunkBufferType) {
+        // Coordinate space changed: drop cell evidence of the other buffer.
+        echoChunkBufferType = bufferType;
+        echoChunkCells = new Map();
+      }
+      const at = clock();
+      for (const cell of info.cells) {
+        if (!Array.isArray(cell) || cell.length < 4) continue;
+        const key = cell[0] + ':' + cell[1];
+        // delete+set refreshes insertion order so the bounded-eviction drop
+        // below always removes the OLDEST evidence, not a rewritten cell.
+        echoChunkCells.delete(key);
+        echoChunkCells.set(key, { at, char: cell[2], width: cell[3], epoch: echoChunkEpoch });
+        if (echoChunkCells.size > ECHO_CHUNK_CELLS_MAX) {
+          echoChunkCells.delete(echoChunkCells.keys().next().value);
+        }
+      }
+    }
+
+    // Char and width currently stored in a viewport-relative protocol cell,
+    // or null when the buffer is unreadable. Same access discipline as
+    // softwareCellMatches (shared workCell, guarded loads).
+    function protocolCell(y, x) {
+      try {
+        const active = terminal.buffer.active;
+        const viewportY = finite(active.viewportY, terminal._core?.buffer?.ydisp);
+        const line = terminal._core?.buffer?.lines?.get(viewportY + y);
+        const cell = renderer._workCell;
+        if (!line || !cell || typeof line.loadCell !== 'function') return null;
+        line.loadCell(x, cell);
+        return { chars: cell.getChars(), width: cell.getWidth() };
+      } catch (error) { return null; }
+    }
+
+    // Lossless text fingerprint of a viewport-relative protocol row, or null
+    // when the buffer is unreadable. Every column is kept (no trailing trim)
+    // and an empty cell encodes as NUL — a sentinel no parsed cell can
+    // contain — so an explicit space stays distinguishable from an unwritten
+    // cell and trailing-column writes survive the comparison.
+    function protocolRowText(y) {
+      try {
+        const active = terminal.buffer.active;
+        const viewportY = finite(active.viewportY, terminal._core?.buffer?.ydisp);
+        const line = terminal._core?.buffer?.lines?.get(viewportY + y);
+        const cell = renderer._workCell;
+        if (!line || !cell || typeof line.loadCell !== 'function' || !terminal.cols) return null;
+        let text = '';
+        for (let x = 0; x < terminal.cols; x += 1) {
+          line.loadCell(x, cell);
+          text += cell.getChars() || '\u0000';
+        }
+        return text;
+      } catch (error) { return null; }
+    }
+
+    // Exact merged-input echo: a coalesced frame typed several characters in
+    // ONE run on one row (the native `_sendPaneInput('fa')` case: vim redraws
+    // the inserted run plus the shifted tail in a single frame). Requires
+    // current-epoch, time-fresh observer coverage of EVERY cell in
+    // [vacated, target) — the walk is width-weighted, so a wide lead covers
+    // its own tail and the coverage must end exactly at the caret — with
+    // per-cell char+width agreement with the parser, plus an EXACT ordered
+    // match of the oldest unconsumed fresh input codepoints, consumed once
+    // on success. Cells at/after the target (the shifted tail of an insert)
+    // are NOT required to match the input. Missing coverage, model
+    // divergence or an input mismatch all fail closed — never legacy.
+    function classifyMergedRunEcho(target) {
+      if (echoChunkBufferType !== terminal.buffer.active.type) return false;
+      const run = [];
+      let x = lastTarget.x;
+      while (x < target.x) {
+        const entry = echoChunkCells.get(lastTarget.y + ':' + x);
+        if (!entry || entry.epoch !== echoChunkEpoch) return false;
+        if (clock() - entry.at > ECHO_WRITE_BATCH_MS) return false;
+        const parsed = protocolCell(lastTarget.y, x);
+        if (!parsed || entry.char !== parsed.chars || entry.width !== parsed.width) return false;
+        run.push(entry.char);
+        x += Math.max(1, parsed.width);
+      }
+      if (x !== target.x) return false; // the sum of widths must equal the advance
+      return consumeInputRun(run);
+    }
+
+    // Rich chunk-evidence decision for the retarget that is starting
+    // (lastTarget is still the vacated cell). Returns a TRI-STATE:
+    //   'echo' — the frame has the mechanical echo signature;
+    //   'nav'  — rich evidence IS applicable and the frame is NOT echo: this
+    //            VETOES the legacy unit evidence for the same retarget (a
+    //            completed sync unit whose writes cover the vacated cell is
+    //            not echo just because the unit exists), and a changed row
+    //            with a non-echo cursor shape fails closed here too — a
+    //            rich-classifiable retarget never leaks back to legacy;
+    //   null   — rich evidence does not apply at all (no current-epoch fresh
+    //            write at the vacated cell): the legacy unit batches decide
+    //            on their own (the verified no-hide multiplexer positives).
+    // Once a current-epoch, time-fresh, same-buffer write exists at the
+    // vacated cell, evaluation order is fixed:
+    //  1. Observer agreement: the observer's char AND width are what the
+    //     parser stored in that cell (divergent grapheme models — combining
+    //     marks, ZWJ sequences, astral widths — fail closed).
+    //  2. Lossless row delta: the vacated row's full fingerprint versus the
+    //     previous drawable pass. UNCHANGED means navigation (vim `l`
+    //     rewrites the cell byte-identically), whatever column or row the
+    //     caret parked on.
+    //  3. Changed row: echo only for the exact echo shapes — the caret one
+    //     char past the vacated cell on the same row, the ordinary
+    //     end-of-row wrap (the written char filled the final column and the
+    //     caret landed on column zero of the next row), or an exact
+    //     merged-input run (classifyMergedRunEcho). Both simple shapes stay
+    //     independent of the input queue (they only RETIRE a matching head
+    //     entry); every other shape fails closed as 'nav'.
+    function classifyRichEcho(target) {
+      if (lastTarget === null || echoChunkBufferType !== terminal.buffer.active.type) return null;
+      const entry = echoChunkCells.get(lastTarget.y + ':' + lastTarget.x);
+      if (!entry || entry.epoch !== echoChunkEpoch) return null;
+      if (clock() - entry.at > ECHO_WRITE_BATCH_MS) return null;
+      const vacated = protocolCell(lastTarget.y, lastTarget.x);
+      if (!vacated) return 'nav'; // entry exists but the cell is unreadable: fail closed
+      if (entry.char !== vacated.chars || entry.width !== vacated.width) return 'nav'; // model divergence
+      const row = protocolRowText(lastTarget.y);
+      if (row === null || lastTargetRowText === null) return 'nav';
+      if (row === lastTargetRowText) return 'nav'; // unchanged row: navigation, any cursor delta
+      const advance = Math.max(1, vacated.width);
+      const parkedAfterChar = target.y === lastTarget.y && target.x === lastTarget.x + advance;
+      const wrappedEndOfRow = lastTarget.x + advance === terminal.cols
+        && target.y === lastTarget.y + 1 && target.x === 0;
+      if (parkedAfterChar || wrappedEndOfRow) {
+        retireInputChar(vacated.chars);
+        return 'echo';
+      }
+      if (target.y === lastTarget.y && target.x > lastTarget.x + advance
+        && classifyMergedRunEcho(target)) return 'echo';
+      return 'nav';
     }
     // Once a slide starts inside the echo window it stays plain for the whole
     // animation run, even when app retargets or blink freezes stretch it past
@@ -311,6 +580,13 @@
           }
         }
       },
+      // Bounded chunk-level write report from the raw-stream observer (see
+      // noteChunkWrites): cells written by this chunk anywhere on screen,
+      // including outside units and inside still-open units.
+      chunkWrites(info) {
+        if (disposed) return;
+        noteChunkWrites(info);
+      },
       // xterm parsed through chunk `seq` (term.write callback): publish the
       // pending candidate if its unit completed inside the parsed range.
       parsed(seq) {
@@ -344,6 +620,10 @@
         // would classify against cells that no longer mean the same thing.
         echoWriteBatches = [];
         pendingWriteEcho = false;
+        echoChunkCells = new Map();
+        pendingChunkEcho = false;
+        echoChunkEpoch += 1;
+        echoInputQueue = [];
         revokeSoftware('invalidate:' + (reason || 'unknown'));
         if (reason === 'session-reset') {
           sw.watermark = 0;
@@ -419,11 +699,26 @@
         motion.reposition(cursorBeforeBase.x, cursorBeforeBase.y, at);
         snapBeforeNextDraw = false;
         pendingWriteEcho = false;
+        pendingChunkEcho = false;
       } else if (targetChanged) {
         // Echo evidence binds to the cell the cursor VACATES: a typing-echo
         // frame writes the character at the caret's previous cell, then
         // moves the caret past it. Navigation retargets never write there.
-        pendingWriteEcho = lastTarget !== null && echoWriteCovers(lastTarget.y, lastTarget.x);
+        // The rich tri-state decision runs first (protocol cursor only; the
+        // software caret keeps its credit path): a rich NAV verdict vetoes
+        // the legacy unit evidence — the unit batches cannot see whether
+        // the row actually changed — while a non-applicable rich decision
+        // leaves the verified legacy positives (multiplexer grammars)
+        // intact. Computed before the frame-epoch bump below so entries
+        // recorded since the previous retarget count as this frame's writes.
+        const richDecision = lastTarget !== null && cursorBeforeBase.software !== true
+          ? classifyRichEcho(cursorBeforeBase) : null;
+        pendingWriteEcho = lastTarget !== null && echoWriteCovers(lastTarget.y, lastTarget.x)
+          && richDecision !== 'nav';
+        pendingChunkEcho = richDecision === 'echo';
+        // This retarget closes the current frame: later writes belong to the
+        // next frame.
+        echoChunkEpoch += 1;
         motion.setTarget(cursorBeforeBase.x, cursorBeforeBase.y, at);
         instrumentation.retargets.push({
           at,
@@ -433,6 +728,12 @@
         trim(instrumentation.retargets, MAX_TIMESTAMPS);
       }
       lastTarget = { x: cursorBeforeBase.x, y: cursorBeforeBase.y };
+      // Vacated-row baseline for the NEXT retarget's row-delta check: the
+      // row text as drawn under the target now, captured after every
+      // drawable pass — never at retarget time, which would already include
+      // the new frame's parsing (kept private; the public snapshot target
+      // stays {x,y}).
+      lastTargetRowText = protocolRowText(lastTarget.y);
       const visual = motion.tick(at);
       lastDrawElapsedMs = motion.animating ? Math.max(0, at - motion.startedAt) : null;
       // Narrow scope: the caret may have been painted on a row that xterm did
@@ -716,12 +1017,17 @@
       //     past any window. Printable keystrokes bank credits, navigation
       //     input clears them.
       //  3. Write evidence — the protocol cursor on the alternate buffer
-      //     (a multiplexer's shell pane presenting the pane caret as the
-      //     native cursor — per herdr's docs the non-Windows default; no
-      //     software caret owns it there, and the same relay latency defeats
-      //     the window). The retarget counts as echo only when a recent unit
-      //     WROTE the vacated cell; hjkl and other navigation never write,
-      //     so they keep the inversion.
+      //     (a multiplexer's shell pane, or an editor like vim: no software
+      //     caret owns it there, and the same relay latency defeats the
+      //     window). The retarget counts as echo only when the frame WROTE
+      //     the vacated cell. Two layers feed it: completed-unit batches
+      //     (multiplexer shells, verified herdr grammar) and the richer
+      //     chunk-level tri-state (see classifyRichEcho: editor frames with
+      //     no completed unit classify by observer agreement plus the
+      //     vacated row's text delta — typing shifts the row, a same-char
+      //     navigation rewrite does not — and a rich NAV verdict vetoes the
+      //     unit batches). hjkl and other navigation never shift the row at
+      //     the vacated cell, so they keep the inversion.
       // The window pays first: during a fast burst the latest keystroke
       // keeps it warm, so mid-burst frames classify echo without touching
       // the balance, and credits are spent only on frames that arrive after
@@ -729,7 +1035,8 @@
       const onAlternateBuffer = terminal.buffer.active.type === 'alternate';
       const withinEchoWindow = clock() - lastPrintableInputAt < ECHO_PLAIN_WINDOW_MS;
       const echoCreditUsable = cursor.software === true && echoInputCredits > 0 && !withinEchoWindow;
-      const protocolWriteEcho = onAlternateBuffer && cursor.software !== true && pendingWriteEcho;
+      const protocolWriteEcho = onAlternateBuffer && cursor.software !== true
+        && (pendingWriteEcho || pendingChunkEcho);
       const echoNow = cursorStyle === 'block'
         && motion.animating
         && (!onAlternateBuffer || cursor.software === true || protocolWriteEcho)
@@ -955,29 +1262,38 @@
       // Software-caret port: the raw-stream observer (wired in ipc.js) reports
       // candidates, unit completions and xterm parse watermarks here.
       softwareCaretPort,
-      // Echo classification for typing slides. Only printable text counts
-      // (IME commits included); arrows and function keys arrive as ESC
-      // sequences, control combos as C0 bytes — their cursor echoes are
-      // navigation and keep the inversion slide. Wired from the PTY input
-      // path, so this sees local keystrokes even when the echo is remote.
-      // A printable keystroke banks one echo credit per printed character
-      // for the software-caret path (its frames may land hundreds of ms late
-      // through a multiplexer); any non-printable input clears the balance
-      // AND the write evidence, so a navigation key never inherits a stale
-      // typing classification from either path (e.g. an arrow pressed within
-      // the batch TTL right after typing, whose retarget crosses cells the
-      // echo just wrote).
+      // Echo classification for typing slides. Printable text counts (IME
+      // commits and complete bracketed-paste payloads included — segmented
+      // in source order, so mixed plain/paste events keep their original
+      // sequence); arrows and function keys arrive as ESC sequences, control
+      // combos and newlines as nonprintable barriers — their cursor echoes
+      // are navigation, they keep the inversion slide, and they VOID every
+      // input-side echo asset. Wired from the PTY input path, so this sees
+      // local keystrokes even when the echo is remote.
+      // A printable keystroke banks one echo credit per codepoint for the
+      // software-caret path, warms the time window, and appends its
+      // codepoints to the bounded ordered input queue that the exact
+      // merged-input match consumes (see classifyMergedRunEcho).
       noteInput(data) {
         if (disposed || typeof data !== 'string') return;
-        if (data.includes('\x1b') || data.includes('\x7f') || !/[\x20-\x7e\u00a0-\uffff]/.test(data)) {
-          echoInputCredits = 0;
-          echoWriteBatches = [];
-          pendingWriteEcho = false;
-          return;
+        let enqueued = 0;
+        for (const segment of segmentInputEvent(data)) {
+          if (segment.kind === 'barrier') {
+            clearInputEchoState();
+            enqueued = 0;
+            continue;
+          }
+          const chars = [];
+          for (const ch of segment.text) if (isPrintableChar(ch)) chars.push(ch);
+          if (chars.length) {
+            enqueueInputChars(chars);
+            enqueued += chars.length;
+          }
         }
-        lastPrintableInputAt = clock();
-        const printed = data.match(/[\x20-\x7e\u00a0-\uffff]/g);
-        echoInputCredits = Math.min(ECHO_CREDIT_CAP, echoInputCredits + printed.length);
+        if (enqueued > 0) {
+          lastPrintableInputAt = clock();
+          echoInputCredits = Math.min(ECHO_CREDIT_CAP, echoInputCredits + enqueued);
+        }
       },
       setEnabled(value) {
         enabled = value !== false;

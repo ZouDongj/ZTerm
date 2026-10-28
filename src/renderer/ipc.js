@@ -117,6 +117,7 @@ function _inkFeed(owner, tab, pane, data) {
             cols: term?.cols,
             onCandidate: c => port.candidate(c),
             onUnit: u => port.unit(u),
+            onChunkWrites: w => port.chunkWrites?.(w),
             onInvalidate: reason => port.invalidate('observer:' + reason),
         });
     }

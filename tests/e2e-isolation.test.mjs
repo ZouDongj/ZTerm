@@ -1379,3 +1379,11 @@ test('seedIsolatedConfig seeds an empty config and never overwrites an existing 
   seedIsolatedConfig(box, appData);
   assert.equal(readFileSync(target, 'utf8'), 'sentinel', 'existing config untouched');
 });
+
+test('resolveE2eTmpSubdir accepts only the artifact root and its children', () => {
+  const nested = join(isolation.E2E_TMP_ROOT, 'shots', 'nested');
+  assert.equal(isolation.resolveE2eTmpSubdir(nested), nested);
+  assert.equal(isolation.resolveE2eTmpSubdir(isolation.E2E_TMP_ROOT), isolation.E2E_TMP_ROOT);
+  assert.throws(() => isolation.resolveE2eTmpSubdir(join(isolation.E2E_TMP_ROOT, '..', 'outside')), /artifacts\/e2e-tmp/);
+  assert.throws(() => isolation.resolveE2eTmpSubdir(join(isolation.E2E_TMP_ROOT, 'child', '..', '..', 'outside')), /artifacts\/e2e-tmp/);
+});

@@ -709,6 +709,895 @@ test('real native-mode multiplexer cursor move without writes keeps the inversio
   assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph');
 });
 
+async function nvimProtocolParserFixture(t, { reduced = false } = {}) {
+  const f = ipcParserFixture(t, { cols: 80, rows: 24, reduced });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  await f.write('\x1b[?1049h\x1b[2J\x1b[1;1Habcdef\x1b[1;5H\x1b[?25h');
+  f.setTime(100);
+  render(f);
+  assert.equal(f.source.buffer.active.type, 'alternate');
+  assert.deepEqual(f.adapter.snapshot().target, { x: 4, y: 0 });
+  assert.equal(f.adapter.snapshot().animationActive, false);
+  return f;
+}
+
+function nvimProtocolFrame(synchronized, navigation = false) {
+  // The typing update models a real insert redraw at mid-line: the typed 'e'
+  // enters BEFORE the existing 'e' ("abcdef" → "abcdeef"), so the frame
+  // rewrites the shifted tail — the row text changes, the caret parks right
+  // after the char written at the vacated cell. (A same-char rewrite that
+  // leaves the row identical is the NAVIGATION shape — vim `l` — and has its
+  // own negatives below; identical bytes cannot mean both.)
+  const update = navigation ? '\x1b[1;6H' : '\x1b[1;5Heef\x1b[1;6H';
+  const body = `\x1b[?25l${update}\x1b[?25h`;
+  return synchronized ? `\x1b[?2026h${body}\x1b[?2026l` : body;
+}
+
+function nvimTransportChunks(frame, mode) {
+  if (mode === 'whole') return [frame];
+  if (mode === 'bytewise') return Array.from(frame);
+  const marker = mode === 'after-show' ? '\x1b[?25h' : 'e';
+  const split = frame.indexOf(marker) + marker.length;
+  assert.ok(split >= marker.length, 'frame must contain its requested split marker');
+  return [frame.slice(0, split), frame.slice(split)];
+}
+
+async function drawNvimProtocolFrame(f, chunks) {
+  let moving = null;
+  for (const chunk of chunks) {
+    const retargetsBefore = f.adapter.snapshot().retargets.length;
+    const glyphsBefore = f.adapter.snapshot().counters.glyphDrawPasses;
+    const rectanglesBefore = f.adapter.snapshot().counters.rectangleDrawPasses;
+    await f.write(chunk);
+    const snapshot = f.adapter.snapshot();
+    if (snapshot.retargets.length > retargetsBefore) {
+      assert.equal(moving, null, 'the minimal frame must produce exactly one caret retarget');
+      moving = {
+        drawPassStatus: snapshot.drawPassStatus,
+        glyphDrawPasses: snapshot.counters.glyphDrawPasses - glyphsBefore,
+        rectangleDrawPasses: snapshot.counters.rectangleDrawPasses - rectanglesBefore,
+        animationActive: snapshot.animationActive,
+        cursorX: f.source.buffer.active.cursorX,
+        source: snapshot.caretOwnership.customDrawSource,
+      };
+    }
+  }
+  assert.ok(moving, 'the frame must move the real protocol cursor');
+  return moving;
+}
+
+for (const [synchronized, chunking] of [
+  [true, 'whole'], [true, 'after-echo'], [true, 'after-show'], [false, 'whole'], [false, 'bytewise'],
+]) {
+  for (const delay of [0, 320]) {
+    const shape = synchronized ? 'synchronized' : 'unsynchronized';
+    const timing = delay === 0 ? 'immediate' : 'delayed';
+    test(`issue #31 real-seam nvim typing: ${shape}, ${chunking}, ${timing}`, async t => {
+      const f = await nvimProtocolParserFixture(t);
+      f.adapter.noteInput('e');
+      f.setTime(100 + delay);
+      const moving = await drawNvimProtocolFrame(f,
+        nvimTransportChunks(nvimProtocolFrame(synchronized), chunking));
+      assert.equal(moving.source, 'protocol');
+      assert.equal(moving.animationActive, true);
+      assert.equal(moving.cursorX, 5);
+      assert.ok(moving.rectangleDrawPasses > 0);
+      assert.deepEqual(
+        { drawPassStatus: moving.drawPassStatus, invertedGlyphPasses: moving.glyphDrawPasses },
+        { drawPassStatus: 'base+rectangle', invertedGlyphPasses: 0 },
+      );
+    });
+  }
+}
+
+for (const synchronized of [true, false]) {
+  for (const delay of [0, 320]) {
+    const shape = synchronized ? 'synchronized' : 'unsynchronized';
+    const timing = delay === 0 ? 'immediate' : 'delayed';
+    test(`issue #31 real-seam printable navigation control: ${shape}, ${timing}`, async t => {
+      const f = await nvimProtocolParserFixture(t);
+      f.adapter.noteInput('l');
+      f.setTime(100 + delay);
+      const moving = await drawNvimProtocolFrame(f, [nvimProtocolFrame(synchronized, true)]);
+      assert.equal(moving.source, 'protocol');
+      assert.equal(moving.animationActive, true);
+      assert.equal(moving.cursorX, 5);
+      assert.ok(moving.rectangleDrawPasses > 0);
+      assert.equal(moving.drawPassStatus, 'base+rectangle+glyph');
+      assert.ok(moving.glyphDrawPasses > 0, 'navigation must retain the inverted glyph pass');
+    });
+  }
+}
+
+// ── issue #31 chunk-evidence classification ──
+// The scenarios below exercise the rich chunk-level write evidence through
+// the real parser + IPC + adapter seam: an editor frame (cursor-hide
+// envelope + writes) classifies typing echo; same-character rewrites,
+// prompt paints, write-less moves and stale or cleared evidence keep the
+// inverted glyph pass.
+
+// Frame shapes used by the chunk-evidence tests. The `hide` option only
+// varies the byte shape (an editor-style hide/show envelope or a bare
+// update); the echo decision itself never gates on the hide flag.
+function editorFrame(update, { hide = true } = {}) {
+  return hide ? `\x1b[?25l${update}\x1b[?25h` : update;
+}
+
+test('issue #31 chunk evidence: bare same-character rewrite keeps inversion (vim l)', async t => {
+  // The real vim normal-mode `l` byte shape: rewrite the char under the
+  // cursor with the cursor visible throughout. The row text is identical
+  // after the frame, so the rich decision vetoes any write evidence.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('l');
+  const moving = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;5He\x1b[1;6H', { hide: false })]);
+  assert.equal(moving.cursorX, 5);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph');
+  assert.ok(moving.glyphDrawPasses > 0, 'an unchanged row is navigation, not typing');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+test('issue #31 chunk evidence: freshly typed input never rescues an unchanged rewrite', async t => {
+  // Type 'e', then navigate with 'l' before the frame lands: the written
+  // char matches typed input, the vacated cell is unchanged — input-side
+  // evidence cannot participate in the rich decision.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('e');
+  f.adapter.noteInput('l');
+  const moving = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;5He\x1b[1;6H', { hide: false })]);
+  assert.ok(moving.glyphDrawPasses > 0, 'fresh input alone must not classify normal-mode motion');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+test('issue #31 chunk evidence: an unchanged rewrite never classifies, whatever the input says', async t => {
+  // The row text is identical after the frame: a same-char rewrite is the
+  // vim `l` navigation shape. No input-side signal (fresh, stale, matching
+  // or not) participates in the decision.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('e');
+  f.setTime(800); // input long stale
+  const stale = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;5He\x1b[1;6H')]);
+  assert.ok(stale.glyphDrawPasses > 0, 'a stale input char must not classify an unchanged rewrite');
+  const f2 = await nvimProtocolParserFixture(t);
+  f2.adapter.noteInput('e');
+  f2.setTime(150); // input fresh and matching the cell char
+  const fresh = await drawNvimProtocolFrame(f2, [editorFrame('\x1b[1;5He\x1b[1;6H')]);
+  assert.ok(fresh.glyphDrawPasses > 0, 'a fresh matching input char must not classify it either');
+  assert.equal(f2.adapter.snapshot().counters.echoSlides, 0);
+});
+
+test('issue #31 chunk evidence: prompt-like paint keeps inversion (not the single-char echo shape)', async t => {
+  // A shell/multiplexer painting a prompt writes the cell the cursor then
+  // vacates and jumps past the WHOLE written run (advance 4, not 1): the
+  // retarget shape is not an editor echo, so rich evidence does not apply
+  // and no unit evidence exists — the slide stays inverted.
+  const f = await nvimProtocolParserFixture(t);
+  const moving = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;5HPS> ', { hide: false })]);
+  assert.ok(moving.glyphDrawPasses > 0, 'app-initiated prompt paint is not typing echo');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+test('issue #31 chunk evidence: CJK typing classifies through the changed-cell rule', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('中');
+  const moving = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;5H中\x1b[1;7H')]);
+  const cell = f.source.buffer.active.getLine(0).getCell(4);
+  assert.equal(cell.getChars(), '中');
+  assert.equal(cell.getWidth(), 2, 'the CJK glyph occupies two cells');
+  assert.equal(moving.cursorX, 6, 'the caret parks past the wide glyph');
+  assert.deepEqual(
+    { drawPassStatus: moving.drawPassStatus, invertedGlyphPasses: moving.glyphDrawPasses },
+    { drawPassStatus: 'base+rectangle', invertedGlyphPasses: 0 },
+  );
+});
+
+test('issue #31 chunk evidence: IME commit echo classifies per codepoint', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('こんにちは'); // one IME commit event, several codepoints
+  const moving = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;5Hこ\x1b[1;7H')]);
+  assert.equal(f.source.buffer.active.getLine(0).getCell(4).getChars(), 'こ');
+  assert.deepEqual(
+    { drawPassStatus: moving.drawPassStatus, invertedGlyphPasses: moving.glyphDrawPasses },
+    { drawPassStatus: 'base+rectangle', invertedGlyphPasses: 0 },
+  );
+});
+
+test('issue #31 chunk evidence: complete bracketed paste is typing evidence, incomplete paste clears it', () => {
+  // Paste observation feeds the INPUT-side evidence (credits + time window):
+  // a complete payload's codepoints pay exactly like typed keys even though
+  // the wrapper bytes are escape sequences; an unterminated payload is not a
+  // typing unit and clears everything.
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  f.terminal.buffer.active.type = 'alternate';
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f);
+  f.adapter.noteInput('\x1b[200~你好\x1b[201~'); // complete paste: two payload codepoints
+  f.setTime(320); // window cold: only credits can pay
+  p.candidate(f.cand({ chunkSeq: 3, x: 6 })); p.parsed(3);
+  render(f);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1,
+    'paste payload codepoints bank credits like typed codepoints');
+  f.setTime(600);
+  render(f); // settle: the echo latch clears
+  f.adapter.noteInput('\x1b[200~好'); // incomplete paste: no terminator, clears the balance
+  f.setTime(950); // window cold again
+  p.candidate(f.cand({ chunkSeq: 4, x: 7 })); p.parsed(4);
+  render(f);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1,
+    'an unterminated payload must not bank or keep credits');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph');
+});
+
+test('issue #31 chunk evidence: a complete paste re-warms the shell echo window, an incomplete one does not', async t => {
+  const build = async () => {
+    const f = ipcParserFixture(t, { cols: 80, rows: 24, reduced: false });
+    Object.defineProperty(f.coreService, 'isCursorHidden', {
+      get: () => f.source._core.coreService.isCursorHidden,
+      set: value => { f.source._core.coreService.isCursorHidden = value; },
+    });
+    f.adapter.setCursorStyle('block');
+    await f.write('\x1b[1;1Hab'); // normal buffer: the shell echo time-window path
+    render(f);
+    return f;
+  };
+  // Type at t=100, a COMPLETE paste arrives at t=250 (re-warms the window),
+  // the echo frame lands at t=400 — inside the window the paste refreshed.
+  const complete = await build();
+  complete.setTime(100);
+  complete.adapter.noteInput('e');
+  complete.setTime(250);
+  complete.adapter.noteInput('\x1b[200~x\x1b[201~');
+  complete.setTime(400);
+  const completeMoving = await drawNvimProtocolFrame(complete, ['\x1b[1;3He\x1b[1;4H']);
+  assert.equal(completeMoving.drawPassStatus, 'base+rectangle',
+    'the complete paste is typing: its window covers the late echo frame');
+  // Same timing, but the paste never terminates: no re-warm, the frame
+  // lands 300ms after the last keystroke — outside the window.
+  const partial = await build();
+  partial.setTime(100);
+  partial.adapter.noteInput('e');
+  partial.setTime(250);
+  partial.adapter.noteInput('\x1b[200~x'); // no ESC[201~
+  partial.setTime(400);
+  const partialMoving = await drawNvimProtocolFrame(partial, ['\x1b[1;3He\x1b[1;4H']);
+  assert.equal(partialMoving.drawPassStatus, 'base+rectangle+glyph',
+    'an unterminated payload must not re-warm the window');
+});
+
+test('issue #31 chunk evidence: burst keystrokes classify frame by frame; a multi-char single frame stays conservative', async t => {
+  // Real vim emits one frame per keystroke (the captured replay's burst):
+  // each frame writes one char at the vacated cell and parks right after it.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('c');
+  f.adapter.noteInput('d'); // burst: both typed before any frame lands
+  f.setTime(150);
+  const first = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;5Hc\x1b[1;6H')]);
+  assert.equal(f.source.buffer.active.getLine(0).getCell(4).getChars(), 'c',
+    'the vacated cell holds the FIRST burst char');
+  assert.equal(first.drawPassStatus, 'base+rectangle');
+  f.setTime(250);
+  render(f); // settle: the first slide's plain latch clears before the next frame
+  f.setTime(300);
+  const second = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;6Hd\x1b[1;7H')]);
+  assert.equal(second.drawPassStatus, 'base+rectangle', 'the burst tail frame classifies too');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 2);
+
+  // A multi-char write in ONE frame now classifies ONLY with an exact
+  // ordered match of the oldest unconsumed fresh input (correction 6);
+  // with NO matching input it stays conservative (the prompt-paint shape).
+  const f2 = await nvimProtocolParserFixture(t);
+  f2.adapter.noteInput('c');
+  f2.adapter.noteInput('d');
+  f2.setTime(150);
+  const merged = await drawNvimProtocolFrame(f2, [editorFrame('\x1b[1;5Hcd\x1b[1;7H')]);
+  assert.equal(merged.drawPassStatus, 'base+rectangle',
+    'a merged frame matching the exact c,d input is the merged-input echo shape');
+  const f3 = await nvimProtocolParserFixture(t);
+  f3.setTime(150); // no input at all
+  const unprompted = await drawNvimProtocolFrame(f3, [editorFrame('\x1b[1;5Hcd\x1b[1;7H')]);
+  assert.equal(unprompted.drawPassStatus, 'base+rectangle+glyph',
+    'a merged frame with no input evidence stays conservative');
+});
+
+test('issue #31 chunk evidence stays gated to the alternate buffer (normal buffer keeps the time window)', async t => {
+  const f = ipcParserFixture(t, { cols: 80, rows: 24, reduced: false });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  await f.write('\x1b[1;1Hab'); // normal buffer, no ?1049h
+  render(f); // snap at cursorX=2
+  assert.equal(f.source.buffer.active.type, 'normal');
+  f.adapter.noteInput('e');
+  f.setTime(320); // beyond the 200ms window: chunk evidence must NOT pay here
+  const moving = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;3He\x1b[1;4H')]);
+  assert.ok(moving.glyphDrawPasses > 0, 'the normal-buffer protocol path keeps the time window only');
+  // Control: inside the window the same frame classifies.
+  f.adapter.noteInput('e');
+  const moving2 = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;4He\x1b[1;5H')]);
+  assert.equal(moving2.drawPassStatus, 'base+rectangle');
+});
+
+test('issue #31 chunk evidence never classifies the software caret (credits still own that path)', () => {
+  const f = fixture({ reduced: false });
+  f.adapter.setCursorStyle('block');
+  f.terminal.buffer.active.type = 'alternate';
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f);
+  assert.equal(f.adapter.instrumentation.softwareCaret.active, true);
+  // Chunk evidence claiming the vacated cell, but no credits and a cold
+  // window: the software caret keeps the inverted slide.
+  p.chunkWrites({ chunkSeq: 3, cells: [[1, 5, 'z', 1]], hid: true });
+  p.enqueued(3);
+  p.candidate(f.cand({ chunkSeq: 3, x: 6 })); p.parsed(3);
+  render(f);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0,
+    'chunk evidence must not leak into the software-caret classification');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph');
+  // A printable keystroke still banks a credit and pays for the slide.
+  f.adapter.noteInput('z');
+  p.candidate(f.cand({ chunkSeq: 4, x: 7 })); p.parsed(4);
+  render(f);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1);
+});
+
+test('issue #31 chunk evidence: bar and underline cursors never take the plain echo slide', async t => {
+  for (const style of ['bar', 'underline']) {
+    const f = await nvimProtocolParserFixture(t);
+    f.adapter.setCursorStyle(style);
+    render(f); // consume the correctness snap the style change arms
+    f.adapter.noteInput('e');
+    const moving = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;5He\x1b[1;6H')]);
+    assert.equal(moving.animationActive, true, `${style}: the slide still animates`);
+    assert.equal(f.adapter.snapshot().counters.echoSlides, 0, `${style}: echo classification is block-only`);
+  }
+});
+
+test('issue #31 chunk evidence: the plain echo slide settles back to the inverted glyph pass', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('e');
+  const moving = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;5Heef\x1b[1;6H')]);
+  assert.equal(moving.drawPassStatus, 'base+rectangle');
+  f.setTime(600); // beyond the 90ms slide
+  render(f);
+  assert.equal(f.adapter.snapshot().animationActive, false);
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle+glyph',
+    'settled frames always invert');
+});
+
+test('issue #31 chunk evidence: a blink off-phase delays the retarget and still classifies on re-show', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.renderer._cursorBlinkStateManager = { value: { isCursorVisible: false } };
+  f.adapter.noteInput('e');
+  await f.write(editorFrame('\x1b[1;5Heef\x1b[1;6H')); // blink off: base-only, no retarget yet
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+  delete f.renderer._cursorBlinkStateManager; // blink on: the frozen anchor slides now
+  render(f);
+  assert.equal(f.adapter.motion.animating, true);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1,
+    'evidence survives the hidden period and classifies the re-show slide');
+  assert.equal(f.adapter.snapshot().drawPassStatus, 'base+rectangle');
+});
+
+test('issue #31 chunk evidence: reduced motion settles immediately and keeps the inversion', async t => {
+  const f = await nvimProtocolParserFixture(t, { reduced: true });
+  f.adapter.noteInput('e');
+  const moving = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;5He\x1b[1;6H')]);
+  assert.equal(moving.animationActive, false, 'no slide under reduced motion');
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph', 'the settled frame inverts');
+});
+
+test('issue #31 chunk evidence: animations off (smooth disabled) keeps the inversion', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.setSmooth(false);
+  render(f); // consume the correctness snap the smooth toggle arms
+  f.adapter.noteInput('e');
+  const moving = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;5He\x1b[1;6H')]);
+  assert.equal(moving.animationActive, false, 'no slide with smoothing off');
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph');
+});
+
+test('issue #31 chunk evidence: stale write evidence never classifies a later slide', async t => {
+  // Row-CHANGING write (an insertion): only the evidence-freshness bound can
+  // reject it — the frame would classify as echo if the entry were fresh.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('e');
+  await f.write('\x1b[?25l\x1b[1;5Hex'); // hide + row-changing write, retarget pending the show
+  f.setTime(2000); // beyond the write-evidence freshness bound
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[1;6H\x1b[?25h']);
+  assert.ok(moving.glyphDrawPasses > 0, 'expired evidence must not classify a changed row');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+test('issue #31 chunk evidence: writes elsewhere on the screen never classify the vacated cell', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('e');
+  const moving = await drawNvimProtocolFrame(f, [editorFrame('\x1b[5;1HX\x1b[1;6H')]);
+  assert.ok(moving.glyphDrawPasses > 0, 'only a write at the vacated cell classifies');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+test('issue #31 chunk evidence: navigation input clears pending chunk evidence mid-frame', async t => {
+  // Row-CHANGING write: only the arrow's evidence clearing can reject the
+  // frame — it would classify as echo with the evidence intact.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('e');
+  await f.write('\x1b[?25l\x1b[1;5Hex'); // frame part 1: hide + row-changing write, no retarget yet
+  f.adapter.noteInput('\x1b[D');        // arrow mid-frame: voids credits, batches AND chunk evidence
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[1;6H\x1b[?25h']);
+  assert.ok(moving.glyphDrawPasses > 0, 'an arrow between the write and the show voids the classification');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+test('issue #31 chunk evidence: invalidation (resize/scroll/session) drops chunk evidence', async t => {
+  // Row-CHANGING write: only the invalidation's evidence drop can reject
+  // the frame — it would classify as echo with the evidence intact.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('e');
+  await f.write('\x1b[?25l\x1b[1;5Hex'); // hide + row-changing write
+  f.adapter.softwareCaretPort.invalidate('resize');
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[1;6H\x1b[?25h']);
+  assert.ok(moving.glyphDrawPasses > 0, 'a coordinate-space boundary drops cell evidence');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+// ── correction round 1: rich-negative blockers ──
+// These reproduce review findings against the real parser + IPC seam: a
+// same-character navigation rewrite (sync and unsync, hide envelope or not,
+// fresh matching input or not) must NEVER classify as echo — when the rich
+// decision applies and rejects, it must veto the legacy unit evidence too.
+
+test('correction 1: synchronized same-char navigation keeps inversion and vetoes legacy unit evidence', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('l');
+  f.setTime(420); // 320ms after the keystroke: window cold, unit evidence live
+  const before = f.adapter.snapshot().counters.echoSlides;
+  const moving = await drawNvimProtocolFrame(f,
+    ['\x1b[?2026h\x1b[?25l\x1b[1;5He\x1b[1;6H\x1b[?25h\x1b[?2026l']);
+  assert.equal(moving.cursorX, 5);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'the sync unit wrote the vacated cell, but the row is unchanged: navigation');
+  assert.ok(moving.glyphDrawPasses > 0);
+  assert.equal(f.adapter.snapshot().counters.echoSlides - before, 0, 'zero new echo slides');
+});
+
+test('correction 1: no-hide synchronized same-char navigation keeps inversion', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('l');
+  f.setTime(420);
+  const before = f.adapter.snapshot().counters.echoSlides;
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[?2026h\x1b[1;5He\x1b[1;6H\x1b[?2026l']);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph');
+  assert.equal(f.adapter.snapshot().counters.echoSlides - before, 0);
+});
+
+test('correction 1: fresh printable navigation input never rescues an unchanged rewrite (the input char IS the cell char)', async t => {
+  // Line "abcdlf", cursor on the l: noteInput('l') makes the input char
+  // identical to the rewritten cell char — input-side evidence cannot
+  // distinguish this from typing, so it must not participate at all.
+  const f = ipcParserFixture(t, { cols: 80, rows: 24, reduced: false });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  await f.write('\x1b[?1049h\x1b[2J\x1b[1;1Habcdlf\x1b[1;5H\x1b[?25h');
+  f.setTime(100);
+  render(f);
+  assert.deepEqual(f.adapter.snapshot().target, { x: 4, y: 0 });
+  f.adapter.noteInput('l');
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;5Hl\x1b[1;6H\x1b[?25h']);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'fresh input matching the cell char must not classify navigation');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+test('correction 2: session reset does not lend prior-session input evidence to an unchanged rewrite', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('e'); // prior session typed e
+  f.adapter.softwareCaretPort.invalidate('session-reset');
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;5He\x1b[1;6H\x1b[?25h']);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'the unchanged row is navigation regardless of what the dead session typed');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+test('correction 3: beyond-BMP emoji width models diverge, so astral typing fails closed', async t => {
+  // Hard evidence at this seam: the vendored xterm parser stores U+1F600 as
+  // width 1 (default unicode provider), while the raw-stream observer's
+  // width table reports 2. The observer's per-chunk cell model therefore
+  // cannot be trusted for astral codepoints — rich evidence must fail
+  // closed (inverted) instead of forcing a match.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('\u{1F600}'); // 😀 U+1F600, astral plane
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;5H\u{1F600}\x1b[1;6H\x1b[?25h']);
+  const cell = f.source.buffer.active.getLine(0).getCell(4);
+  assert.equal(cell.getChars(), '\u{1F600}');
+  assert.equal(cell.getWidth(), 1, 'the real parser gives the astral emoji width 1');
+  assert.equal(moving.cursorX, 5, 'the caret parks right after the single parsed cell');
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'a codepoint whose width models diverge must not classify as echo');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+test('correction 3: combining-mark input fails closed (grapheme not modeled, navigation negatives intact)', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('e\u0301'); // e + combining acute
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;5He\u0301\x1b[1;6H\x1b[?25h']);
+  // The real parser combines both codepoints into ONE cell; the observer's
+  // per-codepoint cell model cannot match that cell char — assert the
+  // divergence honestly and require the fail-closed (inverted) outcome.
+  assert.equal(f.source.buffer.active.getLine(0).getCell(4).getChars(), 'e\u0301');
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'an unmodeled grapheme shape must not classify as echo');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+test('correction 3: ZWJ sequence input fails closed (grapheme not modeled)', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F466}'; // man-ZWJ-woman-ZWJ-boy
+  f.adapter.noteInput(family);
+  const moving = await drawNvimProtocolFrame(f, [`\x1b[?25l\x1b[1;5H${family}\x1b[1;6H\x1b[?25h`]);
+  // The vendored parser splits the sequence across cells (each emoji+ZWJ
+  // pair combines; the family does not stay one grapheme): cell 4 holds
+  // 'man+ZWJ' at width 1, while the raw-stream observer models the lead
+  // emoji as width 2 — divergent models must fail closed.
+  assert.equal(f.source.buffer.active.getLine(0).getCell(4).getChars(), '\u{1F468}\u200D');
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'a multi-codepoint grapheme must not classify as echo');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+// ── correction round 2: lossless row fingerprint, authoritative rich shape ──
+
+test('correction 4: synchronized multiplexer space echo classifies (lossless row fingerprint)', async t => {
+  // A space typed at the end of the prompt: the vacated cell was EMPTY and
+  // becomes an explicit space. A whitespace-trimming fingerprint that also
+  // maps empty cells to spaces cannot see this delta.
+  const f = ipcParserFixture(t, { cols: 80, rows: 24, reduced: false });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  await f.write('\x1b[?1049h\x1b[?7l');
+  await f.write('\x1b[1;1HPS> '); // caret ends at x=4; cell (0,4) is EMPTY
+  render(f);
+  assert.equal(f.source.buffer.active.cursorX, 4);
+  f.adapter.noteInput(' ');
+  f.setTime(320); // outside the time window: only write evidence can pay
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[?2026h\x1b[1;5H \x1b[?2026l']);
+  assert.equal(f.source.buffer.active.getLine(0).getCell(4).getChars(), ' ');
+  assert.equal(moving.drawPassStatus, 'base+rectangle',
+    'an empty cell becoming an explicit space is a row delta: echo');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1);
+});
+
+test('correction 4: unsynchronized end-of-line space echo classifies', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  await f.write('\x1b[1;7H'); // park AFTER the content: the vacated cell is EMPTY
+  render(f);
+  assert.deepEqual(f.adapter.snapshot().target, { x: 6, y: 0 });
+  f.adapter.noteInput(' ');
+  f.setTime(420);
+  const moving = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;7H \x1b[1;8H')]);
+  assert.equal(f.source.buffer.active.getLine(0).getCell(6).getChars(), ' ');
+  assert.equal(moving.drawPassStatus, 'base+rectangle',
+    'typing a space over an empty vacated cell is a lossless row delta: echo');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1);
+});
+
+test('correction 5: synchronized same-row navigation jumping two columns stays inverted', async t => {
+  // The frame rewrites the vacated cell unchanged and parks TWO columns
+  // ahead: the row is unchanged, so navigation — the legacy unit evidence
+  // (the sync unit wrote the vacated cell) must be vetoed, not leaked.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('l');
+  f.setTime(420);
+  const before = f.adapter.snapshot().counters.echoSlides;
+  const moving = await drawNvimProtocolFrame(f,
+    ['\x1b[?2026h\x1b[?25l\x1b[1;5He\x1b[1;7H\x1b[?25h\x1b[?2026l']);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'an unchanged row is navigation whatever column the caret parked on');
+  assert.equal(f.adapter.snapshot().counters.echoSlides - before, 0);
+});
+
+test('correction 5: synchronized multi-char frame fails closed (no legacy leak)', async t => {
+  // Two cells written in one sync unit, caret jumping past both: the row
+  // changed but the shape is not single-cell parking nor end-of-row wrap —
+  // rich evidence is authoritative and must fail closed, not hand the
+  // retarget back to the unit batches.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('e');
+  f.setTime(420);
+  const before = f.adapter.snapshot().counters.echoSlides;
+  const moving = await drawNvimProtocolFrame(f,
+    ['\x1b[?2026h\x1b[?25l\x1b[1;5Hex\x1b[1;7H\x1b[?25h\x1b[?2026l']);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'a changed row with a non-echo cursor shape must fail closed');
+  assert.equal(f.adapter.snapshot().counters.echoSlides - before, 0);
+});
+
+test('correction 5: typing at the final column wraps to the next row and still classifies', async t => {
+  // A wrap slide only animates within the jump distance, so this uses a
+  // narrow (8-col) terminal: the caret at the final column types, the
+  // written char fills that column and the caret lands on column zero of
+  // the next row — the ordinary end-of-row wrap shape.
+  const f = ipcParserFixture(t, { cols: 8, rows: 5, reduced: false });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  await f.write('\x1b[?1049h\x1b[2J\x1b[1;1Habc');
+  await f.write('\x1b[1;8H'); // park at the final column (a navigation park: no echo)
+  render(f);
+  assert.deepEqual(f.adapter.snapshot().target, { x: 7, y: 0 });
+  f.adapter.noteInput('z');
+  f.setTime(420);
+  // The parser holds cursorX=cols in the pending-wrap state after the
+  // final-column write; the CR/LF completes the move to the next row.
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;8Hz\r\n\x1b[?25h']);
+  assert.equal(f.source.buffer.active.getLine(0).getCell(7).getChars(), 'z');
+  assert.deepEqual({ x: f.source.buffer.active.cursorX, y: f.source.buffer.active.cursorY }, { x: 0, y: 1 });
+  assert.equal(moving.animationActive, true, 'the wrap slide stays inside the jump distance');
+  assert.equal(moving.drawPassStatus, 'base+rectangle',
+    'the ordinary end-of-row wrap is an accepted echo shape');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1);
+});
+
+// ── correction round 3: exact merged-input echo (native Phase E `_sendPaneInput('fa')`) ──
+// A coalesced frame types several characters in ONE run. The run must match
+// the OLDEST UNCONSUMED fresh input codepoints exactly, in order; every
+// other outcome fails closed. Single-cell/wrap classification stays
+// independent of the input queue (it only RETIRES a matching head entry).
+
+// Realistic vim coalesced insert of 'fa' before the 'e' at x=4: the frame
+// rewrites the inserted run plus the shifted tail, parks right after it.
+const mergedFrame = run => `\x1b[?25l\x1b[1;5H${run}ef\x1b[1;7H\x1b[?25h`;
+
+test('correction 6: native merged-input fa echo classifies (shifted tail is not input-matched)', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('fa'); // one input event, two codepoints (native _sendPaneInput('fa'))
+  const moving = await drawNvimProtocolFrame(f, [mergedFrame('fa')]);
+  assert.equal(f.source.buffer.active.cursorX, 6);
+  assert.equal(f.source.buffer.active.getLine(0).getCell(4).getChars(), 'f');
+  assert.equal(f.source.buffer.active.getLine(0).getCell(5).getChars(), 'a');
+  assert.equal(moving.drawPassStatus, 'base+rectangle',
+    'the run [vacated,target) matched the oldest unconsumed input exactly');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 1);
+});
+
+test('correction 6: insert-mode prefix and direct echoes cannot block a later merged run', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('i'); // mode-change key with no character echo
+  f.adapter.noteInput('a');
+  const first = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;5Haef\x1b[1;6H\x1b[?25h']);
+  assert.equal(first.drawPassStatus, 'base+rectangle');
+  f.setTime(250);
+  render(f);
+  f.adapter.noteInput('f');
+  const second = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;6Hfef\x1b[1;7H\x1b[?25h']);
+  assert.equal(second.drawPassStatus, 'base+rectangle');
+  f.setTime(500);
+  render(f);
+  f.adapter.noteInput('fa');
+  const merged = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;7Hfaef\x1b[1;9H\x1b[?25h']);
+  assert.equal(merged.drawPassStatus, 'base+rectangle',
+    'the native i/a/f/fa sequence must retire older non-echo input');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 3);
+});
+
+test('correction 6: a trailing navigation barrier does not re-warm input or grant echo credits', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  await f.write('\x1b[?1049l');
+  assert.equal(f.source.buffer.active.type, 'normal');
+  f.adapter.noteInput('e\x1b[D');
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[1;6H']);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'only printable text after the last barrier may warm the normal-buffer window');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
+test('correction 6: separate f/a/b events coalesce fa, then b classifies later', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('f');
+  f.adapter.noteInput('a');
+  f.adapter.noteInput('b'); // queued ahead: the fa frame must consume exactly f,a
+  f.setTime(150);
+  const first = await drawNvimProtocolFrame(f, [mergedFrame('fa')]);
+  assert.equal(first.drawPassStatus, 'base+rectangle');
+  f.setTime(250);
+  render(f); // settle: clear the plain latch
+  f.setTime(300);
+  const second = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;6Hbef\x1b[1;8H\x1b[?25h']);
+  assert.equal(second.drawPassStatus, 'base+rectangle',
+    'after fa was consumed, the still-queued b classifies its own frame');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 2);
+});
+
+test('correction 6: single-cell retirements close identical repaint reuse', async t => {
+  // Two single-cell inserts retire f then a; a later repaint producing the
+  // same run with NO new input must stay inverted (the queue is empty).
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('f');
+  await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;5Hfef\x1b[1;6H\x1b[?25h']);
+  f.setTime(250);
+  render(f);
+  f.adapter.noteInput('a');
+  f.setTime(300);
+  await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;6Haef\x1b[1;7H\x1b[?25h']);
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 2);
+  f.setTime(500);
+  render(f); // settle
+  // Navigate the caret back to the run start (pure CUP: no echo), then a
+  // repaint re-derives fa unchanged at cells 4-5 while the row changes ONLY
+  // past the run (cell 6 'e'→X) — with the queue retired, the exact-input
+  // match fails and the slide stays inverted.
+  const park = await drawNvimProtocolFrame(f, ['\x1b[1;5H']);
+  assert.equal(park.drawPassStatus, 'base+rectangle+glyph');
+  f.setTime(560);
+  render(f); // settle the navigation slide
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;5HfaX\x1b[1;7H\x1b[?25h']);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'retired input must not authorize a later identical repaint');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 2);
+});
+
+test('correction 6: complete paste fa merged echo classifies', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('\x1b[200~fa\x1b[201~');
+  f.setTime(420);
+  const moving = await drawNvimProtocolFrame(f, [mergedFrame('fa')]);
+  assert.equal(moving.drawPassStatus, 'base+rectangle',
+    'pasted codepoints are ordered input for the exact-run match');
+});
+
+test('correction 6: mixed plain/paste/plain input keeps source order', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('x\x1b[200~fa\x1b[201~y'); // queue must be x,f,a,y in order
+  f.setTime(150);
+  const first = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;5Hxfa\x1b[1;8H\x1b[?25h']);
+  assert.equal(first.drawPassStatus, 'base+rectangle',
+    'the run matched the source-ordered queue head x,f,a');
+  f.setTime(250);
+  render(f);
+  f.setTime(300);
+  const second = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;8Hy\x1b[1;9H\x1b[?25h']);
+  assert.equal(second.drawPassStatus, 'base+rectangle', 'the trailing y classifies after');
+});
+
+test('correction 6: multiple pastes concatenate in order; an incomplete paste fails closed', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('\x1b[200~f\x1b[201~\x1b[200~a\x1b[201~'); // two complete payloads
+  f.setTime(420);
+  const moving = await drawNvimProtocolFrame(f, [mergedFrame('fa')]);
+  assert.equal(moving.drawPassStatus, 'base+rectangle');
+
+  const f2 = await nvimProtocolParserFixture(t);
+  f2.adapter.noteInput('\x1b[200~fa'); // unterminated wrapper: a barrier, nothing joins
+  f2.setTime(420);
+  const moving2 = await drawNvimProtocolFrame(f2, [mergedFrame('fa')]);
+  assert.equal(moving2.drawPassStatus, 'base+rectangle+glyph',
+    'an incomplete wrapper must not enqueue its payload');
+});
+
+test('correction 6: pasted newlines barrier printable runs', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('\x1b[200~f\na\x1b[201~'); // newline inside the payload splits the runs
+  f.setTime(420);
+  const moving = await drawNvimProtocolFrame(f, [mergedFrame('fa')]);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'a newline between f and a must not join them into one fa run');
+});
+
+test('correction 6: synchronized merged-input echo classifies with exact input', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('fa');
+  f.setTime(420);
+  const before = f.adapter.snapshot().counters.echoSlides;
+  const moving = await drawNvimProtocolFrame(f,
+    ['\x1b[?2026h' + mergedFrame('fa') + '\x1b[?2026l']);
+  assert.equal(moving.drawPassStatus, 'base+rectangle');
+  assert.equal(f.adapter.snapshot().counters.echoSlides - before, 1);
+});
+
+test('correction 6: synchronized unchanged-row multi-cell navigation stays inverted despite matching input', async t => {
+  // Input e,f is queued and WOULD match the rewritten run — but the row is
+  // byte-identical after the frame: navigation, vetoed before input matters.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('e');
+  f.adapter.noteInput('f');
+  f.setTime(420);
+  const before = f.adapter.snapshot().counters.echoSlides;
+  const moving = await drawNvimProtocolFrame(f,
+    ['\x1b[?2026h\x1b[?25l\x1b[1;5Hef\x1b[1;7H\x1b[?25h\x1b[?2026l']);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph');
+  assert.equal(f.adapter.snapshot().counters.echoSlides - before, 0);
+});
+
+test('correction 6: mismatched and reordered input runs fail closed', async t => {
+  const mismatched = await nvimProtocolParserFixture(t);
+  mismatched.adapter.noteInput('fa');
+  mismatched.setTime(420);
+  const wrong = await drawNvimProtocolFrame(mismatched, [mergedFrame('fx')]);
+  assert.equal(wrong.drawPassStatus, 'base+rectangle+glyph', 'the run fx does not match f,a');
+
+  const reordered = await nvimProtocolParserFixture(t);
+  reordered.adapter.noteInput('af');
+  reordered.setTime(420);
+  const swapped = await drawNvimProtocolFrame(reordered, [mergedFrame('fa')]);
+  assert.equal(swapped.drawPassStatus, 'base+rectangle+glyph',
+    'matching must anchor at the oldest unconsumed entry, not any suffix');
+});
+
+test('correction 6: stale input fails closed even with fresh write evidence', async t => {
+  // Split frame: the writes stay inside the evidence TTL; only the INPUT
+  // queue entries are past theirs when the retarget lands.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('fa'); // input at t=100
+  f.setTime(1500);
+  await f.write('\x1b[?25l\x1b[1;5Hfa'); // writes land fresh at t=1500
+  f.setTime(1700); // input now 1600ms old; writes 200ms fresh
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[1;7H\x1b[?25h']);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'per-entry input expiry must reject the run independently of write freshness');
+});
+
+test('correction 6: missing intermediate coverage and queue-overflow runs fail closed', async t => {
+  // Park beyond the fixture content so the intermediate cell has NO entry
+  // at all (never written in any epoch), then write a single cell and park
+  // two ahead: the coverage walk must find the hole.
+  const gap = await nvimProtocolParserFixture(t);
+  await gap.write('\x1b[1;7H'); // navigation park at the empty cell (0,6)
+  render(gap);
+  assert.deepEqual(gap.adapter.snapshot().target, { x: 6, y: 0 });
+  gap.adapter.noteInput('fa');
+  gap.setTime(420);
+  const holed = await drawNvimProtocolFrame(gap, ['\x1b[?25l\x1b[1;7Hf\x1b[1;9H\x1b[?25h']);
+  assert.equal(holed.drawPassStatus, 'base+rectangle+glyph',
+    'a cell in [vacated,target) with no observer coverage is nav');
+
+  const overflow = await nvimProtocolParserFixture(t);
+  overflow.adapter.noteInput('f'); // one codepoint queued
+  overflow.setTime(420);
+  const tooLong = await drawNvimProtocolFrame(overflow, [mergedFrame('fa')]);
+  assert.equal(tooLong.drawPassStatus, 'base+rectangle+glyph', 'a run longer than the queue is nav');
+});
+
+test('correction 6: BMP CJK merged run matches per-width advance', async t => {
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('中a');
+  f.setTime(420);
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[?25l\x1b[1;5H中a\x1b[1;8H\x1b[?25h']);
+  assert.equal(f.source.buffer.active.getLine(0).getCell(4).getChars(), '中');
+  assert.equal(moving.cursorX, 7, 'the caret parks past the wide lead and the narrow a');
+  assert.equal(moving.drawPassStatus, 'base+rectangle',
+    'the width-weighted walk [vacated,target) matched 中,a exactly');
+});
+test('issue #31 chunk evidence: buffer switch invalidates the cell coordinate space', async t => {
+  // Row-CHANGING write: only the buffer-of-origin bound can reject the
+  // frame — it would classify as echo if evidence crossed the boundary.
+  const f = await nvimProtocolParserFixture(t);
+  f.adapter.noteInput('e');
+  await f.write('\x1b[?25l\x1b[1;5Hex'); // hide + row-changing write on the alternate buffer
+  await f.write('\x1b[?1049l'); // leave the alternate buffer mid-frame
+  f.setTime(400); // cold window: on the normal buffer only the (gated) chunk evidence could pay
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[1;6H\x1b[?25h']);
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph',
+    'evidence from the other buffer must not classify (the empty normal buffer draws no glyphs, but the pass must run)');
+  assert.equal(f.adapter.snapshot().counters.echoSlides, 0);
+});
+
 test('write evidence binds to the vacated cell, not to any recent write', () => {
   const f = fixture({ reduced: false });
   f.adapter.setCursorStyle('block');

@@ -1,5 +1,5 @@
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
@@ -9,6 +9,15 @@ import { execFileSync } from 'node:child_process';
 // process exit; dirs older than an hour (left by killed runs) are swept when
 // the next sandbox is created.
 export const E2E_TMP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'artifacts', 'e2e-tmp');
+
+export function resolveE2eTmpSubdir(value) {
+  const candidate = resolve(value);
+  const rel = relative(E2E_TMP_ROOT, candidate);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error('E2E artifact directory must stay inside artifacts/e2e-tmp');
+  }
+  return candidate;
+}
 
 const exitCleanups = new Set();
 let exitHookArmed = false;

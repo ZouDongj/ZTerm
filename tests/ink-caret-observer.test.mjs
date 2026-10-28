@@ -118,3 +118,38 @@ test('CJK wide caret cell reports width 2', () => {
   assert.equal(candidates.length, 1);
   assert.equal(candidates[0].width, 2);
 });
+
+// ── chunk-level write reporting (issue #31) ──
+
+function observeChunks(chunks) {
+  const reports = [];
+  const o = createInkCaretObserver({ onChunkWrites: w => reports.push(w) });
+  for (const chunk of chunks) o.push(chunk);
+  return { reports, state: o.state() };
+}
+
+test('chunk write report carries coords/char/width for writes outside and inside open units, plus the hide flag', () => {
+  const { reports } = observeChunks(['\u001b[2;3Hab', '\u001b[?25l', '\u001b[?2026h中', '\u001b[?2026l']);
+  assert.deepEqual(reports[0].cells, [[1, 2, 'a', 1], [1, 3, 'b', 1]], '0-based write cells with char and width');
+  assert.equal(reports[0].hid, false);
+  assert.equal(reports[1].hid, true, 'a cursor-hide chunk reports the envelope flag');
+  assert.deepEqual(reports[2].cells, [[1, 4, '中', 2]], 'writes inside a still-open unit are reported before it closes');
+  assert.equal(reports[2].hid, false, 'the hide flag is per chunk, not sticky');
+  assert.deepEqual(reports[3].cells, [], 'a write-less chunk still reports (envelope carrier)');
+  for (const report of reports) assert.ok(Number.isInteger(report.chunkSeq));
+});
+
+test('chunk write report is bounded per chunk and stops at the bound', () => {
+  const bulk = '\u001b[1;1H' + 'x'.repeat(5000);
+  const { reports } = observeChunks([bulk]);
+  assert.equal(reports[0].cells.length, 4096, 'bulk output stops being reported at the bound');
+  assert.ok(reports[0].cells.every(cell => Array.isArray(cell) && cell.length === 4));
+});
+
+test('chunk write report stays silent without coordinates it can trust', () => {
+  // ?1049h voids the position model; the following write must not report a
+  // guessed coordinate until an absolute anchor restores the model.
+  const { reports } = observeChunks(['\u001b[?1049hx', '\u001b[3;4Hy']);
+  assert.deepEqual(reports[0].cells, [], 'unknown position reports nothing');
+  assert.deepEqual(reports[1].cells, [[2, 3, 'y', 1]], 'a CUP anchor restores trustworthy reporting');
+});

@@ -48,6 +48,9 @@
   const NON_POSITIONING_CONTROLS = new Set(['\u001b[>7u', '\u001b[?u', '\u001b[?996n', '\u001b[>4;2m']);
   // Bounded state: a unit longer than this is not an input-line update.
   const MAX_UNIT_BYTES = 262144;
+  // Per-chunk cell-write record bound: a chunk writing more cells than this
+  // is bulk output, not an echo frame; its writes stop being reported.
+  const MAX_CHUNK_CELL_WRITES = 4096;
 
   const unicodeWidth = root.__unicodeWidth ||
     (typeof module !== 'undefined' && module.exports ? require('./unicode-width.js') : null);
@@ -80,6 +83,14 @@
     const onCandidate = typeof options?.onCandidate === 'function' ? options.onCandidate : null;
     const onUnit = typeof options?.onUnit === 'function' ? options.onUnit : null;
     const onInvalidate = typeof options?.onInvalidate === 'function' ? options.onInvalidate : null;
+    // Optional bounded chunk-level write report (see push): coordinates, char
+    // and width of every printable cell this chunk wrote, plus whether the
+    // chunk hid the protocol cursor (stable stream evidence; the adapter's
+    // echo decision does not currently consume the hide flag). Covers writes
+    // OUTSIDE units and inside still-open units — real editor echo (vim
+    // insert mode) emits plain writes with no completed unit at all. Never
+    // fires without a listener.
+    const onChunkWrites = typeof options?.onChunkWrites === 'function' ? options.onChunkWrites : null;
 
     let buffer = '';
     let inSync = false;
@@ -110,6 +121,9 @@
     // (SGR0 + OSC8-end + HOME must be adjacent; printables break it).
     let seqBack1 = '';
     let seqBack2 = '';
+    // Per-push chunk-write report state (null when nobody listens).
+    let chunkCellWrites = null;
+    let chunkHidCursor = false;
 
     function lineFeed() {
       // LF at the bottom row scrolls the viewport: the cursor STICKS to the
@@ -360,7 +374,7 @@
         if (unit) { unit.sawShow = true; unit.showCount += 1; unit.hidden = false; }
         return;
       }
-      if (seq === '\u001b[?25l') { if (unit) unit.hidden = true; return; }
+      if (seq === '\u001b[?25l') { if (unit) unit.hidden = true; if (chunkCellWrites) chunkHidCursor = true; return; }
       if (seq === '\u001b(B' || NON_POSITIONING_CONTROLS.has(seq)) return;
       // String sequences (OSC/DCS/etc., e.g. the OSC8 hyperlinks every ink
       // frame carries) do not move the cursor — ignore them. ESC 7/8
@@ -473,6 +487,14 @@
         // A two-cell glyph cannot start in the final column. Match xterm's
         // pre-write wrap before recording writes or the software caret.
         if (w === 2 && col === cols) { lineFeed(); col = 1; }
+        // Chunk-level write record: every printable cell this chunk writes,
+        // inside or outside any unit, with its char and width. Skipped while
+        // the coordinate model is unknown (a wrong coordinate is worse than
+        // no evidence) and bounded per chunk (bulk output is not an echo
+        // frame).
+        if (chunkCellWrites && positionKnown && chunkCellWrites.length < MAX_CHUNK_CELL_WRITES) {
+          chunkCellWrites.push([row - 1, col - 1, ch, w]); // 0-based, matches descriptor coords
+        }
         if (!unit) { // printable outside a unit still advances the cursor
           if (bareRev.on) {
             bareRev.count += 1;
@@ -542,6 +564,7 @@
     function push(chunk) {
       if (typeof chunk !== 'string' || chunk.length === 0) return { unitSeq, chunkSeq };
       chunkSeq += 1;
+      if (onChunkWrites) { chunkCellWrites = []; chunkHidCursor = false; }
       buffer += chunk;
       let index = 0;
       while (index < buffer.length) {
@@ -565,6 +588,14 @@
       }
       buffer = buffer.slice(index);
       if (buffer.length > MAX_UNIT_BYTES) { buffer = ''; } // liveness valve
+      // Chunk-write report fires for every chunk (a write-less chunk can
+      // still carry the cursor-hide flag of a frame split across chunks);
+      // cells carry [y, x, char, width] in descriptor coordinates.
+      if (onChunkWrites && chunkCellWrites) {
+        onChunkWrites({ chunkSeq, cells: chunkCellWrites, hid: chunkHidCursor });
+      }
+      chunkCellWrites = null;
+      chunkHidCursor = false;
       return { unitSeq, chunkSeq };
     }
 
