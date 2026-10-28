@@ -66,6 +66,15 @@ export async function loadSftpVm() {
                     input.className = m[1];
                     el.appendChild(input);
                 }
+                // Materialize the row's name span (what the rename editor
+                // swaps in place); textContent carries the unescaped name.
+                const sm = /<span class="sftp-item-name">([\s\S]*?)<\/span>/.exec(html);
+                if (sm && !el.children.some(c => c.classList && c.classList.contains('sftp-item-name'))) {
+                    const span = ctx.document.createElement('span');
+                    span.className = 'sftp-item-name';
+                    span.textContent = sm[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+                    el.appendChild(span);
+                }
             },
         });
         const elQuerySelector = el.querySelector;

@@ -502,6 +502,26 @@ async function main() {
     // sessions were protected on disk before launch by startApp().
     await installIsolatedShellGuard(cdp);
 
+    // 0.5 Native WebView2 UI policy: the browser UI integrations must be
+    // disabled AS READ BACK through the settings getters (the probe command
+    // exists only under the owned background E2E runtime; production
+    // invocations are refused). Layers of proof, each staying in its lane:
+    // THIS check proves the WebView2 settings layer via the getters; the
+    // defaultPrevented assertions in the menu sections prove the DOM-level
+    // cancellation. No claim is made here about the native popup's visual
+    // appearance — capturing that is not possible without showing it.
+    const nativePolicy = await cdp.eval(`ipcRenderer.invoke('browser-ui-policy')`)
+      .catch(e => ({ error: String(e && e.message || e) }));
+    check('原生 WebView2：默认右键菜单/浏览器加速键/密码自动保存/自动填充/缩放/链接悬停状态栏均已禁用（读回验证）',
+      !nativePolicy.error && nativePolicy.readBackComplete === true &&
+      nativePolicy.defaultContextMenusDisabled === true &&
+      nativePolicy.browserAcceleratorKeysDisabled === true &&
+      nativePolicy.passwordAutosaveDisabled === true &&
+      nativePolicy.generalAutofillDisabled === true &&
+      nativePolicy.zoomControlDisabled === true &&
+      nativePolicy.statusBarDisabled === true,
+      JSON.stringify(nativePolicy));
+
     // 0. Startup splash: correct structure (icon + green-dot animation only)
     // plus auto fade-out after the first frame (wait at most 5s); force-hide
     // as a fallback so it cannot block later checks
@@ -934,6 +954,80 @@ async function main() {
     check('设置页切换到外观', appearanceActive === true, String(appearanceActive));
     await cdp.eval(`closeSettingsTab()`);
     await sleep(800);
+
+    // 10b. The machine-registered standard Git Bash must offer an explicit
+    // remembered grant even when its install root is outside ProgramFiles.
+    // No consent is approved through the product UI here, and no shell starts.
+    const gitStarted = await cdp.eval(`(async () => {
+      const shells = await ipcRenderer.invoke('get-local-shells');
+      const git = shells.find(s => s.id === 'gitbash');
+      if (!git) return { found: false };
+      const owner = 'local:e2e-standard-git-classify';
+      const classification = await ipcRenderer.invoke('prepare-execution', {
+        kind: 'local', owner, payload: { shell: git.command, args: git.args },
+      });
+      await ipcRenderer.invoke('cancel-execution', { owner });
+      if (classification.ticket) return { found: true, safe: true };
+      const tab = TabManager.tabs.find(t => t.type === 'local' && !t.splitRoot && !TabManager._closingTabs.has(t.id));
+      if (!tab) return { found: false, reason: 'no single local terminal owner' };
+      TabManager.switchTo(tab.id);
+      window.__e2eGitLaunches = 0;
+      window.__e2eGitStart = ZTermExecutionTrust.startLocal(
+        { requestId: tab.id, shell: git.command, args: git.args },
+        () => { window.__e2eGitLaunches += 1; });
+      return { found: true, safe: false };
+    })()`);
+    if (gitStarted?.found !== true) throw new Error('Machine Git Bash discovery is unavailable');
+    if (!gitStarted.safe) {
+      const gitDialogReady = await waitForValue(cdp,
+        `document.getElementById('overlay-confirm').classList.contains('open') && document.getElementById('confirm-msg').textContent.includes('bash.exe')`, true, 15000);
+      const gitReview = await cdp.eval(`(() => {
+        const ok = document.getElementById('confirm-ok'), cancel = document.getElementById('confirm-cancel');
+        const a = getComputedStyle(ok), b = getComputedStyle(cancel);
+        return {
+          primary: ok.classList.contains('btn-primary'), outline: cancel.classList.contains('btn-outline'),
+          rememberPresent: !!document.querySelector('.execution-remember'),
+          sameHeight: a.height === b.height && a.height === '30px',
+          sameRadius: a.borderRadius === b.borderRadius && a.borderRadius === '8px',
+          sameFont: a.fontFamily === b.fontFamily && a.fontSize === b.fontSize,
+          safeFocus: document.activeElement === cancel,
+        };
+      })()`);
+      check('标准 Git Bash：明确提供可记住的本账户授权', gitDialogReady === true && gitReview.rememberPresent === true, JSON.stringify(gitReview));
+      check('授权弹窗：按钮风格尺寸一致且默认焦点为取消', gitReview.primary === true && gitReview.outline === true && gitReview.sameHeight === true && gitReview.sameRadius === true && gitReview.sameFont === true && gitReview.safeFocus === true, JSON.stringify(gitReview));
+      if (process.env.ZTERM_E2E_SHOTS) {
+        mkdirSync(process.env.ZTERM_E2E_SHOTS, { recursive: true });
+        const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
+        if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'execution-standard-git.png'), Buffer.from(shot.data, 'base64'));
+      }
+      const gitCancelled = await cdp.eval(`(async () => {
+        document.getElementById('confirm-cancel').click();
+        await window.__e2eGitStart;
+        return { launches: window.__e2eGitLaunches, open: document.getElementById('overlay-confirm').classList.contains('open') };
+      })()`);
+      if (gitCancelled.launches !== 0 || gitCancelled.open !== false) throw new Error('Git authorization cancellation started a shell or stranded the modal');
+      const gitGrantStore = join(sandbox.directory, 'execution-trust.v1.bin');
+      if (existsSync(gitGrantStore)) throw new Error('Git grant fixture requires an absent sandbox grant store');
+      const gitGrant = await cdp.eval(`(async () => {
+        const shells = await ipcRenderer.invoke('get-local-shells');
+        const git = shells.find(s => s.id === 'gitbash');
+        const owner = 'local:e2e-standard-git-grant';
+        const payload = { shell: git.command, args: git.args };
+        try {
+          const first = await ipcRenderer.invoke('prepare-execution', { kind: 'local', owner, payload });
+          if (!first.challengeId) return { firstTicket: true, canRemember: first.canRemember === true };
+          await ipcRenderer.invoke('decide-execution', { challengeId: first.challengeId, allow: true, remember: true });
+          const second = await ipcRenderer.invoke('prepare-execution', { kind: 'local', owner, payload });
+          return { firstTicket: false, canRemember: first.canRemember === true, rememberedTicket: !!second.ticket };
+        } finally { await ipcRenderer.invoke('cancel-execution', { owner }); }
+      })()`);
+      check('标准 Git Bash：记住授权后相同启动配置免再次确认', gitGrant.canRemember === true && (gitGrant.firstTicket === true || gitGrant.rememberedTicket === true), JSON.stringify(gitGrant));
+      if (!gitGrant.firstTicket) rmSync(gitGrantStore, { force: false });
+      if (existsSync(gitGrantStore)) throw new Error('Git grant fixture did not restore the absent sandbox grant store');
+    } else {
+      check('ProgramFiles Git Bash：保留既有直接授权', gitStarted.safe === true);
+      if (existsSync(join(sandbox.directory, 'execution-trust.v1.bin'))) throw new Error('Safe Git Bash must not create a grant store');
+    }
 
     // 11. SSH failure path: an owned listener closes before authentication →
     // the ssh-error event is handled and the frontend does not crash. Count
@@ -1544,7 +1638,7 @@ async function main() {
         },
       };
       ipcRenderer.invoke = (cmd, args) => {
-        if (['sftp-open', 'sftp-readdir', 'sftp-upload', 'show-open-dialog', 'show-save-dialog'].includes(cmd)) {
+        if (['sftp-open', 'sftp-readdir', 'sftp-upload', 'sftp-rename', 'sftp-remove', 'show-open-dialog', 'show-save-dialog'].includes(cmd)) {
           return new Promise((resolve, reject) => { window.__sftpGate.log.push({ cmd, args, resolve, reject, settled: false }); });
         }
         return window.__sftpOrigInvoke(cmd, args);
@@ -2027,6 +2121,435 @@ async function main() {
       const perTabClosed = await cdp.eval(`(() => ({ open: SFTP.isOpen, aOpen: SFTP._openTabs.has('e2e-ft-a') }))()`);
       check('SFTP 每标签：A 上关闭后切回 A 无 dock', perTabClosed.open === false && perTabClosed.aOpen === false, JSON.stringify(perTabClosed));
 
+      // K) Row/blank context menu (right-click): select + menu only — the
+      //    gesture must never trigger the row's left-click semantics
+      //    (navigate / download). File rows offer download/rename/delete,
+      //    directory rows open/rename/delete, ".." nothing; actions carry the snapshot
+      //    captured at right-click ({tabId, path, name, isDir}).
+      // Fresh-open staging (see B): J left remembered paths, which would
+      // turn this open(A) into a restore readdir instead of a fresh open.
+      await cdp.eval(`SFTP.close(); SFTP._lastPath = {}; SFTP._pinned = {}; SFTP._pinnedPath = {};`);
+      await sleep(200);
+      await cdp.eval(`window.__sftpGate.run('menu-open-a', () => SFTP.open(${JSON.stringify(A)}))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}).length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-open' && c.args.tabId === ${JSON.stringify(A)}, { path: '/srv/app', files: [
+        { name: 'notes.txt', isDir: false, size: 5, mtime: 0 },
+        { name: 'assets', isDir: true, size: 0, mtime: 0 },
+      ] })`);
+      await sleep(300);
+      const menuRows = () => `[...document.querySelectorAll('#sftp-body .sftp-item')]`;
+      const captureContextShot = async (name) => {
+        const dir = process.env.ZTERM_E2E_SHOTS || '';
+        if (!dir) return;
+        await cdp.send('Page.enable').catch(() => {});
+        const image = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
+        if (image?.data) {
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(join(dir, name + '.png'), Buffer.from(image.data, 'base64'));
+        } else {
+          console.log(`[e2e] context screenshot unavailable: ${name}`);
+        }
+      };
+      const rowMenuProbe = await cdp.eval(`(() => {
+        const row = ${menuRows()}.find(r => r.querySelector('.sftp-item-dl') && r.textContent.includes('notes.txt'));
+        if (!row) return { ok: false, why: 'no-row' };
+        const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 60 });
+        row.dispatchEvent(ev);
+        const menu = document.getElementById('app-context-menu');
+        return {
+          ok: true,
+          prevented: ev.defaultPrevented,
+          selected: row.classList.contains('selected'),
+          labels: menu ? [...menu.children].map(c => c.textContent) : null,
+          role: menu ? menu.getAttribute('role') : null,
+          pendingNav: window.__sftpGate.pending(c => c.cmd === 'sftp-readdir').length,
+          pendingSave: window.__sftpGate.pending(c => c.cmd === 'show-save-dialog').length,
+        };
+      })()`);
+      check('SFTP 右键：文件行=选中+下载/重命名/删除菜单，不触发导航/下载',
+        rowMenuProbe.ok === true && rowMenuProbe.prevented === true && rowMenuProbe.selected === true &&
+        Array.isArray(rowMenuProbe.labels) && rowMenuProbe.labels.join() === '下载,重命名,删除' &&
+        rowMenuProbe.role === 'menu' && rowMenuProbe.pendingNav === 0 && rowMenuProbe.pendingSave === 0,
+        JSON.stringify(rowMenuProbe));
+      // Screenshot of the APPLICATION menu for visual review — it documents
+      // the in-app menu only; native-menu disablement is proven by the
+      // getter read-back (0.5) and DOM defaultPrevented, not by this image.
+      await captureContextShot('sftp-row-context-menu');
+
+      const dirMenuProbe = await cdp.eval(`(() => {
+        const row = ${menuRows()}.find(r => !r.querySelector('.sftp-item-dl') && r.textContent.includes('assets'));
+        const up = ${menuRows()}.find(r => r.textContent.trim() === '..');
+        if (!row || !up) return { ok: false, why: 'no-rows' };
+        row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 90 }));
+        const dirMenu = document.getElementById('app-context-menu');
+        const dirLabels = dirMenu ? [...dirMenu.children].map(c => c.textContent) : null;
+        const upEv = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 30 });
+        up.dispatchEvent(upEv);
+        const menuAfterUp = document.getElementById('app-context-menu');
+        return { ok: true, dirLabels, upPrevented: upEv.defaultPrevented, menuAfterUp: !!menuAfterUp };
+      })()`);
+      check('SFTP 右键：目录行=打开/重命名/删除，".." 不可变更且不弹菜单',
+        dirMenuProbe.ok === true && Array.isArray(dirMenuProbe.dirLabels) &&
+        dirMenuProbe.dirLabels.join() === '打开,重命名,删除' &&
+        dirMenuProbe.upPrevented === true && dirMenuProbe.menuAfterUp === false,
+        JSON.stringify(dirMenuProbe));
+
+      const blankMenuProbe = await cdp.eval(`(() => {
+        const body = document.getElementById('sftp-body');
+        const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 320 });
+        body.dispatchEvent(ev);
+        const menu = document.getElementById('app-context-menu');
+        return { prevented: ev.defaultPrevented, labels: menu ? [...menu.children].map(c => c.textContent) : null };
+      })()`);
+      check('SFTP 右键：列表空白=新建目录/上传/刷新',
+        blankMenuProbe.prevented === true && Array.isArray(blankMenuProbe.labels) &&
+        blankMenuProbe.labels.join() === '新建目录,上传,刷新',
+        JSON.stringify(blankMenuProbe));
+      await cdp.eval(`(() => { if (window.ContextMenu) ContextMenu.close(); return 'menu-closed'; })()`);
+
+      // Rename through the menu: inline editor commits sftp-rename with the
+      // snapshot captured at right-click, then refreshes the owning view.
+      const renameStart = await cdp.eval(`(() => {
+        const row = ${menuRows()}.find(r => r.querySelector('.sftp-item-dl') && r.textContent.includes('notes.txt'));
+        if (!row) return { ok: false, why: 'no-row' };
+        row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 60 }));
+        const menu = document.getElementById('app-context-menu');
+        const item = menu && [...menu.children].find(c => c.textContent === '重命名');
+        if (!item) return { ok: false, why: 'no-item' };
+        item.click();
+        const input = row.querySelector('input.sftp-rename-input');
+        return { ok: !!input, prefill: input ? input.value : null };
+      })()`);
+      await sleep(200);
+      await captureContextShot('sftp-inline-rename');
+      await cdp.eval(`(() => {
+        const input = document.querySelector('#sftp-body input.sftp-rename-input');
+        if (!input) return 'no-editor';
+        input.value = 'diary.txt';
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        return 'committed';
+      })()`);
+      await sleep(300);
+      const renameCall = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-rename')[0] || null`);
+      check('SFTP 右键：重命名内联编辑以快照提交 sftp-rename',
+        renameStart.ok === true && renameStart.prefill === 'notes.txt' && !!renameCall &&
+        renameCall.args.tabId === A && renameCall.args.oldPath === '/srv/app/notes.txt' && renameCall.args.newPath === '/srv/app/diary.txt',
+        JSON.stringify({ renameStart, renameCall }));
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-rename', { ok: true })`);
+      await sleep(300);
+      const renameRefresh = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app').length`);
+      check('SFTP 右键：重命名成功后刷新所属视图', renameRefresh === 1, `pending readdir=${renameRefresh}`);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app', { files: [
+        { name: 'diary.txt', isDir: false, size: 5, mtime: 0 },
+        { name: 'assets', isDir: true, size: 0, mtime: 0 },
+      ] })`);
+      await sleep(300);
+
+      // Delete: showConfirm (cancel-focused by default) gates sftp-remove.
+      const delCancel = await cdp.eval(`(() => {
+        const row = ${menuRows()}.find(r => r.querySelector('.sftp-item-dl') && r.textContent.includes('diary.txt'));
+        if (!row) return { ok: false, why: 'no-row' };
+        row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 60 }));
+        const menu = document.getElementById('app-context-menu');
+        const item = menu && [...menu.children].find(c => c.textContent === '删除');
+        if (!item) return { ok: false, why: 'no-item' };
+        item.click();
+        return {
+          ok: true,
+          overlayOpen: document.getElementById('overlay-confirm').classList.contains('open'),
+          msg: document.getElementById('confirm-msg').textContent,
+          cancelFocused: document.activeElement === document.getElementById('confirm-cancel'),
+          pendingRemove: window.__sftpGate.pending(c => c.cmd === 'sftp-remove').length,
+        };
+      })()`);
+      check('SFTP 右键：删除走 showConfirm、默认焦点取消、未确认不调用',
+        delCancel.ok === true && delCancel.overlayOpen === true && delCancel.msg.includes('diary.txt') &&
+        delCancel.cancelFocused === true && delCancel.pendingRemove === 0,
+        JSON.stringify(delCancel));
+      await captureContextShot('sftp-delete-confirm');
+      await cdp.eval(`(() => { document.getElementById('confirm-cancel').click(); return 'cancelled'; })()`);
+      await sleep(200);
+      const afterCancel = await cdp.eval(`(() => ({
+        confirmClosed: !document.getElementById('overlay-confirm').classList.contains('open'),
+        pendingRemove: window.__sftpGate.pending(c => c.cmd === 'sftp-remove').length,
+      }))()`);
+      const delOkPath = await cdp.eval(`(() => {
+        const row = ${menuRows()}.find(r => r.querySelector('.sftp-item-dl') && r.textContent.includes('diary.txt'));
+        if (!row) return { ok: false, why: 'no-row' };
+        row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 60 }));
+        const menu = document.getElementById('app-context-menu');
+        const item = menu && [...menu.children].find(c => c.textContent === '删除');
+        if (!item) return { ok: false, why: 'no-item' };
+        item.click();
+        document.getElementById('confirm-ok').click();
+        return { ok: true };
+      })()`);
+      await sleep(300);
+      const removeCall = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-remove')[0] || null`);
+      check('SFTP 右键：确认后 sftp-remove 按快照调用，取消路径未调用',
+        delOkPath.ok === true && afterCancel.confirmClosed === true && afterCancel.pendingRemove === 0 &&
+        !!removeCall && removeCall.args.tabId === A && removeCall.args.path === '/srv/app/diary.txt' && removeCall.args.isDir === false,
+        JSON.stringify({ afterCancel, delOkPath, removeCall }));
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-remove', { ok: true })`);
+      await sleep(300);
+      const removeRefresh = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app').length`);
+      check('SFTP 右键：删除成功后刷新所属视图', removeRefresh === 1, `pending readdir=${removeRefresh}`);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app', { files: [{ name: 'assets', isDir: true, size: 0, mtime: 0 }] })`);
+      await sleep(300);
+
+      // Directory delete names the empty-directory contract and routes to
+      // rmdir (isDir); a server refusal keeps the listing usable.
+      const dirDel = await cdp.eval(`(() => {
+        const row = ${menuRows()}.find(r => !r.querySelector('.sftp-item-dl') && r.textContent.includes('assets'));
+        if (!row) return { ok: false, why: 'no-row' };
+        row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 90 }));
+        const menu = document.getElementById('app-context-menu');
+        const item = menu && [...menu.children].find(c => c.textContent === '删除');
+        if (!item) return { ok: false, why: 'no-item' };
+        item.click();
+        return { ok: true, msg: document.getElementById('confirm-msg').textContent };
+      })()`);
+      await cdp.eval(`(() => { if (document.getElementById('overlay-confirm').classList.contains('open')) document.getElementById('confirm-ok').click(); return 'ok'; })()`);
+      await sleep(300);
+      const dirRemoveCall = await cdp.eval(`window.__sftpGate.pending(c => c.cmd === 'sftp-remove')[0] || null`);
+      check('SFTP 右键：目录删除明确空目录约束并按 isDir 走 rmdir',
+        dirDel.ok === true && dirDel.msg.includes('assets') && dirDel.msg.includes('空目录') &&
+        !!dirRemoveCall && dirRemoveCall.args.isDir === true && dirRemoveCall.args.path === '/srv/app/assets',
+        JSON.stringify({ dirDel, dirRemoveCall }));
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-remove', { error: 'failure (not empty)' })`);
+      await sleep(300);
+      const dirRefused = await cdp.eval(`(() => ({
+        rowsStillListed: document.querySelectorAll('#sftp-body .sftp-item').length,
+        confirmClosed: !document.getElementById('overlay-confirm').classList.contains('open'),
+      }))()`);
+      check('SFTP 右键：非空目录被服务端拒绝后列表仍可用', dirRefused.rowsStillListed >= 1 && dirRefused.confirmClosed === true,
+        JSON.stringify(dirRefused));
+      await cdp.eval(`(() => { if (window.ContextMenu) ContextMenu.close(); return 'k-menu-closed'; })()`);
+
+      // Stage the listing so a FILE row (with its hover download button) and
+      // a DIRECTORY row are both present for the real-pointer probes below.
+      await cdp.eval(`window.__sftpGate.run('stage-l', () => SFTP.navigate('/srv/app'))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app').length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app', { files: [
+        { name: 'rowfile.txt', isDir: false, size: 4, mtime: 0 },
+        { name: 'rowdir', isDir: true, size: 0, mtime: 0 },
+      ] })`);
+      await sleep(300);
+
+      // L) REAL pointer right-clicks (CDP Input domain). A bubble-end
+      //    listener records defaultPrevented AFTER every handler ran; each
+      //    target's menu is asserted by its SPECIFIC item labels (a bare
+      //    "3 items" count could pass with the wrong menu).
+      await cdp.eval(`(() => {
+        window.__ctxEnd = { prevented: null, fired: 0 };
+        document.addEventListener('contextmenu', (e) => {
+          window.__ctxEnd.fired++;
+          Promise.resolve().then(() => { window.__ctxEnd.prevented = e.defaultPrevented; });
+        }, true);
+        return 'armed';
+      })()`);
+      const centerOf = async (js) => await cdp.eval(`(() => {
+        const el = ${js};
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      })()`);
+      const realRightAt = async (pos) => {
+        if (!pos) return { pos: null };
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pos.x, y: pos.y, button: 'right', buttons: 2, clickCount: 1 });
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pos.x, y: pos.y, button: 'right', buttons: 2, clickCount: 1 });
+        await sleep(350);
+        const state = await cdp.eval(`(() => {
+          const menu = document.getElementById('app-context-menu');
+          return {
+            prevented: window.__ctxEnd.prevented,
+            fired: window.__ctxEnd.fired,
+            open: !!menu,
+            labels: menu ? [...menu.children].map(c => c.textContent) : null,
+          };
+        })()`);
+        return { pos, ...state };
+      };
+      const realRightOn = async (js, keepMenu) => {
+        const state = await realRightAt(await centerOf(js));
+        if (!keepMenu) await cdp.eval(`(() => { if (window.ContextMenu) ContextMenu.close(); return 'closed'; })()`);
+        return state;
+      };
+
+      // L1) A FILE row (carries the hover download button) → file menu.
+      const fileRowReal = await realRightOn(`${menuRows()}.find(r => r.querySelector('.sftp-item-dl'))`, true);
+      const fileMenuBounds = await cdp.eval(`(() => {
+        const menu = document.getElementById('app-context-menu');
+        if (!menu) return { bounded: false };
+        const r = menu.getBoundingClientRect();
+        return { bounded: r.left >= 0 && r.top >= 0 && r.right <= window.innerWidth && r.bottom <= window.innerHeight,
+          rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom } };
+      })()`);
+      await captureContextShot('sftp-pointer-context-menu');
+      check('SFTP 真实指针：文件行右键=下载/重命名/删除且 defaultPrevented',
+        fileRowReal.pos !== null && fileRowReal.fired >= 1 && fileRowReal.prevented === true &&
+        Array.isArray(fileRowReal.labels) && fileRowReal.labels.join() === '下载,重命名,删除' && fileMenuBounds.bounded === true,
+        JSON.stringify({ fileRowReal, fileMenuBounds }));
+      await cdp.eval(`(() => { if (window.ContextMenu) ContextMenu.close(); return 'closed'; })()`);
+
+      // L2) A DIRECTORY row (no download button) → directory menu.
+      const dirRowReal = await realRightOn(`${menuRows()}.find(r => !r.querySelector('.sftp-item-dl') && r.textContent.trim() !== '..')`);
+      check('SFTP 真实指针：目录行右键=打开/重命名/删除且 defaultPrevented',
+        dirRowReal.pos !== null && dirRowReal.prevented === true &&
+        Array.isArray(dirRowReal.labels) && dirRowReal.labels.join() === '打开,重命名,删除',
+        JSON.stringify(dirRowReal));
+
+      // L3) The blank area BELOW the rows (actual coordinates inside
+      //     sftp-body under the last row) → the directory-level menu.
+      const blankMenuPos = await cdp.eval(`(() => {
+        const body = document.getElementById('sftp-body');
+        if (!body) return null;
+        const r = body.getBoundingClientRect();
+        // Below the rows, inside the body's lower-left corner.
+        return { x: Math.round(r.left + 30), y: Math.round(r.bottom - 8) };
+      })()`);
+      const blankReal = await realRightAt(blankMenuPos);
+      check('SFTP 真实指针：列表空白右键=新建目录/上传/刷新且 defaultPrevented',
+        blankReal.pos !== null && blankReal.prevented === true &&
+        Array.isArray(blankReal.labels) && blankReal.labels.join() === '新建目录,上传,刷新',
+        JSON.stringify(blankReal));
+      await cdp.eval(`(() => { if (window.ContextMenu) ContextMenu.close(); return 'closed'; })()`);
+
+      // L4) The empty-directory message itself is blank-area territory: an
+      //     empty listing still offers the directory menu (real event chain,
+      //     right-click ON the .sftp-empty child).
+      // The empty-directory message only renders at the ROOT — a non-root empty
+      // directory still shows the ".." row (which is its own right-click
+      // territory), so the empty-message probe navigates to "/".
+      await cdp.eval(`window.__sftpGate.run('empty-nav', () => SFTP.navigate('/'))`);
+      await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.path === '/').length`, 1, 5000);
+      await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/', { files: [] })`);
+      await sleep(300);
+      const emptyReal = await realRightOn(`document.querySelector('#sftp-body .sftp-empty')`);
+      check('SFTP 真实指针：空目录提示右键仍给目录菜单',
+        emptyReal.pos !== null && emptyReal.prevented === true &&
+        Array.isArray(emptyReal.labels) && emptyReal.labels.join() === '新建目录,上传,刷新',
+        JSON.stringify(emptyReal));
+
+      // L5) Rename editor under the real event chain: a real CLICK on the
+      //     editor must not trigger the row's left-click semantics, a real
+      //     right-click opens the TEXT menu without closing the editor, and
+      //     a menu paste keeps the editor alive (no blur-cancel, no commit).
+      //     Clipboard IPC is mocked at the invoke boundary — the system
+      //     clipboard is never touched here.
+      await cdp.eval(`(() => {
+        window.__clipPrevInvoke = ipcRenderer.invoke.bind(ipcRenderer);
+        window.__clipMock = { text: 'PASTED', writes: [] };
+        ipcRenderer.invoke = (cmd, args) => {
+          if (cmd === 'clipboard-read-text') return Promise.resolve(window.__clipMock.text);
+          if (cmd === 'clipboard-write-text') { window.__clipMock.writes.push(args && args.text); return Promise.resolve({ ok: true }); }
+          return window.__clipPrevInvoke(cmd, args);
+        };
+        return 'clip-mock-armed';
+      })()`);
+      let renameChain = null;
+      try {
+        await cdp.eval(`window.__sftpGate.run('back-a', () => SFTP.navigate('/srv/app'))`);
+        await waitForValue(cdp, `window.__sftpGate.pending(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app').length`, 1, 5000);
+        await cdp.eval(`window.__sftpGate.settle(c => c.cmd === 'sftp-readdir' && c.args.path === '/srv/app', { files: [
+          { name: 'chain.txt', isDir: false, size: 3, mtime: 0 },
+        ] })`);
+        await sleep(300);
+        // Open the rename editor through the real menu.
+        await cdp.eval(`(() => {
+          const row = ${menuRows()}.find(r => r.querySelector('.sftp-item-dl'));
+          row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 60 }));
+          const menu = document.getElementById('app-context-menu');
+          [...menu.children].find(c => c.textContent === '重命名').click();
+          return 'editor-open';
+        })()`);
+        await sleep(200);
+        const editorPos = await centerOf(`document.querySelector('#sftp-body input.sftp-rename-input')`);
+        let clickLeak = null;
+        if (editorPos) {
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: editorPos.x, y: editorPos.y, button: 'left', buttons: 1, clickCount: 1 });
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: editorPos.x, y: editorPos.y, button: 'left', buttons: 1, clickCount: 1 });
+          await sleep(300);
+          clickLeak = await cdp.eval(`(() => ({
+            editorOpen: !!document.querySelector('#sftp-body input.sftp-rename-input'),
+            nav: window.__sftpGate.pending(c => c.cmd === 'sftp-readdir').length,
+            save: window.__sftpGate.pending(c => c.cmd === 'show-save-dialog').length,
+          }))()`);
+        }
+        // Real right-click on the editor → the TEXT menu replaces the row
+        // menu, and the editor (still holding DOM focus) stays open.
+        const editorMenu = await realRightAt(editorPos);
+        const focusHeld = await cdp.eval(`(() => {
+          const i = document.querySelector('#sftp-body input.sftp-rename-input');
+          return { editorOpen: !!i, focused: i === document.activeElement };
+        })()`);
+        // Paste through the menu: the mocked clipboard delivers 'PASTED';
+        // the editor had its name selected, so the paste replaces it.
+        await cdp.eval(`(() => {
+          const i = document.querySelector('#sftp-body input.sftp-rename-input');
+          i.dataset.evtInput = 0; i.dataset.evtChange = 0;
+          i.addEventListener('input', () => i.dataset.evtInput++);
+          i.addEventListener('change', () => i.dataset.evtChange++);
+          const menu = document.getElementById('app-context-menu');
+          const paste = menu && [...menu.children].find(c => c.textContent === '粘贴');
+          if (paste) paste.click();
+          return paste ? 'clicked' : 'no-paste-item';
+        })()`);
+        await sleep(400);
+        const afterPaste = await cdp.eval(`(() => {
+          const i = document.querySelector('#sftp-body input.sftp-rename-input');
+          return {
+            editorOpen: !!i,
+            value: i ? i.value : null,
+            inputs: i ? Number(i.dataset.evtInput || 0) : 0,
+            changes: i ? Number(i.dataset.evtChange || 0) : 0,
+            renameInvoked: window.__sftpGate.pending(c => c.cmd === 'sftp-rename').length,
+          };
+        })()`);
+        // IME Enter must not commit.
+        await cdp.eval(`(() => {
+          const i = document.querySelector('#sftp-body input.sftp-rename-input');
+          if (i) i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, keyCode: 229, bubbles: true, cancelable: true }));
+          return 'ime-enter';
+        })()`);
+        await sleep(200);
+        const afterIme = await cdp.eval(`(() => ({
+          editorOpen: !!document.querySelector('#sftp-body input.sftp-rename-input'),
+          renameInvoked: window.__sftpGate.pending(c => c.cmd === 'sftp-rename').length,
+        }))()`);
+        // Escape cancels cleanly; nothing was ever invoked.
+        await cdp.eval(`(() => {
+          const i = document.querySelector('#sftp-body input.sftp-rename-input');
+          if (i) i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          return 'esc';
+        })()`);
+        await sleep(200);
+        const afterEsc = await cdp.eval(`(() => ({
+          editorOpen: !!document.querySelector('#sftp-body input.sftp-rename-input'),
+          renameInvoked: window.__sftpGate.pending(c => c.cmd === 'sftp-rename').length,
+        }))()`);
+        renameChain = { editorPos, clickLeak, editorMenu, focusHeld, afterPaste, afterIme, afterEsc };
+      } finally {
+        await cdp.eval(`(() => { ipcRenderer.invoke = window.__clipPrevInvoke; delete window.__clipPrevInvoke; delete window.__clipMock; return 'clip-mock-restored'; })()`).catch(() => null);
+      }
+      check('SFTP 重命名编辑链：真实点击不触发行语义、右键文本菜单不夺焦、粘贴可继续编辑',
+        renameChain && renameChain.editorPos !== null &&
+        renameChain.clickLeak && renameChain.clickLeak.editorOpen === true &&
+        renameChain.clickLeak.nav === 0 && renameChain.clickLeak.save === 0 &&
+        renameChain.editorMenu.prevented === true &&
+        Array.isArray(renameChain.editorMenu.labels) && renameChain.editorMenu.labels.join() === '剪切,复制,粘贴,全选' &&
+        renameChain.focusHeld.editorOpen === true && renameChain.focusHeld.focused === true &&
+        // The real click collapsed the select-all to a caret, so the paste
+        // INSERTS at it: assert the inserted text, the exact event counts,
+        // and that the editor survived (no blur-cancel, no commit).
+        renameChain.afterPaste.editorOpen === true &&
+        String(renameChain.afterPaste.value).includes('PASTED') &&
+        renameChain.afterPaste.inputs === 1 && renameChain.afterPaste.changes === 1 &&
+        renameChain.afterPaste.renameInvoked === 0 &&
+        renameChain.afterIme.editorOpen === true && renameChain.afterIme.renameInvoked === 0 &&
+        renameChain.afterEsc.editorOpen === false && renameChain.afterEsc.renameInvoked === 0,
+        JSON.stringify(renameChain));
+
       // Fixture teardown: null the synthetic session ids first so the real
       // closeTab never sends backend events for the synthetic sessions.
       await cdp.eval(`(() => {
@@ -2117,6 +2640,492 @@ async function main() {
     const inputOk = inputProbe.ok === true && gotInput.includes('x') && gotInput.includes('y') && gotInput.includes('\r');
     check('xterm 键盘链路：合成按键→onData 编码', inputOk === true, inputProbe.why || JSON.stringify(gotInput));
 
+    // 13.5b In-app text-edit context menu: with the native menus disabled,
+    //      plain inputs expose cut/copy/paste/select-all. The clipboard IPC is
+    //      MOCKED at the invoke boundary for this whole section — the system
+    //      clipboard is never read or written here (a real read failure used
+    //      to fall back to writing; the mock cannot lose user data and makes
+    //      the failure path assertable). The original invoke is saved and
+    //      restored-verified in the finally block.
+    await cdp.eval(`(() => {
+      window.__clipPrevInvoke = ipcRenderer.invoke.bind(ipcRenderer);
+      window.__clipMock = { text: '', writes: [], reads: 0, failNextRead: false };
+      ipcRenderer.invoke = (cmd, args) => {
+        if (cmd === 'clipboard-read-text') {
+          window.__clipMock.reads++;
+          if (window.__clipMock.failNextRead) { window.__clipMock.failNextRead = false; return Promise.reject(new Error('mock clipboard down')); }
+          return Promise.resolve(window.__clipMock.text);
+        }
+        if (cmd === 'clipboard-write-text') { window.__clipMock.writes.push(args && args.text); window.__clipMock.text = args && args.text || ''; return Promise.resolve({ ok: true }); }
+        return window.__clipPrevInvoke(cmd, args);
+      };
+      return 'armed';
+    })()`);
+    let clipRestoreOk = false;
+    try {
+      // Probe the native editing command's REAL semantics on this engine
+      // (informs the menu's edit path; insertText does not touch the
+      // clipboard).
+      const execProbe = await cdp.eval(`(() => {
+        const mk = (type) => { const i = document.createElement('input'); if (type) i.type = type; document.body.appendChild(i); return i; };
+        const text = mk(''); const num = mk('number');
+        const listen = (el) => { const c = { input: 0, change: 0 }; el.addEventListener('input', () => c.input++); el.addEventListener('change', () => c.change++); return c; };
+        const ct = listen(text), cn = listen(num);
+        text.value = 'ab'; text.focus(); text.setSelectionRange(1, 1);
+        const ins1 = document.execCommand('insertText', false, 'X');
+        const afterText = { value: text.value, caret: text.selectionStart, input: ct.input, change: ct.change };
+        num.value = '12'; num.focus();
+        // Per spec, controls without selection support return null from
+        // selectionStart (Chromium does not throw).
+        let numSel = 'other';
+        try { numSel = num.selectionStart === null ? 'null' : 'value'; } catch (e) { numSel = 'throws'; }
+        const ins2 = document.execCommand('insertText', false, '9');
+        let numSelectWorks = false;
+        try { num.select(); numSelectWorks = num.selectionStart === 0; } catch (e) { numSelectWorks = false; }
+        const afterNum = { value: num.value, input: cn.input, change: cn.change, numSelectWorks };
+        text.remove(); num.remove();
+        return { ins1, afterText, numSel, ins2, afterNum };
+      })()`).catch(e => ({ error: String(e && e.message || e) }));
+      check('execCommand 探针：insertText 在文本/数字控件的原生编辑语义（caret 保持、input 恰一次）',
+        !execProbe.error && execProbe.ins1 === true && execProbe.afterText.value === 'aXb' &&
+        execProbe.afterText.caret === 2 && execProbe.afterText.input === 1 && execProbe.afterText.change === 0 &&
+        execProbe.numSel === 'null' && execProbe.ins2 === true && execProbe.afterNum.value === '129' &&
+        execProbe.afterNum.input === 1 && execProbe.afterNum.change === 0,
+        JSON.stringify(execProbe));
+
+      // Real product control (the search bar input): menu shape + full
+      // mocked cut→paste round trip with exact event counts.
+      const textMenuProbe = await cdp.eval(`(() => {
+        openSearch();
+        const input = document.getElementById('search-input');
+        input.value = 'menu-probe';
+        input.focus();
+        input.setSelectionRange(0, 4);
+        input.dataset.evtInput = 0; input.dataset.evtChange = 0;
+        input.addEventListener('input', () => input.dataset.evtInput++);
+        input.addEventListener('change', () => input.dataset.evtChange++);
+        const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 220, clientY: 200 });
+        input.dispatchEvent(ev);
+        const menu = document.getElementById('app-context-menu');
+        return {
+          prevented: ev.defaultPrevented,
+          labels: menu ? [...menu.children].map(c => ({ label: c.textContent, disabled: c.classList.contains('disabled') })) : null,
+          role: menu ? menu.getAttribute('role') : null,
+          focusHeld: document.activeElement === input,
+        };
+      })()`).catch(e => ({ error: String(e && e.message || e) }));
+      check('文本右键菜单：输入框暴露 剪切/复制/粘贴/全选且不夺焦（选区驱动可用态）',
+        !textMenuProbe.error && textMenuProbe.prevented === true && Array.isArray(textMenuProbe.labels) &&
+        textMenuProbe.labels.map(i => i.label).join() === '剪切,复制,粘贴,全选' &&
+        textMenuProbe.labels.every(i => !i.disabled) === true && textMenuProbe.role === 'menu' &&
+        textMenuProbe.focusHeld === true,
+        JSON.stringify(textMenuProbe));
+      {
+        const shotDirEnv = process.env.ZTERM_E2E_SHOTS || '';
+        if (shotDirEnv) {
+          const menuShot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
+          if (menuShot?.data) {
+            mkdirSync(shotDirEnv, { recursive: true });
+            writeFileSync(join(shotDirEnv, 'text-edit-context-menu.png'), Buffer.from(menuShot.data, 'base64'));
+          }
+        }
+      }
+      const clipRoundTrip = await cdp.eval(`(async () => {
+        const input = document.getElementById('search-input');
+        const mock = window.__clipMock;
+        input.value = 'abc';
+        input.focus();
+        input.setSelectionRange(0, 3);
+        let ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 220, clientY: 200 });
+        input.dispatchEvent(ev);
+        let menu = document.getElementById('app-context-menu');
+        const cut = menu && [...menu.children].find(c => c.textContent === '剪切');
+        if (!cut) return { ok: false, why: 'no-cut-item' };
+        cut.click();
+        await new Promise(r => setTimeout(r, 300));
+        const afterCut = input.value;
+        const clipAfterCut = mock.text;
+        const writesAfterCut = mock.writes.slice();
+        input.value = '';
+        input.focus();
+        ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 220, clientY: 200 });
+        input.dispatchEvent(ev);
+        menu = document.getElementById('app-context-menu');
+        const paste = menu && [...menu.children].find(c => c.textContent === '粘贴');
+        if (!paste) return { ok: false, why: 'no-paste-item' };
+        paste.click();
+        await new Promise(r => setTimeout(r, 300));
+        const afterPaste = input.value;
+        const inputs = Number(input.dataset.evtInput || 0), changes = Number(input.dataset.evtChange || 0);
+        return { ok: true, afterCut, clipAfterCut, writesAfterCut, afterPaste, inputs, changes };
+      })()`).catch(e => ({ ok: false, error: String(e && e.message || e) }));
+      check('文本右键菜单：剪切→(mock)剪贴板 IPC→粘贴 回到输入框（input/change 各恰一次）',
+        clipRoundTrip.ok === true && clipRoundTrip.afterCut === '' &&
+        clipRoundTrip.clipAfterCut === 'abc' && JSON.stringify(clipRoundTrip.writesAfterCut) === '["abc"]' &&
+        clipRoundTrip.afterPaste === 'abc' && clipRoundTrip.inputs === 2 && clipRoundTrip.changes === 2,
+        JSON.stringify(clipRoundTrip));
+
+      // A clipboard IPC failure must be VISIBLE (toast), never silent.
+      const clipFail = await cdp.eval(`(async () => {
+        const input = document.getElementById('search-input');
+        window.__clipMock.failNextRead = true;
+        input.value = 'keep';
+        input.focus();
+        const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 220, clientY: 200 });
+        input.dispatchEvent(ev);
+        const menu = document.getElementById('app-context-menu');
+        [...menu.children].find(c => c.textContent === '粘贴').click();
+        await new Promise(r => setTimeout(r, 300));
+        const toast = document.getElementById('toast');
+        return { value: input.value, toastShown: toast.classList.contains('show'), toastText: toast.textContent };
+      })()`).catch(e => ({ error: String(e && e.message || e) }));
+      check('文本右键菜单：剪贴板 IPC 失败给用户可见 toast',
+        !clipFail.error && clipFail.value === 'keep' && clipFail.toastShown === true &&
+        String(clipFail.toastText).includes('剪贴板'),
+        JSON.stringify(clipFail));
+
+      // A real type=number setting input (set-contrast): unreadable
+      // selection must not offer fake cut/copy, paste goes through the
+      // native edit command, and the onchange save chain runs (stubbed — no
+      // user config is written).
+      const numberProbe = await cdp.eval(`(async () => {
+        closeSearch();
+        openSettings('appearance');
+        // switchSettingsTab (and its loadSettingsIntoForm) runs on a 50ms
+        // timer and would overwrite the staged value — let it settle first.
+        await new Promise(r => setTimeout(r, 300));
+        const num = document.getElementById('set-contrast');
+        if (!num) { try { closeSettingsTab(); } catch (e) {} return { ok: false, why: 'no-input' }; }
+        window.__saveCalls = 0;
+        window.__origSaveAppearance = saveAppearance;
+        saveAppearance = () => { window.__saveCalls++; };
+        try {
+          num.value = '';
+          num.focus();
+          const ev = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 220, clientY: 200 });
+          num.dispatchEvent(ev);
+          const menu = document.getElementById('app-context-menu');
+          if (!menu) return { ok: false, why: 'no-menu' };
+          const state = [...menu.children].map(c => ({ label: c.textContent, disabled: c.classList.contains('disabled') }));
+          window.__clipMock.text = '7';
+          const paste = [...menu.children].find(c => c.textContent === '粘贴');
+          paste.click();
+          await new Promise(r => setTimeout(r, 300));
+          return { ok: true, state, value: num.value, saves: window.__saveCalls };
+        } finally {
+          saveAppearance = window.__origSaveAppearance; delete window.__origSaveAppearance;
+          try { closeSettingsTab(); } catch (e) {}
+        }
+      })()`).catch(e => ({ ok: false, error: String(e && e.message || e) }));
+      check('文本右键菜单：number 设置项无假剪切/复制、粘贴经原生编辑命令且 onchange 保存链触发',
+        numberProbe.ok === true && Array.isArray(numberProbe.state) &&
+        numberProbe.state.filter(i => i.label === '剪切' || i.label === '复制').every(i => i.disabled) === true &&
+        numberProbe.state.filter(i => i.label === '粘贴').every(i => !i.disabled) === true &&
+        numberProbe.value === '7' && numberProbe.saves >= 1,
+        JSON.stringify(numberProbe));
+    } finally {
+      clipRestoreOk = await cdp.eval(`(() => {
+        if (!window.__clipPrevInvoke) return false;
+        const target = window.__clipPrevInvoke;
+        ipcRenderer.invoke = target;
+        const restored = ipcRenderer.invoke === target;
+        delete window.__clipPrevInvoke; delete window.__clipMock;
+        return restored;
+      })()`).catch(() => false);
+    }
+    check('文本右键菜单：剪贴板 mock fixture 已恢复并验证', clipRestoreOk === true);
+    await cdp.eval(`(() => { if (window.ContextMenu) ContextMenu.close(); try { closeSearch(); } catch (e) {} return 'text-menu-clean'; })()`);
+    await sleep(150);
+
+    // 13.5c REAL pointer right-click across the remaining surfaces: the tab
+    //      rename editor (continuation under the text menu), the settings
+    //      tab, the SSH edit form, the transfer flyout, and the terminal
+    //      (right-click paste temporarily disabled — the system clipboard
+    //      is never touched by any of these probes). defaultPrevented is
+    //      recorded by a bubble-end listener, i.e. AFTER every handler ran.
+    await cdp.eval(`(() => {
+      window.__ctxEnd2 = { prevented: null, fired: 0 };
+      document.addEventListener('contextmenu', (e) => {
+        window.__ctxEnd2.fired++;
+        Promise.resolve().then(() => { window.__ctxEnd2.prevented = e.defaultPrevented; });
+      }, true);
+      window.__clipPrevInvoke2 = ipcRenderer.invoke.bind(ipcRenderer);
+      window.__clipMock2 = { text: 'TABPASTE' };
+      ipcRenderer.invoke = (cmd, args) => {
+        if (cmd === 'clipboard-read-text') return Promise.resolve(window.__clipMock2.text);
+        if (cmd === 'clipboard-write-text') { window.__clipMock2.text = args && args.text || ''; return Promise.resolve({ ok: true }); }
+        return window.__clipPrevInvoke2(cmd, args);
+      };
+      return 'armed';
+    })()`);
+    const surfaceCenter = async (js) => await cdp.eval(`(() => {
+      const el = ${js};
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    const surfaceRight = async (js, keepMenu) => {
+      const pos = await surfaceCenter(js);
+      if (!pos) return { pos: null };
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pos.x, y: pos.y, button: 'right', buttons: 2, clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pos.x, y: pos.y, button: 'right', buttons: 2, clickCount: 1 });
+      await sleep(350);
+      const state = await cdp.eval(`(() => {
+        const menu = document.getElementById('app-context-menu');
+        return {
+          prevented: window.__ctxEnd2.prevented,
+          fired: window.__ctxEnd2.fired,
+          labels: menu ? [...menu.children].map(c => c.textContent) : null,
+        };
+      })()`);
+      if (!keepMenu) await cdp.eval(`(() => { if (window.ContextMenu) ContextMenu.close(); return 'closed'; })()`);
+      return { pos, ...state };
+    };
+    try {
+      // Focus sits on control A; the real right-press targets control B.
+      // B keeps the NATIVE focus move (only already-focused editors get the
+      // suppression), so the menu's paste must land in B with focus on it.
+      // Both the original and pasted scrollback values are valid: the change
+      // handler must not reject them or alter later local-PTY startup paths.
+      const crossFocus = await cdp.eval(`(async () => {
+        openSettings('terminal');
+        await new Promise(r => setTimeout(r, 300));
+        const a = document.getElementById('set-startup-dir');
+        const b = document.getElementById('set-scrollback');
+        if (!a || !b) return { ok: false, why: 'no-inputs' };
+        a.focus();
+        b.value = '11000';
+        window.__clipMock2.text = '12000';
+        b.scrollIntoView({ block: 'center' });
+        await new Promise(r => setTimeout(r, 200));
+        const rect = b.getBoundingClientRect();
+        const visible = rect.top >= 0 && rect.bottom <= window.innerHeight && rect.left >= 0 && rect.right <= window.innerWidth;
+        // Surface evidence BEFORE the gesture: the reopen must have landed
+        // on a live settings tab with the settings pane actually shown, and
+        // the press point must hit the target input (not whatever view was
+        // underneath — the proven failure mode).
+        const active = TabManager.getActive();
+        const pane = document.getElementById('settings-pane');
+        const hit = document.elementFromPoint(Math.round(rect.left + rect.width / 2), Math.round(rect.top + rect.height / 2));
+        return {
+          ok: true,
+          hadFocusOnA: document.activeElement === a,
+          visible,
+          onSettings: !!(active && active.type === 'settings' && !TabManager._closingTabs.has(active.id)),
+          paneActive: !!(pane && pane.classList.contains('active')),
+          hitInput: !!(hit && (hit === b || (b.contains && b.contains(hit)))),
+          hitDesc: hit && (hit.tagName + '#' + (hit.id || '')),
+        };
+      })()`);
+      const crossMenu = crossFocus.ok ? await surfaceRight(`document.getElementById('set-scrollback')`, true) : { pos: null };
+      const crossPaste = crossMenu.pos ? await cdp.eval(`(async () => {
+        const b = document.getElementById('set-scrollback');
+        if (!b) return { ok: false, why: 'no-input' };
+        const menu = document.getElementById('app-context-menu');
+        if (!menu) return { ok: false, why: 'no-menu' };
+        b.select(); // deterministic: the paste replaces the whole field
+        [...menu.children].find(c => c.textContent === '粘贴').click();
+        await new Promise(r => setTimeout(r, 300));
+        const value = b.value;
+        const focused = document.activeElement === b;
+        b.value = '10000';
+        b.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true, value, focused };
+      })()`) : { ok: false, why: 'no-menu' };
+      await cdp.eval(`(() => { window.__clipMock2.text = 'TABPASTE'; try { closeSettingsTab(); } catch (e) {} return 'closed'; })()`);
+      await sleep(200);
+      check('文本右键菜单：焦点在另一控件时右键 B 仍可粘贴（设置页可见、命中 B、原生聚焦不被抑制）',
+        crossFocus.ok === true && crossFocus.hadFocusOnA === true && crossFocus.visible === true &&
+        crossFocus.onSettings === true && crossFocus.paneActive === true && crossFocus.hitInput === true &&
+        crossMenu.pos !== null && crossMenu.prevented === true &&
+        Array.isArray(crossMenu.labels) && crossMenu.labels.join() === '剪切,复制,粘贴,全选' &&
+        crossPaste.ok === true && crossPaste.focused === true && crossPaste.value === '12000',
+        JSON.stringify({ crossFocus, crossMenu, crossPaste }));
+
+      // Number select() proof: deleting after select must clear the fresh
+      // control. Native delete exercises the actual selection without any
+      // clipboard read/write or a misleading empty-copy control.
+      const numSelectProbe = await cdp.eval(`(() => {
+        openSettings('appearance');
+        return new Promise(resolve => setTimeout(() => {
+          const parent = document.getElementById('settings-content');
+          const num = document.createElement('input');
+          num.type = 'number';
+          num.value = '12345';
+          parent.appendChild(num);
+          try {
+            num.focus();
+            num.select();
+            const deleted = document.execCommand('delete');
+            resolve({ ok: true, deleted, after: num.value });
+          } finally {
+            num.remove();
+            try { closeSettingsTab(); } catch (e) {}
+          }
+        }, 300));
+      })()`);
+      check('number 控件 select() 后原生删除清空所选内容（零剪贴板读写）',
+        numSelectProbe.ok === true && numSelectProbe.deleted === true && numSelectProbe.after === '',
+        JSON.stringify(numSelectProbe));
+
+      // Tab rename under the REAL doRemove scenario: a half-typed rename
+      // with the text menu open (real right-press) while a BACKGROUND tab
+      // closes through the real closeTab — its doRemove render re-seats the
+      // kept rename node, which fired a synchronous blur that committed the
+      // half-typed name (root-caused in artifacts/e2e-tmp/06-tab-focus-
+      // state.log). The editor must survive with focus/selection, nothing
+      // may commit, and paste must continue editing afterwards.
+      const spareId = await cdp.eval(`TabManager.createTab({ name: 'E2E-RENAME-SPARE', type: 'local' })`);
+      await sleep(400); // let the spare's backend land before the staging
+      const tabRename = await cdp.eval(`(async () => {
+        const tabEl = [...document.querySelectorAll('#tabbar .tab')].find(el => {
+          const t = (TabManager.tabs.find(x => x.id === el.getAttribute('data-tab')) || {});
+          return t.type !== 'settings' && t.id !== ${JSON.stringify(spareId)};
+        });
+        if (!tabEl) return { ok: false, why: 'no-tab' };
+        const tabId = tabEl.getAttribute('data-tab');
+        const before = TabManager.tabs.find(t => t.id === tabId).name;
+        TabManager.switchTo(tabId);
+        await new Promise(r => setTimeout(r, 350));
+        tabEl.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+        const input = document.querySelector('.tab-rename-input');
+        if (!input) return { ok: false, why: 'no-editor' };
+        input.focus();
+        input.value = 'HALF-TYPED';
+        input.select();
+        return { ok: true, tabId, before,
+          nameWhileEditing: TabManager.tabs.find(t => t.id === tabId).name,
+          focused: document.activeElement === input };
+      })()`);
+      // keepMenu: the paste step below clicks the item of THIS real-gesture menu.
+      const tabMenuState = tabRename.ok ? await surfaceRight(`document.querySelector('.tab-rename-input')`, true) : { pos: null };
+      // The REAL doRemove: close the spare background tab while the editor
+      // and its menu are open — the render must reseat without committing.
+      const afterDoRemove = (tabRename.ok && tabMenuState.pos) ? await cdp.eval(`(async () => {
+        TabManager.closeTab(${JSON.stringify(spareId)});
+        await new Promise(r => setTimeout(r, 350));
+        const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(tabRename.tabId)});
+        const input = document.querySelector('.tab-rename-input');
+        return {
+          editorOpen: !!input,
+          focused: input === document.activeElement,
+          name: tab && tab.name,
+          custom: !!(tab && tab._customName),
+          menuOpen: !!document.getElementById('app-context-menu'),
+        };
+      })()`) : null;
+      const tabPaste = (tabRename.ok && afterDoRemove && afterDoRemove.editorOpen && tabMenuState.pos) ? await cdp.eval(`(async () => {
+        const input = document.querySelector('.tab-rename-input');
+        const tabId = input.closest('.tab').getAttribute('data-tab');
+        const menu = document.getElementById('app-context-menu');
+        if (!menu) return { ok: false, why: 'no-menu' };
+        [...menu.children].find(c => c.textContent === '粘贴').click();
+        await new Promise(r => setTimeout(r, 300));
+        const stillOpen = !!document.querySelector('.tab-rename-input');
+        const value = input.value;
+        const nameAfterPaste = TabManager.tabs.find(t => t.id === tabId).name;
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, keyCode: 229, bubbles: true, cancelable: true }));
+        await new Promise(r => setTimeout(r, 150));
+        const nameAfterIme = TabManager.tabs.find(t => t.id === tabId).name;
+        const openAfterIme = !!document.querySelector('.tab-rename-input');
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        await new Promise(r => setTimeout(r, 200));
+        const openAfterEsc = !!document.querySelector('.tab-rename-input');
+        const nameAfterEsc = TabManager.tabs.find(t => t.id === tabId).name;
+        return { ok: true, value, stillOpen, nameAfterPaste, nameAfterIme, openAfterIme, openAfterEsc, nameAfterEsc };
+      })()`) : { ok: false, why: 'editor-gone', diag: { afterDoRemove, tabMenuState } };
+      check('标签重命名：doRemove 重排不提交半名（焦点/编辑续写保留，IME Enter 不提交）',
+        tabRename.ok === true && tabRename.focused === true && tabRename.nameWhileEditing === tabRename.before &&
+        tabMenuState.pos !== null && tabMenuState.prevented === true &&
+        Array.isArray(tabMenuState.labels) && tabMenuState.labels.join() === '剪切,复制,粘贴,全选' &&
+        afterDoRemove && afterDoRemove.editorOpen === true && afterDoRemove.focused === true &&
+        afterDoRemove.name === tabRename.before && afterDoRemove.custom === false && afterDoRemove.menuOpen === true &&
+        tabPaste.ok === true && tabPaste.stillOpen === true && String(tabPaste.value).includes('TABPASTE') &&
+        tabPaste.nameAfterPaste === tabRename.before && tabPaste.nameAfterIme === tabRename.before &&
+        tabPaste.openAfterIme === true && tabPaste.openAfterEsc === false && tabPaste.nameAfterEsc === tabRename.before,
+        JSON.stringify({ tabRename, tabMenuState, afterDoRemove, tabPaste }));
+
+      // Settings tab: suppressed, no app menu (the settings tab owns no tab
+      // actions; the browser menu must not appear either).
+      await cdp.eval(`openSettings()`);
+      await sleep(300);
+      const settingsTab = await surfaceRight(`[...document.querySelectorAll('#tabbar .tab')].find(el => ((TabManager.tabs.find(t => t.id === el.getAttribute('data-tab')) || {}).type) === 'settings')`);
+      await cdp.eval(`try { closeSettingsTab(); } catch (e) {}`);
+      await sleep(200);
+      check('设置标签右键：defaultPrevented 且无应用菜单',
+        settingsTab.pos !== null && settingsTab.prevented === true && settingsTab.labels === null,
+        JSON.stringify(settingsTab));
+
+      // SSH edit form: a plain text input gets the app text menu.
+      await cdp.eval(`openSSHEdit(true)`);
+      await sleep(300);
+      const sshForm = await surfaceRight(`document.getElementById('ssh-edit-name')`);
+      await cdp.eval(`closeAllOverlays()`);
+      await sleep(200);
+      check('SSH 表单右键：文本输入得到应用编辑菜单',
+        sshForm.pos !== null && sshForm.prevented === true &&
+        Array.isArray(sshForm.labels) && sshForm.labels.join() === '剪切,复制,粘贴,全选',
+        JSON.stringify(sshForm));
+
+      // Transfer flyout: suppressed, no app menu (non-text surface).
+      await cdp.eval(`TransferManager.openPanel()`);
+      await sleep(250);
+      const flyout = await surfaceRight(`document.querySelector('#transfer-window') || document.getElementById('transfer-window')`);
+      await cdp.eval(`TransferManager.closePanel()`);
+      await sleep(150);
+      check('传输浮窗右键：defaultPrevented 且无应用菜单',
+        flyout.pos !== null && flyout.prevented === true && flyout.labels === null,
+        JSON.stringify(flyout));
+
+      // Terminal: right-click paste disabled for the probe (restored right
+      // after) — the terminal's own handler suppresses the default, the app
+      // menu never appears, and no clipboard IPC happens.
+      const termProbe = await cdp.eval(`(() => {
+        const tab = TabManager.getActive();
+        const term = tab && (tab.term || (tab.splitRoot && (getAllPanes(tab).find(p => p.focused) || getAllPanes(tab)[0]).term));
+        const el = term && term.element;
+        if (!el) return { ok: false, why: 'no-term' };
+        // undefined is a legitimate saved value (setting absent = enabled):
+        // remember presence separately so the restore can delete the key.
+        window.__hadRightClickPaste = Object.prototype.hasOwnProperty.call(_settingsConfig, 'rightClickPaste');
+        window.__oldRightClickPaste = _settingsConfig.rightClickPaste;
+        _settingsConfig.rightClickPaste = false;
+        return { ok: true };
+      })()`);
+      let termState = { pos: null };
+      if (termProbe.ok) {
+        termState = await surfaceRight(`(TabManager.getActive().term || (getAllPanes(TabManager.getActive()).find(p => p.focused) || getAllPanes(TabManager.getActive())[0]).term).element`);
+      }
+      const termRestored = await cdp.eval(`(() => {
+        if (typeof window.__hadRightClickPaste !== 'boolean') return false;
+        if (window.__hadRightClickPaste) _settingsConfig.rightClickPaste = window.__oldRightClickPaste;
+        else delete _settingsConfig.rightClickPaste;
+        delete window.__oldRightClickPaste; delete window.__hadRightClickPaste;
+        return _settingsConfig.rightClickPaste !== false;
+      })()`);
+      check('终端右键：终端自身处理且无应用菜单（paste 设置已复原，未触碰剪贴板）',
+        termProbe.ok === true && termState.pos !== null && termState.prevented === true &&
+        termState.labels === null && termRestored === true,
+        JSON.stringify({ termProbe, termState, termRestored }));
+    } finally {
+      await cdp.eval(`(() => {
+        if (window.__clipPrevInvoke2) {
+          const target = window.__clipPrevInvoke2;
+          ipcRenderer.invoke = target;
+          const ok = ipcRenderer.invoke === target;
+          delete window.__clipPrevInvoke2; delete window.__clipMock2;
+          if (window.__hadRightClickPaste === true) _settingsConfig.rightClickPaste = window.__oldRightClickPaste;
+          else if (window.__hadRightClickPaste === false) delete _settingsConfig.rightClickPaste;
+          delete window.__oldRightClickPaste; delete window.__hadRightClickPaste;
+          window.__surfaceRestoreOk = ok;
+          return ok;
+        }
+        window.__surfaceRestoreOk = false;
+        return false;
+      })()`).catch(() => null);
+    }
+    const surfaceRestoreOk = await cdp.eval(`(() => { const v = !!window.__surfaceRestoreOk; delete window.__surfaceRestoreOk; return v; })()`).catch(() => false);
+    check('跨表面右键探针：fixture 已恢复并验证', surfaceRestoreOk === true);
     // 13.6 About-page update card state machine (mocked IPC: no real
     // download, no real exit). Covers the full flow: new version found →
     // download update → ready → restart and install, plus the SSH-blocker
@@ -3190,16 +4199,27 @@ async function main() {
         const term = TabManager.tabs.find(t => t.type === 'local').term;
         const buf = term.buffer.active;
         for (let y = 0; y < buf.length; y++) {
-          const line = buf.getLine(y)?.translateToString(true) || '';
+          const bufferLine = buf.getLine(y);
+          const line = bufferLine?.translateToString(true) || '';
           const col = line.indexOf(needle);
           if (col < 0) continue;
           const row = y - buf.viewportY;
           if (row < 0 || row >= term.rows) continue;
+          // String indices are not terminal cell columns when CJK/wide glyphs
+          // precede the match. Map through the actual buffer cells.
+          const bufferCell = buf.getNullCell();
+          let cellCol = col, offset = 0;
+          for (let x = 0; x < line.length && offset < col; x++) {
+            bufferLine.getCell(x, bufferCell);
+            if (bufferCell.getWidth() !== 0) offset += bufferCell.getChars().length || 1;
+            cellCol = x + 1;
+          }
           const screen = term.element.querySelector('.xterm-screen');
           const r = screen.getBoundingClientRect();
-          return { screen, row, col, r,
-            px: r.left + (col + 0.5) * (r.width / term.cols),
-            py: r.top + (row + 0.5) * (r.height / term.rows) };
+          const cell = term._core._renderService.dimensions.css.cell;
+          return { screen, row, col: cellCol, r,
+            px: r.left + (cellCol + 0.5) * cell.width,
+            py: r.top + (row + 0.5) * cell.height };
         }
         return null;
       };
@@ -3216,13 +4236,16 @@ async function main() {
           p.screen.dispatchEvent(new MouseEvent('mousemove', over));
           setTimeout(() => {
             const tip = document.querySelector('.link-tip');
-            res({ at: 'hover@' + p.row + ':' + p.col, shown: !!tip && tip.classList.contains('show'), text: tip ? tip.textContent : '' });
+            res({ at: 'hover@' + p.row + ':' + p.col, shown: !!tip && tip.classList.contains('show'), text: tip ? tip.textContent : '',
+              font: tip ? getComputedStyle(tip.querySelector('.link-tip-target')).fontFamily : '',
+              uiFont: getComputedStyle(document.body).fontFamily });
           }, 250);
         }, 60));
       };
-      window.__linkClick = (needle, ctrl) => {
+      window.__linkClick = (needle, ctrl, refreshDuringDown = false) => {
         const p = locate(needle);
         if (!p) return Promise.resolve('not-found');
+        const term = TabManager.tabs.find(t => t.type === 'local').term;
         // Same re-arm discipline as __linkHover: xterm re-evaluates hover only
         // on a buffer-cell change, and a resize/activation may have cleared
         // the current link since the last move — move off the link first,
@@ -3235,19 +4258,37 @@ async function main() {
           p.screen.dispatchEvent(new MouseEvent('mousemove', opts));
           setTimeout(() => {
             p.screen.dispatchEvent(new MouseEvent('mousedown', opts));
-            p.screen.dispatchEvent(new MouseEvent('mouseup', opts));
-            res('click@' + p.row + ':' + p.col);
+            if (!refreshDuringDown) {
+              p.screen.dispatchEvent(new MouseEvent('mouseup', opts));
+              res('click@' + p.row + ':' + p.col);
+              return;
+            }
+            const down = term._core.linkifier._mouseDownLink;
+            term.refresh(p.row, p.row);
+            let remaining = 40;
+            const finish = () => {
+              const current = term._core.linkifier._currentLink;
+              p.screen.dispatchEvent(new MouseEvent('mouseup', opts));
+              res((current && current !== down ? 'refresh-swapped@' : 'refresh-stale@') + p.row + ':' + p.col);
+            };
+            const waitForRefresh = () => {
+              const current = term._core.linkifier._currentLink;
+              if ((current && current !== down) || --remaining <= 0) finish();
+              else setTimeout(waitForRefresh, 25);
+            };
+            waitForRefresh();
           }, 200);
         }, 60));
       };
       const tab = TabManager.tabs.find(t => t.type === 'local');
       TabManager.switchTo(tab.id);
       return tab.id;
-    })()`).catch(() => null);
+    })()`).catch(error => ({ error: String(error), stack: error?.stack }));
     await sleep(600);
     await cdp.eval(`(() => {
       const term = TabManager.tabs.find(t => t.type === 'local').term;
       term.write('\\r\\nhttps://e2e-link.example/plain-path\\r\\n');
+      term.write('进展栏目已经上线，地址是 https://e2e-link.example:3000/progress/，用原来的私人站账号登录。\\r\\n');
       term.write('\\x1b]8;;https://e2e-osc8.example/real-target\\x07osc8-label\\x1b]8;;\\x07\\r\\n');
       return 'written';
     })()`).catch(() => null);
@@ -3257,13 +4298,45 @@ async function main() {
     const plainState = await cdp.eval(`({ calls: window.__linkOpenCalls, overlay: document.getElementById('overlay-confirm').classList.contains('open') })`);
     check('终端链接：Ctrl+点击纯文本链接直开一次', typeof linkPlain === 'string' && linkPlain.startsWith('click@') && plainState.calls.length === 1 && plainState.calls[0] === 'https://e2e-link.example/plain-path' && plainState.overlay === false,
       JSON.stringify({ linkPlain, ...plainState, setup: linkSetup }));
+    const linkRefresh = await cdp.eval(`window.__linkClick('e2e-link.example', true, true)`).catch(() => 'eval-err');
+    await sleep(300);
+    const linkRefreshCalls = await cdp.eval(`window.__linkOpenCalls.length`);
+    check('终端链接：按下期间刷新后抬起仍恰好打开一次', typeof linkRefresh === 'string' && linkRefresh.startsWith('refresh-swapped@') && linkRefreshCalls === plainState.calls.length + 1, JSON.stringify({ linkRefresh, linkRefreshCalls }));
+    const linkCjk = await cdp.eval(`window.__linkClick('e2e-link.example:3000', true)`).catch(error => String(error));
+    await sleep(300);
+    const linkCjkCalls = await cdp.eval(`window.__linkOpenCalls`);
+    check('终端链接：中文逗号后的文字不进入识别目标', typeof linkCjk === 'string' && linkCjk.startsWith('click@') && linkCjkCalls.length === linkRefreshCalls + 1 && linkCjkCalls.at(-1) === 'https://e2e-link.example:3000/progress/', JSON.stringify({ linkCjk, linkCjkCalls }));
+    const cjkHover = await cdp.eval(`window.__linkHover('e2e-link.example:3000')`).catch(error => String(error));
+    check('终端链接：中文语境悬停只显示有界地址', !!cjkHover && cjkHover.shown === true && cjkHover.text.includes('https://e2e-link.example:3000/progress/') && !cjkHover.text.includes('用原来的'), JSON.stringify(cjkHover));
+    if (process.env.ZTERM_E2E_SHOTS && cjkHover?.shown === true) {
+      mkdirSync(process.env.ZTERM_E2E_SHOTS, { recursive: true });
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
+      if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'link-cjk-boundary.png'), Buffer.from(shot.data, 'base64'));
+    }
     const linkNoCtrl = await cdp.eval(`window.__linkClick('e2e-link.example', false)`).catch(() => 'eval-err');
     await sleep(300);
     const noCtrlCalls = await cdp.eval(`window.__linkOpenCalls.length`);
-    check('终端链接：无 Ctrl 点击不打开', typeof linkNoCtrl === 'string' && linkNoCtrl.startsWith('click@') && noCtrlCalls === 1, JSON.stringify({ linkNoCtrl, noCtrlCalls }));
+    check('终端链接：无 Ctrl 点击不打开', typeof linkNoCtrl === 'string' && linkNoCtrl.startsWith('click@') && noCtrlCalls === linkCjkCalls.length, JSON.stringify({ linkNoCtrl, noCtrlCalls }));
     const linkHover = await cdp.eval(`window.__linkHover('e2e-link.example')`).catch(() => null);
     const hoverOk = !!linkHover && linkHover.shown === true && linkHover.text.includes('https://e2e-link.example/plain-path') && linkHover.text.includes('Ctrl+点击打开');
     check('终端链接：悬停提示真实目标与手势', hoverOk === true, JSON.stringify(linkHover));
+    check('终端链接：提示字体与应用界面字体一致', !!linkHover && linkHover.font === linkHover.uiFont, JSON.stringify({ font: linkHover?.font, uiFont: linkHover?.uiFont }));
+    // Ride-along on the existing hover moment: one screenshot of the hover
+    // state for visual REVIEW of the bottom-left corner (where WebView2's
+    // link-hover status bar used to draw). Review material only — the
+    // status-bar disablement itself is proven by the settings read-back in
+    // 0.5, not by this image.
+    {
+      const shotDirEnv = process.env.ZTERM_E2E_SHOTS || '';
+      if (shotDirEnv && hoverOk === true) {
+        const hoverShot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
+        if (hoverShot?.data) {
+          mkdirSync(shotDirEnv, { recursive: true });
+          writeFileSync(join(shotDirEnv, 'link-hover-statusbar-review.png'), Buffer.from(hoverShot.data, 'base64'));
+        }
+      }
+    }
+    const oscBaseline = await cdp.eval(`window.__linkOpenCalls.length`);
     await cdp.eval(`window.__linkClick('osc8-label', true)`).catch(() => 'eval-err');
     await sleep(300);
     const oscConfirm = await cdp.eval(`({
@@ -3272,7 +4345,7 @@ async function main() {
       okText: document.getElementById('confirm-ok').textContent,
       calls: window.__linkOpenCalls.length
     })`);
-    const oscConfirmOk = oscConfirm.open === true && oscConfirm.msg.includes('https://e2e-osc8.example/real-target') && oscConfirm.okText === '打开' && oscConfirm.calls === 1;
+    const oscConfirmOk = oscConfirm.open === true && oscConfirm.msg.includes('https://e2e-osc8.example/real-target') && oscConfirm.okText === '打开' && oscConfirm.calls === oscBaseline;
     check('终端链接：OSC8 先弹确认（真实目标，未打开）', oscConfirmOk === true, JSON.stringify(oscConfirm));
     await cdp.eval(`document.getElementById('confirm-cancel').click(); 'cancel'`);
     await sleep(250);
@@ -3282,7 +4355,7 @@ async function main() {
     await cdp.eval(`document.getElementById('confirm-ok').click(); 'ok'`);
     await sleep(300);
     const oscAfterOk = await cdp.eval(`({ open: document.getElementById('overlay-confirm').classList.contains('open'), calls: window.__linkOpenCalls })`);
-    const oscFlowOk = oscAfterCancel.open === false && oscAfterCancel.calls === 1 && oscAfterOk.open === false && oscAfterOk.calls.length === 2 && oscAfterOk.calls[1] === 'https://e2e-osc8.example/real-target';
+    const oscFlowOk = oscAfterCancel.open === false && oscAfterCancel.calls === oscBaseline && oscAfterOk.open === false && oscAfterOk.calls.length === oscBaseline + 1 && oscAfterOk.calls.at(-1) === 'https://e2e-osc8.example/real-target';
     check('终端链接：OSC8 取消零调用、确定调用一次', oscFlowOk === true, JSON.stringify({ oscAfterCancel, oscAfterOk }));
     // Drag-select gesture: press on the link, move off it, release elsewhere —
     // the Linkifier only activates when down/up land on the same link, so this
@@ -3314,7 +4387,7 @@ async function main() {
           overlay: document.getElementById('overlay-confirm').classList.contains('open') }), 150);
       }, 200));
     })()`).catch(() => null);
-    check('终端链接：拖出链接后抬起不打开', !!linkDrag && linkDrag.calls === 2 && linkDrag.overlay === false, JSON.stringify(linkDrag));
+    check('终端链接：拖出链接后抬起不打开', !!linkDrag && linkDrag.calls === oscAfterOk.calls.length && linkDrag.overlay === false, JSON.stringify(linkDrag));
     // Right button (even with Ctrl) is not an activation gesture.
     const linkRight = await cdp.eval(`(() => {
       const term = TabManager.tabs.find(t => t.type === 'local').term;
@@ -3341,13 +4414,13 @@ async function main() {
           overlay: document.getElementById('overlay-confirm').classList.contains('open') }), 150);
       }, 200));
     })()`).catch(() => null);
-    check('终端链接：Ctrl+右键不打开', !!linkRight && linkRight.calls === 2 && linkRight.overlay === false, JSON.stringify(linkRight));
+    check('终端链接：Ctrl+右键不打开', !!linkRight && linkRight.calls === oscAfterOk.calls.length && linkRight.overlay === false, JSON.stringify(linkRight));
     const notesProbe = await cdp.eval(`(() => {
       window.__updateUrl = 'https://notes.example/release';
       goUpdateReleaseNotes();
       return window.__linkOpenCalls.length;
     })()`);
-    check('更新说明链接走统一 open-url 入口', notesProbe === 3, `calls=${notesProbe}`);
+    check('更新说明链接走统一 open-url 入口', notesProbe === oscAfterOk.calls.length + 1, `calls=${notesProbe}`);
     const notesFail = await cdp.eval(`(async () => {
       const read = () => {
         const t = document.getElementById('toast');
