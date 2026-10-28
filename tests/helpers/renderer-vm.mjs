@@ -305,7 +305,12 @@ export class RealTerm {
     }
 }
 
-export function loadVm() {
+// wireSmoothCursorStub: the default harness stubs _wireSmoothCursorWebgl so
+// WebGL attach paths stay inert for the many tests that never exercise them.
+// Pass false to keep terminal.js's REAL wrapper wiring (the WebGL
+// context-loss recovery tests); those tests install their own
+// createXtermWebglSmoothCursor + WebglAddon fakes on the context.
+export function loadVm({ wireSmoothCursorStub = true } = {}) {
     const tq = new TimerQueue();
     const sends = [];
     const ipcHandlers = new Map();
@@ -424,7 +429,7 @@ export function loadVm() {
         vm.runInContext(src(f), ctx, { filename: f });
     }
     ctx.TabManager = vm.runInContext('TabManager', ctx);
-    ctx._wireSmoothCursorWebgl = () => ({ _adapter: null, dispose() {} });
+    if (wireSmoothCursorStub) ctx._wireSmoothCursorWebgl = () => ({ _adapter: null, dispose() {} });
     activeDoc = ctx.document;
     return ctx;
 }

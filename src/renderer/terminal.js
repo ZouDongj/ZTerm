@@ -144,7 +144,6 @@ function setupWrapResizeObserver(wrap, tab) {
 function _wireSmoothCursorWebgl(term, webglAddon) {
     if (!webglAddon) return null;
     let adapter = null;
-    let retired = false; // disposed on purpose (context loss)
     const create = () => createXtermWebglSmoothCursor({
         terminal: term,
         addon: webglAddon,
@@ -165,11 +164,13 @@ function _wireSmoothCursorWebgl(term, webglAddon) {
         console.warn('WebGL smooth cursor unavailable, using native caret:', e);
         return null;
     }
-    // Context loss would leave the adapter's hooks pointing at dead renderer
-    // internals and throw on every frame; retire it and let the native caret
-    // take over instead.
+    // Context loss leaves the adapter's hooks pointing at dead renderer
+    // internals and would throw on every frame. The wrapper retires for
+    // good: it must never rebuild the adapter from this (about-to-be
+    // disposed) addon closure — recovery is a fresh addon plus a fresh
+    // wrapper at the record level (_reattachWebglAfterLoss / the next
+    // _attachWebglRenderer), which re-points the holder's slot.
     webglAddon.onContextLoss?.(() => {
-        retired = true;
         try { adapter?.dispose(); } catch (e) {}
         adapter = null;
         wrapper._adapter = null;
@@ -189,13 +190,6 @@ function _wireSmoothCursorWebgl(term, webglAddon) {
                 term.options.cursorStyle = style;
                 if (adapter) {
                     try { adapter.setCursorStyle(style); } catch (e) {}
-                } else if (retired) {
-                    // Only context loss retires the adapter now; rebuild it.
-                    try {
-                        adapter = create();
-                        retired = false;
-                        adapter.setSmooth(_settingsConfig.animations !== false);
-                    } catch (e) { adapter = null; }
                 }
                 wrapper._adapter = adapter;
             }
@@ -229,6 +223,9 @@ function _wireSmoothCursorWebgl(term, webglAddon) {
 // holder-keyed bookkeeping orphaned the record on every migration — the
 // stranded context leaked past the cap, and the zombie slot blocked
 // re-attach, stacking a SECOND WebglAddon (and canvas) onto one terminal.
+// Context loss recovery is bounded: an unrecovered loss releases the addon
+// (DOM renderer fallback) and re-attaches at most once, only for the active
+// tab — see _reattachWebglAfterLoss.
 const WEBGL_IDLE_RELEASE_MS = 20000;
 // Hard budget on simultaneously-live contexts, enforced by LRU force-release
 // at attach time: the idle grace alone cannot bound a rapid creation burst
@@ -238,8 +235,31 @@ const WEBGL_IDLE_RELEASE_MS = 20000;
 // headroom (one window shows one tab, split into at most a few panes;
 // everything else is hidden and DOM-rendered).
 const WEBGL_CONTEXT_BUDGET = 8;
-const _webglByTerm = new WeakMap(); // term → { addon, idleTimer, wrapper }
+const _webglByTerm = new WeakMap(); // term → { addon, idleTimer, wrapper, autoReattachBudget }
 const _webglLive = new Set(); // terms holding a live addon, LRU attach order
+
+// Live context-loss probe: inside the vendor's 3s restore window the record
+// still holds the addon while its GL context is already dead. Shape-checked
+// reach into the vendored addon (its public surface is only textureAtlas/
+// clearTextureAtlas); an xterm upgrade that moves the field degrades to
+// "not lost" — the 3s onContextLoss fallback then still releases the addon.
+function _webglContextLost(addon) {
+    try { return addon?._renderer?._gl?.isContextLost?.() === true; } catch (e) { return false; }
+}
+
+// Bounded recovery after an unrecoverable context loss: re-attach once when
+// the terminal currently belongs to the ACTIVE tab (hidden tabs never get an
+// auto-created context — they re-attach through the normal activation path).
+// The single-shot budget stops a permanently broken GPU from churning fresh
+// contexts every 3s; a user-driven attach (tab switch / migration) re-arms it.
+function _reattachWebglAfterLoss(term) {
+    const rec = term ? _webglByTerm.get(term) : null;
+    if (!rec || !(rec.autoReattachBudget > 0)) return;
+    const resolved = _resolveTermOwner(term);
+    if (!resolved || TabManager.activeId !== resolved.tab.id) return;
+    rec.autoReattachBudget -= 1;
+    _attachWebglRenderer(resolved.owner, term, { lossRecovery: true });
+}
 
 // Immediate release: cancels a pending idle timer and disposes the addon (the
 // vendored dispose restores the DOM renderer, so background output keeps
@@ -258,20 +278,29 @@ function _releaseWebglForTerm(term) {
     if (addon) try { addon.dispose(); } catch (e) {}
 }
 
-function _attachWebglRenderer(holder, term) {
+function _attachWebglRenderer(holder, term, opts) {
     if (!holder || !term) return;
     let rec = _webglByTerm.get(term);
     if (rec) {
         if (rec.idleTimer) { clearTimeout(rec.idleTimer); rec.idleTimer = null; }
         if (rec.addon) {
-            // Still attached (within the idle grace): re-point the holder's
-            // smooth cursor — a migration may have moved or cleared the slot.
-            holder._smoothCursor = rec.wrapper;
-            _webglLive.delete(term); _webglLive.add(term); // LRU touch
-            return;
+            if (_webglContextLost(rec.addon)) {
+                // Dead context inside the vendor's restore window: reusing the
+                // record would pin a white canvas until the loss handler runs.
+                // Release it (restores the DOM renderer) and attach a fresh
+                // context below — the same path an idle re-attach takes.
+                _releaseWebglForTerm(term);
+            } else {
+                // Still attached (within the idle grace): re-point the holder's
+                // smooth cursor — a migration may have moved or cleared the slot.
+                holder._smoothCursor = rec.wrapper;
+                _webglLive.delete(term); _webglLive.add(term); // LRU touch
+                if (opts?.lossRecovery !== true) rec.autoReattachBudget = 1;
+                return;
+            }
         }
     } else {
-        rec = { addon: null, idleTimer: null, wrapper: null };
+        rec = { addon: null, idleTimer: null, wrapper: null, autoReattachBudget: 0 };
         _webglByTerm.set(term, rec);
     }
     // The WebGL addon must load AFTER open(): loading it before open loses the
@@ -280,6 +309,9 @@ function _attachWebglRenderer(holder, term) {
     let addon = null;
     try { addon = new WebglAddon(); term.loadAddon(addon); } catch (e) { console.warn('WebglAddon init failed:', e); return; }
     rec.addon = addon;
+    // User-driven attaches re-arm the bounded loss recovery; the recovery's
+    // own attach must not (that would make the retry unbounded).
+    if (opts?.lossRecovery !== true) rec.autoReattachBudget = 1;
     _webglLive.delete(term);
     _webglLive.add(term);
     // Over budget: force-release the least-recently attached contexts. The
@@ -291,14 +323,15 @@ function _attachWebglRenderer(holder, term) {
     }
     // Unrecoverable context loss (the vendored addon's own 3s restore window
     // elapsed): fall back to the DOM renderer — its dispose path restores it —
-    // instead of keeping a dead white canvas. Deferred out of the emit.
+    // instead of keeping a dead white canvas, then recover through
+    // _reattachWebglAfterLoss. Deferred out of the emit; the rec.addon
+    // identity check keeps callbacks of a since-replaced addon inert.
     try {
         addon.onContextLoss?.(() => {
             setTimeout(() => {
                 if (rec.addon !== addon) return;
-                rec.addon = null;
-                _webglLive.delete(term);
-                try { addon.dispose(); } catch (e) {}
+                _releaseWebglForTerm(term);
+                _reattachWebglAfterLoss(term);
             }, 0);
         });
     } catch (e) {}
