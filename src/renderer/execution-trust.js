@@ -77,7 +77,7 @@ const ZTermExecutionTrust = (() => {
                 // replacing an unrelated delete or host-key decision.
                 if ((typeof _activeConfirmCleanup !== 'undefined' && _activeConfirmCleanup) ||
                     (typeof _activeHostkeyCleanup !== 'undefined' && _activeHostkeyCleanup)) return;
-                cleanup = showConfirm(response.description, () => finish(true), '仅本次允许');
+                cleanup = showConfirm(response.description, () => finish(true), '仅本次允许', 'primary');
                 const message = document.getElementById('confirm-msg');
                 message.classList.add('execution-review');
                 if (response.canRemember) {

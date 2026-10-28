@@ -188,3 +188,30 @@ test('a confirm layered on another open overlay does not steal focus to the term
     assert.equal(ctx.__refocusCalls, 0,
         'the still-open overlay keeps the keyboard — no focus jump behind its back (pre-fix behavior)');
 });
+
+// Execution authorization opts into the primary tone; cleanup restores danger.
+test('showConfirm tone styles the allow button once and cleanup restores the shared default', () => {
+    const ctx = loadVm();
+    loadUtils(ctx);
+    mountConfirmDom(ctx);
+    const tab = tabWithTerminal(ctx, 't4', 'b4');
+    installRefocusStub(ctx, tab.term);
+
+    ctx.showConfirm('共享启动配置需要本账户确认。', () => {}, '仅本次允许', 'primary');
+    const ok = okBtn(ctx);
+    assert.equal(ok.className, 'btn-primary', 'the execution consent allow button is primary, not destructive');
+    assert.ok(ctx.document.activeElement === cancelBtn(ctx),
+        'the safe default (cancel) still owns the keyboard under a primary tone');
+
+    cancelBtn(ctx).dispatch('click');
+    assert.equal(ok.className, 'btn-danger', 'cleanup restores the shared danger tone');
+    assert.equal(ok.textContent, '删除', 'cleanup restores the default label');
+
+    // The next (tone-less) dialog — a delete flow — is not styled by the
+    // previous one.
+    ctx.showConfirm('确定删除此 SSH 连接？', () => {});
+    assert.equal(ok.className, 'btn-danger');
+    assert.equal(okBtn(ctx).textContent, '删除');
+    cancelBtn(ctx).dispatch('click');
+    assert.equal(ok.className, 'btn-danger');
+});

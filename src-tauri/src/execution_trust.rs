@@ -38,6 +38,7 @@ struct Context {
     default_cwd: PathBuf,
     system: PathBuf,
     git_bash: Vec<PathBuf>,
+    git_registered: Vec<PathBuf>,
     current: PathBuf,
     search: Vec<PathBuf>,
     elevated: bool,
@@ -222,6 +223,26 @@ fn git_bash_paths() -> Vec<PathBuf> {
     paths
 }
 
+// Machine-level Git for Windows registrations: the official installer records
+// its install root under HKLM whatever drive it installs to, so the env-var
+// scan above misses installs like D:\Program Files\Git. Only this exact
+// installer-registered bash.exe (joined as <InstallPath>\bin\bash.exe) is a
+// standard Git shell the account may consent to once; HKCU registrations,
+// PATH copies and arbitrary custom picks stay per-launch consents.
+#[cfg(windows)]
+fn git_registered_paths() -> Vec<PathBuf> {
+    use winapi::um::winreg::HKEY_LOCAL_MACHINE;
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Some(root) = crate::zterm::reg_get_string(HKEY_LOCAL_MACHINE, r"SOFTWARE\GitForWindows", "InstallPath") {
+        let root = root.trim_end_matches('\\');
+        if !root.is_empty() && !root.contains('\0') {
+            let path = PathBuf::from(format!("{root}\\bin\\bash.exe"));
+            if !paths.iter().any(|existing| path_key(existing) == path_key(&path)) { paths.push(path); }
+        }
+    }
+    paths
+}
+
 #[cfg(windows)]
 fn context() -> Result<Context, String> {
     use winapi::um::knownfolders::{FOLDERID_LocalAppData, FOLDERID_Profile};
@@ -248,6 +269,7 @@ fn context() -> Result<Context, String> {
         default_cwd: known_folder(&FOLDERID_Profile)?,
         system: PathBuf::from(String::from_utf16_lossy(&system[..len])),
         git_bash: git_bash_paths(),
+        git_registered: git_registered_paths(),
         current: std::env::current_dir().map_err(|_| "current directory is unavailable")?,
         search: std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect(),
         elevated: elevation.TokenIsElevated != 0,
@@ -417,7 +439,7 @@ fn make_record(kind: &str, owner: &str, payload: &Value, auth: AuthSource, conte
     if !owner.starts_with(&format!("{kind}:")) || owner.len() > 256 || payload.to_string().len() > 262144 { return Err("invalid startup request".into()); }
     let original = clean_original(payload);
     let mut frozen = original.clone();
-    let (descriptor, description, safe_builtin) = if kind == "local" {
+    let (descriptor, description, safe_builtin, standard_git) = if kind == "local" {
         let shell = original.get("shell").and_then(Value::as_str).unwrap_or("powershell.exe");
         let shell_args = match original.get("args") {
             None | Some(Value::Null) => Vec::new(),
@@ -452,16 +474,29 @@ fn make_record(kind: &str, owner: &str, payload: &Value, auth: AuthSource, conte
             (is_powershell && ["-noprofile", "-nologo", "-noexit"].contains(&arg.as_str())) || (is_cmd && ["/d", "/q"].contains(&arg.as_str()))
         });
         let harmless_git_args = shell_args.iter().all(|arg| ["-i", "-l", "--login", "-il", "-li"].contains(&arg.as_str()));
-        let safe = (((is_powershell || is_cmd) && harmless_system_args) || (is_git_bash && harmless_git_args)) && path_key(&cwd) == path_key(&context.default_cwd);
+        let default_cwd = path_key(&cwd) == path_key(&context.default_cwd);
+        let safe = (((is_powershell || is_cmd) && harmless_system_args) || (is_git_bash && harmless_git_args)) && default_cwd;
+        // A machine-registered Git bash (installer record under HKLM, whatever
+        // drive it installed to) with harmless arguments and the default cwd is
+        // a standard shell the account may consent to once. It is never a
+        // silent safe_builtin — the install root is not guaranteed to be
+        // admin-only writable — so the descriptor keeps the image digest and
+        // every remembered start re-runs the pre-launch hash check.
+        let is_registered_git = context.git_registered.iter().any(|path| path_key(&program) == path_key(path));
+        let standard_git = !safe && is_registered_git && harmless_git_args && default_cwd;
+        // Descriptor version 2 is the standard-git consent domain only: it can
+        // never match a v1 local fingerprint an older build remembered, while
+        // safe_builtin and every other descriptor keep version 1.
+        let descriptor_version = if standard_git { 2 } else { 1 };
         let digest = if safe { None } else { Some(file_digest(executable_file(&program)?.file.as_mut().ok_or("missing executable")?)?) };
         frozen["shell"] = json!(program.to_string_lossy());
         frozen["args"] = json!(shell_args);
         frozen["cwd"] = json!(cwd.to_string_lossy());
         let mut description = format!("共享启动配置需要本账户确认。\n程序：{}\n参数：{}\n目录：{}{}",
             quoted(&program.to_string_lossy()), shell_args.iter().map(|arg| quoted(arg)).collect::<Vec<_>>().join(" "), quoted(&cwd.to_string_lossy()),
-            if context.elevated { "\n将以管理员权限运行；授权仅限本次。" } else if safe { "\n如需以后自动启动，可选择记住此配置；更改后会再次确认。" } else { "" });
-        if !safe { description.push_str("\n自定义本地启动的授权仅限本次；标准 shell 可直接启动，SSH 连接可记住授权。"); }
-        (json!({"version":1,"kind":"local","program":path_key(&program),"image":digest,"args":shell_args,"cwd":path_key(&cwd),"elevated":context.elevated}), description, safe)
+            if context.elevated { "\n将以管理员权限运行；授权仅限本次。" } else if safe || standard_git { "\n如需以后自动启动，可选择记住此配置；更改后会再次确认。" } else { "" });
+        if !safe && !standard_git { description.push_str("\n自定义本地启动的授权仅限本次；标准 shell 可直接启动，Git Bash 首次确认后可记住，SSH 连接可记住授权。"); }
+        (json!({"version":descriptor_version,"kind":"local","program":path_key(&program),"image":digest,"args":shell_args,"cwd":path_key(&cwd),"elevated":context.elevated}), description, safe, standard_git)
     } else if kind == "ssh" {
         let host = original.get("host").and_then(Value::as_str).unwrap_or("").trim();
         let username = original.get("username").and_then(Value::as_str).unwrap_or("").trim();
@@ -489,11 +524,11 @@ fn make_record(kind: &str, owner: &str, payload: &Value, auth: AuthSource, conte
             if context.elevated || !auth.rememberable { "\n此授权仅限本次；密码和私钥内容不会显示或保存到授权记录。" } else { "\n可选择记住此连接及启动脚本；更改后会再次确认。" });
         (json!({"version":1,"kind":"ssh","host":host.to_lowercase(),"port":port,"username":username,
             "scripts":scripts,"followCwd":original.get("followCwd").and_then(Value::as_bool).unwrap_or(false),
-            "auth":auth.identity,"elevated":context.elevated}), description, false)
+            "auth":auth.identity,"elevated":context.elevated}), description, false, false)
     } else { return Err("unknown startup kind".into()); };
     if description.len() > 65536 { return Err("startup description is too large to review".into()); }
     Ok(Record { owner: owner.into(), kind: kind.into(), original, frozen, descriptor, description, auth: auth.clone(),
-        safe_builtin, rememberable: !context.elevated && auth.rememberable && (kind != "local" || safe_builtin), expires: Instant::now() + LIFETIME })
+        safe_builtin, rememberable: !context.elevated && auth.rememberable && (kind != "local" || safe_builtin || standard_git), expires: Instant::now() + LIFETIME })
 }
 
 fn load_database(path: &Path) -> Result<Option<Database>, String> {
@@ -717,8 +752,12 @@ mod tests {
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::write(path, b"inert Git Bash fixture").unwrap();
             }
+            let git_registered = root.join("machine-git/bin/bash.exe");
+            std::fs::create_dir_all(git_registered.parent().unwrap()).unwrap();
+            std::fs::write(&git_registered, b"inert machine-registered Git Bash fixture").unwrap();
             let context = Context { store: root.join("account/grants.bin"), default_cwd: home,
-                system, git_bash: vec![git_bash, git_bash_x86], current: root.clone(), search: vec![root.clone()], elevated: false };
+                system, git_bash: vec![git_bash, git_bash_x86], git_registered: vec![git_registered],
+                current: root.clone(), search: vec![root.clone()], elevated: false };
             Self { root, context, program }
         }
         fn local(&self, owner: &str) -> Record {
@@ -771,7 +810,7 @@ mod tests {
         let record = fixture.local("local:custom-decision");
         assert!(!record.safe_builtin);
         assert!(!record.rememberable);
-        assert!(record.description.contains("自定义本地启动的授权仅限本次；标准 shell 可直接启动，SSH 连接可记住授权。"));
+        assert!(record.description.contains("自定义本地启动的授权仅限本次；标准 shell 可直接启动，Git Bash 首次确认后可记住，SSH 连接可记住授权。"));
         assert!(!record.description.contains("可选择记住此配置"));
         let original = record.original.clone();
         let challenge = prepare_record(record, &fixture.context.store, &registry).unwrap();
@@ -811,6 +850,11 @@ mod tests {
             }
         }
         let program = fixture.context.git_bash[0].clone();
+        let mut registered = fixture.context.clone();
+        registered.git_registered = vec![program.clone()];
+        let record = make_record("local", "local:git-program-files-registered", &json!({"shell":program.clone(),"args":["--login","-i"]}), AuthSource::none(), &registered).unwrap();
+        assert!(record.safe_builtin, "the established ProgramFiles safe list is unchanged by registry discovery");
+        assert!(record.descriptor["image"].is_null());
         let record = make_record("local", "local:git-command", &json!({"shell":program.clone(),"args":["-c","echo hi"]}), AuthSource::none(), &fixture.context).unwrap();
         assert!(!record.safe_builtin);
         assert!(!record.rememberable);
@@ -824,6 +868,128 @@ mod tests {
         let record = make_record("local", "local:other-bash", &json!({"shell":other_bash,"args":["-i","-l"]}), AuthSource::none(), &fixture.context).unwrap();
         assert!(!record.safe_builtin);
         assert!(!record.rememberable);
+    }
+
+    #[test]
+    fn execution_trust_machine_registered_git_asks_once_then_persistent_grants_apply() {
+        let fixture = Fixture::new();
+        let program = fixture.context.git_registered[0].clone();
+        let payload = json!({"shell":program.clone(),"args":["--login","-i"]});
+        let record = make_record("local", "local:git-registered", &payload, AuthSource::none(), &fixture.context).unwrap();
+        // A machine-registered install root is not guaranteed admin-only
+        // writable, so it is never a silent safe_builtin: first use still asks.
+        assert!(!record.safe_builtin);
+        assert!(record.rememberable);
+        assert!(record.descriptor["image"].as_str().is_some_and(|digest| !digest.is_empty()));
+        assert!(record.description.contains("可选择记住此配置"));
+        assert!(!record.description.contains("授权仅限本次"));
+        let original = record.original.clone();
+        let registry = Mutex::new(Gate::default());
+        let challenge = prepare_record(record, &fixture.context.store, &registry).unwrap();
+        assert!(challenge.get("ticket").is_none());
+        assert_eq!(challenge["canRemember"], json!(true));
+        let approved = decide_record(challenge["challengeId"].as_str().unwrap(), true, true, &fixture.context, &registry).unwrap();
+        let ticket = approved["ticket"].as_str().unwrap().to_owned();
+        assert!(!ticket.is_empty());
+        assert!(fixture.context.store.exists());
+        registry.lock().take("local", "local:git-registered", &ticket, &original, &AuthSource::none()).unwrap();
+        // The stored grant makes later identical launches ticket-only.
+        let record = make_record("local", "local:git-registered", &payload, AuthSource::none(), &fixture.context).unwrap();
+        let response = prepare_record(record, &fixture.context.store, &registry).unwrap();
+        assert!(response.get("ticket").is_some());
+        assert!(response.get("challengeId").is_none());
+    }
+
+    #[test]
+    fn execution_trust_machine_registered_git_legacy_v1_local_grants_need_fresh_consent() {
+        let fixture = Fixture::new();
+        let program = fixture.context.git_registered[0].clone();
+        let payload = json!({"shell":program.clone(),"args":["--login","-i"]});
+        let registry = Mutex::new(Gate::default());
+        let record = make_record("local", "local:git-legacy", &payload, AuthSource::none(), &fixture.context).unwrap();
+        // Seed a grant file from a build that remembered this launch as a v1
+        // local descriptor: that legacy consent domain must stay inert.
+        let mut legacy = record.descriptor.clone();
+        legacy["version"] = json!(1);
+        let mut database = Database::new().unwrap();
+        database.grants.push(database.fingerprint(&legacy).unwrap());
+        save_database(&fixture.context.store, &database).unwrap();
+        let challenge = prepare_record(record, &fixture.context.store, &registry).unwrap();
+        assert!(challenge.get("challengeId").is_some());
+        assert!(challenge.get("ticket").is_none());
+        assert_eq!(challenge["canRemember"], json!(true));
+        let approved = decide_record(challenge["challengeId"].as_str().unwrap(), true, true, &fixture.context, &registry).unwrap();
+        assert!(!approved["ticket"].as_str().unwrap().is_empty());
+        // Fresh consent is remembered in the new domain: later identical
+        // launches are ticket-only.
+        let record = make_record("local", "local:git-legacy", &payload, AuthSource::none(), &fixture.context).unwrap();
+        let response = prepare_record(record, &fixture.context.store, &registry).unwrap();
+        assert!(response.get("ticket").is_some());
+        assert!(response.get("challengeId").is_none());
+    }
+
+    #[test]
+    fn execution_trust_machine_registered_git_is_one_time_under_elevation() {
+        let fixture = Fixture::new();
+        let mut elevated = fixture.context.clone();
+        elevated.elevated = true;
+        let program = elevated.git_registered[0].clone();
+        let record = make_record("local", "local:git-elevated", &json!({"shell":program,"args":["-i"]}), AuthSource::none(), &elevated).unwrap();
+        assert!(!record.safe_builtin);
+        assert!(!record.rememberable);
+        assert!(record.description.contains("将以管理员权限运行；授权仅限本次。"));
+        let response = prepare_record(record, &elevated.store, &Mutex::new(Gate::default())).unwrap();
+        assert_eq!(response["canRemember"], json!(false));
+    }
+
+    #[test]
+    fn execution_trust_machine_registered_git_edges_stay_per_launch_consents() {
+        let fixture = Fixture::new();
+        let program = fixture.context.git_registered[0].clone();
+        for args in [json!(["-c","echo fixture"]), json!(["--rcfile","evil.rc"]), json!(["-i","--posix"])] {
+            let record = make_record("local", "local:git-args", &json!({"shell":program.clone(),"args":args}), AuthSource::none(), &fixture.context).unwrap();
+            assert!(!record.safe_builtin, "dangerous Git arguments never become a standard launch");
+            assert!(!record.rememberable);
+            assert!(record.description.contains("授权仅限本次"));
+        }
+        let cwd = fixture.root.join("git-registered-cwd");
+        std::fs::create_dir(&cwd).unwrap();
+        let record = make_record("local", "local:git-cwd", &json!({"shell":program,"args":["-i"],"cwd":cwd}), AuthSource::none(), &fixture.context).unwrap();
+        assert!(!record.rememberable, "only the default cwd qualifies");
+        // A bash.exe outside the machine registration (HKCU, a PATH copy or any
+        // custom pick) remains a per-launch custom launch.
+        let user_bash = fixture.root.join("user-git/bin/bash.exe");
+        std::fs::create_dir_all(user_bash.parent().unwrap()).unwrap();
+        std::fs::write(&user_bash, b"inert unregistered bash fixture").unwrap();
+        let record = make_record("local", "local:git-user", &json!({"shell":user_bash,"args":["-i","-l"]}), AuthSource::none(), &fixture.context).unwrap();
+        assert!(!record.safe_builtin);
+        assert!(!record.rememberable);
+        let response = prepare_record(record, &fixture.context.store, &Mutex::new(Gate::default())).unwrap();
+        assert_eq!(response["canRemember"], json!(false));
+    }
+
+    #[test]
+    fn execution_trust_machine_registered_git_grant_binds_args_cwd_and_image() {
+        let fixture = Fixture::new();
+        let program = fixture.context.git_registered[0].clone();
+        let payload = json!({"shell":program.clone(),"args":[]});
+        let registry = Mutex::new(Gate::default());
+        let record = make_record("local", "local:git-bind", &payload, AuthSource::none(), &fixture.context).unwrap();
+        let challenge = prepare_record(record, &fixture.context.store, &registry).unwrap();
+        decide_record(challenge["challengeId"].as_str().unwrap(), true, true, &fixture.context, &registry).unwrap();
+        let again = |payload: Value| prepare_record(
+            make_record("local", "local:git-bind", &payload, AuthSource::none(), &fixture.context).unwrap(),
+            &fixture.context.store, &registry).unwrap();
+        // Other harmless args miss the stored fingerprint and ask again.
+        let mut other_args = payload.clone(); other_args["args"] = json!(["-l"]);
+        assert!(again(other_args).get("challengeId").is_some());
+        let cwd = fixture.root.join("git-bind-cwd");
+        std::fs::create_dir(&cwd).unwrap();
+        let mut other_cwd = payload.clone(); other_cwd["cwd"] = json!(cwd);
+        assert!(again(other_cwd).get("challengeId").is_some());
+        // An upgraded (or tampered) image hash no longer matches the grant.
+        std::fs::write(&program, b"upgraded machine Git fixture").unwrap();
+        assert!(again(payload).get("challengeId").is_some());
     }
 
     #[test]

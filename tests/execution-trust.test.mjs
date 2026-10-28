@@ -36,10 +36,10 @@ function fixture(handler = () => Promise.resolve({ challengeId: 'challenge', des
         ipcRenderer: { invoke: (name, payload) => { calls.push({ name, payload }); return handler(name, payload); } },
         sshAttempts: { ownerWants: () => true, ownerAttempt: () => null },
     });
-    context.showConfirm = (message, onOk, label) => {
+    context.showConfirm = (message, onOk, label, tone) => {
         const cleanup = () => { if (context._activeConfirmCleanup === cleanup) context._activeConfirmCleanup = null; };
         context._activeConfirmCleanup = cleanup;
-        const confirm = { message, label, cleanup,
+        const confirm = { message, label, tone, cleanup,
             approve: () => { cleanup(); onOk(); }, cancel: cleanup };
         confirms.push(confirm);
         return cleanup;
@@ -85,6 +85,7 @@ test('unapproved local startup sends no launch before explicit confirmation', as
     await tick();
     assert.equal(launches.length, 0);
     assert.equal(f.confirms[0].message, '<script>fixture</script>', 'the existing confirm renderer receives plain text');
+    assert.equal(f.confirms[0].tone, 'primary', 'one-time execution consents also use the primary tone');
     assert.equal(f.elements.get('confirm-msg').after, undefined, 'custom local approval has no remember checkbox');
     request.args[0] = 'mutated';
     f.confirms[0].approve();
@@ -112,6 +113,24 @@ test('SSH remember is explicit and the decision carries no mutable execution pay
     assert.equal(authorized.executionOwner, 'ssh:remember');
     assert.equal(authorized.executionTicket, 'approved');
     assert.equal(label.removed, true);
+});
+
+test('rememberable local consent uses the primary tone and offers an explicit remember', async () => {
+    const f = fixture(name => Promise.resolve(name === 'prepare-execution'
+        ? { challengeId: 'git', description: 'standard Git Bash fixture', canRemember: true } : { ticket: 'approved' }));
+    const running = f.broker.startLocal({ requestId: 'local-owner', shell: 'D:/Program Files/Git/bin/bash.exe', args: ['-i'] }, () => {});
+    await tick();
+    assert.equal(f.confirms[0].tone, 'primary', 'execution authorization is a launch consent, not a destructive action');
+    assert.equal(f.confirms[0].label, '仅本次允许');
+    const label = f.elements.get('confirm-msg').after;
+    assert.ok(label, 'a rememberable local challenge offers the remember checkbox');
+    label.children[0].checked = true;
+    label.children[0].change();
+    assert.equal(f.elements.get('confirm-ok').textContent, '允许并记住');
+    f.confirms[0].approve();
+    await running;
+    assert.deepEqual(JSON.parse(JSON.stringify(f.calls.find(call => call.name === 'decide-execution').payload)),
+        { challengeId: 'git', allow: true, remember: true });
 });
 
 test('closing a local owner cancels its challenge and stale approval cannot launch', async () => {

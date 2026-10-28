@@ -135,7 +135,7 @@ function _restoreFocusAfterModal() {
     if (typeof _refocusActiveTerminal === 'function') _refocusActiveTerminal();
 }
 
-function showConfirm(msg, onOk, okText) {
+function showConfirm(msg, onOk, okText, tone) {
     if (_activeConfirmCleanup) _activeConfirmCleanup();
     // The hostkey dialog shares this DOM but keeps its own cleanup registry;
     // unbind it too or a following OK click would fire its stale callbacks
@@ -146,6 +146,18 @@ function showConfirm(msg, onOk, okText) {
     const cancelBtn = document.getElementById('confirm-cancel');
     const okBtn = document.getElementById('confirm-ok');
     okBtn.textContent = okText || '删除';
+    // Execution authorization confirms a launch rather than a destructive
+    // action, so it opts into the primary tone; every other consumer keeps
+    // the danger default. Both actions share one geometry (30px tall, 8px
+    // radius) so the allow button lines up with the cancel button; cleanup
+    // restores everything so the next dialog never inherits this one.
+    okBtn.className = tone === 'primary' ? 'btn-primary' : 'btn-danger';
+    okBtn.style.height = '30px';
+    okBtn.style.borderRadius = '8px';
+    okBtn.style.padding = '0 16px';
+    okBtn.style.display = 'inline-flex';
+    okBtn.style.alignItems = 'center';
+    okBtn.style.justifyContent = 'center';
 
     const cleanup = () => {
         _activeConfirmCleanup = null;
@@ -153,8 +165,15 @@ function showConfirm(msg, onOk, okText) {
         cancelBtn.removeEventListener('click', onCancel);
         okBtn.removeEventListener('click', onOkClick);
         overlay.querySelector('.overlay-backdrop').removeEventListener('click', onCancel);
-        // Restore the default label so delete flows are unaffected.
+        // Restore the default label, tone and geometry so delete flows are unaffected.
         okBtn.textContent = '删除';
+        okBtn.className = 'btn-danger';
+        okBtn.style.height = '';
+        okBtn.style.borderRadius = '';
+        okBtn.style.padding = '';
+        okBtn.style.display = '';
+        okBtn.style.alignItems = '';
+        okBtn.style.justifyContent = '';
         _restoreFocusAfterModal();
     };
     const onCancel = () => cleanup();

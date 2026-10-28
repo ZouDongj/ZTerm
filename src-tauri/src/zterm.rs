@@ -3987,7 +3987,8 @@ fn path_which(exe: &str) -> Option<String> {
 }
 
 // Read a registry string value (Win32 API, avoids spawning a reg.exe console subprocess that would slow startup)
-fn reg_get_string(
+// Crate-visible: execution_trust reuses it for the machine-level Git registration lookup.
+pub(crate) fn reg_get_string(
     hive: winapi::shared::minwindef::HKEY,
     subkey: &str,
     value: &str,
