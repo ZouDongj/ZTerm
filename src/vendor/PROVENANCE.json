@@ -28,7 +28,7 @@
       "upstreamReferences": [
         "https://github.com/xtermjs/xterm.js/commit/f764c0ac917ba751d27003390436ba62402007a9"
       ],
-      "notes": "Backport of the upstream fix only; no dependency upgrade. The same-position activation gate and all other vendored behavior are unchanged."
+      "notes": "Backport of the upstream fix; no dependency upgrade. The same-position activation gate is unchanged. The value holder is not terminal-owned, so full teardown cannot clear it before addon fallback constructs the DOM renderer. The actual Linkifier is registered separately and disposed by the terminal. Standalone addon disposal while the terminal is alive retains a live Linkifier."
     },
     {
       "file": "addon-webgl.js",
