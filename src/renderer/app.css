@@ -200,6 +200,16 @@ body.tab-dragging{user-select:none}
 .tab-context-menu{position:fixed;background:var(--acrylic);border-radius:12px;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(26px) saturate(1.45);backdrop-filter:blur(26px) saturate(1.45);z-index:200;overflow:hidden;min-width:180px;padding:4px;user-select:none}
 .tab-context-item{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:8px 12px;font-size:12px;color:var(--text-2);cursor:pointer;border-radius:8px;transition:background 0.12s}
 .tab-context-item:hover{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
+/* Shared menu item states (app-context-menu / tab-context-menu): disabled
+   items stay visibly inert (no hover accent, no pointer); danger items
+   carry the destructive red the confirm buttons use; `.active` is the
+   keyboard/hover highlight — purely visual, the menu never takes DOM
+   focus. Color/opacity only. */
+.tab-context-item.disabled{opacity:0.42;cursor:default}
+.tab-context-item.disabled:hover{background:transparent;color:var(--text-2)}
+.tab-context-item.danger{color:#f2b8b5}
+.tab-context-item.danger:hover{background:rgba(242,184,181,0.14);color:#fef0ef}
+.tab-context-item.active{background:rgba(var(--accent-rgb),0.14);color:var(--text-1)}
 .tab-context-shortcut{font-size:10px;font-family:inherit;color:var(--text-3);background:rgba(255,255,255,0.05);padding:2px 7px;border-radius:4px;flex-shrink:0}
 .tab.bell-flash{animation:bellFlash 0.6s ease-in-out 3}
 /* Close animation: opacity fade only. NEVER animate layout properties
@@ -749,6 +759,10 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 .sftp-item-dl{width:24px;height:24px;border-radius:6px;border:none;background:transparent;color:var(--text-3);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0;opacity:0;transition:opacity 0.2s ease,background 0.12s,color 0.12s}
 .sftp-item:hover .sftp-item-dl,.sftp-item-dl:focus-visible{opacity:1}
 .sftp-item-dl:hover{background:rgba(255,255,255,0.06);color:var(--text-1)}
+/* Inline rename editor (right-click rename action): matches the mkdir row's
+   inline edit affordance; sized to the row, no layout animation. */
+.sftp-rename-input{flex:1;min-width:0;background:rgba(var(--accent-rgb),0.06);border:1.5px solid rgba(var(--accent-rgb),0.25);border-radius:8px;padding:4px 10px;color:var(--text-2);font-size:12.5px;font-family:inherit;outline:none}
+.sftp-rename-input:focus{border-color:rgba(var(--accent-rgb),0.55);color:var(--text-1)}
 .sftp-empty{padding:40px;text-align:center;color:var(--text-3);font-size:13px}
 /* Transfer button in statusbar */
 /* Top-bar transfer entry (Flutter flyout port): rounded-square icon button
@@ -1119,7 +1133,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 /* Terminal link hover tip: shows the real target URL plus a gesture hint */
 .link-tip{position:fixed;z-index:90;max-width:480px;background:var(--surface-float);color:var(--text-1);border:1px solid var(--stroke);border-radius:6px;padding:6px 10px;font-size:12px;line-height:1.5;pointer-events:none;opacity:0;transition:opacity 0.12s;word-break:break-all;box-shadow:var(--shadow-float);-webkit-backdrop-filter:blur(18px) saturate(1.3);backdrop-filter:blur(18px) saturate(1.3)}
 .link-tip.show{opacity:1}
-.link-tip-target{display:block;font-family:monospace}
+.link-tip-target{display:block}
 .link-tip-hint{display:block;color:var(--text-3);font-size:11px;margin-top:2px}
 
 /* Confirm dialog */
@@ -1127,7 +1141,7 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
 #confirm-msg.execution-review{max-height:min(55vh,440px);overflow:auto;text-align:left;white-space:pre-wrap;font-size:13px;line-height:1.6}
 .execution-remember{display:flex;align-items:center;gap:8px;margin-top:14px;color:var(--text-2);font-size:12px;line-height:1.5}
 .execution-remember input{accent-color:var(--accent)}
-.btn-danger{background:rgba(242,184,181,0.18);border:1px solid rgba(242,184,181,0.18);color:#eed2d0;padding:8px 20px;border-radius:20px;font-size:13px;cursor:pointer;transition:all 0.12s;font-family:inherit}
+.btn-danger{background:rgba(242,184,181,0.18);border:1px solid rgba(242,184,181,0.18);color:#eed2d0;height:30px;padding:0 16px;border-radius:8px;font-size:11.5px;font-weight:500;cursor:pointer;transition:all 0.12s;font-family:inherit;display:inline-flex;align-items:center;justify-content:center}
 .btn-danger:hover{background:rgba(242,184,181,0.28);border-color:rgba(242,184,181,0.28);color:#fef0ef}
 
 

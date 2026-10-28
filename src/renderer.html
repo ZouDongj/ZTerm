@@ -1125,6 +1125,9 @@
 
   <script src="renderer/icons.js"></script>
   <script src="renderer/utils.js"></script>
+  <!-- In-app context menu surface (text-edit menu + shared menu chrome).
+       Loads before tabs/sftp so their handlers can open menus through it. -->
+  <script src="renderer/context-menu.js"></script>
   <script src="renderer/state.js"></script>
   <script src="renderer/split-layout.js"></script>
   <script src="renderer/tab-title-utils.js"></script>

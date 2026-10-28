@@ -52,6 +52,7 @@ const SFTP = {
     _crumbWidth: null, // breadcrumb box width at the last fit, dedupes observer callbacks
     _saveDialogOpen: false, // a save dialog is up: re-entrant download() calls return early
     _mkdir: null,      // inline mkdir edit state {tabId, base, ready, moving, row} while its input row is open
+    _renaming: null,   // inline rename edit state {snap, input, done} while a row name is being edited (cancelled safely on any rebuild/rebind)
     _sessionDead: false, // the bound session died mid-panel: navigations are refused until a fresh open() rebinds
     _pinned: {},       // backend session id -> boolean, per-session pin state
     _pinnedPath: {},   // backend session id -> path, per-session pinned path
@@ -494,6 +495,10 @@ const SFTP = {
             if (nonUser) held = this._holdMkdirRow();
             else this._mkdir = null;
         }
+        // Any navigation swaps the listing: an open rename edit cannot
+        // survive it and is cancelled BEFORE the wipe (the browser fires
+        // blur on removal too — the done guard makes that a no-op).
+        this._cancelRename();
         body.innerHTML = '<div class="sftp-empty">加载中…</div>';
         this._restoreMkdirRow(held, body);
         // Request sequence + ownership check (same as open); a hidden panel
@@ -608,6 +613,9 @@ const SFTP = {
         this._refreshQueued = null;
         this._refreshInFlight = null;
         this._mkdir = null;
+        // A rename edit on a dead session can never commit — cancel it
+        // before the listing wipe (same parity as the mkdir edit).
+        this._cancelRename();
         // Same parity as the mkdir edit: a path edit in progress can never
         // commit on a dead session (navigate refuses), so tear it down —
         // Enter would otherwise consume the editor's finish lock with
@@ -779,6 +787,9 @@ const SFTP = {
 
     _renderFiles() {
         const body = document.getElementById('sftp-body');
+        // A rebuild destroys every row: an open rename edit is cancelled
+        // first (never committed, never left half-typed on a dead row).
+        this._cancelRename();
         // Preserve an in-progress mkdir input across the rebuild: the row is
         // held (detached, not destroyed) and restored at the top afterwards.
         const held = this._holdMkdirRow();
@@ -789,6 +800,16 @@ const SFTP = {
             up.className = 'sftp-item';
             up.innerHTML = '<span class="sftp-item-icon ic-accent">' + Icons.iconSvg('folder', 16) + '</span><span class="sftp-item-name">..</span>';
             up.addEventListener('click', () => this.goUp());
+            // The parent row is immutable: the gesture is still suppressed
+            // (no browser menu) but offers no actions. An open menu from a
+            // previous gesture closes (in the page the document-capture
+            // router already did this; the row keeps it self-contained).
+            up.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (typeof ContextMenu !== 'undefined' && ContextMenu.isOpen && ContextMenu.isOpen()) ContextMenu.close();
+                this._clearSelection();
+            });
             body.appendChild(up);
         }
         this._files.forEach(f => {
@@ -811,6 +832,23 @@ const SFTP = {
             el.addEventListener('click', () => {
                 if (f.isDir) this.navigate(fullPath);
                 else this.download(fullPath, f.name);
+            });
+            // Right-click selects the row and offers its menu. The action
+            // data is captured from the row's closure (never from HTML
+            // attributes), so a hostile filename cannot inject anything; the
+            // snapshot travels with the menu and its async dialogs.
+            el.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                this._selectRow(el);
+                this._showRowMenu(e, {
+                    tabId: this._tabId,
+                    base: this._path,
+                    name: f.name,
+                    isDir: !!f.isDir,
+                    names: new Set(this._files.map(x => x.name)),
+                    row: el,
+                });
             });
             // Hover-revealed download action (file rows only): same target as
             // the row click, but stopPropagation keeps the row itself inert.
@@ -866,12 +904,14 @@ const SFTP = {
         }
     },
 
-    async download(remotePath, filename) {
+    async download(remotePath, filename, ownerTabId) {
         // Snapshot the session BEFORE the save-dialog await: the panel may
         // be closed or rebound to another session while the dialog is open —
         // the transfer must go to the session the user clicked, not
         // this._tabId's post-dialog value (same contract as upload()).
-        const owner = { tabId: this._tabId };
+        // Menu actions pass the session captured at right-click time
+        // (ownerTabId); row clicks use the current binding.
+        const owner = { tabId: ownerTabId != null ? ownerTabId : this._tabId };
         // Re-entrancy guard: a double-click on a row (or its download button)
         // fires download() twice; the second call must not stack a second
         // save dialog on top of the first.
@@ -1017,11 +1057,16 @@ const SFTP = {
         });
     },
 
-    async upload() {
+    async upload(owner) {
         // Snapshot the operation target BEFORE the file-dialog await: the panel
         // may be closed or rebound to another session while the dialog is open.
-        const owner = this._captureUploadOwner();
-        if (!owner) return;
+        // A caller (the blank-area context menu) passes the snapshot captured
+        // at right-click time; the toolbar button captures the current view.
+        const snap = (owner && owner.tabId && typeof owner.path === 'string')
+            ? owner
+            : this._captureUploadOwner();
+        if (!snap) return;
+        const ownerArg = snap;
         const result = await ipcRenderer.invoke('show-open-dialog', { properties: ['openFile', 'multiSelections'] });
         if (result.canceled || !result.filePaths.length) return;
         // Same-basename refusal (same-basename files in one batch would
@@ -1033,10 +1078,10 @@ const SFTP = {
         }
         // Same-name overwrite gate: one confirmation for the whole batch,
         // judged against the listing the user is looking at.
-        const conflicts = this._uploadConflictCount(owner, result.filePaths);
+        const conflicts = this._uploadConflictCount(ownerArg, result.filePaths);
         if (conflicts > 0 && !(await this._confirmUploadOverwrite(conflicts))) return;
         for (const localPath of result.filePaths) {
-            await this.uploadLocal(localPath, owner);
+            await this.uploadLocal(localPath, ownerArg);
         }
     },
 
@@ -1131,6 +1176,225 @@ const SFTP = {
         snap.moving = false;
         const input = snap.row.querySelector('input');
         if (input) input.focus();
+    },
+
+    // ── Row context menu (right-click) ──
+    // Selection is right-click-only and single; left-click semantics are
+    // untouched.
+
+    _selectRow(el) {
+        const body = document.getElementById('sftp-body');
+        if (body && body.querySelectorAll) {
+            body.querySelectorAll('.sftp-item').forEach(r => r.classList.remove('selected'));
+        }
+        if (el) el.classList.add('selected');
+    },
+
+    _clearSelection() {
+        this._selectRow(null);
+    },
+
+    _childPath(base, name) {
+        return (base === '/' ? '' : base) + '/' + name;
+    },
+
+    // Menu actions that kick off long async flows (native dialogs, network)
+    // return nothing to the menu (it closes immediately); every failure path
+    // reports its own toast, so this only logs unexpected rejections.
+    _bg(p) {
+        if (p && typeof p.catch === 'function') {
+            p.catch(e => console.error('[ZTerm] menu action failed:', e));
+        }
+    },
+
+    _showRowMenu(e, snap) {
+        // A dead or unbound panel offers no actions (its rows are normally
+        // gone already); the gesture itself stays suppressed.
+        if (!this._tabId || this._sessionDead) return;
+        const items = [];
+        if (snap.isDir) {
+            items.push({
+                label: '打开',
+                action: () => {
+                    // A stale gesture (rebind/navigate while the menu was
+                    // open) must never steer the CURRENT binding to the old
+                    // session's directory — and a view request in flight
+                    // owns the view: navigating here would supersede it and
+                    // snap the view back (same settled/live gate as the
+                    // blank-area menu).
+                    if (this.isOpen && this._tabId === snap.tabId && this._path === snap.base
+                        && this._listed && !this._sessionDead && !this._viewReq) {
+                        this._bg(this.navigate(this._childPath(snap.base, snap.name)));
+                    }
+                },
+            });
+        } else {
+            items.push({
+                label: '下载',
+                action: () => this._bg(this.download(this._childPath(snap.base, snap.name), snap.name, snap.tabId)),
+            });
+        }
+        items.push({ label: '重命名', action: () => this._startRename(snap) });
+        items.push({ label: '删除', danger: true, action: () => this._confirmRemove(snap) });
+        ContextMenu.show(e.clientX, e.clientY, items, { onClosed: () => this._clearSelection() });
+    },
+
+    // Inline rename: the row's name span becomes an input. Enter commits
+    // through sftp-rename against the snapshot captured at right-click;
+    // Escape/blur cancel; empty/./../NUL/slash names and existing targets
+    // are refused; any listing rebuild (navigation, refresh, follow, death)
+    // cancels the edit instead of committing it somewhere else.
+    _startRename(snap) {
+        const body = document.getElementById('sftp-body');
+        const row = snap.row;
+        if (!body || !row || row.parentElement !== body) return; // rows rebuilt since the gesture
+        if (this._tabId !== snap.tabId || this._path !== snap.base) return; // gesture went stale with the view
+        if (this._sessionDead || !this.isOpen) return;
+        const nameSpan = row.querySelector('.sftp-item-name');
+        if (!nameSpan || row.querySelector('input')) return;
+        const self = this;
+        const input = document.createElement('input');
+        input.className = 'inline-edit sftp-rename-input';
+        input.value = snap.name;
+        input.spellcheck = false;
+        input.autocomplete = 'off';
+        const state = { snap, input, done: false };
+        this._renaming = state;
+        row.insertBefore(input, nameSpan);
+        nameSpan.remove();
+        try {
+            input.focus();
+            if (typeof input.select === 'function') input.select();
+        } catch (err) {}
+
+        // Restore the row's name span. On a row that has been rebuilt (or is
+        // being rebuilt) there is nothing to restore.
+        const close = () => {
+            if (state.done) return;
+            state.done = true;
+            if (self._renaming === state) self._renaming = null;
+            if (row.parentElement !== body) return;
+            const span = document.createElement('span');
+            span.className = 'sftp-item-name';
+            span.textContent = state.snap.name; // the pre-edit name; a commit's refresh re-renders the row
+            if (input.parentElement === row) row.insertBefore(span, input);
+            else row.appendChild(span);
+            if (input.parentElement) input.remove();
+        };
+
+        const commit = async () => {
+            if (state.done) return;
+            // NO trimming: remote names travel byte-for-byte (`a` and `a `
+            // are different files); only truly empty/./../NUL/slash names
+            // are refused.
+            const name = String(input.value == null ? '' : input.value);
+            if (name === '' || name === '.' || name === '..' || name.indexOf('/') !== -1 || name.indexOf('\0') !== -1) {
+                showToast('名称不能为空，且不能是 "."、".."、包含 / 或空字符', true);
+                return; // keep editing
+            }
+            if (name === snap.name) { close(); return; } // unchanged: a silent no-op
+            // No-overwrite gate: judge against the freshest listing of the
+            // same directory when the panel still shows it, else the names
+            // captured at the right-click (upload-conflict precedent).
+            const names = (self._tabId === snap.tabId && self._path === snap.base && self._listed)
+                ? self._files.map(f => f.name)
+                : Array.from(snap.names);
+            if (names.indexOf(name) !== -1) {
+                showToast('已存在同名项目: ' + name, true);
+                return; // keep editing
+            }
+            close();
+            const oldPath = self._childPath(snap.base, snap.name);
+            const newPath = self._childPath(snap.base, name);
+            let result;
+            try {
+                result = await ipcRenderer.invoke('sftp-rename', { tabId: snap.tabId, oldPath, newPath });
+            } catch (err) {
+                showToast('重命名失败: ' + (err && err.message || err || '会话不可用'), true);
+                return;
+            }
+            if (result && result.error) {
+                showToast('重命名失败: ' + result.error, true);
+                return;
+            }
+            showToast('已重命名');
+            // Refresh only the view that still belongs to this session AND
+            // directory, and only when no newer request owns the view (the
+            // mkdir-completion contract): a rebind or navigation in flight
+            // must not be superseded by this cleanup.
+            if (self.isOpen && self._tabId === snap.tabId && self._path === snap.base && !self._viewReq) {
+                await self.refresh();
+            }
+        };
+
+        input.addEventListener('keydown', (e) => {
+            // IME composition owns the key: the Enter that confirms a
+            // candidate must neither commit nor cancel (same guard as
+            // _editPath and the tab rename).
+            if (e.isComposing || e.keyCode === 229) return;
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                close();
+                return;
+            }
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                commit();
+            }
+        });
+        input.addEventListener('blur', () => close());
+        // Clicks inside the editor must never reach the row's left-click
+        // semantics (navigate / download) — the editor replaces the name
+        // span inside the very row that carries them.
+        input.addEventListener('click', (e) => e.stopPropagation());
+        input.addEventListener('dblclick', (e) => e.stopPropagation());
+        input.addEventListener('mousedown', (e) => e.stopPropagation());
+    },
+
+    // Consume an open rename edit ahead of a body wipe: the edit is CANCELLED
+    // (never committed) and the blur the removal fires in a real browser hits
+    // the done guard as a no-op. Minimal variant of the _mkdir hold/restore
+    // contract, chosen because a rename row must follow a listing that may
+    // no longer contain the entry at all.
+    _cancelRename() {
+        const state = this._renaming;
+        if (!state) return;
+        state.done = true;
+        this._renaming = null;
+    },
+
+    _confirmRemove(snap) {
+        const target = this._childPath(snap.base, snap.name);
+        const msg = snap.isDir
+            ? '确定删除空目录 ' + snap.name + ' ？目录必须为空，服务器不会递归删除。'
+            : '确定删除文件 ' + snap.name + ' ？';
+        // showConfirm focuses the cancel button by default (safe Enter).
+        showConfirm(msg, () => {
+            this._removeEntry({ tabId: snap.tabId, base: snap.base, name: snap.name, isDir: !!snap.isDir, target });
+        }, '删除');
+    },
+
+    async _removeEntry(op) {
+        let result;
+        try {
+            result = await ipcRenderer.invoke('sftp-remove', { tabId: op.tabId, path: op.target, isDir: !!op.isDir });
+        } catch (err) {
+            showToast('删除失败: ' + (err && err.message || err || '会话不可用'), true);
+            return;
+        }
+        if (result && result.error) {
+            // A non-empty directory (or a vanished entry) is a server-side
+            // refusal: report it and keep the current listing usable.
+            showToast('删除失败: ' + result.error, true);
+            return;
+        }
+        showToast(op.isDir ? '目录已删除' : '文件已删除');
+        // Same ownership guard as rename/mkdir completions.
+        if (this.isOpen && this._tabId === op.tabId && this._path === op.base && !this._viewReq) {
+            await this.refresh();
+        }
     },
 
 };
@@ -1716,6 +1980,70 @@ ipcRenderer.on('ssh-disconnect-reason', (event, { tabId, kind, reason } = {}) =>
         const cur = parseFloat(main.style.getPropertyValue('--sftp-width')) || 320;
         main.style.setProperty('--sftp-width', clamp(cur + delta, rect) + 'px');
         if (typeof _fitActiveTabSync === 'function') _fitActiveTabSync();
+    });
+})();
+
+// ── SFTP blank-area context menu ──
+// Right-click on the listing's empty space (below/around the rows, including
+// the empty-directory message) offers the directory-level actions. Rows and
+// text controls never reach this handler: rows stop propagation in their own
+// contextmenu listener and text controls are claimed earlier by the
+// capture-phase app edit menu.
+//
+// OWNERSHIP: the operation target is captured at RIGHT-CLICK time
+// ({tabId, base, names, ready} — the upload-owner contract). Actions must
+// never re-read the panel at action time: a cwd follow or a rebind while the
+// menu was open must not redirect them at the new view. Mutations (and
+// refresh) are only OFFERED on a live, fully listed view with no view
+// request in flight — an UNLISTED panel (fresh open, mid-navigation swap)
+// or a dead session gets no fake-available items; a LISTED empty directory
+// is a perfectly valid target. An action captured on a settled view is
+// refused once that view re-pends (a refresh here would supersede the newer
+// navigation and snap the view back).
+(() => {
+    const body = document.getElementById('sftp-body');
+    if (!body) return;
+    body.addEventListener('contextmenu', (e) => {
+        const t = e.target;
+        if (t && t !== body && t.closest && t.closest('.sftp-item')) return; // a row handled it
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return; // text menu territory
+        e.preventDefault();
+        const snap = {
+            tabId: SFTP._tabId,
+            base: SFTP._path,
+            names: new Set(SFTP._files.map(f => f.name)),
+            // A pending view request (open/navigate/follow in flight) means
+            // the panel shows a loading swap, not a listing — _listed still
+            // carries the PREVIOUS listing's flag, so it is not enough.
+            ready: !!(SFTP._tabId && SFTP._listed && !SFTP._sessionDead && SFTP.isOpen && !SFTP._viewReq),
+        };
+        // Strict action-time liveness: the view must still be the very one
+        // the menu was opened on, and it must still be that view's SETTLED
+        // listing (listed, nothing newer in flight, alive).
+        const live = () => SFTP.isOpen && SFTP._tabId === snap.tabId && SFTP._path === snap.base
+            && SFTP._listed && !SFTP._sessionDead && !SFTP._viewReq;
+        ContextMenu.show(e.clientX, e.clientY, [
+            {
+                label: '新建目录',
+                disabled: !snap.ready,
+                action: () => { if (live()) SFTP.mkdir(); },
+            },
+            {
+                label: '上传',
+                disabled: !snap.ready,
+                // The batch owner is the snapshot; upload() must not
+                // re-capture the (possibly rebound) current view. The
+                // snapshot alone is not enough though: a view request
+                // pending at ACTION time (cwd follow/navigate mid-menu)
+                // blocks the batch too.
+                action: () => { if (snap.ready && !SFTP._viewReq) SFTP._bg(SFTP.upload({ tabId: snap.tabId, path: snap.base, names: snap.names })); },
+            },
+            {
+                label: '刷新',
+                disabled: !snap.ready,
+                action: () => { if (live()) SFTP._bg(SFTP.refresh()); },
+            },
+        ]);
     });
 })();
 

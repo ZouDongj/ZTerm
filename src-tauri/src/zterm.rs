@@ -5840,6 +5840,163 @@ pub async fn sftp_mkdir(
     }
 }
 
+/// Parent directory of an absolute SFTP path ("/" for first-level entries).
+/// Pure lexical split: mutation paths keep the server's own interpretation
+/// of every component (symlinks, ".."), so this is only ever used as a
+/// validation boundary, never to rewrite a path.
+fn sftp_parent_dir(path: &str) -> String {
+    match path.rfind('/') {
+        Some(0) => "/".to_string(),
+        Some(i) => path[..i].to_string(),
+        None => String::new(),
+    }
+}
+
+/// Root-equivalence predicate, used ONLY to refuse a mutation target: a
+/// path is refused when its FINAL lexical target is the base directory
+/// itself ("/", "//", "/.", "/..", "/a/.." and friends; depth 0 is the
+/// filesystem root for absolute paths, the working base for relative
+/// ones). An extra ".." at depth 0 clamps there (POSIX lexical resolution
+/// at the root) and the segments after it still count, so climb-out-and-
+/// return paths ("../f", "/a/../../f" → "/f") are ordinary entries, not
+/// the base directory. Legal mutation paths are never rewritten by this
+/// check — the server keeps the final interpretation of every component.
+fn is_root_alias(path: &str) -> bool {
+    if path.is_empty() || path == "/" {
+        return true;
+    }
+    let mut depth: i64 = 0;
+    for seg in path.split('/') {
+        match seg {
+            // Empty segments ("//") and "." do not move the depth.
+            "" | "." => {}
+            // ".." at depth 0 clamps there: the climb never dips below
+            // zero, and the verdict is reserved for the FINAL depth below
+            // so segments after a clamped ".." still count.
+            ".." => depth = (depth - 1).max(0),
+            _ => depth += 1,
+        }
+    }
+    depth <= 0
+}
+
+/// Rename validation shared with the renderer's contract: both paths
+/// non-empty, neither a root alias, and both inside ONE directory (a bare
+/// SSH_FXP_RENAME crossing directories would let a crafted target escape
+/// the listed directory). Paths travel VERBATIM — remote filenames may
+/// legitimately begin or end with spaces, and `a` vs `a ` are different
+/// files, so no trimming happens here.
+fn validate_panel_rename(old_path: &str, new_path: &str) -> Result<(String, String), String> {
+    if old_path.is_empty() || new_path.is_empty() {
+        return Err("missing path".into());
+    }
+    if is_root_alias(old_path) || is_root_alias(new_path) {
+        return Err("cannot rename the root directory".into());
+    }
+    if sftp_parent_dir(old_path) != sftp_parent_dir(new_path) {
+        return Err("rename must stay in the same directory".into());
+    }
+    Ok((old_path.to_string(), new_path.to_string()))
+}
+
+/// Removal validation: the target must be a named entry (never a root
+/// alias). The path travels verbatim (see validate_panel_rename).
+fn validate_panel_remove(path: &str) -> Result<String, String> {
+    if path.is_empty() {
+        return Err("missing path".into());
+    }
+    if is_root_alias(path) {
+        return Err("cannot remove the root directory".into());
+    }
+    Ok(path.to_string())
+}
+
+/// The panel rename op: one bare SSH_FXP_RENAME, never a shell command.
+/// Renaming onto an existing target fails server-side (OpenSSH semantics),
+/// which is the no-overwrite behavior the renderer's confirmations rely on.
+async fn panel_rename_op(
+    sftp: Arc<russh_sftp::client::SftpSession>,
+    old_path: String,
+    new_path: String,
+) -> Result<(), SftpOpFailure> {
+    sftp.rename(old_path, new_path)
+        .await
+        .map_err(SftpOpFailure::sftp)
+}
+
+/// The panel removal op: files remove via REMOVE, directories via RMDIR.
+/// The server refuses a non-empty directory and nothing here ever recurses
+/// (a symlink to a directory lists as a file and removes as the link).
+async fn panel_remove_op(
+    sftp: Arc<russh_sftp::client::SftpSession>,
+    path: String,
+    is_dir: bool,
+) -> Result<(), SftpOpFailure> {
+    let result = if is_dir {
+        sftp.remove_dir(path).await
+    } else {
+        sftp.remove_file(path).await
+    };
+    result.map_err(SftpOpFailure::sftp)
+}
+
+#[tauri::command]
+pub async fn sftp_rename(
+    app: AppHandle,
+    state: State<'_, SessionMap>,
+    args: Vec<Value>,
+) -> Result<Value, String> {
+    let params = args.into_iter().next().unwrap_or(json!({}));
+    let tab_id = params.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
+    let old_raw = params.get("oldPath").and_then(|v| v.as_str()).unwrap_or("");
+    let new_raw = params.get("newPath").and_then(|v| v.as_str()).unwrap_or("");
+    let (old_path, new_path) = match validate_panel_rename(old_raw, new_raw) {
+        Ok(v) => v,
+        Err(m) => return Ok(json!({ "error": m })),
+    };
+    match panel_sftp_op(&state, tab_id, move |sftp| {
+        let (old_path, new_path) = (old_path.clone(), new_path.clone());
+        async move { panel_rename_op(sftp, old_path, new_path).await }
+    })
+    .await
+    {
+        SftpOpOutcome::Done(_, rebuilt) => {
+            emit_sftp_channel_rebuilt(&app, tab_id, rebuilt);
+            Ok(json!({ "ok": true }))
+        }
+        SftpOpOutcome::Failed(m) => Ok(json!({ "error": m })),
+        SftpOpOutcome::NoChannel(m) => Err(m),
+    }
+}
+
+#[tauri::command]
+pub async fn sftp_remove(
+    app: AppHandle,
+    state: State<'_, SessionMap>,
+    args: Vec<Value>,
+) -> Result<Value, String> {
+    let params = args.into_iter().next().unwrap_or(json!({}));
+    let tab_id = params.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
+    let is_dir = params.get("isDir").and_then(|v| v.as_bool()).unwrap_or(false);
+    let path = match validate_panel_remove(params.get("path").and_then(|v| v.as_str()).unwrap_or("")) {
+        Ok(v) => v,
+        Err(m) => return Ok(json!({ "error": m })),
+    };
+    match panel_sftp_op(&state, tab_id, move |sftp| {
+        let (path, is_dir) = (path.clone(), is_dir);
+        async move { panel_remove_op(sftp, path, is_dir).await }
+    })
+    .await
+    {
+        SftpOpOutcome::Done(_, rebuilt) => {
+            emit_sftp_channel_rebuilt(&app, tab_id, rebuilt);
+            Ok(json!({ "ok": true }))
+        }
+        SftpOpOutcome::Failed(m) => Ok(json!({ "error": m })),
+        SftpOpOutcome::NoChannel(m) => Err(m),
+    }
+}
+
 /// Grace window for cancelled SFTP transfers to remove their remote
 /// `.zterm-tmp-<id>` temp files before the session is disconnected underneath
 /// them (P3-07): a remove racing the disconnect would fail and leave the temp
@@ -8074,6 +8231,19 @@ mod tests {
             Ok(sftp_ok_status(id))
         }
 
+        async fn rmdir(
+            &mut self,
+            id: u32,
+            path: String,
+        ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            // std::fs::remove_dir refuses a non-empty directory, mirroring
+            // the server-side refusal (bare RMDIR never recurses) that the
+            // panel's empty-directory contract surfaces to the user.
+            std::fs::remove_dir(self.path(&path))
+                .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
+            Ok(sftp_ok_status(id))
+        }
+
         async fn rename(
             &mut self,
             id: u32,
@@ -8948,6 +9118,191 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("dest.txt")).unwrap(), b"new");
         assert!(!dir.join("dest.txt.zterm-tmp-7").exists());
         assert!(!dir.join("dest.txt.zterm-bak-7").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Panel rename/remove (sftp_rename / sftp_remove) against the real
+    // in-process SFTP protocol: success, existing target, non-empty
+    // directory, missing target, and the channel-death classification. ──
+
+    #[tokio::test]
+    async fn panel_remove_dir_removes_an_empty_directory() {
+        let dir = config_test_dir("sftp-panel-rmdir-empty");
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
+        std::fs::create_dir(dir.join("emptydir")).unwrap();
+        sftp.remove_dir("emptydir").await.unwrap();
+        assert!(!dir.join("emptydir").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn panel_remove_dir_nonempty_is_refused_and_keeps_contents() {
+        let dir = config_test_dir("sftp-panel-rmdir-nonempty");
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
+        std::fs::create_dir(dir.join("full")).unwrap();
+        write_remote_file(&sftp, "full/keep.txt", b"keep").await;
+        // The server refuses (bare RMDIR never recurses); the refusal is a
+        // Status answer, so the failure must not classify the channel dead.
+        let err = sftp.remove_dir("full").await.unwrap_err();
+        let failure = SftpOpFailure::sftp(err);
+        assert!(
+            !failure.channel_dead,
+            "a server refusal never triggers a channel rebuild"
+        );
+        assert!(
+            dir.join("full/keep.txt").exists(),
+            "a refused rmdir must not delete anything"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn panel_remove_file_missing_is_a_server_refusal() {
+        let dir = config_test_dir("sftp-panel-rm-missing");
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
+        let err = sftp.remove_file("missing.txt").await.unwrap_err();
+        let failure = SftpOpFailure::sftp(err);
+        assert!(!failure.channel_dead, "missing target is a Status refusal");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn panel_rename_moves_within_one_directory_and_refuses_existing_target() {
+        let dir = config_test_dir("sftp-panel-rename");
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
+        write_remote_file(&sftp, "a.txt", b"body").await;
+        // Real success: the file moves, the old name is gone.
+        sftp.rename("a.txt", "b.txt").await.unwrap();
+        assert_eq!(std::fs::read(dir.join("b.txt")).unwrap(), b"body");
+        assert!(!dir.join("a.txt").exists());
+        // Rename onto an existing target: bare SSH_FXP_RENAME never
+        // overwrites — a Status refusal, not a dead channel.
+        write_remote_file(&sftp, "a.txt", b"again").await;
+        let err = sftp.rename("a.txt", "b.txt").await.unwrap_err();
+        let failure = SftpOpFailure::sftp(err);
+        assert!(!failure.channel_dead, "existing target is a Status refusal");
+        assert_eq!(std::fs::read(dir.join("b.txt")).unwrap(), b"body");
+        assert!(dir.join("a.txt").exists(), "the source survives the refusal");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn panel_ops_run_through_the_command_helpers() {
+        let dir = config_test_dir("sftp-panel-op-helpers");
+        let (session, _failures) = test_sftp_session(dir.clone()).await;
+        let sftp: Arc<russh_sftp::client::SftpSession> = Arc::new(session);
+        std::fs::create_dir(dir.join("emptydir")).unwrap();
+        write_remote_file(&sftp, "a.txt", b"v1").await;
+
+        panel_rename_op(sftp.clone(), "a.txt".into(), "b.txt".into())
+            .await
+            .unwrap_or_else(|e| panic!("rename must succeed: {}", e.message));
+        assert_eq!(std::fs::read(dir.join("b.txt")).unwrap(), b"v1");
+
+        panel_remove_op(sftp.clone(), "emptydir".into(), true)
+            .await
+            .unwrap_or_else(|e| panic!("rmdir must succeed: {}", e.message));
+        assert!(!dir.join("emptydir").exists());
+
+        panel_remove_op(sftp.clone(), "b.txt".into(), false)
+            .await
+            .unwrap_or_else(|e| panic!("remove must succeed: {}", e.message));
+        assert!(!dir.join("b.txt").exists());
+
+        // A missing file routes to the same refusal the panel reports.
+        let err = match panel_remove_op(sftp.clone(), "missing.txt".into(), false).await {
+            Ok(()) => panic!("removing a missing file must fail"),
+            Err(e) => e,
+        };
+        assert!(!err.channel_dead, "missing target never rebuilds the channel");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn panel_rename_validation_keeps_targets_in_one_directory() {
+        let (old, new) = validate_panel_rename("/srv/app/a.txt", "/srv/app/b.txt").unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("/srv/app/a.txt", "/srv/app/b.txt"));
+        // Root-level entries share the "/" parent.
+        validate_panel_rename("/a", "/b").unwrap();
+        // Missing/empty paths, the root itself, and cross-directory targets
+        // are refused up front (the renderer mirrors the same contract).
+        assert!(validate_panel_rename("", "/a/c").is_err());
+        assert!(validate_panel_rename("/a/b", "").is_err());
+        assert!(validate_panel_rename("/a/b.txt", "/other/c.txt").is_err());
+    }
+
+    #[test]
+    fn panel_rename_validation_passes_paths_verbatim_without_trimming() {
+        // `a` and `a ` are DIFFERENT files: trimming would silently retarget
+        // the rename at the wrong entry. Paths travel byte-for-byte.
+        let (old, new) = validate_panel_rename("/a/b ", "/a/c ").unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("/a/b ", "/a/c "));
+        let (old, new) = validate_panel_rename(" /x/y", " /x/z").unwrap();
+        assert_eq!((old.as_str(), new.as_str()), (" /x/y", " /x/z"));
+        // Leading/trailing spaces still respect the same-directory rule.
+        assert!(validate_panel_rename("/a/b ", "/other/c").is_err());
+    }
+
+    #[test]
+    fn panel_rename_validation_rejects_every_root_alias() {
+        // Only used to REFUSE: legal mutation paths are never rewritten.
+        for alias in ["/", "//", "///", "/.", "/..", "/a/..", "/a/./.."] {
+            assert!(validate_panel_rename(alias, "/a/b").is_err(), "old={alias}");
+            assert!(validate_panel_rename("/a/b", alias).is_err(), "new={alias}");
+        }
+        // The same-directory rule compares parents TEXTUALLY (no folding of
+        // legal paths): "/a/." is not the literal "/a", so the pair is
+        // refused exactly like any other cross-directory target.
+        assert!(validate_panel_rename("/a/./b.txt", "/a/c.txt").is_err());
+    }
+
+    #[test]
+    fn panel_remove_validation_preserves_and_rejects_root_aliases() {
+        assert_eq!(validate_panel_remove("/a/b.txt").unwrap(), "/a/b.txt");
+        assert_eq!(validate_panel_remove("/a/ b.txt").unwrap(), "/a/ b.txt");
+        assert_eq!(validate_panel_remove("/a/b ").unwrap(), "/a/b ");
+        assert!(validate_panel_remove("").is_err());
+        for alias in ["/", "//", "/.", "/..", "/a/.."] {
+            assert!(validate_panel_remove(alias).is_err(), "path={alias}");
+        }
+    }
+
+    #[test]
+    fn panel_root_alias_judges_the_final_lexical_target() {
+        // Climb-out-and-return paths resolve to ordinary entries: an extra
+        // ".." at the root clamps there and the segments after it still
+        // count, so these are NOT the root directory itself.
+        for entry in ["../f", "../../f", "a/../../b", "/a/../../f", "/a/../../../f"] {
+            assert!(!is_root_alias(entry), "entry={entry} is a normal mutation target");
+        }
+        // The root directory itself, in its many lexical spellings —
+        // including climb-outs that never come back down.
+        for alias in ["/", "//", "///", "/.", "/..", "/a/..", "/a/./..", "/../..", "/./.."] {
+            assert!(is_root_alias(alias), "alias={alias} resolves to the root itself");
+        }
+        // The previously refused shapes stay usable end to end: they pass
+        // the validators verbatim and the same-directory rule still holds.
+        assert_eq!(validate_panel_remove("../f").unwrap(), "../f");
+        assert_eq!(validate_panel_remove("/a/../../f").unwrap(), "/a/../../f");
+        let (old, new) = validate_panel_rename("../f", "../g").unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("../f", "../g"));
+        let (old, new) = validate_panel_rename("/a/../../f", "/a/../../g").unwrap();
+        assert_eq!((old.as_str(), new.as_str()), ("/a/../../f", "/a/../../g"));
+        assert!(validate_panel_rename("../f", "/x/g").is_err(), "cross-directory pairs stay refused");
+    }
+
+    #[tokio::test]
+    async fn panel_rename_of_space_named_files_never_touches_the_neighbor() {
+        // `a.txt` and ` a.txt` coexist; renaming one must leave the other
+        // byte-identical (a trimming client would conflate them).
+        let dir = config_test_dir("sftp-panel-space-names");
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
+        write_remote_file(&sftp, "a.txt", b"plain").await;
+        write_remote_file(&sftp, " a.txt", b"spaced").await;
+        sftp.rename("a.txt", "a .txt").await.unwrap();
+        assert_eq!(std::fs::read(dir.join("a .txt")).unwrap(), b"plain");
+        assert_eq!(std::fs::read(dir.join(" a.txt")).unwrap(), b"spaced");
+        assert!(!dir.join("a.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

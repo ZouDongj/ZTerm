@@ -77,6 +77,8 @@ async fn main() {
             zterm::sftp_open,
             zterm::sftp_readdir,
             zterm::sftp_mkdir,
+            zterm::sftp_rename,
+            zterm::sftp_remove,
             zterm::sftp_download,
             zterm::sftp_upload,
             zterm::sftp_cancel_transfer,
@@ -90,6 +92,7 @@ async fn main() {
             zterm::clipboard_write_text,
             zterm::clipboard_read_text,
             zterm::renderer_ready,
+            browser_ui_policy,
         ])
         .setup(|app| {
             background_e2e::configure().map_err(std::io::Error::other)?;
@@ -154,7 +157,7 @@ async fn main() {
             background_e2e::install(&window, app.handle()).map_err(std::io::Error::other)?;
 
             #[cfg(windows)]
-            disable_browser_accelerator_keys(&window);
+            apply_browser_ui_policy(&window);
 
             // Window-state restore + show live in the renderer_ready command: the
             // renderer asks the main process to show the window only after it has
@@ -248,15 +251,92 @@ async fn main() {
         .expect("error while running tauri application");
 }
 
-/// Turn off every WebView2 accelerator key that opens browser UI instead of
-/// reaching the page (Ctrl+F find, Ctrl+P print, Ctrl+R/F5 reload, Ctrl+J
-/// downloads popup, F12, browser back/forward/search keys). With them off,
-/// the key events fall through to the page untouched, so ZTerm's own
-/// shortcuts always win. Failure is logged and non-fatal: the app still
-/// works, it just keeps the browser keys.
+/// Read-back of the WebView2 UI policy: what the settings GETTERS actually
+/// report after the setters ran (None = the getter itself failed). Stored
+/// once at window setup; the E2E-only browser_ui_policy command reports the
+/// booleans so verification never has to trust that a setter call returned.
+#[derive(Default, Clone, Copy)]
+struct BrowserUiPolicy {
+    default_context_menus: Option<bool>,
+    browser_accelerator_keys: Option<bool>,
+    password_autosave: Option<bool>,
+    general_autofill: Option<bool>,
+    zoom_control: Option<bool>,
+    status_bar: Option<bool>,
+}
+
+static BROWSER_UI_POLICY: parking_lot::Mutex<BrowserUiPolicy> = parking_lot::Mutex::new(
+    BrowserUiPolicy {
+        default_context_menus: None,
+        browser_accelerator_keys: None,
+        password_autosave: None,
+        general_autofill: None,
+        zoom_control: None,
+        status_bar: None,
+    },
+);
+
+// Getter helper: webview2-com settings getters use BOOL out-params.
 #[cfg(windows)]
-fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) {
-    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+fn read_bool_setting(
+    read: impl FnOnce(*mut windows_core::BOOL) -> windows_core::Result<()>,
+) -> Option<bool> {
+    let mut value = windows_core::BOOL::default();
+    read(&mut value).ok().map(|_| value.as_bool())
+}
+
+#[cfg(windows)]
+fn read_browser_ui_policy(
+    settings: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings,
+) -> BrowserUiPolicy {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Settings3, ICoreWebView2Settings4};
+    use windows_core::Interface;
+
+    let mut report = BrowserUiPolicy::default();
+    unsafe {
+        report.default_context_menus =
+            read_bool_setting(|out| settings.AreDefaultContextMenusEnabled(out));
+        report.zoom_control = read_bool_setting(|out| settings.IsZoomControlEnabled(out));
+        report.status_bar = read_bool_setting(|out| settings.IsStatusBarEnabled(out));
+        if let Ok(s3) = settings.cast::<ICoreWebView2Settings3>() {
+            report.browser_accelerator_keys =
+                read_bool_setting(|out| s3.AreBrowserAcceleratorKeysEnabled(out));
+        }
+        if let Ok(s4) = settings.cast::<ICoreWebView2Settings4>() {
+            report.password_autosave =
+                read_bool_setting(|out| s4.IsPasswordAutosaveEnabled(out));
+            report.general_autofill =
+                read_bool_setting(|out| s4.IsGeneralAutofillEnabled(out));
+        }
+    }
+    report
+}
+
+/// Apply the WebView2 browser-UI policy and READ IT BACK through the
+/// settings getters (a setter that silently failed must never be reported
+/// as applied — the read-back records the truth, including None for a
+/// getter that failed, which the probe reports as not-disabled).
+///
+/// Policy: accelerator keys off (Ctrl+F find, Ctrl+P print, Ctrl+R/F5
+/// reload, Ctrl+J downloads popup, F12, browser back/forward/search keys —
+/// with them off the keys fall through to the page, so ZTerm's own
+/// shortcuts always win), the DEFAULT CONTEXT MENU off (ZTerm's surfaces
+/// own their right-click menus; src/renderer/context-menu.js covers plain
+/// text inputs and preventDefaults everything else as a second layer),
+/// password autosave off (independent of the general autofill the builder
+/// disables — a terminal has no use for either popup), and the WebView2
+/// STATUS BAR off (the browser-chrome link-hover URL overlay WebView2 draws
+/// at the bottom-left of the webview; ZTerm shows its own DOM status bar
+/// instead, which this setting does NOT touch).
+///
+/// Scope: applied once to the single main webview at setup; the stored
+/// read-back is a startup snapshot for the E2E-only probe, not a dynamic
+/// policy monitor. Failure is logged and non-fatal — the app still works,
+/// and the read-back makes any silently-missed setting observable instead
+/// of assumed.
+#[cfg(windows)]
+fn apply_browser_ui_policy(window: &tauri::WebviewWindow) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Settings3, ICoreWebView2Settings4};
     use windows_core::Interface;
 
     let dispatch = window.with_webview(|webview| unsafe {
@@ -264,15 +344,69 @@ fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) {
             .controller()
             .CoreWebView2()
             .and_then(|core| core.Settings())
-            .and_then(|settings| settings.cast::<ICoreWebView2Settings3>())
-            .and_then(|s3| s3.SetAreBrowserAcceleratorKeysEnabled(false));
+            .and_then(|settings| {
+                let menus = settings.SetAreDefaultContextMenusEnabled(false);
+                if let Err(e) = menus {
+                    eprintln!("[zterm] disable default context menus failed: {e}");
+                }
+                let keys = settings
+                    .cast::<ICoreWebView2Settings3>()
+                    .and_then(|s3| s3.SetAreBrowserAcceleratorKeysEnabled(false));
+                if let Err(e) = &keys {
+                    eprintln!("[zterm] disable browser accelerator keys failed: {e}");
+                }
+                let autosave = settings
+                    .cast::<ICoreWebView2Settings4>()
+                    .and_then(|s4| s4.SetIsPasswordAutosaveEnabled(false));
+                if let Err(e) = autosave {
+                    eprintln!("[zterm] disable password autosave failed: {e}");
+                }
+                let status = settings.SetIsStatusBarEnabled(false);
+                if let Err(e) = status {
+                    eprintln!("[zterm] disable status bar failed: {e}");
+                }
+                let report = read_browser_ui_policy(&settings);
+                *BROWSER_UI_POLICY.lock() = report;
+                keys
+            });
         if let Err(e) = applied {
-            eprintln!("[zterm] disable browser accelerator keys failed: {e}");
+            eprintln!("[zterm] webview settings unavailable: {e}");
         }
     });
     if let Err(e) = dispatch {
         eprintln!("[zterm] with_webview dispatch failed: {e}");
     }
+}
+
+/// Read-only WebView2 UI policy probe, available only to the owned
+/// background E2E runtime (production invocations are refused). Returns
+/// booleans only — the READ-BACK state of the browser UI integrations at
+/// startup, plus whether every getter answered (`readBackComplete`; a
+/// missing getter reports its flag as not-disabled rather than guessing).
+/// The read-back proves the WebView2 settings layer; the DOM-level
+/// cancellation of contextmenu defaults is verified separately in the page.
+#[tauri::command]
+fn browser_ui_policy() -> Result<serde_json::Value, String> {
+    if !background_e2e::enabled() {
+        return Err("browser-ui-policy requires the owned background E2E runtime".into());
+    }
+    let p = *BROWSER_UI_POLICY.lock();
+    let disabled = |v: Option<bool>| v == Some(false);
+    let complete = p.default_context_menus.is_some()
+        && p.browser_accelerator_keys.is_some()
+        && p.password_autosave.is_some()
+        && p.general_autofill.is_some()
+        && p.zoom_control.is_some()
+        && p.status_bar.is_some();
+    Ok(json!({
+        "defaultContextMenusDisabled": disabled(p.default_context_menus),
+        "browserAcceleratorKeysDisabled": disabled(p.browser_accelerator_keys),
+        "passwordAutosaveDisabled": disabled(p.password_autosave),
+        "generalAutofillDisabled": disabled(p.general_autofill),
+        "zoomControlDisabled": disabled(p.zoom_control),
+        "statusBarDisabled": disabled(p.status_bar),
+        "readBackComplete": complete,
+    }))
 }
 
 /// Whether the geometry captured at close time must NOT overwrite the saved
