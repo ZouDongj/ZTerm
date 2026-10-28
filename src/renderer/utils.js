@@ -241,18 +241,38 @@ function _getAccentColorAlpha(alpha) {
     return rgb ? 'rgba(' + rgb + ',' + alpha + ')' : 'rgba(97,175,239,' + alpha + ')';
 }
 
-// Terminal link opening: the vendored addon's built-in regex is already
-// http(s)-only and `requireModifier` is not a real option — the gesture gate
-// lives in the unified LinkOpen entry (bare Ctrl+click).
-// Known detection gap: the regex matches only all-lower or all-upper case
-// schemes, so mixed-case "Https://…" plain text is not linkified (harmless;
-// the backend validator is case-insensitive and would accept it).
+// Terminal link opening: the vendored addon's built-in regex is http(s)-only
+// and `requireModifier` is not a real option — the gesture gate lives in the
+// unified LinkOpen entry (bare Ctrl+click).
+// The vendored default bounds URLs only at ASCII punctuation, so CJK sentence
+// punctuation directly after a URL (ideographic comma/period, full-width
+// marks, corner/book-title brackets, curly quotes) is swallowed into the link
+// text. ZTerm ships its own urlRegex: same shape as the vendor default plus
+// explicit CJK/full-width boundary ranges in both the body and the trailing
+// class. Everything else non-ASCII stays matchable (CJK ideographs in paths,
+// punycode/Unicode domain labels, ports, query strings), and any-case http(s)
+// schemes are accepted (the backend validator is case-insensitive).
+const _CJK_URL_BOUNDARY =
+    '\\u2013\\u2014'                 // en dash, em dash
+    + '\\u2018\\u2019\\u201c\\u201d' // curly single/double quotes
+    + '\\u2026'                      // horizontal ellipsis
+    + '\\u3000-\\u303f'              // CJK symbols and punctuation (ideographic space/comma/period, corner/book-title brackets)
+    + '\\uff01-\\uff0f'              // fullwidth ASCII punctuation !"#$%&'()*+,-./
+    + '\\uff1a-\\uff20'              // fullwidth :;<=>?@
+    + '\\uff3b-\\uff40'              // fullwidth [\]^_`
+    + '\\uff5b-\\uff65';             // fullwidth {|}~ and halfwidth ideographic marks
+const _URL_REGEX = new RegExp(
+    '[hH][tT][tT][pP][sS]?:[/]{2}'
+    + '[^\\s"\'!*(){}|\\\\^<>`' + _CJK_URL_BOUNDARY + ']*'
+    + '[^\\s"\':,.!?{}|\\\\^~\\[\\]`()<>' + _CJK_URL_BOUNDARY + ']'
+);
 function _createWebLinksAddon(term) {
     return new WebLinksAddon(
         (event, uri) => LinkOpen.handleLinkActivate(event, uri, { term }),
         {
             hover: (event, text) => LinkOpen.showLinkTip(event, text),
             leave: () => LinkOpen.hideLinkTip(),
+            urlRegex: _URL_REGEX,
         }
     );
 }
