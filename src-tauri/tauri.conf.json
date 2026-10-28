@@ -1,6 +1,6 @@
 {
   "productName": "ZTerm",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "identifier": "com.zterm.tauri.app",
   "mainBinaryName": "zterm",
   "build": {
