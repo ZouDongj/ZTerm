@@ -10818,7 +10818,7 @@ mod tests {
         }
         let mut child = OwnedChild(command.spawn().expect("spawn isolated bash"));
         let input = format!(
-            ". {}\nprintf '__ZT_COLOR__%s\\n' \"$COLORTERM\"\nexit\n",
+            ". {}\nprintf '__ZT_HOME__%s\\n' \"$HOME\"\nprintf '__ZT_PWD__%s\\n' \"$PWD\"\nprintf '__ZT_COLOR__%s\\n' \"$COLORTERM\"\nexit\n",
             quote(&shell_path(&rcfile))
         );
         child
@@ -10855,7 +10855,7 @@ mod tests {
         assert_eq!(
             cwd,
             shell_path(&home),
-            "wrapper must report the isolated cwd"
+            "wrapper must report the isolated cwd; output={text}"
         );
         assert!(!rcfile.exists(), "wrapper must remove its own fixture file");
     }
