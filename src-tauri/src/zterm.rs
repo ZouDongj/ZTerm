@@ -10818,7 +10818,7 @@ mod tests {
         }
         let mut child = OwnedChild(command.spawn().expect("spawn isolated bash"));
         let input = format!(
-            ". {}\nprintf '__ZT_HOME__%s\\n' \"$HOME\"\nprintf '__ZT_PWD__%s\\n' \"$PWD\"\nprintf '__ZT_COLOR__%s\\n' \"$COLORTERM\"\nexit\n",
+            "cd -- \"$HOME\" || exit 1\n. {}\nprintf '__ZT_HOME__%s\\n' \"$HOME\"\nprintf '__ZT_PWD__%s\\n' \"$PWD\"\nprintf '__ZT_COLOR__%s\\n' \"$COLORTERM\"\nexit\n",
             quote(&shell_path(&rcfile))
         );
         child
