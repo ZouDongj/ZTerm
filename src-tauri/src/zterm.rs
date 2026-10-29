@@ -355,10 +355,20 @@ pub struct PendingGuard {
 impl PendingGuard {
     #[cfg(test)]
     pub fn new(pm: PendingMap, attempt: String, backend: String) -> Self {
-        Self::with_cancel_flag(pm, attempt, backend, Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        Self::with_cancel_flag(
+            pm,
+            attempt,
+            backend,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
     }
 
-    pub(crate) fn with_cancel_flag(pm: PendingMap, attempt: String, backend: String, cancel: Arc<std::sync::atomic::AtomicBool>) -> Self {
+    pub(crate) fn with_cancel_flag(
+        pm: PendingMap,
+        attempt: String,
+        backend: String,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
         // The SAME cancel Arc is inserted into the registry and retained
         // here. A concurrent cancel_pending(Attempt(token)) between this
         // insert and any later use sets THIS flag; the task must observe it
@@ -768,22 +778,40 @@ pub struct Credential {
     authorization: crate::execution_trust::AuthSource,
 }
 
-fn execution_auth_source(profile: &Value, credentials: &CredentialStore) -> Result<crate::execution_trust::AuthSource, String> {
-    let Some(id) = profile.get("credentialId").and_then(Value::as_str).filter(|id| !id.is_empty()) else {
+fn execution_auth_source(
+    profile: &Value,
+    credentials: &CredentialStore,
+) -> Result<crate::execution_trust::AuthSource, String> {
+    let Some(id) = profile
+        .get("credentialId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
         return Ok(crate::execution_trust::AuthSource::none());
     };
-    credentials.lock().get(id).map(|credential| credential.authorization.clone())
+    credentials
+        .lock()
+        .get(id)
+        .map(|credential| credential.authorization.clone())
         .ok_or_else(|| "startup credential was revoked or is unavailable".into())
 }
 
 #[tauri::command]
-pub fn prepare_execution(app: AppHandle, cred_state: State<'_, CredentialStore>, args: Vec<Value>) -> Result<Value, String> {
+pub fn prepare_execution(
+    app: AppHandle,
+    cred_state: State<'_, CredentialStore>,
+    args: Vec<Value>,
+) -> Result<Value, String> {
     let request = args.first().cloned().unwrap_or(json!({}));
     let kind = request.get("kind").and_then(Value::as_str).unwrap_or("");
     let owner = request.get("owner").and_then(Value::as_str).unwrap_or("");
     let payload = request.get("payload").cloned().unwrap_or(json!({}));
     let result = (|| {
-        let auth = if kind == "ssh" { execution_auth_source(&payload, &cred_state)? } else { crate::execution_trust::AuthSource::none() };
+        let auth = if kind == "ssh" {
+            execution_auth_source(&payload, &cred_state)?
+        } else {
+            crate::execution_trust::AuthSource::none()
+        };
         crate::execution_trust::prepare(kind, owner, &payload, auth)
     })();
     if let Err(ref error) = result {
@@ -798,9 +826,18 @@ pub fn prepare_execution(app: AppHandle, cred_state: State<'_, CredentialStore>,
 pub fn decide_execution(args: Vec<Value>) -> Result<Value, String> {
     let request = args.first().cloned().unwrap_or(json!({}));
     crate::execution_trust::decide(
-        request.get("challengeId").and_then(Value::as_str).unwrap_or(""),
-        request.get("allow").and_then(Value::as_bool).unwrap_or(false),
-        request.get("remember").and_then(Value::as_bool).unwrap_or(false),
+        request
+            .get("challengeId")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        request
+            .get("allow")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        request
+            .get("remember")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     )
 }
 
@@ -1464,7 +1501,10 @@ pub async fn pty_create(
         }
     };
     let params = &execution.payload;
-    let execution_owner = requested.get("executionOwner").and_then(Value::as_str).unwrap_or("");
+    let execution_owner = requested
+        .get("executionOwner")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let shell = params
         .get("shell")
         .and_then(|v| v.as_str())
@@ -1542,37 +1582,33 @@ pub async fn pty_create(
     // aware TUI apps (which key on COLORTERM) enable their direct-color paths.
     cmd.env("COLORTERM", "truecolor");
 
-    let child = execution.start(|| {
-        pair.slave.spawn_command(cmd).map_err(|e| {
-            // os error 267 ("The directory name is invalid") is the common
-            // case: the profile's startup directory no longer exists. Name
-            // the cwd so the user knows what to fix instead of a blank tab.
-            let msg = match &cwd {
-                Some(dir) => format!("spawn failed (cwd: {dir}): {e}"),
-                None => format!("spawn failed: {e}"),
-            };
-            msg
+    let child = execution
+        .start(|| {
+            pair.slave.spawn_command(cmd).map_err(|e| {
+                // os error 267 ("The directory name is invalid") is the common
+                // case: the profile's startup directory no longer exists. Name
+                // the cwd so the user knows what to fix instead of a blank tab.
+                let msg = match &cwd {
+                    Some(dir) => format!("spawn failed (cwd: {dir}): {e}"),
+                    None => format!("spawn failed: {e}"),
+                };
+                msg
+            })
         })
-    }).map_err(|msg| {
+        .map_err(|msg| {
+            emit_spawn_error(&app, &request_id, &msg);
+            msg
+        })?;
+    let mut reader = pair.master.try_clone_reader().map_err(|e| {
+        let msg = format!("reader failed: {e}");
         emit_spawn_error(&app, &request_id, &msg);
         msg
     })?;
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| {
-            let msg = format!("reader failed: {e}");
-            emit_spawn_error(&app, &request_id, &msg);
-            msg
-        })?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| {
-            let msg = format!("writer failed: {e}");
-            emit_spawn_error(&app, &request_id, &msg);
-            msg
-        })?;
+    let writer = pair.master.take_writer().map_err(|e| {
+        let msg = format!("writer failed: {e}");
+        emit_spawn_error(&app, &request_id, &msg);
+        msg
+    })?;
 
     let loose = std::env::var("ZTERM_PTY_COALESCE")
         .map(|v| v.trim() == "loose")
@@ -1714,23 +1750,27 @@ where
     // The channel open itself is also reply-bounded: a wedged connection
     // would otherwise park this await forever (the handle has no internal
     // timeout for it).
-    let mut channel = match tokio::time::timeout(SSH_SFTP_STEP_TIMEOUT, handle.channel_open_session())
-    .await
-    {
-        Ok(Ok(c)) => c,
-        Ok(Err(e)) => return Err((SftpOpenStage::Channel, format!("{e}"))),
-        Err(_) => {
-            return Err((
-                SftpOpenStage::Channel,
-                "no reply to the channel-open request within 10s".into(),
-            ))
-        }
-    };
+    let mut channel =
+        match tokio::time::timeout(SSH_SFTP_STEP_TIMEOUT, handle.channel_open_session()).await {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => return Err((SftpOpenStage::Channel, format!("{e}"))),
+            Err(_) => {
+                return Err((
+                    SftpOpenStage::Channel,
+                    "no reply to the channel-open request within 10s".into(),
+                ))
+            }
+        };
     // request_subsystem only SENDS the request — the reply is what tells
     // whether the server has the subsystem at all. Wait for that reply so a
     // server without SFTP reports Subsystem here instead of a confusing
     // handshake failure on a dead channel (issue #29's exact scenario).
-    match tokio::time::timeout(SSH_SFTP_STEP_TIMEOUT, channel.request_subsystem(true, "sftp")).await {
+    match tokio::time::timeout(
+        SSH_SFTP_STEP_TIMEOUT,
+        channel.request_subsystem(true, "sftp"),
+    )
+    .await
+    {
         Ok(Ok(())) => {}
         result => {
             // A blocked sender also needs a finite deadline. Keep ownership
@@ -1931,9 +1971,7 @@ async fn ensure_sftp_transfer(
                     let map = state.lock();
                     match map.get(tab_id) {
                         Some(SessionType::Ssh(s))
-                            if s.sftp
-                                .as_ref()
-                                .is_some_and(|cur| Arc::ptr_eq(cur, &shared)) =>
+                            if s.sftp.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, &shared)) =>
                         {
                             Ok((shared, s.transfer_cancels.clone()))
                         }
@@ -2053,7 +2091,10 @@ fn forget_dead_sftp_channel(
         if s.sftp.as_ref().is_some_and(|c| Arc::ptr_eq(c, dead)) {
             s.sftp = None;
         }
-        if s.sftp_transfer.as_ref().is_some_and(|c| Arc::ptr_eq(c, dead)) {
+        if s.sftp_transfer
+            .as_ref()
+            .is_some_and(|c| Arc::ptr_eq(c, dead))
+        {
             s.sftp_transfer = None;
         }
     }
@@ -2062,11 +2103,7 @@ fn forget_dead_sftp_channel(
 /// Panel-channel ops (sftp_open / sftp_readdir / sftp_mkdir) with the
 /// mid-session rebuild: the ensure failure keeps its invoke-error surface
 /// and the op failure keeps its json `error` surface.
-async fn panel_sftp_op<T, F, Fut>(
-    state: &SessionMap,
-    tab_id: &str,
-    op: F,
-) -> SftpOpOutcome<T>
+async fn panel_sftp_op<T, F, Fut>(state: &SessionMap, tab_id: &str, op: F) -> SftpOpOutcome<T>
 where
     F: Fn(Arc<russh_sftp::client::SftpSession>) -> Fut,
     Fut: std::future::Future<Output = Result<T, SftpOpFailure>>,
@@ -2106,7 +2143,11 @@ impl TransferRegistration {
             }
             map.insert(key.clone(), cancelled.clone());
         }
-        Ok(Self { cancels, key, cancelled })
+        Ok(Self {
+            cancels,
+            key,
+            cancelled,
+        })
     }
 
     fn check(&self) -> Result<(), String> {
@@ -2141,7 +2182,10 @@ impl TransferRegistration {
 impl Drop for TransferRegistration {
     fn drop(&mut self) {
         let mut map = self.cancels.lock();
-        if map.get(&self.key).is_some_and(|flag| Arc::ptr_eq(flag, &self.cancelled)) {
+        if map
+            .get(&self.key)
+            .is_some_and(|flag| Arc::ptr_eq(flag, &self.cancelled))
+        {
             map.remove(&self.key);
         }
     }
@@ -2208,7 +2252,10 @@ where
     }
     registration.check()?;
     forget_dead_sftp_channel(state, tab_id, &sftp);
-    match registration.prepare(ensure_sftp_transfer(state, tab_id)).await {
+    match registration
+        .prepare(ensure_sftp_transfer(state, tab_id))
+        .await
+    {
         Ok((rebuilt, rebuilt_cancels)) => {
             registration.check_registry(&rebuilt_cancels)?;
             let retry = init(rebuilt.clone()).await;
@@ -2543,14 +2590,7 @@ async fn start_ssh_shell(
     deadline: tokio::time::Instant,
 ) -> Result<ShellStartup, ShellStartError> {
     let wrapper_rejected = std::sync::atomic::AtomicBool::new(false);
-    start_ssh_shell_tracking_rejection(
-        channel,
-        wrapper,
-        cancel,
-        deadline,
-        &wrapper_rejected,
-    )
-    .await
+    start_ssh_shell_tracking_rejection(channel, wrapper, cancel, deadline, &wrapper_rejected).await
 }
 
 async fn next_shell_message(
@@ -2592,21 +2632,45 @@ pub async fn ssh_connect(
 ) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
     let requested_profile = params.get("profile").cloned().unwrap_or(json!({}));
-    let expected_owner = format!("ssh:{}", params.get("attemptId").and_then(Value::as_str).unwrap_or(""));
+    let expected_owner = format!(
+        "ssh:{}",
+        params
+            .get("attemptId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    );
     if params.get("executionOwner").and_then(Value::as_str) != Some(expected_owner.as_str()) {
         return Err("startup authorization belongs to another SSH attempt".into());
     }
     let (auth, password, key_path) = {
         let credentials = cred_state.lock();
-        if let Some(id) = requested_profile.get("credentialId").and_then(Value::as_str).filter(|id| !id.is_empty()) {
-            let credential = credentials.get(id).ok_or("startup credential was revoked or is unavailable")?;
-            (credential.authorization.clone(), credential.password.clone(), credential.private_key_path.clone())
-        } else { (crate::execution_trust::AuthSource::none(), None, None) }
+        if let Some(id) = requested_profile
+            .get("credentialId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            let credential = credentials
+                .get(id)
+                .ok_or("startup credential was revoked or is unavailable")?;
+            (
+                credential.authorization.clone(),
+                credential.password.clone(),
+                credential.private_key_path.clone(),
+            )
+        } else {
+            (crate::execution_trust::AuthSource::none(), None, None)
+        }
     };
     let execution = crate::execution_trust::take_ssh(
         &requested_profile,
-        params.get("executionOwner").and_then(Value::as_str).unwrap_or(""),
-        params.get("executionTicket").and_then(Value::as_str).unwrap_or(""),
+        params
+            .get("executionOwner")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        params
+            .get("executionTicket")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
         &auth,
     )?;
     let profile = &execution.payload;
@@ -2686,12 +2750,14 @@ pub async fn ssh_connect(
     // same flag remains reachable through both guards during establishment.
     // Lock order is execution gate -> pending registry; pending cleanup never
     // acquires the execution gate.
-    let _guard = execution.start(|| Ok(PendingGuard::with_cancel_flag(
-        Arc::clone(&*pending_state.inner()),
-        attempt_id.clone(),
-        tab_id.clone(),
-        execution.cancel_flag(),
-    )))?;
+    let _guard = execution.start(|| {
+        Ok(PendingGuard::with_cancel_flag(
+            Arc::clone(&*pending_state.inner()),
+            attempt_id.clone(),
+            tab_id.clone(),
+            execution.cancel_flag(),
+        ))
+    })?;
     let cancel_flag = _guard.cancel_flag();
     let _ = app.emit(
         "ssh-connecting",
@@ -3011,7 +3077,9 @@ pub async fn ssh_connect(
                 let _ = handle
                     .disconnect(russh::Disconnect::ByApplication, "ZTerm cancelled", "")
                     .await;
-                return Ok(json!({ "cancelled": true, "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }));
+                return Ok(
+                    json!({ "cancelled": true, "tabId": tab_id, "rendererId": renderer_id, "attemptId": attempt_id }),
+                );
             }
         }
     }
@@ -3715,7 +3783,9 @@ pub fn save_window_state(state: &WindowState) {
 // of the main process's on_page_load, so the listener is guaranteed ready when the event fires — a lost event would leave the splash stuck on screen
 #[tauri::command]
 pub fn renderer_ready(app: AppHandle) -> Result<(), String> {
-    if crate::background_e2e::renderer_ready() { return Ok(()); }
+    if crate::background_e2e::renderer_ready() {
+        return Ok(());
+    }
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
@@ -3738,7 +3808,9 @@ pub(crate) fn restore_window_state(window: &tauri::WebviewWindow) {
             let _ = window.set_position(tauri::PhysicalPosition::new(ws.x, ws.y));
             let _ = window.set_size(tauri::PhysicalSize::new(ws.width, ws.height));
         }
-        if ws.maximized { let _ = window.maximize(); }
+        if ws.maximized {
+            let _ = window.maximize();
+        }
     }
 }
 
@@ -5655,7 +5727,10 @@ fn credential_from_encrypted(encrypted_pwd: &str, key_path: &str) -> Result<Cred
     Ok(Credential {
         password,
         private_key_path,
-        authorization: crate::execution_trust::AuthSource { identity: source, rememberable },
+        authorization: crate::execution_trust::AuthSource {
+            identity: source,
+            rememberable,
+        },
     })
 }
 
@@ -5977,11 +6052,15 @@ pub async fn sftp_remove(
 ) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
     let tab_id = params.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
-    let is_dir = params.get("isDir").and_then(|v| v.as_bool()).unwrap_or(false);
-    let path = match validate_panel_remove(params.get("path").and_then(|v| v.as_str()).unwrap_or("")) {
-        Ok(v) => v,
-        Err(m) => return Ok(json!({ "error": m })),
-    };
+    let is_dir = params
+        .get("isDir")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let path =
+        match validate_panel_remove(params.get("path").and_then(|v| v.as_str()).unwrap_or("")) {
+            Ok(v) => v,
+            Err(m) => return Ok(json!({ "error": m })),
+        };
     match panel_sftp_op(&state, tab_id, move |sftp| {
         let (path, is_dir) = (path.clone(), is_dir);
         async move { panel_remove_op(sftp, path, is_dir).await }
@@ -6093,15 +6172,8 @@ pub async fn sftp_download(
             Ok((file, metadata, tmp_local, local))
         }
     };
-    let (_sftp, init_result) = transfer_init_with_rebuild(
-        &app,
-        &state,
-        tab_id,
-        &registration,
-        sftp,
-        init,
-    )
-    .await?;
+    let (_sftp, init_result) =
+        transfer_init_with_rebuild(&app, &state, tab_id, &registration, sftp, init).await?;
     let (mut file, metadata, tmp_local, mut local) = match init_result {
         Ok(v) => v,
         Err(e) => {
@@ -6232,7 +6304,9 @@ async fn finalize_upload_rename(
     Ok(())
 }
 
-fn check_transfer_init_cancelled(cancelled: &std::sync::atomic::AtomicBool) -> Result<(), SftpOpFailure> {
+fn check_transfer_init_cancelled(
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<(), SftpOpFailure> {
     if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(SftpOpFailure::other("Transfer cancelled".to_string()));
     }
@@ -6555,7 +6629,10 @@ struct QuitFlowState {
 }
 
 static QUIT_FLOW_STATE: parking_lot::Mutex<QuitFlowState> =
-    parking_lot::Mutex::new(QuitFlowState { requested: false, generation: 0 });
+    parking_lot::Mutex::new(QuitFlowState {
+        requested: false,
+        generation: 0,
+    });
 
 fn begin_quit_in(state: &mut QuitFlowState) -> Option<u64> {
     if state.requested {
@@ -8834,11 +8911,9 @@ mod tests {
         allow_channel: bool,
         root: PathBuf,
     ) -> russh::client::Handle<NoCheckClient> {
-        let host_key = russh::keys::PrivateKey::random(
-            &mut rand::rng(),
-            russh::keys::Algorithm::Ed25519,
-        )
-        .unwrap();
+        let host_key =
+            russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
+                .unwrap();
         let server_config = Arc::new(russh::server::Config {
             keys: vec![host_key],
             methods: russh::MethodSet::from(&[russh::MethodKind::Password][..]),
@@ -8852,7 +8927,8 @@ mod tests {
         };
         let (client_side, server_side) = tokio::io::duplex(64 * 1024);
         tokio::spawn(async move {
-            if let Ok(session) = russh::server::run_stream(server_config, server_side, handler).await
+            if let Ok(session) =
+                russh::server::run_stream(server_config, server_side, handler).await
             {
                 let _ = session.await;
             }
@@ -8903,7 +8979,10 @@ mod tests {
         let err = open_sftp_channel_classified(&handle).await.err().unwrap();
         assert_eq!(err.0, SftpOpenStage::Channel);
         let msg = sftp_open_message(err.0, &err.1);
-        assert!(msg.contains("channel refused"), "the toast names the cause: {msg}");
+        assert!(
+            msg.contains("channel refused"),
+            "the toast names the cause: {msg}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -8963,7 +9042,10 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("directory"), "error names the cause: {err}");
         // The directory is untouched and nothing was renamed aside.
-        assert_eq!(std::fs::read(dir.join("destdir/keep.txt")).unwrap(), b"keep");
+        assert_eq!(
+            std::fs::read(dir.join("destdir/keep.txt")).unwrap(),
+            b"keep"
+        );
         assert!(!dir.join("destdir.zterm-bak-3").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9182,7 +9264,10 @@ mod tests {
         let failure = SftpOpFailure::sftp(err);
         assert!(!failure.channel_dead, "existing target is a Status refusal");
         assert_eq!(std::fs::read(dir.join("b.txt")).unwrap(), b"body");
-        assert!(dir.join("a.txt").exists(), "the source survives the refusal");
+        assert!(
+            dir.join("a.txt").exists(),
+            "the source survives the refusal"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9214,14 +9299,20 @@ mod tests {
             Ok(()) => panic!("removing a missing file must fail"),
             Err(e) => e,
         };
-        assert!(!err.channel_dead, "missing target never rebuilds the channel");
+        assert!(
+            !err.channel_dead,
+            "missing target never rebuilds the channel"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn panel_rename_validation_keeps_targets_in_one_directory() {
         let (old, new) = validate_panel_rename("/srv/app/a.txt", "/srv/app/b.txt").unwrap();
-        assert_eq!((old.as_str(), new.as_str()), ("/srv/app/a.txt", "/srv/app/b.txt"));
+        assert_eq!(
+            (old.as_str(), new.as_str()),
+            ("/srv/app/a.txt", "/srv/app/b.txt")
+        );
         // Root-level entries share the "/" parent.
         validate_panel_rename("/a", "/b").unwrap();
         // Missing/empty paths, the root itself, and cross-directory targets
@@ -9272,13 +9363,27 @@ mod tests {
         // Climb-out-and-return paths resolve to ordinary entries: an extra
         // ".." at the root clamps there and the segments after it still
         // count, so these are NOT the root directory itself.
-        for entry in ["../f", "../../f", "a/../../b", "/a/../../f", "/a/../../../f"] {
-            assert!(!is_root_alias(entry), "entry={entry} is a normal mutation target");
+        for entry in [
+            "../f",
+            "../../f",
+            "a/../../b",
+            "/a/../../f",
+            "/a/../../../f",
+        ] {
+            assert!(
+                !is_root_alias(entry),
+                "entry={entry} is a normal mutation target"
+            );
         }
         // The root directory itself, in its many lexical spellings —
         // including climb-outs that never come back down.
-        for alias in ["/", "//", "///", "/.", "/..", "/a/..", "/a/./..", "/../..", "/./.."] {
-            assert!(is_root_alias(alias), "alias={alias} resolves to the root itself");
+        for alias in [
+            "/", "//", "///", "/.", "/..", "/a/..", "/a/./..", "/../..", "/./..",
+        ] {
+            assert!(
+                is_root_alias(alias),
+                "alias={alias} resolves to the root itself"
+            );
         }
         // The previously refused shapes stay usable end to end: they pass
         // the validators verbatim and the same-directory rule still holds.
@@ -9288,7 +9393,10 @@ mod tests {
         assert_eq!((old.as_str(), new.as_str()), ("../f", "../g"));
         let (old, new) = validate_panel_rename("/a/../../f", "/a/../../g").unwrap();
         assert_eq!((old.as_str(), new.as_str()), ("/a/../../f", "/a/../../g"));
-        assert!(validate_panel_rename("../f", "/x/g").is_err(), "cross-directory pairs stay refused");
+        assert!(
+            validate_panel_rename("../f", "/x/g").is_err(),
+            "cross-directory pairs stay refused"
+        );
     }
 
     #[tokio::test]
@@ -9339,11 +9447,23 @@ mod tests {
         let local = dir.join("local.bin");
         std::fs::write(&local, b"data").unwrap();
         failures.fail_opens_for("dest.txt.zterm-tmp-7");
-        let err = match prepare_upload(&sftp, local.to_str().unwrap(), "dest.txt", 7, &std::sync::atomic::AtomicBool::new(false)).await {
+        let err = match prepare_upload(
+            &sftp,
+            local.to_str().unwrap(),
+            "dest.txt",
+            7,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .await
+        {
             Ok(_) => panic!("the injected open failure must fail init"),
             Err(e) => e,
         };
-        assert!(err.message.starts_with("open:"), "unexpected error: {}", err.message);
+        assert!(
+            err.message.starts_with("open:"),
+            "unexpected error: {}",
+            err.message
+        );
         assert!(
             !dir.join("dest.txt.zterm-tmp-7").exists(),
             "init failure must not orphan the remote temp file"
@@ -9359,12 +9479,27 @@ mod tests {
         let (sftp, _failures) = test_sftp_session(dir.clone()).await;
         let local_dir = dir.join("srcdir");
         std::fs::create_dir(&local_dir).unwrap();
-        let err = match prepare_upload(&sftp, local_dir.to_str().unwrap(), "dest.txt", 3, &std::sync::atomic::AtomicBool::new(false)).await {
+        let err = match prepare_upload(
+            &sftp,
+            local_dir.to_str().unwrap(),
+            "dest.txt",
+            3,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .await
+        {
             Ok(_) => panic!("a directory source must fail init"),
             Err(e) => e,
         };
-        assert!(err.message.contains("上传文件夹"), "unexpected error: {}", err.message);
-        assert!(!err.channel_dead, "a local validation failure is not a dead channel");
+        assert!(
+            err.message.contains("上传文件夹"),
+            "unexpected error: {}",
+            err.message
+        );
+        assert!(
+            !err.channel_dead,
+            "a local validation failure is not a dead channel"
+        );
         assert!(!dir.join("dest.txt.zterm-tmp-3").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -9396,7 +9531,9 @@ mod tests {
             language_tag: String::new(),
         };
         assert!(!sftp_channel_died(&Error::Status(status)));
-        assert!(!sftp_channel_died(&Error::Limited("read limit reached".into())));
+        assert!(!sftp_channel_died(&Error::Limited(
+            "read limit reached".into()
+        )));
         // An unexpected packet still proves a packet ARRIVED on this channel:
         // alive, never rebuilt.
         assert!(!sftp_channel_died(&Error::UnexpectedPacket));
@@ -9428,7 +9565,10 @@ mod tests {
         let successor = Arc::new(std::sync::atomic::AtomicBool::new(false));
         registry.lock().insert("1".to_string(), successor.clone());
         drop(registration);
-        assert!(registry.lock().get("1").is_some_and(|flag| Arc::ptr_eq(flag, &successor)));
+        assert!(registry
+            .lock()
+            .get("1")
+            .is_some_and(|flag| Arc::ptr_eq(flag, &successor)));
         registry.lock().remove("1");
         drop(TransferRegistration::new(registry.clone(), "2".to_string()).unwrap());
         assert!(registry.lock().is_empty());
@@ -9444,11 +9584,13 @@ mod tests {
             let registry2 = registry.clone();
             let file_init2 = file_init.clone();
             let task = tokio::spawn(async move {
-                let (_, registration) = register_and_prepare_transfer(registry2, direction.to_string(), async {
-                    let _ = started_tx.send(());
-                    let _ = resume_rx.await;
-                    Ok(())
-                }).await?;
+                let (_, registration) =
+                    register_and_prepare_transfer(registry2, direction.to_string(), async {
+                        let _ = started_tx.send(());
+                        let _ = resume_rx.await;
+                        Ok(())
+                    })
+                    .await?;
                 file_init2.store(true, std::sync::atomic::Ordering::Relaxed);
                 drop(registration);
                 Ok::<(), String>(())
@@ -9478,12 +9620,17 @@ mod tests {
                 // close before returning. Dropping this future skips that close.
                 cleanup2.store(true, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
-            }).await
+            })
+            .await
         });
         started_rx.await.unwrap();
         assert!(cancel_registered_transfer(&registry, "pending-channel"));
-        assert!(tokio::time::timeout(CANCEL_POLL_INTERVAL * 2, &mut task).await.is_err(),
-            "cancellation must retain the channel preparation future until cleanup");
+        assert!(
+            tokio::time::timeout(CANCEL_POLL_INTERVAL * 2, &mut task)
+                .await
+                .is_err(),
+            "cancellation must retain the channel preparation future until cleanup"
+        );
         assert!(registry.lock().contains_key("pending-channel"));
         let _ = resume_tx.send(());
         assert_eq!(task.await.unwrap().unwrap_err(), "Transfer cancelled");
@@ -9496,14 +9643,23 @@ mod tests {
         let registry = Arc::new(Mutex::new(HashMap::new()));
         let result = register_and_prepare_transfer(registry.clone(), "1".to_string(), async {
             Err::<(), _>("channel failed".to_string())
-        }).await;
+        })
+        .await;
         assert_eq!(result.unwrap_err(), "channel failed");
         assert!(registry.lock().is_empty());
 
-        let (_, registration) = register_and_prepare_transfer(registry.clone(), "2".to_string(), async { Ok(()) }).await.unwrap();
+        let (_, registration) =
+            register_and_prepare_transfer(registry.clone(), "2".to_string(), async { Ok(()) })
+                .await
+                .unwrap();
         assert!(cancel_registered_transfer(&registry, "2"));
         let mut polled = false;
-        let result = registration.prepare(async { polled = true; Ok(()) }).await;
+        let result = registration
+            .prepare(async {
+                polled = true;
+                Ok(())
+            })
+            .await;
         assert_eq!(result.unwrap_err(), "Transfer cancelled");
         assert!(!polled);
         drop(registration);
@@ -9535,7 +9691,9 @@ mod tests {
             }
         };
         let outcome = run_sftp_op_with_rebuild(dead, evict, reopen, |sftp| async move {
-            sftp.symlink_metadata("f.txt").await.map_err(SftpOpFailure::sftp)
+            sftp.symlink_metadata("f.txt")
+                .await
+                .map_err(SftpOpFailure::sftp)
         })
         .await;
         match outcome {
@@ -9578,7 +9736,11 @@ mod tests {
             Arc::new(sftp),
             || panic!("a Status failure must not evict the channel"),
             reopen,
-            |s| async move { s.symlink_metadata("missing.txt").await.map_err(SftpOpFailure::sftp) },
+            |s| async move {
+                s.symlink_metadata("missing.txt")
+                    .await
+                    .map_err(SftpOpFailure::sftp)
+            },
         )
         .await;
         match outcome {
@@ -9597,7 +9759,11 @@ mod tests {
             dead,
             || {},
             || async { Err("SFTP subsystem not enabled on the server".to_string()) },
-            |sftp| async move { sftp.symlink_metadata(".").await.map_err(SftpOpFailure::sftp) },
+            |sftp| async move {
+                sftp.symlink_metadata(".")
+                    .await
+                    .map_err(SftpOpFailure::sftp)
+            },
         )
         .await;
         match outcome {
@@ -10412,22 +10578,40 @@ mod tests {
         let (files, _) = cwd_wrapper_files("/bin/zsh", "t").expect("zsh wrapper");
         let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
         let text = String::from_utf8_lossy(&zshrc.1);
-        assert!(text.contains("export COLORTERM=truecolor"), "zsh .zshrc: {text}");
+        assert!(
+            text.contains("export COLORTERM=truecolor"),
+            "zsh .zshrc: {text}"
+        );
     }
 
     #[test]
     fn cwd_follow_unavailable_reasons_are_pinned() {
         // The reason strings surface verbatim in the renderer toast; every
         // variant is pinned so a wording change is a deliberate, reviewed one.
-        assert_eq!(CwdFollowUnavailable::NoSftpChannel.reason(), "SFTP 通道不可用");
-        assert_eq!(CwdFollowUnavailable::ShellUndetected.reason(), "无法识别远程 shell");
+        assert_eq!(
+            CwdFollowUnavailable::NoSftpChannel.reason(),
+            "SFTP 通道不可用"
+        );
+        assert_eq!(
+            CwdFollowUnavailable::ShellUndetected.reason(),
+            "无法识别远程 shell"
+        );
         assert_eq!(
             CwdFollowUnavailable::ShellUnsupported("/usr/bin/fish".into()).reason(),
             "当前 Shell 暂不支持目录跟随"
         );
-        assert_eq!(CwdFollowUnavailable::WrapperUploadFailed.reason(), "目录跟随组件部署失败");
-        assert_eq!(CwdFollowUnavailable::PrepTimedOut.reason(), "目录跟随组件准备超时");
-        assert_eq!(CwdFollowUnavailable::WrapperStartFailed.reason(), "目录跟随组件启动失败");
+        assert_eq!(
+            CwdFollowUnavailable::WrapperUploadFailed.reason(),
+            "目录跟随组件部署失败"
+        );
+        assert_eq!(
+            CwdFollowUnavailable::PrepTimedOut.reason(),
+            "目录跟随组件准备超时"
+        );
+        assert_eq!(
+            CwdFollowUnavailable::WrapperStartFailed.reason(),
+            "目录跟随组件启动失败"
+        );
     }
 
     #[test]
@@ -11007,7 +11191,10 @@ mod tests {
         let validate = crate::update_http::validate_proxy_url;
         assert!(validate("http://127.0.0.1:7890").is_ok());
         let err = validate("https://proxy.corp:8443").unwrap_err();
-        assert!(err.contains("invalid update proxy") && err.contains("TLS-to-proxy"), "{err}");
+        assert!(
+            err.contains("invalid update proxy") && err.contains("TLS-to-proxy"),
+            "{err}"
+        );
         assert!(validate("localhost:7890").is_ok()); // schemeless defaults to http
         let err = validate("socks5://127.0.0.1:1080").unwrap_err();
         assert!(err.contains("only HTTP proxies"), "{err}");
@@ -11321,11 +11508,18 @@ mod tests {
         let identity = first.authorization.identity.to_string();
         assert!(!identity.contains(plaintext));
         assert!(!identity.contains(&legacy));
-        let encrypted = format!("dpapi:{}", base64_encode_bytes(&dpapi_encrypt(plaintext).unwrap()));
+        let encrypted = format!(
+            "dpapi:{}",
+            base64_encode_bytes(&dpapi_encrypt(plaintext).unwrap())
+        );
         let current = credential_from_encrypted(&encrypted, "").unwrap();
         assert!(current.authorization.rememberable);
         assert_eq!(current.authorization.identity["encryptedSource"], encrypted);
-        assert!(!current.authorization.identity.to_string().contains(plaintext));
+        assert!(!current
+            .authorization
+            .identity
+            .to_string()
+            .contains(plaintext));
     }
 
     #[test]
@@ -11338,7 +11532,10 @@ mod tests {
         assert_eq!(err["errorKind"], json!("credential-decrypt-failed"));
         assert_eq!(err["code"], json!("credential-decrypt-failed"));
         let msg = err["error"].as_str().unwrap().to_lowercase();
-        assert!(msg.contains("decrypt"), "message must name the cause: {msg}");
+        assert!(
+            msg.contains("decrypt"),
+            "message must name the cause: {msg}"
+        );
         assert!(err.get("credId").is_none(), "no credential id on failure");
     }
 
@@ -11408,13 +11605,19 @@ mod tests {
         config["appearance"]["fontSize"] = json!(20);
 
         let error = save_config_to(&primary, &anchor, &config).unwrap_err();
-        assert!(error.contains("active configuration was not saved"), "{error}");
+        assert!(
+            error.contains("active configuration was not saved"),
+            "{error}"
+        );
         let recovery: Value =
             serde_json::from_str(&std::fs::read_to_string(&anchor).unwrap()).unwrap();
         assert_eq!(recovery["appearance"]["fontSize"], 20);
 
         drop(lock);
-        assert_eq!(load_config_from(&primary, &anchor)["appearance"]["fontSize"], 12);
+        assert_eq!(
+            load_config_from(&primary, &anchor)["appearance"]["fontSize"],
+            12
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

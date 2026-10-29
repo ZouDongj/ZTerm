@@ -4,7 +4,10 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
-use std::sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    OnceLock,
+};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
@@ -17,9 +20,13 @@ const PROTOCOL_MARKER: &str = "ZTERM_E2E_BACKGROUND_PROTOCOL_V1_WINDOWS_BOOT_MS"
 
 fn background_now() -> u64 {
     #[cfg(windows)]
-    unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }
+    unsafe {
+        windows::Win32::System::SystemInformation::GetTickCount64()
+    }
     #[cfg(not(windows))]
-    { 0 }
+    {
+        0
+    }
 }
 
 #[derive(Deserialize)]
@@ -30,7 +37,14 @@ struct Policy {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Phase { Hidden, Registered, Placed, Showing, Shown, Failed }
+enum Phase {
+    Hidden,
+    Registered,
+    Placed,
+    Showing,
+    Shown,
+    Failed,
+}
 
 struct Runtime {
     policy: Policy,
@@ -45,22 +59,36 @@ struct Runtime {
 
 static RUNTIME: OnceLock<Option<Runtime>> = OnceLock::new();
 
-fn runtime() -> Option<&'static Runtime> { RUNTIME.get().and_then(Option::as_ref) }
-pub fn enabled() -> bool { runtime().is_some() }
+fn runtime() -> Option<&'static Runtime> {
+    RUNTIME.get().and_then(Option::as_ref)
+}
+pub fn enabled() -> bool {
+    runtime().is_some()
+}
 
 pub fn execution_grant_store() -> Result<Option<PathBuf>, String> {
     execution_grant_store_from(RUNTIME.get(), lease_valid)
 }
 
-fn execution_grant_store_from(state: Option<&Option<Runtime>>, valid_lease: impl FnOnce(&Runtime) -> bool) -> Result<Option<PathBuf>, String> {
+fn execution_grant_store_from(
+    state: Option<&Option<Runtime>>,
+    valid_lease: impl FnOnce(&Runtime) -> bool,
+) -> Result<Option<PathBuf>, String> {
     let configured = state.ok_or("background policy has not been initialized")?;
-    let Some(rt) = configured else { return Ok(None); };
+    let Some(rt) = configured else {
+        return Ok(None);
+    };
     let phase = *rt.phase.lock();
     let elapsed = rt.started.elapsed();
-    if rt.terminating.load(Ordering::SeqCst) || phase == Phase::Failed || elapsed > RUN_LIMIT
+    if rt.terminating.load(Ordering::SeqCst)
+        || phase == Phase::Failed
+        || elapsed > RUN_LIMIT
         || (phase != Phase::Shown && elapsed > STARTUP_LIMIT)
-        || !rt.root.is_absolute() || !valid_guid(&rt.policy.token) || !valid_guid(&rt.policy.target_desktop_id)
-        || (matches!(phase, Phase::Showing | Phase::Shown) && !valid_lease(rt)) {
+        || !rt.root.is_absolute()
+        || !valid_guid(&rt.policy.token)
+        || !valid_guid(&rt.policy.target_desktop_id)
+        || (matches!(phase, Phase::Showing | Phase::Shown) && !valid_lease(rt))
+    {
         return Err("background execution storage requires a valid owned runtime".into());
     }
     // configure binds this canonical root to the owned executable and policy.
@@ -69,38 +97,66 @@ fn execution_grant_store_from(state: Option<&Option<Runtime>>, valid_lease: impl
 }
 
 fn valid_guid(text: &str) -> bool {
-    text != "00000000-0000-0000-0000-000000000000" && text.len() == 36 && text.bytes().enumerate().all(|(index, byte)| {
-        if [8, 13, 18, 23].contains(&index) { byte == b'-' } else { byte.is_ascii_hexdigit() }
-    })
+    text != "00000000-0000-0000-0000-000000000000"
+        && text.len() == 36
+        && text.bytes().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
 }
 
 pub fn configure() -> Result<(), String> {
     let Some(path) = std::env::var_os("ZTERM_E2E_BACKGROUND_POLICY") else {
-        RUNTIME.set(None).map_err(|_| "background policy already initialized")?;
+        RUNTIME
+            .set(None)
+            .map_err(|_| "background policy already initialized")?;
         return Ok(());
     };
-    if !cfg!(windows) { return Err("background E2E is supported only on Windows".into()); }
-    let path = PathBuf::from(path).canonicalize().map_err(|e| format!("background policy: {e}"))?;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?.canonicalize().map_err(|e| e.to_string())?;
+    if !cfg!(windows) {
+        return Err("background E2E is supported only on Windows".into());
+    }
+    let path = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|e| format!("background policy: {e}"))?;
+    let exe = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
     let root = exe.parent().ok_or("background executable has no parent")?;
-    if path.parent() != Some(root) { return Err("background policy must belong to the executable sandbox".into()); }
-    let policy: Policy = serde_json::from_str(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("invalid background policy: {e}"))?;
-    if !valid_guid(&policy.token) || !valid_guid(&policy.target_desktop_id)
-        || path.file_name().and_then(|n| n.to_str()) != Some(format!("background-{}.json", policy.token).as_str()) {
+    if path.parent() != Some(root) {
+        return Err("background policy must belong to the executable sandbox".into());
+    }
+    let policy: Policy =
+        serde_json::from_str(&std::fs::read_to_string(&path).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("invalid background policy: {e}"))?;
+    if !valid_guid(&policy.token)
+        || !valid_guid(&policy.target_desktop_id)
+        || path.file_name().and_then(|n| n.to_str())
+            != Some(format!("background-{}.json", policy.token).as_str())
+    {
         return Err("invalid background policy identity".into());
     }
-    RUNTIME.set(Some(Runtime {
-        policy, root: root.to_path_buf(), phase: parking_lot::Mutex::new(Phase::Hidden),
-        status_write: parking_lot::Mutex::new(()),
-        ready: AtomicBool::new(false), terminating: AtomicBool::new(false),
-        hwnd: AtomicUsize::new(0), started: Instant::now(),
-    })).map_err(|_| "background policy already initialized")?;
+    RUNTIME
+        .set(Some(Runtime {
+            policy,
+            root: root.to_path_buf(),
+            phase: parking_lot::Mutex::new(Phase::Hidden),
+            status_write: parking_lot::Mutex::new(()),
+            ready: AtomicBool::new(false),
+            terminating: AtomicBool::new(false),
+            hwnd: AtomicUsize::new(0),
+            started: Instant::now(),
+        }))
+        .map_err(|_| "background policy already initialized")?;
     Ok(())
 }
 
 fn marker(rt: &Runtime, kind: &str) -> PathBuf {
-    rt.root.join(format!("background-{}.{}.json", rt.policy.token, kind))
+    rt.root
+        .join(format!("background-{}.{}.json", rt.policy.token, kind))
 }
 
 fn read_marker(rt: &Runtime, kind: &str) -> Option<Value> {
@@ -115,12 +171,22 @@ fn identity_matches(value: &Value, token: &str, pid: u32, hwnd: usize) -> bool {
 
 fn lease_valid(rt: &Runtime) -> bool {
     read_marker(rt, "lease").is_some_and(|value| {
-        lease_proven(&value, &rt.policy.token, std::process::id(), rt.hwnd.load(Ordering::SeqCst), background_now())
+        lease_proven(
+            &value,
+            &rt.policy.token,
+            std::process::id(),
+            rt.hwnd.load(Ordering::SeqCst),
+            background_now(),
+        )
     })
 }
 
 fn lease_proven(value: &Value, token: &str, pid: u32, hwnd: usize, now: u64) -> bool {
-    if value["clockDomain"].as_str() != Some(CLOCK_DOMAIN) || !identity_matches(value, token, pid, hwnd) { return false; }
+    if value["clockDomain"].as_str() != Some(CLOCK_DOMAIN)
+        || !identity_matches(value, token, pid, hwnd)
+    {
+        return false;
+    }
     value["renewedAt"].as_u64().is_some_and(|renewed| {
         renewed > 0 && renewed <= now && now - renewed < LEASE_LIMIT.as_millis() as u64
     })
@@ -139,12 +205,21 @@ fn write_status(rt: &Runtime, mut status: Value) -> Result<(), String> {
     status["backgroundProtocol"] = json!(PROTOCOL_MARKER);
     let path = marker(rt, "status");
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serde_json::to_vec(&status).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    std::fs::write(
+        &tmp,
+        serde_json::to_vec(&status).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     std::fs::rename(tmp, path).map_err(|e| e.to_string())
 }
 
 pub fn renderer_ready() -> bool {
-    if let Some(rt) = runtime() { rt.ready.store(true, Ordering::SeqCst); true } else { false }
+    if let Some(rt) = runtime() {
+        rt.ready.store(true, Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
 }
 
 pub fn require_released() -> Result<(), String> {
@@ -162,24 +237,29 @@ pub fn install(window: &tauri::WebviewWindow, app: &tauri::AppHandle) -> Result<
     native::install(window, rt)?;
     *rt.phase.lock() = Phase::Registered;
     let app = app.clone();
-    std::thread::spawn(move || {
-        loop {
-            if *rt.phase.lock() == Phase::Failed { break; }
-            let dispatch_app = app.clone();
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            if app.run_on_main_thread(move || { let _ = tx.send(tick(&dispatch_app)); }).is_err() {
-                fail(&app, "background GUI dispatcher stopped");
+    std::thread::spawn(move || loop {
+        if *rt.phase.lock() == Phase::Failed {
+            break;
+        }
+        let dispatch_app = app.clone();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        if app
+            .run_on_main_thread(move || {
+                let _ = tx.send(tick(&dispatch_app));
+            })
+            .is_err()
+        {
+            fail(&app, "background GUI dispatcher stopped");
+            break;
+        }
+        match rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(true) => {}
+            _ => {
+                fail(&app, "background isolation watchdog stopped or timed out");
                 break;
             }
-            match rx.recv_timeout(Duration::from_secs(3)) {
-                Ok(true) => {}
-                _ => {
-                    fail(&app, "background isolation watchdog stopped or timed out");
-                    break;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(100));
         }
+        std::thread::sleep(Duration::from_millis(100));
     });
     Ok(())
 }
@@ -205,21 +285,39 @@ fn fail(app: &tauri::AppHandle, reason: &str) {
 fn tick(app: &tauri::AppHandle) -> bool {
     let Some(rt) = runtime() else { return false };
     let phase = *rt.phase.lock();
-    if phase == Phase::Failed { return false; }
-    let Some(window) = app.get_webview_window("main") else { return false };
+    if phase == Phase::Failed {
+        return false;
+    }
+    let Some(window) = app.get_webview_window("main") else {
+        return false;
+    };
     #[cfg(windows)]
     {
-        if let Err(error) = native::verify_guard(rt) { fail(app, &error); return false; }
-        if rt.started.elapsed() > RUN_LIMIT { fail(app, "background E2E lifetime exceeded"); return false; }
+        if let Err(error) = native::verify_guard(rt) {
+            fail(app, &error);
+            return false;
+        }
+        if rt.started.elapsed() > RUN_LIMIT {
+            fail(app, "background E2E lifetime exceeded");
+            return false;
+        }
         if phase != Phase::Shown && rt.started.elapsed() > STARTUP_LIMIT {
-            fail(app, "background placement/renderer/release barrier timed out"); return false;
+            fail(
+                app,
+                "background placement/renderer/release barrier timed out",
+            );
+            return false;
         }
         if phase == Phase::Registered {
             match native::place(rt) {
                 Ok(()) => {
                     *rt.phase.lock() = Phase::Placed;
-                    if native::snapshot(rt, "placed").and_then(|status| write_status(rt, status)).is_err() {
-                        fail(app, "could not publish background placement"); return false;
+                    if native::snapshot(rt, "placed")
+                        .and_then(|status| write_status(rt, status))
+                        .is_err()
+                    {
+                        fail(app, "could not publish background placement");
+                        return false;
                     }
                 }
                 Err(_) => return true,
@@ -227,11 +325,26 @@ fn tick(app: &tauri::AppHandle) -> bool {
         }
         let phase = *rt.phase.lock();
         if matches!(phase, Phase::Placed | Phase::Showing | Phase::Shown) {
-            if let Err(error) = native::verify_desktop(rt) { fail(app, &error); return false; }
+            if let Err(error) = native::verify_desktop(rt) {
+                fail(app, &error);
+                return false;
+            }
         }
-        if phase == Phase::Placed && rt.ready.load(Ordering::SeqCst)
-            && read_marker(rt, "release").is_some_and(|value| identity_matches(&value, &rt.policy.token, std::process::id(), rt.hwnd.load(Ordering::SeqCst))) {
-            if !lease_valid(rt) { fail(app, "background observer lease missing or expired"); return false; }
+        if phase == Phase::Placed
+            && rt.ready.load(Ordering::SeqCst)
+            && read_marker(rt, "release").is_some_and(|value| {
+                identity_matches(
+                    &value,
+                    &rt.policy.token,
+                    std::process::id(),
+                    rt.hwnd.load(Ordering::SeqCst),
+                )
+            })
+        {
+            if !lease_valid(rt) {
+                fail(app, "background observer lease missing or expired");
+                return false;
+            }
             *rt.phase.lock() = Phase::Showing;
             let _ = window.unminimize();
             crate::zterm::restore_window_state(&window);
@@ -239,21 +352,34 @@ fn tick(app: &tauri::AppHandle) -> bool {
         }
         let phase = *rt.phase.lock();
         if matches!(phase, Phase::Showing | Phase::Shown) && !lease_valid(rt) {
-            fail(app, "background observer lease expired"); return false;
+            fail(app, "background observer lease expired");
+            return false;
         }
         if phase == Phase::Showing && native::visible_and_restored(rt) {
             *rt.phase.lock() = Phase::Shown;
-            if native::snapshot(rt, "shown").and_then(|status| write_status(rt, status)).is_err() {
-                fail(app, "could not publish background release"); return false;
+            if native::snapshot(rt, "shown")
+                .and_then(|status| write_status(rt, status))
+                .is_err()
+            {
+                fail(app, "could not publish background release");
+                return false;
             }
             let _ = app.emit("window-shown", json!({}));
         } else if phase == Phase::Placed {
-            if native::snapshot(rt, "placed").and_then(|status| write_status(rt, status)).is_err() {
-                fail(app, "could not refresh background placement proof"); return false;
+            if native::snapshot(rt, "placed")
+                .and_then(|status| write_status(rt, status))
+                .is_err()
+            {
+                fail(app, "could not refresh background placement proof");
+                return false;
             }
         } else if phase == Phase::Shown {
-            if native::health_snapshot(rt).and_then(|status| write_status(rt, status)).is_err() {
-                fail(app, "could not refresh background native guard proof"); return false;
+            if native::health_snapshot(rt)
+                .and_then(|status| write_status(rt, status))
+                .is_err()
+            {
+                fail(app, "could not refresh background native guard proof");
+                return false;
             }
         }
     }
@@ -262,12 +388,23 @@ fn tick(app: &tauri::AppHandle) -> bool {
 
 // WS_DISABLED and WS_EX_NOACTIVATE share this bit in their respective style
 // words. Retain it after other subclass callbacks, including tao's style rebuild.
-fn retained_guard_style(proposed: u32) -> u32 { proposed | 0x0800_0000 }
+fn retained_guard_style(proposed: u32) -> u32 {
+    proposed | 0x0800_0000
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum GuardAction { Disable, RetainStyle, Remove, None }
+enum GuardAction {
+    Disable,
+    RetainStyle,
+    Remove,
+    None,
+}
 
-fn dispatch_guard<T>(action: GuardAction, enforce: impl FnOnce(), delegate: impl FnOnce() -> T) -> T {
+fn dispatch_guard<T>(
+    action: GuardAction,
+    enforce: impl FnOnce(),
+    delegate: impl FnOnce() -> T,
+) -> T {
     if action == GuardAction::RetainStyle {
         let result = delegate();
         enforce();
@@ -282,36 +419,67 @@ fn dispatch_guard<T>(action: GuardAction, enforce: impl FnOnce(), delegate: impl
 mod native {
     use super::*;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
-    use windows::Win32::UI::Shell::{DefSubclassProc, IVirtualDesktopManager, RemoveWindowSubclass, SetWindowSubclass, VirtualDesktopManager};
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, ShowWindow, ShowWindowAsync, GWL_EXSTYLE, GWL_STYLE, STYLESTRUCT, SW_HIDE, SW_SHOWMINNOACTIVE, WM_ENABLE, WM_NCDESTROY, WM_STYLECHANGING, WS_DISABLED, WS_EX_NOACTIVATE};
+    use windows::Win32::UI::Shell::{
+        DefSubclassProc, IVirtualDesktopManager, RemoveWindowSubclass, SetWindowSubclass,
+        VirtualDesktopManager,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId, IsIconic, IsWindow,
+        IsWindowVisible, ShowWindow, ShowWindowAsync, GWL_EXSTYLE, GWL_STYLE, STYLESTRUCT, SW_HIDE,
+        SW_SHOWMINNOACTIVE, WM_ENABLE, WM_NCDESTROY, WM_STYLECHANGING, WS_DISABLED,
+        WS_EX_NOACTIVATE,
+    };
 
     const SUBCLASS_ID: usize = 0x5a54_4247;
 
-    fn hwnd(rt: &Runtime) -> HWND { HWND(rt.hwnd.load(Ordering::SeqCst) as *mut std::ffi::c_void) }
+    fn hwnd(rt: &Runtime) -> HWND {
+        HWND(rt.hwnd.load(Ordering::SeqCst) as *mut std::ffi::c_void)
+    }
 
-    unsafe extern "system" fn guard(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
-        let action = if message == WM_STYLECHANGING && (wparam.0 as i32 == GWL_STYLE.0 || wparam.0 as i32 == GWL_EXSTYLE.0) && lparam.0 != 0 {
+    unsafe extern "system" fn guard(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _data: usize,
+    ) -> LRESULT {
+        let action = if message == WM_STYLECHANGING
+            && (wparam.0 as i32 == GWL_STYLE.0 || wparam.0 as i32 == GWL_EXSTYLE.0)
+            && lparam.0 != 0
+        {
             GuardAction::RetainStyle
         } else if message == WM_ENABLE && wparam.0 != 0 {
             GuardAction::Disable
         } else if message == WM_NCDESTROY {
             GuardAction::Remove
-        } else { GuardAction::None };
-        dispatch_guard(action, || match action {
-            GuardAction::Disable => {
-                // Re-disable before any downstream callback observes the HWND.
-                let _ = EnableWindow(hwnd, false);
-            }
-            GuardAction::RetainStyle => {
-                let styles = &mut *(lparam.0 as *mut STYLESTRUCT);
-                styles.styleNew = retained_guard_style(styles.styleNew);
-            }
-            GuardAction::Remove => { let _ = RemoveWindowSubclass(hwnd, Some(guard), SUBCLASS_ID); }
-            GuardAction::None => {}
-        }, || DefSubclassProc(hwnd, message, wparam, lparam))
+        } else {
+            GuardAction::None
+        };
+        dispatch_guard(
+            action,
+            || match action {
+                GuardAction::Disable => {
+                    // Re-disable before any downstream callback observes the HWND.
+                    let _ = EnableWindow(hwnd, false);
+                }
+                GuardAction::RetainStyle => {
+                    let styles = &mut *(lparam.0 as *mut STYLESTRUCT);
+                    styles.styleNew = retained_guard_style(styles.styleNew);
+                }
+                GuardAction::Remove => {
+                    let _ = RemoveWindowSubclass(hwnd, Some(guard), SUBCLASS_ID);
+                }
+                GuardAction::None => {}
+            },
+            || DefSubclassProc(hwnd, message, wparam, lparam),
+        )
     }
 
     pub(super) fn install(window: &tauri::WebviewWindow, rt: &Runtime) -> Result<(), String> {
@@ -320,17 +488,27 @@ mod native {
         let mut pid = 0;
         unsafe {
             let thread = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            if pid != std::process::id() || thread != GetCurrentThreadId() { return Err("background guard must be installed on its owning GUI thread".into()); }
-            if IsWindowVisible(hwnd).as_bool() { return Err("background host became visible before guard installation".into()); }
+            if pid != std::process::id() || thread != GetCurrentThreadId() {
+                return Err("background guard must be installed on its owning GUI thread".into());
+            }
+            if IsWindowVisible(hwnd).as_bool() {
+                return Err("background host became visible before guard installation".into());
+            }
             rt.hwnd.store(hwnd.0 as usize, Ordering::SeqCst);
-            if !SetWindowSubclass(hwnd, Some(guard), SUBCLASS_ID, 0).as_bool() { return Err("background window subclass installation failed".into()); }
+            if !SetWindowSubclass(hwnd, Some(guard), SUBCLASS_ID, 0).as_bool() {
+                return Err("background window subclass installation failed".into());
+            }
             let _ = EnableWindow(hwnd, false);
             verify_guard(rt)?;
             // The first ShowWindow can honor launcher STARTUPINFO instead.
             // Both attempts are non-activating and the host is already disabled.
             let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
-            if !IsIconic(hwnd).as_bool() { let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE); }
-            if !IsIconic(hwnd).as_bool() { return Err("background host did not register minimized".into()); }
+            if !IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+            }
+            if !IsIconic(hwnd).as_bool() {
+                return Err("background host did not register minimized".into());
+            }
         }
         Ok(())
     }
@@ -340,21 +518,33 @@ mod native {
         let mut pid = 0;
         unsafe {
             GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            if !IsWindow(Some(hwnd)).as_bool() || pid != std::process::id() { return Err("background HWND ownership lost".into()); }
-            if IsWindowEnabled(hwnd).as_bool() || GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_DISABLED.0 == 0
-                || GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_NOACTIVATE.0 == 0 {
+            if !IsWindow(Some(hwnd)).as_bool() || pid != std::process::id() {
+                return Err("background HWND ownership lost".into());
+            }
+            if IsWindowEnabled(hwnd).as_bool()
+                || GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & WS_DISABLED.0 == 0
+                || GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_NOACTIVATE.0 == 0
+            {
                 return Err("background non-activation guard lost".into());
             }
-            if GetForegroundWindow() == hwnd { return Err("background host acquired foreground".into()); }
+            if GetForegroundWindow() == hwnd {
+                return Err("background host acquired foreground".into());
+            }
         }
         Ok(())
     }
 
-    fn manager<T>(operation: impl FnOnce(&IVirtualDesktopManager) -> Result<T, String>) -> Result<T, String> {
+    fn manager<T>(
+        operation: impl FnOnce(&IVirtualDesktopManager) -> Result<T, String>,
+    ) -> Result<T, String> {
         unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().map_err(|e| e.to_string())?;
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+                .ok()
+                .map_err(|e| e.to_string())?;
             let result = (|| {
-                let manager: IVirtualDesktopManager = CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_INPROC_SERVER).map_err(|e| e.to_string())?;
+                let manager: IVirtualDesktopManager =
+                    CoCreateInstance(&VirtualDesktopManager, None, CLSCTX_INPROC_SERVER)
+                        .map_err(|e| e.to_string())?;
                 operation(&manager)
             })();
             CoUninitialize();
@@ -363,7 +553,10 @@ mod native {
     }
 
     fn target(rt: &Runtime) -> windows_core::GUID {
-        windows_core::GUID::from_u128(u128::from_str_radix(&rt.policy.target_desktop_id.replace('-', ""), 16).expect("validated GUID"))
+        windows_core::GUID::from_u128(
+            u128::from_str_radix(&rt.policy.target_desktop_id.replace('-', ""), 16)
+                .expect("validated GUID"),
+        )
     }
 
     pub(super) fn place(rt: &Runtime) -> Result<(), String> {
@@ -371,11 +564,19 @@ mod native {
             let own = hwnd(rt);
             let target = target(rt);
             if manager.GetWindowDesktopId(own).map_err(|e| e.to_string())? != target {
-                manager.MoveWindowToDesktop(own, &target).map_err(|e| e.to_string())?;
+                manager
+                    .MoveWindowToDesktop(own, &target)
+                    .map_err(|e| e.to_string())?;
             }
             if manager.GetWindowDesktopId(own).map_err(|e| e.to_string())? != target
-                || manager.IsWindowOnCurrentVirtualDesktop(own).map_err(|e| e.to_string())?.as_bool() {
-                return Err("background placement is unverified or the target desktop is active".into());
+                || manager
+                    .IsWindowOnCurrentVirtualDesktop(own)
+                    .map_err(|e| e.to_string())?
+                    .as_bool()
+            {
+                return Err(
+                    "background placement is unverified or the target desktop is active".into(),
+                );
             }
             Ok(())
         })
@@ -383,8 +584,15 @@ mod native {
 
     pub(super) fn verify_desktop(rt: &Runtime) -> Result<(), String> {
         manager(|manager| unsafe {
-            if manager.GetWindowDesktopId(hwnd(rt)).map_err(|e| e.to_string())? != target(rt)
-                || manager.IsWindowOnCurrentVirtualDesktop(hwnd(rt)).map_err(|e| e.to_string())?.as_bool() {
+            if manager
+                .GetWindowDesktopId(hwnd(rt))
+                .map_err(|e| e.to_string())?
+                != target(rt)
+                || manager
+                    .IsWindowOnCurrentVirtualDesktop(hwnd(rt))
+                    .map_err(|e| e.to_string())?
+                    .as_bool()
+            {
                 return Err("background desktop isolation was lost".into());
             }
             Ok(())
@@ -409,14 +617,18 @@ mod native {
                 "onCurrentDesktop": manager.IsWindowOnCurrentVirtualDesktop(own).map_err(|e| e.to_string())?.as_bool(),
                 "checkedAt": background_now()
             });
-            if !guard_proven(&status) { return Err("background native guard proof is incomplete".into()); }
+            if !guard_proven(&status) {
+                return Err("background native guard proof is incomplete".into());
+            }
             Ok(status)
         })
     }
 
     pub(super) fn snapshot(rt: &Runtime, phase: &str) -> Result<Value, String> {
         let status = current_status(rt, phase)?;
-        if !barrier_proven(&status) { return Err("background native window barrier is incomplete".into()); }
+        if !barrier_proven(&status) {
+            return Err("background native window barrier is incomplete".into());
+        }
         Ok(status)
     }
 
@@ -442,8 +654,11 @@ mod native {
 }
 
 fn guard_proven(status: &Value) -> bool {
-    status["disabled"] == true && status["noActivate"] == true && status["visible"].is_boolean()
-        && status["minimized"].is_boolean() && status["onTargetDesktop"] == true
+    status["disabled"] == true
+        && status["noActivate"] == true
+        && status["visible"].is_boolean()
+        && status["minimized"].is_boolean()
+        && status["onTargetDesktop"] == true
         && status["onCurrentDesktop"] == false
 }
 
@@ -471,20 +686,42 @@ mod tests {
     fn background_guard_enforces_critical_state_before_downstream_callbacks() {
         use std::cell::Cell;
         let enabled = Cell::new(true);
-        let result = dispatch_guard(GuardAction::Disable, || enabled.set(false), || {
-            assert!(!enabled.get(), "downstream callbacks must observe a disabled HWND");
-            7
-        });
+        let result = dispatch_guard(
+            GuardAction::Disable,
+            || enabled.set(false),
+            || {
+                assert!(
+                    !enabled.get(),
+                    "downstream callbacks must observe a disabled HWND"
+                );
+                7
+            },
+        );
         assert_eq!(result, 7);
         let installed = Cell::new(true);
-        dispatch_guard(GuardAction::Remove, || installed.set(false), || {
-            assert!(!installed.get(), "remove the subclass before forwarding destruction");
-        });
+        dispatch_guard(
+            GuardAction::Remove,
+            || installed.set(false),
+            || {
+                assert!(
+                    !installed.get(),
+                    "remove the subclass before forwarding destruction"
+                );
+            },
+        );
         let styles = Cell::new(0);
-        dispatch_guard(GuardAction::RetainStyle, || styles.set(retained_guard_style(styles.get())), || {
-            styles.set(0x0100_0000);
-        });
-        assert_eq!(styles.get(), 0x0900_0000, "retain guard bits after downstream style changes");
+        dispatch_guard(
+            GuardAction::RetainStyle,
+            || styles.set(retained_guard_style(styles.get())),
+            || {
+                styles.set(0x0100_0000);
+            },
+        );
+        assert_eq!(
+            styles.get(),
+            0x0900_0000,
+            "retain guard bits after downstream style changes"
+        );
     }
 
     #[test]
@@ -504,11 +741,20 @@ mod tests {
         assert!(lease_proven(&lease, "fixture", 10, 32, 14999));
         assert!(!lease_proven(&lease, "fixture", 10, 32, 15000));
         assert!(!lease_proven(&lease, "fixture", 10, 32, 9999));
-        for replacement in [json!({ "clockDomain": "wall-ms" }), json!({ "clockDomain": null }),
-            json!({ "renewedAt": null }), json!({ "renewedAt": 0 }), json!({ "renewedAt": "10000" }),
-            json!({ "token": "old" }), json!({ "pid": 11 }), json!({ "hwnd": "0x21" })] {
+        for replacement in [
+            json!({ "clockDomain": "wall-ms" }),
+            json!({ "clockDomain": null }),
+            json!({ "renewedAt": null }),
+            json!({ "renewedAt": 0 }),
+            json!({ "renewedAt": "10000" }),
+            json!({ "token": "old" }),
+            json!({ "pid": 11 }),
+            json!({ "hwnd": "0x21" }),
+        ] {
             let mut invalid = lease.clone();
-            for (field, value) in replacement.as_object().unwrap() { invalid[field] = value.clone(); }
+            for (field, value) in replacement.as_object().unwrap() {
+                invalid[field] = value.clone();
+            }
             assert!(!lease_proven(&invalid, "fixture", 10, 32, 10000));
         }
     }
@@ -516,7 +762,12 @@ mod tests {
     #[test]
     fn background_policy_rejects_ambiguous_or_path_like_tokens() {
         assert!(valid_guid("11111111-1111-1111-1111-111111111111"));
-        for value in ["", "../release", "11111111111111111111111111111111", "zzzzzzzz-1111-1111-1111-111111111111"] {
+        for value in [
+            "",
+            "../release",
+            "11111111111111111111111111111111",
+            "zzzzzzzz-1111-1111-1111-111111111111",
+        ] {
             assert!(!valid_guid(value));
         }
     }
@@ -524,41 +775,80 @@ mod tests {
     #[test]
     fn background_execution_store_uses_only_its_initialized_owned_root() {
         assert!(execution_grant_store_from(None, |_| true).is_err());
-        assert_eq!(execution_grant_store_from(Some(&None), |_| true).unwrap(), None);
+        assert_eq!(
+            execution_grant_store_from(Some(&None), |_| true).unwrap(),
+            None
+        );
         let configured = Some(Runtime {
-            policy: Policy { token: "11111111-1111-1111-1111-111111111111".into(), target_desktop_id: "22222222-2222-2222-2222-222222222222".into() },
-            root: PathBuf::from(r"D:\inert-owned-sandbox"), phase: parking_lot::Mutex::new(Phase::Hidden),
-            status_write: parking_lot::Mutex::new(()), ready: AtomicBool::new(false), terminating: AtomicBool::new(false),
-            hwnd: AtomicUsize::new(0), started: Instant::now(),
+            policy: Policy {
+                token: "11111111-1111-1111-1111-111111111111".into(),
+                target_desktop_id: "22222222-2222-2222-2222-222222222222".into(),
+            },
+            root: PathBuf::from(r"D:\inert-owned-sandbox"),
+            phase: parking_lot::Mutex::new(Phase::Hidden),
+            status_write: parking_lot::Mutex::new(()),
+            ready: AtomicBool::new(false),
+            terminating: AtomicBool::new(false),
+            hwnd: AtomicUsize::new(0),
+            started: Instant::now(),
         });
-        assert_eq!(execution_grant_store_from(Some(&configured), |_| false).unwrap(),
-            Some(PathBuf::from(r"D:\inert-owned-sandbox\execution-trust.v1.bin")));
+        assert_eq!(
+            execution_grant_store_from(Some(&configured), |_| false).unwrap(),
+            Some(PathBuf::from(
+                r"D:\inert-owned-sandbox\execution-trust.v1.bin"
+            ))
+        );
         let rt = configured.as_ref().unwrap();
         *rt.phase.lock() = Phase::Shown;
         assert!(execution_grant_store_from(Some(&configured), |_| false).is_err());
-        assert!(execution_grant_store_from(Some(&configured), |_| true).unwrap().is_some());
+        assert!(execution_grant_store_from(Some(&configured), |_| true)
+            .unwrap()
+            .is_some());
         rt.terminating.store(true, Ordering::SeqCst);
         assert!(execution_grant_store_from(Some(&configured), |_| true).is_err());
     }
 
     #[test]
     fn background_execution_store_deadlines_match_the_native_guard() {
-        let configured = |phase, age| Some(Runtime {
-            policy: Policy { token: "11111111-1111-1111-1111-111111111111".into(), target_desktop_id: "22222222-2222-2222-2222-222222222222".into() },
-            root: PathBuf::from(r"D:\inert-owned-sandbox"), phase: parking_lot::Mutex::new(phase),
-            status_write: parking_lot::Mutex::new(()), ready: AtomicBool::new(false), terminating: AtomicBool::new(false),
-            hwnd: AtomicUsize::new(0), started: Instant::now() - age,
-        });
+        let configured = |phase, age| {
+            Some(Runtime {
+                policy: Policy {
+                    token: "11111111-1111-1111-1111-111111111111".into(),
+                    target_desktop_id: "22222222-2222-2222-2222-222222222222".into(),
+                },
+                root: PathBuf::from(r"D:\inert-owned-sandbox"),
+                phase: parking_lot::Mutex::new(phase),
+                status_write: parking_lot::Mutex::new(()),
+                ready: AtomicBool::new(false),
+                terminating: AtomicBool::new(false),
+                hwnd: AtomicUsize::new(0),
+                started: Instant::now() - age,
+            })
+        };
         for phase in [Phase::Hidden, Phase::Registered, Phase::Placed] {
             let fresh = configured(phase, STARTUP_LIMIT - Duration::from_secs(1));
-            assert!(execution_grant_store_from(Some(&fresh), |_| panic!("pre-show bootstrap must not query a lease")).unwrap().is_some());
+            assert!(execution_grant_store_from(Some(&fresh), |_| panic!(
+                "pre-show bootstrap must not query a lease"
+            ))
+            .unwrap()
+            .is_some());
         }
-        for phase in [Phase::Hidden, Phase::Registered, Phase::Placed, Phase::Showing] {
+        for phase in [
+            Phase::Hidden,
+            Phase::Registered,
+            Phase::Placed,
+            Phase::Showing,
+        ] {
             let expired = configured(phase, STARTUP_LIMIT + Duration::from_secs(1));
-            assert!(execution_grant_store_from(Some(&expired), |_| true).is_err(), "expired pre-show runtime must be rejected");
+            assert!(
+                execution_grant_store_from(Some(&expired), |_| true).is_err(),
+                "expired pre-show runtime must be rejected"
+            );
         }
         let shown = configured(Phase::Shown, STARTUP_LIMIT + Duration::from_secs(1));
-        assert!(execution_grant_store_from(Some(&shown), |_| true).unwrap().is_some());
+        assert!(execution_grant_store_from(Some(&shown), |_| true)
+            .unwrap()
+            .is_some());
         assert!(execution_grant_store_from(Some(&shown), |_| false).is_err());
         let expired = configured(Phase::Shown, RUN_LIMIT + Duration::from_secs(1));
         assert!(execution_grant_store_from(Some(&expired), |_| true).is_err());
@@ -569,7 +859,14 @@ mod tests {
         let placed = json!({ "phase": "placed", "disabled": true, "noActivate": true,
             "visible": true, "minimized": true, "onTargetDesktop": true, "onCurrentDesktop": false });
         assert!(barrier_proven(&placed));
-        for field in ["disabled", "noActivate", "visible", "minimized", "onTargetDesktop", "onCurrentDesktop"] {
+        for field in [
+            "disabled",
+            "noActivate",
+            "visible",
+            "minimized",
+            "onTargetDesktop",
+            "onCurrentDesktop",
+        ] {
             let mut missing = placed.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert!(!barrier_proven(&missing), "missing {field}");

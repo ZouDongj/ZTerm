@@ -3,10 +3,10 @@
 // GUI subsystem: avoid starting as a console app, which would open in the system default terminal (Windows Terminal)
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod update_http;
-mod execution_trust;
-mod zterm;
 mod background_e2e;
+mod execution_trust;
+mod update_http;
+mod zterm;
 
 use serde_json::json;
 use std::sync::Arc;
@@ -164,7 +164,9 @@ async fn main() {
             // loaded and registered its window-shown listener — an earlier emit would strand the splash screen
             #[cfg(debug_assertions)]
             {
-                if !background_e2e::enabled() { window.open_devtools(); }
+                if !background_e2e::enabled() {
+                    window.open_devtools();
+                }
             }
             // On close, notify the renderer to save state; also save the window state (position/size/maximized)
             let handle = app.handle().clone();
@@ -189,11 +191,8 @@ async fn main() {
                     };
                     if let Some((x, y, width, height)) = rect {
                         // Closing while minimized must keep the last valid state (see minimized_at_close)
-                        if !minimized_at_close(
-                            win_for_state.is_minimized().unwrap_or(false),
-                            x,
-                            y,
-                        ) {
+                        if !minimized_at_close(win_for_state.is_minimized().unwrap_or(false), x, y)
+                        {
                             zterm::save_window_state(&zterm::WindowState {
                                 x,
                                 y,
@@ -236,7 +235,9 @@ async fn main() {
             let app_fallback = app.handle().clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(5));
-                if background_e2e::enabled() { return; }
+                if background_e2e::enabled() {
+                    return;
+                }
                 match win_fallback.is_visible() {
                     Ok(false) | Err(_) => {
                         let _ = win_fallback.show();
@@ -265,16 +266,15 @@ struct BrowserUiPolicy {
     status_bar: Option<bool>,
 }
 
-static BROWSER_UI_POLICY: parking_lot::Mutex<BrowserUiPolicy> = parking_lot::Mutex::new(
-    BrowserUiPolicy {
+static BROWSER_UI_POLICY: parking_lot::Mutex<BrowserUiPolicy> =
+    parking_lot::Mutex::new(BrowserUiPolicy {
         default_context_menus: None,
         browser_accelerator_keys: None,
         password_autosave: None,
         general_autofill: None,
         zoom_control: None,
         status_bar: None,
-    },
-);
+    });
 
 // Getter helper: webview2-com settings getters use BOOL out-params.
 #[cfg(windows)]
@@ -289,7 +289,9 @@ fn read_bool_setting(
 fn read_browser_ui_policy(
     settings: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings,
 ) -> BrowserUiPolicy {
-    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Settings3, ICoreWebView2Settings4};
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2Settings3, ICoreWebView2Settings4,
+    };
     use windows_core::Interface;
 
     let mut report = BrowserUiPolicy::default();
@@ -303,10 +305,8 @@ fn read_browser_ui_policy(
                 read_bool_setting(|out| s3.AreBrowserAcceleratorKeysEnabled(out));
         }
         if let Ok(s4) = settings.cast::<ICoreWebView2Settings4>() {
-            report.password_autosave =
-                read_bool_setting(|out| s4.IsPasswordAutosaveEnabled(out));
-            report.general_autofill =
-                read_bool_setting(|out| s4.IsGeneralAutofillEnabled(out));
+            report.password_autosave = read_bool_setting(|out| s4.IsPasswordAutosaveEnabled(out));
+            report.general_autofill = read_bool_setting(|out| s4.IsGeneralAutofillEnabled(out));
         }
     }
     report
@@ -336,7 +336,9 @@ fn read_browser_ui_policy(
 /// of assumed.
 #[cfg(windows)]
 fn apply_browser_ui_policy(window: &tauri::WebviewWindow) {
-    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Settings3, ICoreWebView2Settings4};
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2Settings3, ICoreWebView2Settings4,
+    };
     use windows_core::Interface;
 
     let dispatch = window.with_webview(|webview| unsafe {
@@ -431,7 +433,12 @@ fn outer_rect(window: &tauri::WebviewWindow) -> Option<(i32, i32, u32, u32)> {
 /// the (x, y, width, height) shape save_window_state persists. Extents are
 /// clamped to at least 1 so a degenerate rect can never persist a zero-sized
 /// window. Pure function for unit tests.
-fn normal_rect_from_placement(left: i32, top: i32, right: i32, bottom: i32) -> (i32, i32, u32, u32) {
+fn normal_rect_from_placement(
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+) -> (i32, i32, u32, u32) {
     (
         left,
         top,
@@ -449,12 +456,7 @@ fn normal_window_rect(window: &tauri::WebviewWindow) -> Option<(i32, i32, u32, u
     let hwnd = window.hwnd().ok()?;
     let mut placement: WINDOWPLACEMENT = unsafe { std::mem::zeroed() };
     placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
-    let ok = unsafe {
-        GetWindowPlacement(
-            hwnd.0 as winapi::shared::windef::HWND,
-            &mut placement,
-        )
-    };
+    let ok = unsafe { GetWindowPlacement(hwnd.0 as winapi::shared::windef::HWND, &mut placement) };
     if ok == 0 {
         return None;
     }
@@ -498,7 +500,10 @@ mod tests {
 
     #[test]
     fn normal_rect_converts_left_top_right_bottom() {
-        assert_eq!(normal_rect_from_placement(100, 50, 1100, 770), (100, 50, 1000, 720));
+        assert_eq!(
+            normal_rect_from_placement(100, 50, 1100, 770),
+            (100, 50, 1000, 720)
+        );
         // Negative-axis positions (secondary monitors) survive unchanged.
         assert_eq!(
             normal_rect_from_placement(-1919, -1079, -1, -1),

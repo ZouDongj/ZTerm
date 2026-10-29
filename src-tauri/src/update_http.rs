@@ -619,7 +619,10 @@ fn send_get(
                 Ok(resolved) => resolved,
                 Err(detail) => {
                     close_handle(session);
-                    return Err(HttpFail { tag: "other", detail });
+                    return Err(HttpFail {
+                        tag: "other",
+                        detail,
+                    });
                 }
             };
             if let Some(server) = resolved.server {
@@ -925,7 +928,10 @@ mod tests {
         assert_eq!(r, "http://***@proxy.corp:8080");
         assert!(!r.contains("s3cret"));
         assert_eq!(redact_proxy_userinfo("proxy.corp:8080"), "proxy.corp:8080");
-        assert_eq!(redact_proxy_userinfo("https://fixture-user:fixture-@-secret@proxy.corp:443"), "https://***@proxy.corp:443");
+        assert_eq!(
+            redact_proxy_userinfo("https://fixture-user:fixture-@-secret@proxy.corp:443"),
+            "https://***@proxy.corp:443"
+        );
     }
 
     #[test]
@@ -957,12 +963,16 @@ mod tests {
         );
         // https= missing falls back to http=
         assert_eq!(
-            collapse_wininet_static("http=10.0.0.1:80;ftp=1.2.3.4:21").unwrap().as_deref(),
+            collapse_wininet_static("http=10.0.0.1:80;ftp=1.2.3.4:21")
+                .unwrap()
+                .as_deref(),
             Some("10.0.0.1:80")
         );
         // bare value passes through, scheme stripped
         assert_eq!(
-            collapse_wininet_static("http://proxy.corp:8080").unwrap().as_deref(),
+            collapse_wininet_static("http://proxy.corp:8080")
+                .unwrap()
+                .as_deref(),
             Some("proxy.corp:8080")
         );
         assert_eq!(collapse_wininet_static("  ").unwrap(), None);
@@ -987,7 +997,9 @@ mod tests {
             _ => None,
         };
         assert_eq!(
-            resolve_env_proxy(vars, "api.github.com").unwrap().as_deref(),
+            resolve_env_proxy(vars, "api.github.com")
+                .unwrap()
+                .as_deref(),
             Some("https-proxy.corp:8443")
         );
         let vars2 = |name: &str| match name {
@@ -995,7 +1007,9 @@ mod tests {
             "NO_PROXY" => Some(".github.com".to_string()),
             _ => None,
         };
-        assert!(resolve_env_proxy(vars2, "api.github.com").unwrap().is_none());
+        assert!(resolve_env_proxy(vars2, "api.github.com")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1068,7 +1082,10 @@ mod tests {
             "updates.fixture.invalid",
         )
         .unwrap_err();
-        assert!(error.contains("invalid update proxy environment HTTP_PROXY"), "{error}");
+        assert!(
+            error.contains("invalid update proxy environment HTTP_PROXY"),
+            "{error}"
+        );
         assert!(error.contains("only HTTP proxies"), "{error}");
         assert!(!error.contains("fixture-secret"), "{error}");
     }
