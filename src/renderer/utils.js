@@ -13,10 +13,10 @@ window.addEventListener('error', e => { console.error('[ZTerm]', e.message, e.fi
 window.addEventListener('unhandledrejection', e => { console.error('[ZTerm] unhandled rejection:', e.reason); });
 
 // ── Toast ──
-function showToast(msg, isError, tone) {
+function showToast(msg, isError) {
     const el = document.getElementById('toast');
     el.textContent = msg;
-    el.className = 'toast' + (isError ? ' error' : tone === 'info' ? ' info' : '');
+    el.className = 'toast' + (isError ? ' error' : '');
     el.classList.add('show');
     clearTimeout(el._timeout);
     el._timeout = setTimeout(() => el.classList.remove('show'), 2500);

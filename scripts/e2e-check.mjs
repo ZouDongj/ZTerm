@@ -4448,6 +4448,25 @@ async function main() {
       return { ok: false, ...read() };
     })()`);
     check('更新说明链接失败弹出错误反馈', notesFail.ok === true, JSON.stringify(notesFail));
+    const standardToast = await cdp.eval(`(() => {
+      showToast('E2E 页内通知');
+      const el = document.getElementById('toast');
+      const style = getComputedStyle(el);
+      const reference = document.createElement('span');
+      reference.style.visibility = 'hidden';
+      document.body.appendChild(reference);
+      reference.style.color = 'rgb(var(--accent-rgb))';
+      const accent = getComputedStyle(reference).color;
+      reference.style.color = 'var(--accent-contrast)';
+      const contrast = getComputedStyle(reference).color;
+      reference.remove();
+      return { className: el.className, background: style.backgroundColor, accent,
+        color: style.color, contrast, radius: style.borderRadius };
+    })()`);
+    check('页内通知保持统一强调色胶囊样式', standardToast?.className === 'toast show'
+      && standardToast.background === standardToast.accent
+      && standardToast.color === standardToast.contrast && standardToast.radius === '20px', JSON.stringify(standardToast));
+    await shot('toast-standard');
     await cdp.eval(`(() => { ipcRenderer.invoke = window.__linkOrigInvoke; window.__updateUrl = ''; return 'restored'; })()`).catch(() => null);
 
     // 13.9 Overlay style unification + search focus-ring + action-icon optical

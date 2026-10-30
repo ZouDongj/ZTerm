@@ -48,7 +48,7 @@ test('foreground terminal BEL does not interrupt editing with a toast', () => {
     assert.deepEqual(toasts, []);
 });
 
-test('background BEL explains its source without presenting success', () => {
+test('background BEL explains its source with the standard toast style', () => {
     const { ctx, toasts } = bellVm();
     const tab = wiredTab(ctx, 'background', 'local_bg', '', { name: 'Build' });
     ctx.TabManager.activeId = 'other';
@@ -56,7 +56,7 @@ test('background BEL explains its source without presenting success', () => {
     assert.equal(toasts.length, 1);
     assert.match(toasts[0][0], /Build/);
     assert.match(toasts[0][0], /终端.*(提示|关注)/);
-    assert.equal(toasts[0][2], 'info');
+    assert.equal(toasts[0][2], undefined, 'no separate informational skin');
 });
 
 test('window-unfocused BEL remains available with notification mode', () => {
@@ -139,7 +139,7 @@ test('explicit flash mode remains available for the foreground tab', () => {
     assert.equal(el.classList.contains('bell-flash'), false);
 });
 
-test('informational toast does not change existing success and error callers', () => {
+test('standard toast styles cover attention, success, and error messages', () => {
     const timers = new TimerQueue();
     const el = { textContent: '', className: '', classList: {
         add(name) { el.className += ' ' + name; },
@@ -154,8 +154,8 @@ test('informational toast does not change existing success and error callers', (
     };
     vm.createContext(ctx);
     vm.runInContext(readFileSync(new URL('../src/renderer/utils.js', import.meta.url), 'utf8'), ctx);
-    ctx.showToast('Attention', false, 'info');
-    assert.equal(el.className, 'toast info show');
+    ctx.showToast('Attention');
+    assert.equal(el.className, 'toast show');
     ctx.showToast('Saved');
     assert.equal(el.className, 'toast show');
     ctx.showToast('Failed', true);

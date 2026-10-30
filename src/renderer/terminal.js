@@ -851,7 +851,7 @@ function _wireTerminalBell(term) {
         if ((mode === 'notification' || mode === 'notification+flash') &&
             !foreground && !notificationPending) {
             const label = resolveTabDisplayName(tab, [owner]) || '终端';
-            showToast(label + '：终端程序请求关注', false, 'info');
+            showToast(label + '：终端程序请求关注');
             notificationPending = true;
             setTimeout(() => { notificationPending = false; }, 2500);
         }
