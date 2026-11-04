@@ -98,6 +98,65 @@ test('setup failure cleans its diagnostics, timers and capture flag', () => {
     assert.equal(f.timers.size + f.intervals.size + f.frames.size, 0);
 });
 
+test('cursor gate, configuredAnimations and pre-sampling gate history are copied; ring keeps 32; private fields stay out', () => {
+    const f = fixture();
+    f.context._settingsConfig = { animations: true };
+    f.tab._smoothCursor = { _adapter: { snapshot: () => ({
+        enabled: true, smoothEnabled: true, reducedMotion: false, duration: 90, jumpDistance: 8, motionDuration: 90,
+        motionGateChanges: [
+            { at: -900, smoothEnabled: true, reducedMotion: false, motionDuration: 90, char: 'private-gate' },
+            { at: -100, smoothEnabled: true, reducedMotion: true, motionDuration: 0, session: 'private-name' },
+            { at: 250, smoothEnabled: true, reducedMotion: false, motionDuration: 90 },
+        ],
+        counters: { cursorDrawPasses: 1, baseDrawPasses: 2 }, retargets: [], drawPassStatus: 'base-only',
+    }) } };
+    f.start(); f.advance(4000);
+    const report = f.report();
+    assert.deepEqual(report.cursor.gate, { enabled: true, smoothEnabled: true, reducedMotion: false, duration: 90, jumpDistance: 8, motionDuration: 90 });
+    assert.equal(report.cursor.configuredAnimations, true);
+    // Negative dt is the point: a gate transition BEFORE the sample window is
+    // the evidence this report exists for.
+    assert.deepEqual(report.cursor.motionGateChanges, [
+        { dt: -900, smoothEnabled: true, reducedMotion: false, motionDuration: 90 },
+        { dt: -100, smoothEnabled: true, reducedMotion: true, motionDuration: 0 },
+        { dt: 250, smoothEnabled: true, reducedMotion: false, motionDuration: 90 },
+    ]);
+    assert.doesNotMatch(JSON.stringify(report), /private-/);
+
+    // Only the newest 32 gate changes survive, and a context without
+    // _settingsConfig (or gate fields) reports nulls instead of throwing.
+    const g = fixture();
+    g.tab._smoothCursor = { _adapter: { snapshot: () => ({
+        motionGateChanges: Array.from({ length: 34 }, (_, i) => ({ at: i * 10 - 330, smoothEnabled: true, reducedMotion: false, motionDuration: 90 })),
+        counters: { cursorDrawPasses: 1, baseDrawPasses: 2 }, retargets: [], drawPassStatus: 'base-only',
+    }) } };
+    g.start(); g.advance(4000);
+    const ring = g.report().cursor.motionGateChanges;
+    assert.equal(ring.length, 32);
+    assert.equal(ring[0].dt, -310, 'the two oldest entries were dropped');
+    assert.equal(g.report().cursor.configuredAnimations, null);
+    assert.deepEqual(g.report().cursor.gate, { enabled: null, smoothEnabled: null, reducedMotion: null, duration: null, jumpDistance: null, motionDuration: null });
+
+    // Only a real boolean passes through (false = animations disabled is a
+    // legitimate setting); abnormal string/object values never enter the
+    // clipboard report.
+    const animationCases = [
+        { animations: false, expected: false },
+        { animations: 'private-animations', expected: null },
+        { animations: { smooth: 'private-object' }, expected: null },
+    ];
+    for (const { animations, expected } of animationCases) {
+        const h = fixture();
+        h.context._settingsConfig = { animations };
+        h.tab._smoothCursor = { _adapter: { snapshot: () => ({
+            counters: { cursorDrawPasses: 1, baseDrawPasses: 2 }, retargets: [], drawPassStatus: 'base-only',
+        }) } };
+        h.start(); h.advance(4000);
+        assert.equal(h.report().cursor.configuredAnimations, expected);
+        assert.doesNotMatch(JSON.stringify(h.report()), /private-/);
+    }
+});
+
 test('caret report explicitly whitelists metadata and excludes descriptor characters and injected reasons', () => {
     const f = fixture();
     f.tab._inkObserver = { state: () => ({ positionKnown: false, positionReason: 'private-reason', checkpointReason: 'open-lexical-unit', recoveries: 2, char: 'private-observer' }) };

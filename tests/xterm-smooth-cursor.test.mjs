@@ -563,6 +563,76 @@ test('echo classification is suspended for a protocol cursor on the alternate bu
   assert.equal(g.adapter.snapshot().drawPassStatus, 'base+rectangle');
 });
 
+test('motion gate history records the first frame and observed transitions, bounded at 32, never altering motion', () => {
+  const f = fixture();
+  f.renderer.renderRows(0, 2);
+  let changes = f.adapter.snapshot().motionGateChanges;
+  assert.equal(changes.length, 1, 'the first drawn frame records the initial gate');
+  assert.deepEqual(changes[0], { at: 0, smoothEnabled: true, reducedMotion: false, motionDuration: 90 });
+  assert.equal(f.adapter.snapshot().motionDuration, 90);
+
+  // An unchanged gate on later frames records nothing.
+  f.active.cursorX = 3;
+  f.renderer.renderRows(0, 2);
+  assert.equal(f.adapter.snapshot().motionGateChanges.length, 1);
+
+  // reduced-motion flipping at the media query is observed on the next drawn
+  // frame as motionDuration 0.
+  f.setTime(100);
+  f.media.matches = true;
+  f.renderer.renderRows(0, 2);
+  changes = f.adapter.snapshot().motionGateChanges;
+  assert.equal(changes.length, 2);
+  assert.deepEqual(changes[1], { at: 100, smoothEnabled: true, reducedMotion: true, motionDuration: 0 });
+  assert.equal(f.adapter.snapshot().motionDuration, 0);
+
+  f.setTime(200);
+  f.media.matches = false;
+  f.renderer.renderRows(0, 2);
+  assert.deepEqual(f.adapter.snapshot().motionGateChanges[2], { at: 200, smoothEnabled: true, reducedMotion: false, motionDuration: 90 });
+
+  f.setTime(300);
+  f.adapter.setSmooth(false);
+  f.renderer.renderRows(0, 2);
+  assert.deepEqual(f.adapter.snapshot().motionGateChanges[3], { at: 300, smoothEnabled: false, reducedMotion: false, motionDuration: 0 });
+
+  f.setTime(400);
+  f.adapter.setSmooth(true);
+  f.renderer.renderRows(0, 2);
+  assert.deepEqual(f.adapter.snapshot().motionGateChanges[4], { at: 400, smoothEnabled: true, reducedMotion: false, motionDuration: 90 });
+
+  // The snapshot hands out a copy: mutating it never rewrites the history.
+  const copy = f.adapter.snapshot().motionGateChanges;
+  copy.pop();
+  copy.push({ at: 999, smoothEnabled: false, reducedMotion: false, motionDuration: 0 });
+  const afterMutation = f.adapter.snapshot().motionGateChanges;
+  assert.equal(afterMutation.length, 5);
+  assert.deepEqual(afterMutation[4], { at: 400, smoothEnabled: true, reducedMotion: false, motionDuration: 90 });
+
+  // Bounded ring: 40 more observed transitions keep only the newest 32.
+  for (let i = 0; i < 40; i += 1) {
+    f.adapter.setSmooth(i % 2 === 1);
+    f.setTime(500 + i * 10);
+    f.renderer.renderRows(0, 2);
+  }
+  const bounded = f.adapter.snapshot().motionGateChanges;
+  assert.equal(bounded.length, 32);
+  assert.equal(bounded[0].at, 580, 'the 13 oldest transitions were dropped');
+  assert.equal(bounded[0].smoothEnabled, false);
+
+  // The ring is pure metadata: motion still slides exactly as before.
+  f.setTime(1000);
+  f.renderer.renderRows(0, 2); // settle at x=3
+  f.active.cursorX = 8;
+  f.setTime(1010);
+  f.renderer.renderRows(0, 2); // retarget 3 -> 8
+  f.setTime(1055); // halfway through a 90ms slide (easeOutCubic: 3 + 5 * 0.875)
+  f.renderer.renderRows(0, 2);
+  assert.equal(f.adapter.motion.animating, true);
+  assert.ok(Math.abs(f.adapter.snapshot().visual.x - 7.375) < 1e-9);
+  assert.equal(f.adapter.snapshot().motionDuration, 90);
+});
+
 test('finite diagnostic capture holds only requested animation frames and excludes hold time', async () => {
   const f = fixture();
   f.renderer.renderRows(0, 2);

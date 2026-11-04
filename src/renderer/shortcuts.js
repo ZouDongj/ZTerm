@@ -260,6 +260,17 @@ const SHORTCUT_ACTIONS = {
             etObs.observe({ type: 'event', buffered: false, durationThreshold: 50 });
         } catch (e) {}
         const before = snapshot(adapter)?.counters;
+        // Current motion gate as the sampled adapter reports it; sanitized so
+        // a snapshot lacking the fields (older/disposed adapter) yields nulls.
+        const gateOf = s => {
+            const boolean = v => typeof v === 'boolean' ? v : null;
+            const number = v => Number.isFinite(v) ? v : null;
+            return {
+                enabled: boolean(s?.enabled), smoothEnabled: boolean(s?.smoothEnabled),
+                reducedMotion: boolean(s?.reducedMotion), duration: number(s?.duration),
+                jumpDistance: number(s?.jumpDistance), motionDuration: number(s?.motionDuration),
+            };
+        };
         const caretMetadata = s => {
             const c = s?.caretOwnership;
             const o = tab?._inkObserver?.state?.();
@@ -359,6 +370,23 @@ const SHORTCUT_ACTIONS = {
                     recentDrawGapMs: after.recentDrawGapMs,
                     // only retargets INSIDE the sample window (clock values >= t0)
                     retargets: after.retargets.filter(r => r.at >= t0 - 50).slice(-40).map(r => ({ dt: Math.round(r.at - t0), from: (+r.from.x.toFixed(2)) + ',' + (+r.from.y.toFixed(2)), to: r.target.x + ',' + r.target.y })),
+                    // Gate as it stands at sampling end, the settings it was
+                    // configured from, and the newest observed transitions.
+                    // Gate-change dt is relative to t0 and MAY be negative: a
+                    // transition before the window is the evidence this report
+                    // exists for, so pre-sampling entries are kept, not filtered.
+                    gate: gateOf(after),
+                    // Boolean only: false (animations off) passes through, any
+                    // abnormal type stays out of the clipboard report.
+                    configuredAnimations: (typeof _settingsConfig !== 'undefined' && _settingsConfig
+                        && typeof _settingsConfig.animations === 'boolean') ? _settingsConfig.animations : null,
+                    motionGateChanges: (Array.isArray(after.motionGateChanges) ? after.motionGateChanges.slice(-32) : [])
+                        .map(c => ({
+                            dt: Number.isFinite(c?.at) ? Math.round(c.at - t0) : null,
+                            smoothEnabled: typeof c?.smoothEnabled === 'boolean' ? c.smoothEnabled : null,
+                            reducedMotion: typeof c?.reducedMotion === 'boolean' ? c.reducedMotion : null,
+                            motionDuration: Number.isFinite(c?.motionDuration) ? c.motionDuration : null,
+                        })),
                     drawPassStatus: after.drawPassStatus,
                     caret: caretMetadata(after),
                     tabType: tab ? tab.type : null,

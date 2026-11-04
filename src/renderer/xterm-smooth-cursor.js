@@ -15,6 +15,7 @@
   const ECHO_CREDIT_CAP = 4;
   const MAX_TIMESTAMPS = 128;
   const MAX_CAPTURE_FRAMES = 12;
+  const MAX_MOTION_GATE_CHANGES = 32;
   const RGB_COLOR_MODE = 0x03000000;
   // xterm AttributeData/FgFlags.INVERSE, verified against the bundled parser.
   const INVERSE_ATTR_FLAG = 0x04000000;
@@ -128,6 +129,7 @@
       lastGlyph: null,
       echoSlides: 0,
       retargets: [],
+      motionGateChanges: [],
       drawTimestamps: [],
       drawPassStatus: 'idle',
       customDrawSource: 'none',
@@ -148,6 +150,9 @@
     let lastDrawnRow = null;
     let snapBeforeNextDraw = true;
     let lastTarget = null;
+    // Last observed {smoothEnabled, reducedMotion, motionDuration} tuple; a
+    // renderRows pass only appends to motionGateChanges when it differs.
+    let lastMotionGate = null;
     // Timestamp of the last printable local keystroke, set via noteInput().
     // A block-caret slide starting inside the echo window is typing echo:
     // the caret may cover the just-typed characters but must not flash them
@@ -693,6 +698,7 @@
       }
       const targetChanged = !lastTarget || cursorBeforeBase.x !== lastTarget.x || cursorBeforeBase.y !== lastTarget.y;
       motion.duration = smoothEnabled && !isReducedMotion() ? duration : 0;
+      noteMotionGate();
       if (snapBeforeNextDraw) {
         // Correctness snaps (initial frame, resize, scroll, focus, reduced
         // motion change, smooth toggle) still land immediately.
@@ -1241,6 +1247,22 @@
       return mediaQuery?.matches === true;
     }
 
+    // Bounded metadata ring of observed motion-gate transitions, read-only
+    // through snapshot(). Pure diagnostics: never touches motion state. Each
+    // entry is latched inside the draw path after the motion.duration
+    // assignment, so `at` is the render moment the change was first observed,
+    // not the moment the underlying setting flipped.
+    function noteMotionGate() {
+      const gate = { smoothEnabled, reducedMotion: isReducedMotion(), motionDuration: motion.duration };
+      if (lastMotionGate
+        && lastMotionGate.smoothEnabled === gate.smoothEnabled
+        && lastMotionGate.reducedMotion === gate.reducedMotion
+        && lastMotionGate.motionDuration === gate.motionDuration) return;
+      lastMotionGate = gate;
+      instrumentation.motionGateChanges.push({ at: clock(), ...gate });
+      trim(instrumentation.motionGateChanges, MAX_MOTION_GATE_CHANGES);
+    }
+
     function surfaceState() {
       const rectangle = renderer._rectangleRenderer?.value;
       const glyph = renderer._glyphRenderer?.value;
@@ -1364,6 +1386,7 @@
           cursorStyle,
           duration,
           jumpDistance,
+          motionDuration: motion.duration,
           renderScope,
           target: instrumentation.target ? { ...instrumentation.target } : null,
           visual: instrumentation.visual ? { ...instrumentation.visual } : null,
@@ -1410,6 +1433,14 @@
           presentationSemantics: instrumentation.presentationSemantics,
           retargets: instrumentation.retargets.map(function (record) {
             return { at: record.at, from: { ...record.from }, target: { ...record.target } };
+          }),
+          motionGateChanges: instrumentation.motionGateChanges.map(function (change) {
+            return {
+              at: change.at,
+              smoothEnabled: change.smoothEnabled,
+              reducedMotion: change.reducedMotion,
+              motionDuration: change.motionDuration,
+            };
           }),
           surface: surfaceState(),
           capture: {
