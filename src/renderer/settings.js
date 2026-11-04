@@ -392,8 +392,9 @@ function decorateSettingsSidebar() {
         span.innerHTML = Icons.iconSvg(name, 15);
         item.prepend(span);
     });
-    // Menu icons that need the purpose-drawn small artwork (currently the
-    // settings gear) are rendered here instead of duplicating SVG inline.
+    // Elements carrying data-app-icon (menu icons such as the settings gear
+    // and the SSH server) get their small artwork rendered here instead of
+    // duplicating SVG inline.
     document.querySelectorAll('[data-app-icon]').forEach(el => {
         if (!el.querySelector('svg') && typeof Icons !== 'undefined') {
             el.innerHTML = Icons.iconSvg(el.dataset.appIcon, 14);

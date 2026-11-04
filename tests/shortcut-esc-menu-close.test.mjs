@@ -162,3 +162,40 @@ test('(order) menu and a modal layer both open: Esc pops the topmost layer first
     assert.ok(esc2.defaultPrevented, 'second Esc reaches the menu branch');
     assert.ok(allClosed(f), 'menu fully closed on the second Esc');
 });
+
+// Follow-up (mouse entry into the SSH manager): Ctrl+Shift+S was the only
+// way into the SSH manager overlay. The ⋮ menu now ships an item that first
+// closes the menu (closeMenuPopup) and then reuses the exact overlay opener
+// the keyboard binding uses (openSSHManager) — no parallel open path. The
+// structural contract below reads the REAL renderer.html, so a dropped,
+// rewired or duplicated entry fails here before it ships.
+test('menu popup: SSH manager entry reuses openSSHManager after closing the menu', () => {
+    const html = fs.readFileSync(new URL('../src/renderer.html', import.meta.url), 'utf8');
+    const idAt = html.indexOf('id="menu-popup"');
+    assert.notEqual(idAt, -1, '#menu-popup exists in renderer.html');
+    // Balanced <div> scan scoped to #menu-popup (a bare class search would
+    // bleed into the separate #ssh-add-menu popup further down the page).
+    const start = html.lastIndexOf('<div', idAt);
+    const tags = /<div\b|<\/div>/g;
+    tags.lastIndex = start;
+    let depth = 0;
+    let match;
+    let popup = null;
+    while ((match = tags.exec(html))) {
+        depth += match[0] === '</div>' ? -1 : 1;
+        if (depth === 0) { popup = html.slice(start, tags.lastIndex); break; }
+    }
+    assert.ok(popup, '#menu-popup block extracted');
+    // Menu items are flat one-line divs (spans only, no nested divs).
+    const items = popup.match(/<div class="menu-item"[^>]*>[\s\S]*?<\/div>/g) || [];
+    assert.ok(items.length >= 5, `menu items parsed (${items.length})`);
+    const entries = items.filter(it => it.includes('data-action="sshPanel"'));
+    assert.equal(entries.length, 1, 'exactly one SSH manager entry lives in #menu-popup');
+    const entry = entries[0];
+    assert.ok(entry.includes('onclick="closeMenuPopup();openSSHManager()"'),
+        'the item closes the menu and reuses the Ctrl+Shift+S overlay opener');
+    assert.ok(entry.includes('<span class="menu-label">SSH 配置管理</span>'), 'label text');
+    assert.ok(entry.includes('<span class="menu-shortcut" data-action="sshPanel"></span>'),
+        'shortcut metadata (updateMenuShortcuts fills it from the sshPanel binding)');
+    assert.ok(entry.includes('data-app-icon="server"'), 'menu icon via the shared icon system');
+});

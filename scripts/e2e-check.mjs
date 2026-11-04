@@ -650,6 +650,65 @@ async function main() {
     await cdp.eval(`closePalette()`);
     await sleep(300);
 
+    // 6.5 SSH manager menu entry: REAL mouse path (CDP Input domain) into the
+    //     same overlay the Ctrl+Shift+S binding opens. The click is dispatched
+    //     at the item's rendered center so it rides the actual event chain —
+    //     a synthetic .click() would prove nothing about the real hit target.
+    //     openSSHManager() with no SSH connection only renders the (empty)
+    //     local profile list; nothing dials out.
+    await cdp.eval(`toggleMenuPopup()`);
+    const sshEntry = await cdp.eval(`(() => {
+      const item = document.querySelector('#menu-popup [data-action="sshPanel"]');
+      if (!item) return null;
+      const r = item.getBoundingClientRect();
+      const center = r.width > 0 && r.height > 0
+        ? { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }
+        : null;
+      // Hit test BEFORE any input: if some other layer covers the center, a
+      // real click there activates that layer instead of this entry.
+      const hitEl = center ? document.elementFromPoint(center.x, center.y) : null;
+      const open = id => document.getElementById(id).classList.contains('open');
+      return {
+        label: (item.querySelector('.menu-label') || {}).textContent || '',
+        hint: (item.querySelector('.menu-shortcut') || {}).textContent || '',
+        center,
+        hitInside: !!hitEl && item.contains(hitEl),
+        menuOpen: open('menu-popup'),
+        backdropOpen: open('menu-backdrop'),
+        overlayOpen: open('overlay-ssh-manager'),
+      };
+    })()`);
+    check('菜单 SSH 入口：标签与快捷键提示渲染（默认绑定的原样显示）',
+      !!sshEntry && sshEntry.label.includes('SSH') && sshEntry.label.includes('配置管理')
+        && sshEntry.hint === 'Ctrl+Shift+S',
+      JSON.stringify(sshEntry));
+    // Staging must hold before any input is sent: menu + backdrop open, SSH
+    // overlay still closed, and the rendered center resolving into the entry.
+    // When any of that fails the click is NOT dispatched and the result check
+    // below fails loudly instead of silently skipping.
+    const sshStagingOk = !!sshEntry && sshEntry.menuOpen === true && sshEntry.backdropOpen === true
+      && sshEntry.overlayOpen === false && sshEntry.hitInside === true;
+    let sshClickSettled = null;
+    if (sshStagingOk) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: sshEntry.center.x, y: sshEntry.center.y, button: 'left', buttons: 1, clickCount: 1 });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: sshEntry.center.x, y: sshEntry.center.y, button: 'left', buttons: 1, clickCount: 1 });
+      sshClickSettled = await waitForValue(cdp, `(() => {
+        const open = id => document.getElementById(id).classList.contains('open');
+        return open('overlay-ssh-manager') && !open('menu-popup') && !open('menu-backdrop');
+      })()`, true, 5000);
+    }
+    const sshMenuState = await cdp.eval(`(() => {
+      const open = id => document.getElementById(id).classList.contains('open');
+      return { overlay: open('overlay-ssh-manager'), menu: open('menu-popup'), backdrop: open('menu-backdrop') };
+    })()`);
+    check('菜单 SSH 入口：真实鼠标点击打开 SSH 管理浮层并关闭菜单与背景',
+      sshClickSettled === true && sshMenuState.overlay === true
+        && sshMenuState.menu === false && sshMenuState.backdrop === false,
+      JSON.stringify({ stagingOk: sshStagingOk, entry: sshEntry, after: sshMenuState }));
+    await cdp.eval(`closeMenuPopup()`);
+    await cdp.eval(`closeOverlay('overlay-ssh-manager')`);
+    await sleep(300);
+
     // 7. IPC path: window commands genuinely reachable (verified via callback, not just the click)
     const ipcOk = await cdp.eval(`window.__TAURI__.core.invoke('window_maximize').then(() => 'ok').catch(e => 'err: ' + e)`);
     check('IPC invoke window_maximize 可达', ipcOk === 'ok', String(ipcOk));
@@ -3302,6 +3361,18 @@ async function main() {
         }
       } catch (e) { console.log(`[e2e] screenshot ${name} failed: ${e.message}`); }
     }
+    // SSH menu entry screenshot (ZTERM_E2E_SHOTS): the ⋮ menu is a transient
+    // popup and the early 6.5 mouse-path check closes it right after its
+    // click, so reopen it here for the capture, then close it again. The
+    // helper above must be fully initialized before this runs.
+    await cdp.eval(`toggleMenuPopup()`);
+    await waitForValue(cdp, `(() => {
+      const open = id => document.getElementById(id).classList.contains('open');
+      return open('menu-popup') && open('menu-backdrop');
+    })()`, true, 5000);
+    await shot('ssh-menu-entry');
+    await cdp.eval(`closeMenuPopup()`);
+    await sleep(200);
     // Editor and confirmation actions share one left-to-right contract. These
     // probes only open and cancel isolated UI; they never submit an edit,
     // authorize execution, or open a connection.
