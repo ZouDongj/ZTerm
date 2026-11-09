@@ -160,3 +160,55 @@ test('DECSCUSR preserves command-line write evidence and cursor coordinates', ()
   assert.equal(state.positionKnown, true, 'cursor shape changes do not move the protocol cursor');
   assert.equal(state.positionReason, null);
 });
+
+
+test('chunk report scopes text effects to written cells, erased rows, buffer switches and scrolling', () => {
+  const { reports } = observeChunks([
+    '\u001b[2;3Hab\u001b[K',
+    '\u001b[?25l',
+    '\u001b[24;1H\n',
+    '\u001b[?1049hx',
+    '\u001b[3;4Hy',
+  ]);
+  assert.deepEqual(reports[0].cells, [[1, 2, 'a', 1], [1, 3, 'b', 1]]);
+  assert.deepEqual(reports[0].rows, [1]);
+  assert.equal(reports[0].text, true);
+  assert.equal(reports[0].complete, true);
+  assert.equal(reports[0].buffer, false);
+  assert.equal(reports[1].text, false);
+  assert.deepEqual(reports[1].rows, []);
+  assert.equal(reports[1].buffer, false);
+  assert.equal(reports[2].scroll, true);
+  assert.equal(reports[3].buffer, true);
+  assert.equal(reports[3].text, true);
+  assert.equal(reports[3].complete, false, 'printable output at unknown coordinates is incomplete evidence');
+  assert.deepEqual(reports[4].cells, [[2, 3, 'y', 1]]);
+  assert.equal(reports[4].complete, true);
+});
+
+test('chunk report marks cell truncation as incomplete text evidence', () => {
+  const { reports } = observeChunks(['x'.repeat(5000)]);
+  assert.equal(reports[0].cells.length, 4096);
+  assert.equal(reports[0].text, true);
+  assert.equal(reports[0].complete, false);
+});
+
+
+test('every directly screen-mutating final takes the bounded conservative text path', () => {
+  for (const sequence of ['\u001b[3X', '\u001b[2P', '\u001b[2@', '\u001b[1L', '\u001b[1M',
+    '\u001b[1S', '\u001b[1T', '\u001b[3b', '\u001bc']) {
+    const { reports } = observeChunks([sequence]);
+    assert.equal(reports[0].text, true, JSON.stringify(sequence));
+    assert.equal(reports[0].complete, false, JSON.stringify(sequence));
+    assert.deepEqual(reports[0].cells, [], JSON.stringify(sequence));
+  }
+});
+
+test('RI is conservative only at the top where it can scroll text', () => {
+  const top = observeChunks(['\u001b[1;1H\u001bM']).reports[0];
+  assert.equal(top.text, true);
+  assert.equal(top.complete, false);
+  const movementOnly = observeChunks(['\u001b[2;1H\u001bM']).reports[0];
+  assert.equal(movementOnly.text, false);
+  assert.equal(movementOnly.complete, true);
+});

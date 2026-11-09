@@ -51,6 +51,8 @@
   // Per-chunk cell-write record bound: a chunk writing more cells than this
   // is bulk output, not an echo frame; its writes stop being reported.
   const MAX_CHUNK_CELL_WRITES = 4096;
+  // Direct content mutations not modeled as cell/row ranges must fail closed.
+  const SCREEN_MUTATING_FINALS = new Set(['@', 'P', 'X', 'L', 'M', 'S', 'T', 'b']);
 
   const unicodeWidth = root.__unicodeWidth ||
     (typeof module !== 'undefined' && module.exports ? require('./unicode-width.js') : null);
@@ -83,13 +85,13 @@
     const onCandidate = typeof options?.onCandidate === 'function' ? options.onCandidate : null;
     const onUnit = typeof options?.onUnit === 'function' ? options.onUnit : null;
     const onInvalidate = typeof options?.onInvalidate === 'function' ? options.onInvalidate : null;
-    // Optional bounded chunk-level write report (see push): coordinates, char
-    // and width of every printable cell this chunk wrote, plus whether the
-    // chunk hid the protocol cursor (stable stream evidence; the adapter's
-    // echo decision does not currently consume the hide flag). Covers writes
+    // Optional bounded chunk-level write report (see push): printable cells,
+    // erased rows, possible text effects, evidence completeness, buffer and
+    // scroll boundaries, plus the protocol cursor-hide flag. Covers writes
     // OUTSIDE units and inside still-open units — real editor echo (vim
-    // insert mode) emits plain writes with no completed unit at all. Never
-    // fires without a listener.
+    // insert mode) emits plain writes with no completed unit at all. The
+    // adapter consumes cells/hid; unread tracking consumes the other fields.
+    // Never fires without a listener.
     const onChunkWrites = typeof options?.onChunkWrites === 'function' ? options.onChunkWrites : null;
 
     let buffer = '';
@@ -98,15 +100,16 @@
     let unitSeq = 0;        // completed units
     let chunkSeq = 0;       // chunks fed (watermark binding granularity)
     let frameUnits = 0;     // completed frame-form units (diagnostics)
-    // Cursor model inside the current unit (1-based row/col like CUP).
-    let row = 1, col = 1;
     // Screen geometry for VT scroll/wrap semantics (the ConPTY sync form
     // addresses units RELATIVELY, so its rows depend on bottom-stick
     // scrolling and autowrap actually being modeled). Defaults are replaced
     // by the live terminal size at wiring time (ipc.js).
     let rows = Math.max(2, Math.floor(options?.rows) || 24);
     let cols = Math.max(2, Math.floor(options?.cols) || 80);
-    let pendingWrap = false;
+    // Cursor model inside the current unit (1-based row/col like CUP).
+    let row = Math.min(rows, Math.max(1, Math.floor(options?.row) || 1));
+    let col = Math.min(cols, Math.max(1, Math.floor(options?.col) || 1));
+    let pendingWrap = options?.pendingWrap === true;
     let positionKnown = true;
     let positionReason = null;
     let checkpointReason = null;
@@ -123,11 +126,17 @@
     let seqBack2 = '';
     // Per-push chunk-write report state (null when nobody listens).
     let chunkCellWrites = null;
+    let chunkEraseRows = null;
     let chunkHidCursor = false;
+    let chunkText = false;
+    let chunkComplete = true;
+    let chunkBuffer = false;
+    let chunkScroll = false;
 
     function lineFeed() {
       // LF at the bottom row scrolls the viewport: the cursor STICKS to the
       // bottom instead of moving past it.
+      if (chunkCellWrites && row >= rows) chunkScroll = true;
       row = row >= rows ? rows : row + 1;
       pendingWrap = false;
     }
@@ -381,12 +390,14 @@
       // (save/restore cursor) DO move it and are not modeled — ambiguous.
       const second = seq.charAt(1);
       if (second !== '[') {
-        if (seq === '\u001b7' || seq === '\u001b8') {
+        if (seq === '\u001bc') {
+          if (chunkCellWrites) { chunkText = true; chunkComplete = false; }
+          losePosition();
+        } else if (seq === '\u001b7' || seq === '\u001b8') {
           losePosition();
         } else if (seq === '\u001bM') {
-          // RI: one row up, clamped at the top (no scroll) — modeled because
-          // position is continuous state; a stray unmodeled move would skew
-          // every later candidate row.
+          // RI mutates content only when the top edge forces a reverse scroll.
+          if (chunkCellWrites && row === 1) { chunkText = true; chunkComplete = false; }
           row = Math.max(1, row - 1); pendingWrap = false;
         } else if (seq === '\u001bD') {
           lineFeed(); // IND: one row down with bottom-stick scroll
@@ -409,7 +420,7 @@
       // CSI params may include private markers (0x3C-0x3F: ? < = >) and the
       // DECRQM intermediate '$' — e.g. ?25l, ?1000h or the ?1049$p query the
       // frame form emits per keystroke. Private h/l/p never move the cursor.
-      const m = /^\u001b\[([0-9;?<=>$]*)([A-Za-z])$/.exec(seq);
+      const m = /^\u001b\[([0-9;?<=>$]*)([A-Za-z@])$/.exec(seq);
       if (!m) { losePosition(); return; }
       const params = m[1];
       const fin = m[2];
@@ -417,7 +428,9 @@
       if (priv) {
         if (fin === 'p') return; // DECRQM queries do not change the screen.
         if (fin === 'h' || fin === 'l') {
-          if (params.split(';').some(p => /^(?:\?)?(?:6|7|47|1047|1048|1049)$/.test(p))) losePosition();
+          const modes = params.split(';');
+          if (chunkCellWrites && modes.some(p => /^(?:\?)?(?:47|1047|1049)$/.test(p))) chunkBuffer = true;
+          if (modes.some(p => /^(?:\?)?(?:6|7|47|1047|1048|1049)$/.test(p))) losePosition();
           return;
         }
         losePosition();
@@ -456,9 +469,24 @@
       if (fin === 'D') { col = Math.max(1, col - n); clampMove(); return; }
       if (fin === 'G') { col = params === '' ? 1 : (parseInt(params, 10) || 1); clampMove(); return; }
       if (fin === 'd') { row = params === '' ? 1 : (parseInt(params, 10) || 1); clampMove(); return; }
-      if (fin === 'J' || fin === 'K') return; // erases do not move the cursor
+      if (fin === 'J' || fin === 'K') {
+        if (chunkCellWrites) {
+          chunkText = true;
+          if (!positionKnown) chunkComplete = false;
+          else {
+            const mode = params === '' ? 0 : (parseInt(params.split(';')[0], 10) || 0);
+            let first = 0, last = rows - 1;
+            if (fin === 'K') first = last = row - 1;
+            else if (mode === 0) first = row - 1;
+            else if (mode === 1) last = row - 1;
+            for (let y = Math.max(0, first); y <= Math.min(rows - 1, last); y++) chunkEraseRows.add(y);
+          }
+        }
+        return; // erases do not move the cursor
+      }
       if (fin === 'h' || fin === 'l') return; // mode set/reset (e.g. ?25l) — no movement
       if (fin === 'c') return; // DA1 query — no movement
+      if (chunkCellWrites && SCREEN_MUTATING_FINALS.has(fin)) { chunkText = true; chunkComplete = false; }
       losePosition(); // Unmodeled movement also invalidates bare gestures.
     }
 
@@ -482,6 +510,10 @@
         }
         if (ch === '\u007f') continue; // DEL: xterm ignores it, no column advance
         if (ch < ' ') continue; // other C0 inside a unit: ignore
+        if (chunkCellWrites) {
+          chunkText = true;
+          if (!positionKnown) chunkComplete = false;
+        }
         // DECAWM: a char written in the pending-wrap state wraps to the next
         // line first (with bottom-stick scrolling).
         if (pendingWrap) { lineFeed(); col = 1; }
@@ -496,6 +528,8 @@
         // frame).
         if (chunkCellWrites && positionKnown && chunkCellWrites.length < MAX_CHUNK_CELL_WRITES) {
           chunkCellWrites.push([row - 1, col - 1, ch, w]); // 0-based, matches descriptor coords
+        } else if (chunkCellWrites && positionKnown) {
+          chunkComplete = false;
         }
         if (!unit) { // printable outside a unit still advances the cursor
           if (bareRev.on) {
@@ -566,7 +600,15 @@
     function push(chunk) {
       if (typeof chunk !== 'string' || chunk.length === 0) return { unitSeq, chunkSeq };
       chunkSeq += 1;
-      if (onChunkWrites) { chunkCellWrites = []; chunkHidCursor = false; }
+      if (onChunkWrites) {
+        chunkCellWrites = [];
+        chunkEraseRows = new Set();
+        chunkHidCursor = false;
+        chunkText = false;
+        chunkComplete = true;
+        chunkBuffer = false;
+        chunkScroll = false;
+      }
       buffer += chunk;
       let index = 0;
       while (index < buffer.length) {
@@ -594,9 +636,12 @@
       // still carry the cursor-hide flag of a frame split across chunks);
       // cells carry [y, x, char, width] in descriptor coordinates.
       if (onChunkWrites && chunkCellWrites) {
-        onChunkWrites({ chunkSeq, cells: chunkCellWrites, hid: chunkHidCursor });
+        onChunkWrites({ chunkSeq, cells: chunkCellWrites, hid: chunkHidCursor,
+          rows: [...chunkEraseRows].sort((a, b) => a - b), text: chunkText,
+          complete: chunkComplete, buffer: chunkBuffer, scroll: chunkScroll });
       }
       chunkCellWrites = null;
+      chunkEraseRows = null;
       chunkHidCursor = false;
       return { unitSeq, chunkSeq };
     }
