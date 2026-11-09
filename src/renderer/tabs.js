@@ -979,6 +979,7 @@ const TabManager = {
             }
         }
         this.activeId = id;
+        this._consumeBackgroundUnread(id);
         this.updateActiveClass();
         // Active-tab expansion: in sharing/overflow the newly active tab
         // widens toward its content width (FLIP-animated; a no-op in sparse,
@@ -1049,6 +1050,48 @@ const TabManager = {
         // SFTP dock reflects the newly active tab's own open state (hidden on
         // tabs that never opened it; settings never targets)
         if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
+    },
+
+    // ── Background-output unread marker (issue #26) ──
+    // Runtime-only flag (underscore-prefixed; saveConfig persists a fixed
+    // field whitelist, so it never reaches disk). ipc.js marks a NON-active
+    // tab whose session produced output; after the first transition this is
+    // a pure flag read, so streaming background output never renders the
+    // strip.
+    markBackgroundOutput(tab) {
+        if (!tab || tab._bgUnread) return;
+        tab._bgUnread = true;
+        // In-place patch of the live status dot — a render() here would
+        // rebuild every strip node per output burst. Only the idle connected
+        // dot takes the tint: connecting / error / disconnected keep their
+        // own (higher-priority) paint, and a hidden dot (showStatusDot=false)
+        // simply stays hidden; the next render() repaints from the flag.
+        const icon = this._tabIconEl(tab.id);
+        if (icon && icon.classList.contains('connected')) {
+            icon.classList.remove('connected');
+            icon.classList.add('bg-unread');
+        }
+    },
+
+    // Consume the marker on activation and restore the idle dot in place
+    // (switchTo keeps the strip node; no full render).
+    _consumeBackgroundUnread(id) {
+        const tab = this.tabs.find(t => t.id === id);
+        if (!tab || !tab._bgUnread) return;
+        tab._bgUnread = false;
+        const icon = this._tabIconEl(id);
+        if (icon && icon.classList.contains('bg-unread')) {
+            icon.classList.remove('bg-unread');
+            icon.classList.add('connected');
+        }
+    },
+
+    // Live status-dot span of a strip entry (null before the first render or
+    // while the dot is hidden by settings).
+    _tabIconEl(id) {
+        const bar = document.getElementById('tabbar');
+        const el = bar && bar.querySelector(`.tab[data-tab="${id}"]`);
+        return (el && el.querySelector('.tab-icon')) || null;
     },
 
     // Tabs that are not currently closing (rapid-close safe count: the
@@ -1676,6 +1719,11 @@ const TabManager = {
                         dotClass = 'error';
                     }
                 }
+                // Background-output unread (issue #26): the tint rides ONLY
+                // the idle connected dot — connecting / error / disconnected
+                // keep their own paint. The flag is runtime-only and consumed
+                // by switchTo.
+                if (t._bgUnread && dotClass === 'connected') dotClass = 'bg-unread';
                 const showDot = _settingsConfig.showStatusDot !== false;
                 inner = (showDot ? `<span class="tab-icon ${dotClass}"></span>` : '') + `<span class="tab-name">${escHtml(this._tabDisplayName(t))}</span>`;
                 // In split mode the tab label shows no reconnect button; each pane reconnects via its own pane header

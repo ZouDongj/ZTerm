@@ -42,6 +42,20 @@ function _aggregateSplitConnected(tab) {
     tab.connected = getAllPanes(tab).some(alive);
 }
 
+// Issue #26: runtime unread marker for BACKGROUND output. Called by the
+// pty-output router for every non-empty chunk that lands on a NON-active
+// tab — in a split, any pane's output aggregates to its owning tab, while
+// the active tab's panes (focused or not) never mark. Only the first
+// transition touches the DOM (TabManager.markBackgroundOutput patches the
+// live dot class); every later chunk is a plain flag read, so streaming
+// background output never drives full strip renders. Guarded for partial
+// harnesses whose TabManager stub has no tabs state machine.
+function _markBackgroundOutput(tab, data) {
+    if (!tab || tab.id === TabManager.activeId) return;
+    if (typeof data !== 'string' || !data) return;
+    if (typeof TabManager.markBackgroundOutput === 'function') TabManager.markBackgroundOutput(tab);
+}
+
 // ConPTY rewrites the app's trailing `ESC[?25h` into `ESC[?25l` and paints its
 // own reverse-video caret cell, which permanently hides the real cursor and
 // kills smooth-cursor animations inside TUI apps (herdr etc.). The filter is
@@ -200,6 +214,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
             const pane = getAllPanes(tab).find(p => p.tabId === tabId);
             if (pane) {
                 diagnostics?.routed(diagnostic, pane, data);
+                _markBackgroundOutput(tab, data);
                 if (!tab._contentBuffer) tab._contentBuffer = '';
                 // Observe the RAW bytes first, then the transport filter,
                 // then write with a parse-watermark callback.
@@ -231,6 +246,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
         }
         if (tab.tabId === tabId) {
             diagnostics?.routed(diagnostic, tab, data);
+            _markBackgroundOutput(tab, data);
             if (!tab._contentBuffer) tab._contentBuffer = '';
             const inkSeq = _inkFeed(tab, tab, null, data);
             if (typeof data === 'string' && data) data = _conPtyCaretFix(tab, data, tab.type);

@@ -6289,6 +6289,235 @@ async function main() {
     await cdp.eval(`(() => { [${A}, ${B}, ${N}, ${C}, ${CC}, ${E}, ${F}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} }); return true; })()`).catch(() => null);
     await sleep(600); // let the staggered tab removals settle before section 14
 
+    // 13.9 Issue #26: background-output unread indicator on the tab status
+    //     dot, end to end against REAL local PTY streams — no synthetic
+    //     pty-output events anywhere: input goes through pty-input into the
+    //     real PowerShell session (same injection pattern as 9.5; xterm 5
+    //     drops synthetic keydown chars), output returns through the real
+    //     ConPTY flusher → pty-output → ipc.js router. Checks:
+    //     a) a background tab's multi-burst stream flips the LIVE dot to
+    //        bg-unread with the accent computed color and unchanged 8px
+    //        geometry (computed-style proof, not just the class name);
+    //     b) the whole stream adds ZERO TabManager.render calls and keeps
+    //        the strip node identity stable (no full strip redraw);
+    //     c) switchTo consumes the marker (dot back to connected green, same
+    //        node, still no render) and further REAL output while ACTIVE
+    //        never re-marks;
+    //     d) a background SPLIT pane's stream aggregates to its owning tab.
+    //     ZTERM_E2E_SHOTS additionally saves before/after-switch PNGs for
+    //     visual review.
+    const i26Fg = await cdp.eval(`TabManager.createTab({ name: 'E2E-I26-FG', type: 'local' })`);
+    const i26Bg = await cdp.eval(`TabManager.createTab({ name: 'E2E-I26-BG', type: 'local' })`);
+    const FG26 = JSON.stringify(i26Fg), BG26 = JSON.stringify(i26Bg);
+    await waitForValue(cdp, `(() => {
+      const a = TabManager.tabs.find(x => x.id === ${FG26});
+      const b = TabManager.tabs.find(x => x.id === ${BG26});
+      return !!(a && a.term && a.tabId && b && b.term && b.tabId);
+    })()`, true, 15000);
+    // Wait until the shells are interactive (first prompt painted) so the
+    // injected command is read by a live PowerShell, not raced against its
+    // startup.
+    await waitForValue(cdp, `TabManager.tabs.find(x => x.id === ${FG26}).term.buffer.active.length`, 1, 15000, 'gt0');
+    await waitForValue(cdp, `TabManager.tabs.find(x => x.id === ${BG26}).term.buffer.active.length`, 1, 15000, 'gt0');
+    // Arm the render counter and capture the pre-mark dot state while BG is
+    // still active (idle connected green baseline).
+    const i26Arm = await cdp.eval(`(() => {
+      const bgId = ${BG26};
+      const tab = TabManager.tabs.find(x => x.id === bgId);
+      const el = document.querySelector('.tab[data-tab="' + bgId + '"] .tab-icon');
+      if (!tab || !el || TabManager.activeId !== bgId) return { ok: false };
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      window.__e2eI26 = {
+        renders: 0,
+        bgEl: document.querySelector('.tab[data-tab="' + bgId + '"]'),
+        origRender: TabManager.render,
+        preClass: el.className,
+        preBg: cs.backgroundColor,
+        preW: r.width, preH: r.height, preX: r.x, preY: r.y,
+      };
+      TabManager.render = function (...args) { window.__e2eI26.renders += 1; return window.__e2eI26.origRender.apply(this, args); };
+      return { ok: true, preClass: el.className, preBg: cs.backgroundColor, preW: r.width, preH: r.height, active: TabManager.activeId };
+    })()`);
+    // Real stream: six separately-flushed bursts (~600ms apart) keep arriving
+    // AFTER the switch away, so the marker must come from real background
+    // output, not from anything observed while the tab was active.
+    const i26StreamSent = await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${BG26});
+      if (!tab || !tab.tabId) return false;
+      ipcRenderer.send('pty-input', { tabId: tab.tabId, data: "1..6 | ForEach-Object { Start-Sleep -Milliseconds 600; Write-Output ('I26-STREAM-' + \$_) }\\r" });
+      TabManager.switchTo(${FG26});
+      return TabManager.activeId === ${FG26};
+    })()`);
+    const i26Marked = await waitForValue(cdp, `(() => {
+      const bgId = ${BG26};
+      const tab = TabManager.tabs.find(x => x.id === bgId);
+      const el = document.querySelector('.tab[data-tab="' + bgId + '"] .tab-icon');
+      return (tab && tab._bgUnread === true && el && el.classList.contains('bg-unread')) ? el.className : '';
+    })()`, 'tab-icon bg-unread', 15000);
+    check('issue26：后台真实 PTY 输出把现有状态灯变为 bg-unread',
+      i26Arm.ok === true && i26StreamSent === true && i26Marked === 'tab-icon bg-unread',
+      `arm=${JSON.stringify(i26Arm)}, sent=${i26StreamSent}, cls=${i26Marked}`);
+    // Computed-color + geometry proof (a real WebView2 style/box read, not a
+    // class-name string): the dot must paint the resolved accent and keep its
+    // 8px box while every other state class is gone.
+    const i26Dot = await cdp.eval(`(() => {
+      const bgId = ${BG26};
+      const el = document.querySelector('.tab[data-tab="' + bgId + '"] .tab-icon');
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+      const rgb = s => { const m = String(s).match(/rgba?\\(([^)]+)\\)/); return m ? m[1].split(',').slice(0, 3).map(v => Math.round(parseFloat(v))) : null; };
+      return { cls: el.className, bg: cs.backgroundColor, bgRgb: rgb(cs.backgroundColor), accentRgb: rgb(accent), w: r.width, h: r.height, x: r.x, y: r.y };
+    })()`);
+    check('issue26：未读灯 computed 颜色等于 accent 且几何不变',
+      i26Dot.cls === 'tab-icon bg-unread' && !!i26Dot.accentRgb && JSON.stringify(i26Dot.bgRgb) === JSON.stringify(i26Dot.accentRgb)
+        && i26Dot.w === i26Arm.preW && i26Dot.h === i26Arm.preH,
+      JSON.stringify({ dot: i26Dot, pre: { cls: i26Arm.preClass, bg: i26Arm.preBg, w: i26Arm.preW, h: i26Arm.preH } }));
+    // Wait for the LAST real burst to reach the buffer (proves the whole
+    // stream traversed the real pipe), then read the render counter and node
+    // identity across the entire burst window.
+    const i26StreamDone = await waitForValue(cdp, `(() => {
+      const b = TabManager.tabs.find(x => x.id === ${BG26}).term.buffer.active;
+      for (let y = b.length - 1; y >= Math.max(0, b.length - 40); y--) {
+        if ((b.getLine(y)?.translateToString(true) || '').includes('I26-STREAM-6')) return true;
+      }
+      return false;
+    })()`, true, 15000);
+    const i26Cold = await cdp.eval(`(() => ({
+      renders: window.__e2eI26.renders,
+      sameNode: document.querySelector('.tab[data-tab="' + ${BG26} + '"]') === window.__e2eI26.bgEl,
+      unread: TabManager.tabs.find(x => x.id === ${BG26})._bgUnread === true,
+    }))()`);
+    check('issue26：连续真实输出块期间零次 TabManager.render 且标签节点身份稳定',
+      i26StreamDone === true && i26Cold.renders === 0 && i26Cold.sameNode === true && i26Cold.unread === true,
+      JSON.stringify({ done: i26StreamDone, cold: i26Cold }));
+    if (process.env.ZTERM_E2E_SHOTS) {
+      mkdirSync(process.env.ZTERM_E2E_SHOTS, { recursive: true });
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
+      if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'issue26-unread-before-switch.png'), Buffer.from(shot.data, 'base64'));
+    }
+    // Switching to the tab consumes the marker in place: same node, no full
+    // render, idle green restored.
+    const i26Switch = await cdp.eval(`(() => {
+      TabManager.switchTo(${BG26});
+      const tab = TabManager.tabs.find(x => x.id === ${BG26});
+      const el = document.querySelector('.tab[data-tab="' + ${BG26} + '"] .tab-icon');
+      const cs = getComputedStyle(el);
+      return { active: TabManager.activeId === ${BG26}, flag: tab._bgUnread, cls: el.className, bg: cs.backgroundColor,
+        sameNode: document.querySelector('.tab[data-tab="' + ${BG26} + '"]') === window.__e2eI26.bgEl,
+        renders: window.__e2eI26.renders };
+    })()`);
+    const i26Green = [108, 203, 95]; // #6ccb5f idle connected dot
+    const i26SwitchBg = (() => { const m = /rgba?\(([^)]+)\)/.exec(i26Switch.bg || ''); return m ? m[1].split(',').slice(0, 3).map(v => Math.round(parseFloat(v))) : null; })();
+    check('issue26：切回后标志与类就地清除（绿色恢复、节点不变、仍无 render）',
+      i26Switch.active === true && i26Switch.flag === false && i26Switch.cls === 'tab-icon connected'
+        && JSON.stringify(i26SwitchBg) === JSON.stringify(i26Green) && i26Switch.sameNode === true && i26Switch.renders === 0,
+      JSON.stringify(i26Switch));
+    if (process.env.ZTERM_E2E_SHOTS) {
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
+      if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'issue26-unread-after-switch.png'), Buffer.from(shot.data, 'base64'));
+    }
+    // Further REAL output on the now-active tab must not re-mark. Wait for
+    // the shell to sit at its prompt first (run evidence: input sent into
+    // the post-pipeline transition window can be lost before PSReadLine
+    // re-engages). The prompt is at the CURSOR row — the buffer's trailing
+    // viewport rows are legitimately blank, so `length - 1` is wrong here.
+    // Diagnostics dump the tail on ANY failure mode.
+    const i26PromptReady = await waitForValue(cdp, `(() => {
+      const b = TabManager.tabs.find(x => x.id === ${BG26}).term.buffer.active;
+      const l = (b.getLine(b.baseY + b.cursorY)?.translateToString(true) || '').trim();
+      return /PS .*>$/.test(l);
+    })()`, true, 15000);
+    await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${BG26});
+      ipcRenderer.send('pty-input', { tabId: tab.tabId, data: "Write-Output 'I26-AFTER-SWITCH'\\r" });
+      return true;
+    })()`);
+    const i26AfterSeen = await waitForValue(cdp, `(() => {
+      const b = TabManager.tabs.find(x => x.id === ${BG26}).term.buffer.active;
+      for (let y = b.length - 1; y >= Math.max(0, b.length - 60); y--) {
+        if ((b.getLine(y)?.translateToString(true) || '').includes('I26-AFTER-SWITCH')) return true;
+      }
+      return false;
+    })()`, true, 15000);
+    const i26NoRemark = await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${BG26});
+      const el = document.querySelector('.tab[data-tab="' + ${BG26} + '"] .tab-icon');
+      return { flag: tab._bgUnread === false, cls: el.className, renders: window.__e2eI26.renders };
+    })()`);
+    const i26AfterDiag = (i26AfterSeen === true && i26PromptReady === true) ? null : await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${BG26});
+      const b = tab.term && tab.term.buffer ? tab.term.buffer.active : null;
+      const tail = [];
+      if (b) for (let y = Math.max(0, b.length - 15); y < b.length; y++) tail.push(b.getLine(y)?.translateToString(true) || '');
+      return { promptReady: ${JSON.stringify(i26PromptReady === true)}, activeId: TabManager.activeId, tabId: tab.tabId, termAlive: !!tab.term,
+        bufLen: b ? b.length : -1, tail, pendingBufKeys: Object.keys(ptyBuffers || {}) };
+    })()`);
+    check('issue26：切回后的真实输出不再置未读',
+      i26PromptReady === true && i26AfterSeen === true && i26NoRemark.flag === true && i26NoRemark.cls === 'tab-icon connected' && i26NoRemark.renders === 0,
+      JSON.stringify({ promptReady: i26PromptReady, seen: i26AfterSeen, state: i26NoRemark, diag: i26AfterDiag }));
+    // Split aggregation: a background split pane's stream must mark the
+    // OWNING tab dot (pane-level output aggregates to the tab).
+    const i26Sp = await cdp.eval(`TabManager.createTab({ name: 'E2E-I26-SP', type: 'local' })`);
+    const SP26 = JSON.stringify(i26Sp);
+    await waitForValue(cdp, `(() => { const t = TabManager.tabs.find(x => x.id === ${SP26}); return !!(t && t.term && t.tabId); })()`, true, 15000);
+    await cdp.eval(`TabManager.splitHorizontal()`);
+    await waitForValue(cdp, `getAllPanes(TabManager.tabs.find(x => x.id === ${SP26})).filter(p => p.term && p.tabId).length`, 2, 15000);
+    await waitForValue(cdp, `(() => {
+      const t = TabManager.tabs.find(x => x.id === ${SP26});
+      const ps = getAllPanes(t);
+      return ps[ps.length - 1].term.buffer.active.length;
+    })()`, 1, 15000, 'gt0');
+    const i26SplitSent = await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${SP26});
+      const panes = getAllPanes(tab);
+      const pane = panes[panes.length - 1];
+      if (!pane || !pane.tabId) return { sent: false };
+      window.__e2eI26SpEl = document.querySelector('.tab[data-tab="' + ${SP26} + '"]');
+      // Baseline BELOW the setup renders (createTab/splitHorizontal/pane
+      // pty-created each render once): the assertion is about the STREAM
+      // window only.
+      const rendersAtSend = window.__e2eI26.renders;
+      ipcRenderer.send('pty-input', { tabId: pane.tabId, data: "1..4 | ForEach-Object { Start-Sleep -Milliseconds 600; Write-Output ('I26-SP-' + \$_) }\\r" });
+      TabManager.switchTo(${FG26});
+      return { sent: true, active: TabManager.activeId === ${FG26}, rendersAtSend };
+    })()`);
+    const i26SpMarked = await waitForValue(cdp, `(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${SP26});
+      const el = document.querySelector('.tab[data-tab="' + ${SP26} + '"] .tab-icon');
+      return (tab && tab._bgUnread === true && el && el.classList.contains('bg-unread')) ? el.className : '';
+    })()`, 'tab-icon bg-unread', 20000);
+    const i26SpDone = await waitForValue(cdp, `(() => {
+      const panes = getAllPanes(TabManager.tabs.find(x => x.id === ${SP26}));
+      const b = panes[panes.length - 1].term.buffer.active;
+      for (let y = b.length - 1; y >= Math.max(0, b.length - 40); y--) {
+        if ((b.getLine(y)?.translateToString(true) || '').includes('I26-SP-4')) return true;
+      }
+      return false;
+    })()`, true, 15000);
+    const i26SpCold = await cdp.eval(`(() => ({
+      sameNode: document.querySelector('.tab[data-tab="' + ${SP26} + '"]') === window.__e2eI26SpEl,
+      renders: window.__e2eI26.renders,
+    }))()`);
+    check('issue26：分屏后台 pane 输出聚合到所属 tab 状态灯（节点稳定、流窗口零 render）',
+      i26SplitSent.sent === true && i26SplitSent.active === true && i26SpMarked === 'tab-icon bg-unread' && i26SpDone === true
+        && i26SpCold.sameNode === true && i26SpCold.renders - i26SplitSent.rendersAtSend === 0,
+      JSON.stringify({ sent: i26SplitSent, cls: i26SpMarked, done: i26SpDone, cold: i26SpCold }));
+    if (process.env.ZTERM_E2E_SHOTS) {
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
+      if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'issue26-split-pane-aggregated.png'), Buffer.from(shot.data, 'base64'));
+    }
+    // Tidy: restore the real render (section 14+ depends on it), close this
+    // section's tabs so later sections see a clean strip.
+    await cdp.eval(`(() => {
+      if (window.__e2eI26) { TabManager.render = window.__e2eI26.origRender; delete window.__e2eI26; }
+      delete window.__e2eI26SpEl;
+      [${SP26}, ${BG26}, ${FG26}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} });
+      return true;
+    })()`).catch(() => null);
+    await sleep(600); // let the staggered tab removals settle before section 14
+
     // 14. Window state restore: write the window field into config → restart →
     // verify maximized/size restore
     async function writeWindowState(state) {
