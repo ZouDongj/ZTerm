@@ -153,3 +153,10 @@ test('chunk write report stays silent without coordinates it can trust', () => {
   assert.deepEqual(reports[0].cells, [], 'unknown position reports nothing');
   assert.deepEqual(reports[1].cells, [[2, 3, 'y', 1]], 'a CUP anchor restores trustworthy reporting');
 });
+
+test('DECSCUSR preserves command-line write evidence and cursor coordinates', () => {
+  const { reports, state } = observeChunks(['\u001b[24;1H:w\u001b[2 q']);
+  assert.deepEqual(reports[0].cells, [[23, 0, ':', 1], [23, 1, 'w', 1]]);
+  assert.equal(state.positionKnown, true, 'cursor shape changes do not move the protocol cursor');
+  assert.equal(state.positionReason, null);
+});

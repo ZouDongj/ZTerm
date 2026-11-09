@@ -813,6 +813,123 @@ for (const synchronized of [true, false]) {
   }
 }
 
+test('issue #31 parser replay: captured nvim 0.12.6 command-line w does not invert during typing echo', async t => {
+  const f = ipcParserFixture(t, { cols: 80, rows: 24, reduced: false });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  await f.write('\x1b[?1049h\x1b[H\x1b[2J\x1b[?25h');
+  f.setTime(100);
+  render(f);
+  f.adapter.noteInput(':');
+  await f.write('\x1b[?25l\x1b(B\x1b[m\x1b[23B\x1b[J:\x1b[2 q\x1b[?25h');
+  assert.equal(f.source.buffer.active.getLine(23).translateToString(true), ':');
+  f.setTime(200);
+  f.adapter.noteInput('w');
+  const moving = await drawNvimProtocolFrame(f, ['\x1b[?25lw\x1b[?25h']);
+  assert.equal(moving.source, 'protocol');
+  assert.equal(moving.animationActive, true);
+  assert.equal(moving.cursorX, 2, 'the protocol caret is on the blank cell after w');
+  assert.equal(f.source.buffer.active.getLine(23).translateToString(true), ':w');
+  assert.equal(moving.drawPassStatus, 'base+rectangle');
+  assert.equal(moving.glyphDrawPasses, 0, 'the w cell must not enter the inverse glyph pass');
+});
+
+test('issue #31 parser replay: captured nvim 0.12.6 merged command-line w near the bottom stays a plain echo', async t => {
+  const f = ipcParserFixture(t, { cols: 80, rows: 34, reduced: false });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  await f.write('\x1b[?1049h\x1b[H\x1b[2J\x1b[32;1Hlast\x1b[32;1H\x1b[?25h');
+  f.setTime(100);
+  render(f);
+  assert.deepEqual(f.adapter.snapshot().target, { x: 0, y: 31 });
+  f.adapter.noteInput('G');
+  f.adapter.noteInput('zb');
+  f.adapter.noteInput(':w');
+  const moving = await drawNvimProtocolFrame(f,
+    ['\x1b[?25l\n\n:w\x1b[2 q\x1b[?1002l\x1b[?1006l\x1b[?25h']);
+  assert.equal(moving.source, 'protocol');
+  assert.equal(moving.animationActive, true);
+  assert.equal(moving.cursorX, 2, 'the protocol caret is on the blank cell after w');
+  assert.equal(f.source.buffer.active.getLine(33).translateToString(true), ':w');
+  assert.equal(moving.drawPassStatus, 'base+rectangle');
+  assert.equal(moving.glyphDrawPasses, 0, 'neither command-line character may enter the inverse glyph pass');
+});
+
+for (const [name, input, update, initialTarget] of [
+  ['an unchanged target row is navigation even with exact matching input', 'nav', 'nav', 'nav'],
+  ['reordered input cannot classify a cross-row command-line run', 'w:', ':w', 'zz'],
+  ['a single-codepoint cross-row rewrite stays ambiguous', 'x', 'x', 'y'],
+]) {
+  test(`issue #31 cross-row echo guard: ${name}`, async t => {
+    const f = ipcParserFixture(t, { cols: 80, rows: 34, reduced: false });
+    Object.defineProperty(f.coreService, 'isCursorHidden', {
+      get: () => f.source._core.coreService.isCursorHidden,
+      set: value => { f.source._core.coreService.isCursorHidden = value; },
+    });
+    f.adapter.setCursorStyle('block');
+    await f.write(`\x1b[?1049h\x1b[H\x1b[2J\x1b[32;1Hlast\x1b[34;1H${initialTarget}\x1b[32;1H\x1b[?25h`);
+    f.setTime(100);
+    render(f);
+    f.adapter.noteInput(input);
+    const moving = await drawNvimProtocolFrame(f,
+      [`\x1b[?25l\n\n${update}\x1b[2 q\x1b[?1002l\x1b[?1006l\x1b[?25h`]);
+    assert.equal(moving.animationActive, true);
+    assert.equal(moving.cursorX, update.length);
+    assert.equal(f.source.buffer.active.getLine(33).translateToString(true), update);
+    assert.equal(moving.drawPassStatus, 'base+rectangle+glyph');
+    assert.ok(moving.glyphDrawPasses > 0, 'ambiguous cross-row writes must retain the inverse glyph pass');
+  });
+}
+
+test('issue #31 cross-row echo guard: normal-mode 2j keeps navigation inversion on an exact input match', async t => {
+  const f = ipcParserFixture(t, { cols: 80, rows: 34, reduced: false });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  await f.write('\x1b[?1049h\x1b[H\x1b[2J\x1b[32;1Hlast\x1b[34;1Hzz\x1b[32;3H\x1b[?25h');
+  f.setTime(100);
+  render(f);
+  assert.deepEqual(f.adapter.snapshot().target, { x: 2, y: 31 });
+  f.adapter.noteInput('2j');
+  const moving = await drawNvimProtocolFrame(f,
+    ['\x1b[?25l\n\n\r2j\x1b[2 q\x1b[?1002l\x1b[?1006l\x1b[?25h']);
+  assert.equal(moving.animationActive, true);
+  assert.equal(moving.cursorX, 2, '2j preserves the original zero-based column');
+  assert.equal(f.source.buffer.active.getLine(33).translateToString(true), '2j');
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph');
+  assert.ok(moving.glyphDrawPasses > 0, 'an exact printable navigation match must not become typing echo');
+});
+
+test('issue #31 cross-row echo guard: a stale target-row baseline fails closed', async t => {
+  const f = ipcParserFixture(t, { cols: 80, rows: 34, reduced: false });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  await f.write('\x1b[?1049h\x1b[H\x1b[2J\x1b[32;1Hlast\x1b[34;1Hzz\x1b[32;1H\x1b[?25h');
+  f.setTime(100);
+  render(f);
+  await f.write('\x1b[?25l\n\n:');
+  f.setTime(2000);
+  f.adapter.noteInput(':w');
+  const moving = await drawNvimProtocolFrame(f,
+    ['\x1b[34;1H:w\x1b[2 q\x1b[?1002l\x1b[?1006l\x1b[?25h']);
+  assert.equal(moving.animationActive, true);
+  assert.equal(moving.cursorX, 2);
+  assert.equal(f.source.buffer.active.getLine(33).translateToString(true), ':w');
+  assert.equal(moving.drawPassStatus, 'base+rectangle+glyph');
+  assert.ok(moving.glyphDrawPasses > 0, 'fresh cells and input cannot revive an expired row baseline');
+});
+
 // ── issue #31 chunk-evidence classification ──
 // The scenarios below exercise the rich chunk-level write evidence through
 // the real parser + IPC + adapter seam: an editor frame (cursor-hide

@@ -184,11 +184,11 @@
     // 194-375ms in the herdr chain) defeats ANY time window, and credits
     // cannot extend here: on the alternate buffer printable keys like hjkl
     // are navigation, so input-side evidence alone would classify them as
-    // typing. Echo is mechanical instead: the frame that moves the cursor
-    // also WROTE the cell the cursor vacates (the echoed character lands at
-    // the caret's previous cell); navigation never writes. The observer
-    // already reports per-unit written cells (unit.wrote); keep the newest
-    // few chunk batches and match the vacated cell at retarget time.
+    // typing. Echo is mechanical instead: a same-row echo writes the cell
+    // the cursor vacates, while a cross-row merged input is validated from
+    // its changed target row. The observer already reports per-unit written
+    // cells (unit.wrote); keep the newest few chunk batches and match the
+    // vacated cell at retarget time.
     // Batches expire by age so leftovers from an idle prompt never classify
     // a later app-initiated slide. Known limit: a chunk boundary cutting
     // through a write unit loses that unit's cells (only complete units are
@@ -211,6 +211,7 @@
     // previous retarget belongs to an older frame and must not classify).
     const ECHO_CHUNK_CELLS_MAX = 8192;
     let echoChunkCells = new Map(); // 'y:x' -> { at, char, width, epoch }
+    let echoChunkRowText = new Map(); // row -> { text, at, epoch }, captured before parsing small write chunks
     let echoChunkBufferType = null;
     let echoChunkEpoch = 0;
     let pendingChunkEcho = false; // rich echo classification for the latest retarget's run
@@ -271,6 +272,7 @@
       echoWriteBatches = [];
       pendingWriteEcho = false;
       echoChunkCells = new Map();
+      echoChunkRowText = new Map();
       pendingChunkEcho = false;
       echoChunkEpoch += 1;
       echoInputQueue = [];
@@ -323,8 +325,25 @@
         // Coordinate space changed: drop cell evidence of the other buffer.
         echoChunkBufferType = bufferType;
         echoChunkCells = new Map();
+        echoChunkRowText = new Map();
       }
       const at = clock();
+      // This callback runs before xterm parses the chunk. Preserve the prior
+      // text only for small chunks that write column zero: a cross-row echo
+      // must later prove that its target row changed, not merely that it was
+      // rewritten with the same characters during navigation.
+      if (info.cells.length > 0 && info.cells.length <= ECHO_INPUT_QUEUE_MAX) {
+        const rows = new Set();
+        for (const cell of info.cells) {
+          if (Array.isArray(cell) && cell.length >= 4 && cell[1] === 0) rows.add(cell[0]);
+        }
+        for (const row of rows) {
+          const prior = echoChunkRowText.get(row);
+          if (!prior || prior.epoch !== echoChunkEpoch) {
+            echoChunkRowText.set(row, { text: protocolRowText(row), at, epoch: echoChunkEpoch });
+          }
+        }
+      }
       for (const cell of info.cells) {
         if (!Array.isArray(cell) || cell.length < 4) continue;
         const key = cell[0] + ':' + cell[1];
@@ -402,6 +421,37 @@
       return consumeInputRun(run);
     }
 
+    // Cross-row merged input lands at the target row instead of the vacated
+    // cell (nvim's coalesced command-line entry). A changed target row with a
+    // fresh contiguous write from column zero to the caret is applicable rich
+    // evidence. Only colon-led command lines have a verified positive shape;
+    // every other cross-row printable run, including normal-mode commands
+    // such as 2j, remains navigation even when the input exactly matches.
+    function classifyTargetRunEcho(target) {
+      if (target.y === lastTarget.y || target.x === 0) return null;
+      const first = echoChunkCells.get(target.y + ':0');
+      if (!first || first.epoch !== echoChunkEpoch) return null;
+      if (clock() - first.at > ECHO_WRITE_BATCH_MS) return null;
+      const prior = echoChunkRowText.get(target.y);
+      if (!prior || prior.epoch !== echoChunkEpoch || prior.text === null) return 'nav';
+      if (clock() - prior.at > ECHO_WRITE_BATCH_MS) return 'nav';
+      const row = protocolRowText(target.y);
+      if (row === null || row === prior.text) return 'nav';
+      const run = [];
+      let x = 0;
+      while (x < target.x) {
+        const entry = echoChunkCells.get(target.y + ':' + x);
+        if (!entry || entry.epoch !== echoChunkEpoch) return 'nav';
+        if (clock() - entry.at > ECHO_WRITE_BATCH_MS) return 'nav';
+        const parsed = protocolCell(target.y, x);
+        if (!parsed || entry.char !== parsed.chars || entry.width !== parsed.width) return 'nav';
+        run.push(entry.char);
+        x += Math.max(1, parsed.width);
+      }
+      if (x !== target.x || run.length < 2 || run[0] !== ':') return 'nav';
+      return consumeInputRun(run) ? 'echo' : 'nav';
+    }
+
     // Rich chunk-evidence decision for the retarget that is starting
     // (lastTarget is still the vacated cell). Returns a TRI-STATE:
     //   'echo' — the frame has the mechanical echo signature;
@@ -411,11 +461,11 @@
     //            not echo just because the unit exists), and a changed row
     //            with a non-echo cursor shape fails closed here too — a
     //            rich-classifiable retarget never leaks back to legacy;
-    //   null   — rich evidence does not apply at all (no current-epoch fresh
-    //            write at the vacated cell): the legacy unit batches decide
-    //            on their own (the verified no-hide multiplexer positives).
-    // Once a current-epoch, time-fresh, same-buffer write exists at the
-    // vacated cell, evaluation order is fixed:
+    //   null   — neither a target-row run nor a current-epoch fresh write at
+    //            the vacated cell applies: the legacy unit batches decide on
+    //            their own (the verified no-hide multiplexer positives).
+    // Cross-row target runs are evaluated first. Once a current-epoch,
+    // time-fresh, same-buffer write exists at the vacated cell, evaluation is:
     //  1. Observer agreement: the observer's char AND width are what the
     //     parser stored in that cell (divergent grapheme models — combining
     //     marks, ZWJ sequences, astral widths — fail closed).
@@ -432,6 +482,8 @@
     //     entry); every other shape fails closed as 'nav'.
     function classifyRichEcho(target) {
       if (lastTarget === null || echoChunkBufferType !== terminal.buffer.active.type) return null;
+      const targetRun = classifyTargetRunEcho(target);
+      if (targetRun !== null) return targetRun;
       const entry = echoChunkCells.get(lastTarget.y + ':' + lastTarget.x);
       if (!entry || entry.epoch !== echoChunkEpoch) return null;
       if (clock() - entry.at > ECHO_WRITE_BATCH_MS) return null;
@@ -626,6 +678,7 @@
         echoWriteBatches = [];
         pendingWriteEcho = false;
         echoChunkCells = new Map();
+        echoChunkRowText = new Map();
         pendingChunkEcho = false;
         echoChunkEpoch += 1;
         echoInputQueue = [];
@@ -1025,15 +1078,15 @@
       //  3. Write evidence — the protocol cursor on the alternate buffer
       //     (a multiplexer's shell pane, or an editor like vim: no software
       //     caret owns it there, and the same relay latency defeats the
-      //     window). The retarget counts as echo only when the frame WROTE
-      //     the vacated cell. Two layers feed it: completed-unit batches
-      //     (multiplexer shells, verified herdr grammar) and the richer
-      //     chunk-level tri-state (see classifyRichEcho: editor frames with
-      //     no completed unit classify by observer agreement plus the
-      //     vacated row's text delta — typing shifts the row, a same-char
-      //     navigation rewrite does not — and a rich NAV verdict vetoes the
-      //     unit batches). hjkl and other navigation never shift the row at
-      //     the vacated cell, so they keep the inversion.
+      //     window). Same-row echo requires a write at the vacated cell;
+      //     cross-row merged input instead requires a changed target row and
+      //     an exact written-input run. Two layers feed the decision:
+      //     completed-unit batches (multiplexer shells, verified herdr
+      //     grammar) and the richer chunk-level tri-state (see
+      //     classifyRichEcho: editor frames with no completed unit classify
+      //     by observer agreement plus row text deltas, and a rich NAV
+      //     verdict vetoes the unit batches). Navigation fails these row and
+      //     input guards, so it keeps the inversion.
       // The window pays first: during a fast burst the latest keystroke
       // keeps it warm, so mid-burst frames classify echo without touching
       // the balance, and credits are spent only on frames that arrive after

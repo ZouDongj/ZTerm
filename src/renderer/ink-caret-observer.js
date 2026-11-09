@@ -404,6 +404,8 @@
       // caret frame's plain restore writes then fail the plain convention.
       const mEarly = /^\u001b\[([0-9;]*)(m)$/.exec(seq);
       if (mEarly) { applySgr(mEarly[1]); return; }
+      // DECSCUSR changes cursor shape/blink, never cell coordinates.
+      if (/^\u001b\[\d* q$/.test(seq)) return;
       // CSI params may include private markers (0x3C-0x3F: ? < = >) and the
       // DECRQM intermediate '$' — e.g. ?25l, ?1000h or the ?1049$p query the
       // frame form emits per keystroke. Private h/l/p never move the cursor.
