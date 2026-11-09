@@ -20,11 +20,17 @@
 // was orphan-disposed (ssh-disconnect) and the pane's reconnect was silently
 // lost. The request now resolves the wrapper holding the kept terminal at
 // fire time (terminal identity is the session identity, ADR-0004).
+//
+// #34 — a cloned tab (context menu / Ctrl+Shift+T) appended at the END of the
+// strip: the plain clone went through createTab's push and the split clone
+// through _cloneSplitTab's own push. Both paths now insert immediately right
+// of the source tab; the clone still activates, and the persisted lastTabs
+// order (TabManager.tabs array order) follows the strip.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { loadVm, wiredTab, armFocusWindow } from './helpers/renderer-vm.mjs';
+import { loadVm, wiredTab, wiredSplitTab, armFocusWindow } from './helpers/renderer-vm.mjs';
 
 // _restoreSplitTab deserializes its splitRoot through tab-serialize.js. The
 // shared harness does not load that file (it is a pure dual-export module),
@@ -230,4 +236,60 @@ test('T35 guard: without a split in the window, the reconnect still connects the
     assert.equal(tab.tabId, 'ssh_9', 'the single tab claimed the new session as before');
     assert.equal(ctx.__sends.filter(s => s.cmd === 'ssh-disconnect' && s.payload && s.payload.tabId === 'ssh_9').length, 0,
         'no orphan disposal on the unchanged path');
+});
+
+// ── #34: cloned tabs insert immediately right of their source ──────────────
+
+// Host-realm id list: TabManager.tabs lives in the VM realm, and a
+// deepStrictEqual against a host array compares prototypes.
+const tabIds = (ctx) => Array.from(ctx.TabManager.tabs, t => t.id);
+const orderedIds = (ctx) => Array.from(ctx.TabManager.orderedTabs(), t => t.id);
+
+test('#34: a plain clone lands immediately right of its source tab', () => {
+    const ctx = loadVm();
+    const a = ctx.TabManager.createTab({ name: 'A', type: 'local', command: 'powershell.exe' });
+    const b = ctx.TabManager.createTab({ name: 'B', type: 'local', command: 'powershell.exe' });
+    const c = ctx.TabManager.createTab({ name: 'C', type: 'local', command: 'powershell.exe' });
+    assert.deepEqual(tabIds(ctx), [a, b, c], 'staging: three tabs in creation order');
+
+    const clone = ctx.TabManager.cloneTab(b);
+
+    // Old code: createTab appended the clone at the end ([A, B, C, B']).
+    assert.deepEqual(tabIds(ctx), [a, b, clone, c],
+        'the clone sits immediately right of its source');
+    assert.equal(ctx.TabManager.activeId, clone, 'the clone activates (clone semantics unchanged)');
+    assert.equal(ctx.TabManager.tabs[2].name, 'B', 'the clone carries the source name');
+});
+
+test('#34: a clone stays visually adjacent with a settings tab mid-array', () => {
+    const ctx = loadVm();
+    stubSettingsGlobals(ctx);
+    const a = ctx.TabManager.createTab({ name: 'A', type: 'local', command: 'powershell.exe' });
+    ctx.TabManager.tabs.push({ id: 't_s', name: '设置', type: 'settings', connected: true, command: '' });
+    const b = ctx.TabManager.createTab({ name: 'B', type: 'local', command: 'powershell.exe' });
+    // Array [A, settings, B]; the strip's visual order pins settings last.
+
+    const clone = ctx.TabManager.cloneTab(a);
+
+    // Old code appended past B. Insertion after A keeps the pair adjacent in
+    // orderedTabs (render / cycling / close-next all read this order) while
+    // the settings tab stays pinned at the end.
+    assert.deepEqual(orderedIds(ctx), [a, clone, b, 't_s'],
+        'visual order: the clone sits immediately right of its source');
+});
+
+test('#34: a split clone lands immediately right of its source tab', () => {
+    const ctx = loadVm();
+    const { tab } = wiredSplitTab(ctx, 't_sp', 'b1', null, 'b2', null);
+    const after = ctx.TabManager.createTab({ name: 'after', type: 'local', command: 'powershell.exe' });
+    assert.deepEqual(tabIds(ctx), ['t_sp', after], 'staging: split tab then a trailing tab');
+
+    const clone = ctx.TabManager.cloneTab('t_sp'); // splitRoot → _cloneSplitTab
+
+    // Old code: _cloneSplitTab pushed the clone to the end.
+    assert.deepEqual(tabIds(ctx), ['t_sp', clone, after],
+        'the split clone sits immediately right of its source');
+    assert.equal(ctx.TabManager.activeId, clone, 'the split clone activates (clone semantics unchanged)');
+    const cloned = ctx.TabManager.tabs.find(t => t.id === clone);
+    assert.ok(cloned && cloned.splitRoot, 'the clone kept its split tree');
 });

@@ -913,11 +913,20 @@ const TabManager = {
         return id;
     },
 
+    // Insert `tab` immediately after the anchor tab (issue #34: a clone sits
+    // to the RIGHT of its source, plain and split alike). No anchor — or an
+    // anchor no longer in the list — appends at the end like before.
+    _insertTabAfter(tab, anchorId) {
+        const idx = anchorId == null ? -1 : this.tabs.findIndex(t => t.id === anchorId);
+        if (idx < 0) this.tabs.push(tab);
+        else this.tabs.splice(idx + 1, 0, tab);
+    },
+
     createTab(options = {}) {
         // A new tab is an explicit geometry change: drop any close-deferral
         // so the strip re-plans immediately and the new tab is reachable.
         this._deferStripRelayout = false;
-        const { name, type, command, args, host, port, user, credId, privateKey, sshProfileId } = options;
+        const { name, type, command, args, host, port, user, credId, privateKey, sshProfileId, afterId } = options;
         const id = 't_' + (this._counter++);
         const isSSH = type === 'ssh';
         const tab = {
@@ -928,7 +937,7 @@ const TabManager = {
             connected: !isSSH,
             host, port, user, _credId: credId, privateKey, sshProfileId,
         };
-        this.tabs.push(tab);
+        this._insertTabAfter(tab, afterId);
         this.switchTo(id);
         this.render();
         if (isSSH) {
@@ -3914,8 +3923,8 @@ const TabManager = {
         // Has splits: deep-clone the split tree and start a new backend for each pane
         if (src.splitRoot) return this._cloneSplitTab(src);
 
-        // Single pane: plain createTab
-        const options = { name: src.name, type: src.type };
+        // Single pane: plain createTab anchored right after the source
+        const options = { name: src.name, type: src.type, afterId: src.id };
         if (src.type === 'ssh') {
             options.host = src.host;
             options.port = src.port;
@@ -3985,7 +3994,9 @@ const TabManager = {
         };
         tab.splitRoot = cloneTree(src.splitRoot);
 
-        this.tabs.push(tab);
+        // Same insertion semantics as the plain clone (issue #34): the split
+        // copy sits immediately right of its source, not at the strip's end.
+        this._insertTabAfter(tab, src.id);
         this._renderSplit(tab);
 
         // During _renderSplit the old and new split-root are both visible, causing layout contention,
