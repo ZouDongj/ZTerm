@@ -2338,7 +2338,7 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
         let rc = format!(
             "[ -f /etc/profile ] && . /etc/profile\n\
              {{ [ -f ~/.bash_profile ] && . ~/.bash_profile; }} || {{ [ -f ~/.bash_login ] && . ~/.bash_login; }} || {{ [ -f ~/.profile ] && . ~/.profile; }} || {{ [ -f ~/.bashrc ] && . ~/.bashrc; }}\n\
-             _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"${{PWD//%/%25}}\"; }}\n\
+             _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"${{PWD//\\%/%25}}\"; }}\n\
              PROMPT_COMMAND=\"_zt_cwd;${{PROMPT_COMMAND}}\"\n\
              export COLORTERM=truecolor\n\
              rm -f {}\n",
@@ -2364,7 +2364,7 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
         // disabled — nothing is lost by not saving).
         let zshrc = format!(
             "[ -f ~/.zshrc ] && . ~/.zshrc\n\
-             _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"${{PWD//%/%25}}\"; }}\n\
+             _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"${{PWD//\\%/%25}}\"; }}\n\
              precmd_functions+=(_zt_cwd)\n\
              export COLORTERM=truecolor\n\
              if [ -n \"$HISTFILE\" ] && [ \"${{HISTFILE#{dir}/}}\" != \"$HISTFILE\" ]; then export HISTFILE=\"$HOME/.zsh_history\"; fi\n"
@@ -10560,7 +10560,7 @@ mod tests {
 
     #[test]
     fn parse_osc7_bash_rc_wrapper_format() {
-        // bash rc wrapper: _zt_cwd() { printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "${PWD//%/%25}"; }
+        // bash rc wrapper: _zt_cwd() { printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "${PWD//\%/%25}"; }
         // output = ESC]7;file://myserver/home/userESC\
         let out = format!("\x1b]7;file://myserver/home/user\x1b\\");
         assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/home/user"));
@@ -10654,12 +10654,16 @@ mod tests {
     #[test]
     fn wrapper_escapes_literal_percent_in_osc7_pwd() {
         // _zt_cwd must not print $PWD verbatim: latest_cwd_report decodes %XX,
-        // so every literal % has to be emitted as %25 to round-trip. Both
-        // shells use the same ${PWD//%/%25} substitution.
+        // so every literal % has to be emitted as %25 to round-trip. The %
+        // must be backslash-escaped in the pattern: zsh anchors a substitution
+        // pattern that begins with % to the END of the string, so the bare
+        // ${PWD//%/%25} form only rewrites a trailing % in zsh and leaves a
+        // mid-path %XX raw (then mis-decoded). Verified against bash 5.2 and
+        // zsh 5.9; both shells accept ${PWD//\%/%25}.
         let (files, _) = cwd_wrapper_files("/bin/bash", "t").expect("bash wrapper");
         let rc = String::from_utf8_lossy(&files[0].1);
         assert!(
-            rc.contains("\"${PWD//%/%25}\""),
+            rc.contains("\"${PWD//\\%/%25}\""),
             "bash rc must escape %: {rc}"
         );
 
@@ -10667,7 +10671,7 @@ mod tests {
         let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
         let text = String::from_utf8_lossy(&zshrc.1);
         assert!(
-            text.contains("\"${PWD//%/%25}\""),
+            text.contains("\"${PWD//\\%/%25}\""),
             "zsh .zshrc must escape %: {text}"
         );
     }
