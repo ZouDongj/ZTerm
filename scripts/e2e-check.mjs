@@ -5585,9 +5585,11 @@ async function main() {
     await cdp.eval(`(() => { try { TabManager.closeTab(${WS2}); TabManager.closeTab(${WS}); } catch (e) {} return true; })()`);
     await sleep(300);
 
-    // 14.10 Reconnect shortcut + Win as its own modifier (issues #19, #23):
-    //     real Ctrl+Shift+R key events reconnect the active SSH tab and
-    //     no-op (but stay consumed) on a local tab; rebinding to Ctrl+Win+R
+    // 14.10 Reconnect shortcut + Win as its own modifier (issues #19, #23, #37):
+    //     a bound key is a reconnect gesture only (issue #37): real
+    //     Ctrl+Shift+R events no-op on a CONNECTED ssh tab (the live session
+    //     is never interrupted), reconnect once the tab is marked
+    //     disconnected, and no-op on a local tab; rebinding to Ctrl+Win+R
     //     moves the action to the exact new combo — Ctrl+Shift+R stops
     //     firing, proving Win is matched as a distinct modifier instead of
     //     folding into Ctrl. reconnectTab itself is spied, never dialed.
@@ -5599,7 +5601,9 @@ async function main() {
       window.__e2eReconnectCalls = 0;
       window.__e2eOrigReconnect = TabManager.reconnectTab.bind(TabManager);
       TabManager.reconnectTab = () => { window.__e2eReconnectCalls++; };
-      tab.type = 'ssh'; // routing guard only; the spy swallows the dial
+      tab.type = 'ssh'; // issue #37 fixture: a live ssh session; the spy swallows the dial
+      tab.connected = true;
+      tab._sshConnecting = false;
       TabManager.switchTo(${SC});
       return true;
     })()`);
@@ -5609,14 +5613,19 @@ async function main() {
       await sleep(120);
       return cdp.eval(`window.__e2eReconnectCalls`);
     }
-    const scOnSsh = await sendCombo('R', 'KeyR', 82, 2 | 8); // Ctrl+Shift+R
+    const scConnected = await sendCombo('R', 'KeyR', 82, 2 | 8); // Ctrl+Shift+R on the live session: no-op
+    await cdp.eval(`(() => { const t = TabManager.tabs.find(x => x.id === ${SC}); t.connected = false; return true; })()`);
+    const scDisconnected = await sendCombo('R', 'KeyR', 82, 2 | 8); // same key on the down session: reconnect
     await cdp.eval(`(() => { const t = TabManager.tabs.find(x => x.id === ${SC}); t.type = 'local'; return true; })()`);
     const scOnLocal = await sendCombo('R', 'KeyR', 82, 2 | 8);
-    check('重连快捷键：Ctrl+Shift+R 仅对 SSH 标签生效', scOnSsh === 1 && scOnLocal === 1, JSON.stringify({ ssh: scOnSsh, local: scOnLocal }));
+    check('重连快捷键：Ctrl+Shift+R 仅对已断开的 SSH 会话生效', scConnected === 0 && scDisconnected === 1 && scOnLocal === 1, JSON.stringify({ connected: scConnected, disconnected: scDisconnected, local: scOnLocal }));
     // Rebind to Ctrl+Win+R through the config object (the capture UI is unit
-    // covered; here the live matcher must honor the new combo exactly).
+    // covered; here the live matcher must honor the new combo exactly). The
+    // tab stays a DISCONNECTED ssh session so the keyboard guard passes and
+    // only the combo matching is under test.
     await cdp.eval(`(() => {
-      const t = TabManager.tabs.find(x => x.id === ${SC}); t.type = 'ssh';
+      const t = TabManager.tabs.find(x => x.id === ${SC});
+      t.type = 'ssh'; t.connected = false; t._sshConnecting = false;
       _settingsConfig.shortcuts = { ...(_settingsConfig.shortcuts || {}), reconnectTab: 'Ctrl+Win+R' };
       persistSettings();
       return true;
@@ -5638,7 +5647,7 @@ async function main() {
     await cdp.eval(`(() => {
       TabManager.reconnectTab = window.__e2eOrigReconnect;
       const t = TabManager.tabs.find(x => x.id === ${SC});
-      if (t) { t.type = 'local'; }
+      if (t) { t.type = 'local'; t.connected = true; t._sshConnecting = false; }
       if (_settingsConfig.shortcuts) { delete _settingsConfig.shortcuts.reconnectTab; persistSettings(); }
       try { TabManager.closeTab(${SC}); } catch (e) {}
       return true;

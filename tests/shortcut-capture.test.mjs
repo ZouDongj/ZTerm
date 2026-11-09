@@ -14,7 +14,11 @@ const source = fs.readFileSync(new URL('../src/renderer/shortcuts.js', import.me
 // Loads the REAL shortcut-utils.js + shortcuts.js in one VM; faked is only the
 // environment (document listener registry, ipcRenderer recording bus, toasts).
 // document.getElementById resolves a bare shortcuts-table so the post-cancel
-// re-render (which restores the edit button label) is observable.
+// re-render (which restores the edit button label) is observable. The globals
+// the reconnectTab action reads from earlier page scripts (getAllPanes from
+// split-layout.js, _paneReconnectWanted from tabs.js) are provided as mirrors
+// of the real predicate; the full-path behavior against the real tabs.js is
+// pinned by tests/issue37-reconnect-shortcut-guard.test.mjs.
 function fixture() {
     const listeners = new Map(); // `${type}:${capture ? 'c' : 'b'}` -> [fn]
     const sends = [];
@@ -43,6 +47,8 @@ function fixture() {
         escHtml: s => String(s),
         Icons: { iconSvg: () => '' },
         TabManager: { tabs: [], getActive: () => null },
+        getAllPanes: () => [],
+        _paneReconnectWanted: t => !!(t && t.type === 'ssh' && t.connected === false && !t._sshConnecting),
     };
     context.window = context;
     vm.createContext(context);
@@ -367,10 +373,14 @@ test('legacy stored bindings (recorded before Win existed) keep firing unchanged
     assert.equal(withWin.defaultPrevented, undefined, 'Ctrl+Win+W is a different combo and falls through');
 });
 
-// ── reconnectTab action (issue #19) ──
-// Default Ctrl+Shift+R reconnects the ACTIVE tab when it is an SSH tab;
-// local/settings tabs and open overlays no-op (the key is still consumed —
-// same dispatcher idiom as closeTab on a settings tab).
+// ── reconnectTab action (issues #19 + #37) ──
+// Default Ctrl+Shift+R reconnects the ACTIVE tab when it is an SSH tab whose
+// session is already DOWN (issue #37 gates only the KEYBOARD dispatch path: a
+// live session must not be interrupted by a bound key). Direct invocations
+// without the keyboard flag — the command palette entry — keep the original
+// force semantics; local/settings tabs and open overlays no-op either way
+// (the key is still consumed — same dispatcher idiom as closeTab on a
+// settings tab).
 
 function reconnectFixture(activeTab) {
     const f = fixture();
@@ -383,13 +393,33 @@ function reconnectFixture(activeTab) {
     return { f, calls };
 }
 
-test('reconnectTab default Ctrl+Shift+R reconnects the active SSH tab', () => {
-    const { f, calls } = reconnectFixture({ id: 'ssh1', type: 'ssh' });
+// The state every reconnecting case below stages: an SSH session that is
+// explicitly down and not mid-connect (the pane-header offer predicate).
+const DOWN_SSH = { id: 'ssh1', type: 'ssh', connected: false, _sshConnecting: false };
+
+test('reconnectTab default Ctrl+Shift+R reconnects the active DISCONNECTED SSH tab', () => {
+    const { f, calls } = reconnectFixture(DOWN_SSH);
     assert.equal(f.context._getShortcutBindings().reconnectTab, 'Ctrl+Shift+R', 'registry default');
 
     const ev = f.keydown({ key: 'r', ctrlKey: true, shiftKey: true, target: XTERM_TARGET });
     assert.equal(ev.defaultPrevented, true, 'the combo is consumed');
     assert.deepEqual(calls, ['ssh1'], 'TabManager.reconnectTab ran for the active tab');
+});
+
+test('reconnectTab (issue #37) no-ops on a CONNECTED SSH tab (key stays consumed)', () => {
+    const { f, calls } = reconnectFixture({ id: 'ssh1', type: 'ssh', connected: true });
+    const ev = f.keydown({ key: 'r', ctrlKey: true, shiftKey: true, target: XTERM_TARGET });
+    assert.equal(ev.defaultPrevented, true, 'the bound combo is still consumed');
+    assert.deepEqual(calls, [], 'the live session was not interrupted');
+});
+
+test('reconnectTab invoked without the keyboard flag (palette shape) still force-reconnects a CONNECTED tab', () => {
+    const { f, calls } = reconnectFixture({ id: 'ssh1', type: 'ssh', connected: true });
+    // What command-palette.js calls (paletteClickItem / paletteKeyDown Enter):
+    // the bare action, no arguments — issue #37 gates only the KEYBOARD
+    // dispatch path, so the explicit palette command keeps force semantics.
+    vm.runInContext('SHORTCUT_ACTIONS.reconnectTab()', f.context);
+    assert.deepEqual(calls, ['ssh1'], 'the palette-shaped invocation force-reconnected the live session');
 });
 
 test('reconnectTab no-ops on local and settings tabs (key stays consumed)', () => {
@@ -402,7 +432,7 @@ test('reconnectTab no-ops on local and settings tabs (key stays consumed)', () =
 });
 
 test('reconnectTab no-ops while an overlay is open', () => {
-    const { f, calls } = reconnectFixture({ id: 'ssh1', type: 'ssh' });
+    const { f, calls } = reconnectFixture(DOWN_SSH);
     f.context.document.querySelector = sel => (sel === '.overlay.open' ? {} : null);
     f.keydown({ key: 'r', ctrlKey: true, shiftKey: true, target: XTERM_TARGET });
     assert.deepEqual(calls, [], 'the open overlay owns the keyboard');

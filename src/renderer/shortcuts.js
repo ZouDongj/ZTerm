@@ -186,14 +186,28 @@ const SHORTCUT_ACTIONS = {
             TabManager.cloneTab(tab.id);
         }
     },
-    reconnectTab: () => {
+    reconnectTab: (fromKeyboard) => {
         // Only SSH tabs have a session to reconnect; local/settings tabs no-op
         // (TabManager.reconnectTab guards the same way). An open overlay owns
-        // the keyboard, same rule as cloneTab.
+        // the keyboard, same rule as cloneTab. Direct callers (the command
+        // palette entry) get the original FORCE semantics: an explicitly
+        // picked command may intentionally drop a live session. The keyboard
+        // dispatcher passes fromKeyboard=true, and issue #37 gates only that
+        // path — a bound key is a reconnect gesture, so the TARGET session
+        // must already be down: the focused pane in a split, the tab itself
+        // otherwise (the same target TabManager.reconnectTab routes to).
+        // _paneReconnectWanted is the pane-header offer predicate (SSH type +
+        // explicitly disconnected + not connecting); a non-split tab carries
+        // the same field family, so it decides both shapes. The mouse buttons
+        // (tab-strip force button / pane-header) call into TabManager
+        // directly and are unaffected either way.
         const tab = TabManager.getActive();
-        if (tab && tab.type === 'ssh' && !document.querySelector('.overlay.open')) {
-            TabManager.reconnectTab(tab.id);
+        if (!tab || tab.type !== 'ssh' || document.querySelector('.overlay.open')) return;
+        if (fromKeyboard) {
+            const target = tab.splitRoot ? getAllPanes(tab).find(p => p.focused) : tab;
+            if (!target || !_paneReconnectWanted(target)) return;
         }
+        TabManager.reconnectTab(tab.id);
     },
     'toggle-statusbar': () => {
         // Show/hide bottom status bar; feedback toast names the CURRENT binding
@@ -1027,6 +1041,10 @@ document.addEventListener('keydown', e => {
     const actionId = Object.keys(bindings).find(id => bindings[id] === combo);
     if (!actionId || !SHORTCUT_ACTIONS[actionId]) return;
     e.preventDefault(); e.stopPropagation();
-    SHORTCUT_ACTIONS[actionId]();
+    // Keyboard-origin flag: the only caller that distinguishes dispatch
+    // provenance today is reconnectTab (issue #37) — a bound key reconnects
+    // only an already-down session, while direct action callers (command
+    // palette) keep force semantics. Every other action ignores the flag.
+    SHORTCUT_ACTIONS[actionId](true);
 }, true);
 
