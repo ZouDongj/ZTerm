@@ -102,7 +102,14 @@
           block.push(text);
           return '';
         }
-        return text; // oversized block: give up on post-processing
+        // Oversized block: flush what is buffered (plus this token) in stream
+        // order and give up on post-processing for the rest of the block —
+        // emitting the overflow ahead of the buffered prefix would reorder
+        // the stream. block=null keeps the remainder a direct passthrough
+        // until the closing SYNC_END.
+        const flushed = block.join('') + text;
+        block = null;
+        return flushed;
       }
       return text;
     }
