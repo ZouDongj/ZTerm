@@ -8389,10 +8389,17 @@ mod tests {
     }
 
     struct SftpTestServer {
-        serve_sftp: bool,
+        serve_sftp: Arc<std::sync::atomic::AtomicBool>,
+        subsystem_requests: Arc<std::sync::atomic::AtomicUsize>,
         allow_channel: bool,
         root: PathBuf,
         channels: HashMap<russh::ChannelId, russh::Channel<russh::server::Msg>>,
+    }
+
+    struct SftpTestFixture {
+        handle: russh::client::Handle<NoCheckClient>,
+        serve_sftp: Arc<std::sync::atomic::AtomicBool>,
+        subsystem_requests: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     #[derive(Clone, Copy)]
@@ -8882,7 +8889,11 @@ mod tests {
             name: &str,
             session: &mut russh::server::Session,
         ) -> Result<(), Self::Error> {
-            if name == "sftp" && self.serve_sftp {
+            if name == "sftp" {
+                self.subsystem_requests
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if name == "sftp" && self.serve_sftp.load(std::sync::atomic::Ordering::Relaxed) {
                 match self.channels.remove(&channel_id) {
                     Some(ch) => {
                         let root = self.root.clone();
@@ -8906,11 +8917,11 @@ mod tests {
         }
     }
 
-    async fn ssh_test_handle(
+    async fn ssh_test_fixture(
         serve_sftp: bool,
         allow_channel: bool,
         root: PathBuf,
-    ) -> russh::client::Handle<NoCheckClient> {
+    ) -> SftpTestFixture {
         let host_key =
             russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
                 .unwrap();
@@ -8919,8 +8930,11 @@ mod tests {
             methods: russh::MethodSet::from(&[russh::MethodKind::Password][..]),
             ..Default::default()
         });
+        let serve_sftp = Arc::new(std::sync::atomic::AtomicBool::new(serve_sftp));
+        let subsystem_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let handler = SftpTestServer {
-            serve_sftp,
+            serve_sftp: serve_sftp.clone(),
+            subsystem_requests: subsystem_requests.clone(),
             allow_channel,
             root,
             channels: HashMap::new(),
@@ -8942,7 +8956,21 @@ mod tests {
         .unwrap();
         let auth = handle.authenticate_password("u", "p").await.unwrap();
         assert!(auth.success());
-        handle
+        SftpTestFixture {
+            handle,
+            serve_sftp,
+            subsystem_requests,
+        }
+    }
+
+    async fn ssh_test_handle(
+        serve_sftp: bool,
+        allow_channel: bool,
+        root: PathBuf,
+    ) -> russh::client::Handle<NoCheckClient> {
+        ssh_test_fixture(serve_sftp, allow_channel, root)
+            .await
+            .handle
     }
 
     #[tokio::test]
@@ -8967,6 +8995,36 @@ mod tests {
         assert!(
             msg.contains("subsystem not enabled"),
             "the toast names the cause: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sftp_channel_recovers_when_the_subsystem_is_enabled_later() {
+        let dir = config_test_dir("sftp-ensure-recovers");
+        let fixture = ssh_test_fixture(false, true, dir.clone()).await;
+        let first = open_sftp_channel_classified(&fixture.handle).await;
+        assert_eq!(first.err().unwrap().0, SftpOpenStage::Subsystem);
+        assert_eq!(
+            fixture
+                .subsystem_requests
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        fixture
+            .serve_sftp
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let recovered = open_sftp_channel_classified(&fixture.handle).await;
+        let sftp = recovered.unwrap_or_else(|e| panic!("second channel must open: {}", e.1));
+        let md = sftp.symlink_metadata(".").await.unwrap();
+        assert!(md.is_dir());
+        assert_eq!(
+            fixture
+                .subsystem_requests
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "recovery opens a fresh channel on the same SSH connection"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

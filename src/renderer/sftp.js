@@ -91,7 +91,9 @@ const SFTP = {
     // open() and updateTarget; never touches the per-tab open set). Restore
     // priority: this session's pin > this session's remembered directory >
     // fresh sftp-open at the remote home.
-    async _bind(tabId) {
+    async _bind(tabId, opts) {
+        const background = !!(opts && opts.refresh);
+        const held = background ? this._holdMkdirRow() : null;
         // tabId here is the main-process tabId, not TabManager's tab id
         this._tabId = tabId;
         // set connection info — pane-aware: a split tab's own tabId is
@@ -117,7 +119,7 @@ const SFTP = {
         this._files = [];
         this._listed = false;
         this._sessionDead = false;
-        this._mkdir = null;
+        this._mkdir = held;
         // A fresh binding starts a new request generation: in-flight requests of
         // the previous binding (even of this same backend after close/reopen) no
         // longer count as loads of this view and cannot re-arm its refreshes.
@@ -128,7 +130,9 @@ const SFTP = {
         this._refreshQueued = null;
         this._refreshInFlight = null;
         document.getElementById('sftp-breadcrumb').innerHTML = `<span class="seg seg-root" title="/" aria-label="根目录">${SFTP_ROOT_ICON}</span>`;
-        document.getElementById('sftp-body').innerHTML = '<div class="sftp-empty">加载中…</div>';
+        const body = document.getElementById('sftp-body');
+        body.innerHTML = '<div class="sftp-empty">加载中…</div>';
+        this._restoreMkdirRow(held, body);
         // Non-modal dock: the terminal keeps the keyboard focus while the
         // panel is open (no focus move on open; close() still refocuses).
         this._setDockVisible(true);
@@ -138,7 +142,7 @@ const SFTP = {
         if (pinBtn) pinBtn.classList.toggle('pinned', this._isPinned(tabId));
         // if this tab is pinned, navigate straight to the pinned directory
         if (this._isPinned(tabId) && this._pinnedPath[tabId]) {
-            await this.navigate(this._pinnedPath[tabId]);
+            await this.navigate(this._pinnedPath[tabId], background ? { refresh: true } : undefined);
             return;
         }
         // Resume the session's remembered directory. Memory is written only
@@ -150,14 +154,14 @@ const SFTP = {
         // back to a fresh sftp-open instead of failing on a dead directory
         // forever.
         if (this._lastPath[tabId]) {
-            await this.navigate(this._lastPath[tabId], { restore: true });
+            await this.navigate(this._lastPath[tabId], { restore: true, refresh: background });
             return;
         }
         // Request sequence + ownership check: the user may switch tabs or close
         // the panel meanwhile; a stale response must not overwrite the current panel state
         const myTab = tabId;
         const seq = ++SFTP._reqSeq;
-        const req = { seq, epoch: this._viewEpoch, user: true };
+        const req = { seq, epoch: this._viewEpoch, user: !background };
         this._viewReq = req;
         try {
             let result;
@@ -188,8 +192,7 @@ const SFTP = {
                 return a.name.localeCompare(b.name);
             });
             this._listed = true;
-            this._renderBreadcrumb();
-            this._renderFiles();
+            this._renderListing(background);
         } finally {
             // Only the latest request of the current binding owns the loading
             // state; a superseded or retired request's finally touches nothing.
@@ -874,6 +877,13 @@ const SFTP = {
     },
 
     async refresh() {
+        if (!this._tabId || this._sessionDead) return;
+        // A failed initial open has no directory to re-list; retry the bind so
+        // the backend resolves home/tracked cwd instead of the placeholder "/".
+        if (!this._listed && this.isOpen) {
+            await this._bind(this._tabId, { refresh: true });
+            return;
+        }
         await this.navigate(this._path, { refresh: true });
     },
 

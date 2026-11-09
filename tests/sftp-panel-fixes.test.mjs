@@ -78,11 +78,13 @@ test('T12: mkdir commit is refused while the listing never loaded, then re-arms 
     assert.ok(vm.toasts.some(t => t.isErr && t.msg.includes('尚未加载')),
         `refusal toast shown: ${JSON.stringify(vm.toasts.map(t => t.msg))}`);
 
-    // Recovery path: a background refresh lands a real listing while the row
-    // stays open, re-arming the snapshot — the retry then commits normally.
+    // Recovery path: a background refresh retries the initial open and lands a
+    // real listing while the row stays open, re-arming the snapshot.
     const r = vm.SFTP.refresh();
     await vm.drain();
-    vm.settle(vm.pending('sftp-readdir')[0], { files: [] });
+    const retry = vm.pending('sftp-open')[0];
+    assert.ok(retry, 'an unlisted panel retries its initial open');
+    vm.settle(retry, { path: '/', files: [] });
     await vm.drain();
     await r;
     assert.ok(vm.ctx.document.getElementById('sftp-mkdir-row'), 'row survives the background refresh');
