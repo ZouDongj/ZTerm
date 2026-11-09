@@ -1614,6 +1614,41 @@ async function main() {
     // the retry token so scheduled retries no-op at fire time, and exhaust the
     // budget so an arriving in-flight error takes the terminal branch (no
     // updateTarget, no new attempt).
+    // Retiring the chain can also race it: when the runner reaches the bump
+    // below while the first automatic retry is still inside its backoff (or
+    // the serialized connect queue), the invalidated token no-ops that retry
+    // before any prepare-execution runs, and cleanup observes prepares=0/
+    // approvals=0 even though the authorized connection failed as designed.
+    // Wait, bounded, for ONE automatic retry to complete its own full cycle —
+    // prepare through the one-use fixture approval, native decision, connect,
+    // second ssh-error from the owned listener — before retiring the chain.
+    // No extra connection is driven manually: the product retry chain is the
+    // only producer of this evidence, and a timeout is a hard failure with
+    // owner/token diagnostics, never a silent pass.
+    const consentRetryReady = await waitForValue(cdp, `(() => {
+      const approval = window.__sshFailApproval;
+      return !!approval && approval.prepares > 0 && approval.approvals > 0 && (window.__sshErrCount || 0) >= 2;
+    })()`, true, 20000);
+    if (consentRetryReady !== true) {
+      const consentRetryState = await cdp.eval(`(() => {
+        const approval = window.__sshFailApproval;
+        const targets = TabManager.tabs.filter(t => t.type === 'ssh' && t.host === '127.0.0.1' && Number(t.port) === ${sshFailureEndpoint.port});
+        return {
+          sshErrCount: window.__sshErrCount || 0,
+          prepares: approval ? approval.prepares : null,
+          approvals: approval ? approval.approvals : null,
+          transportWrapped: !!approval && ipcRenderer.invoke === approval.invoke,
+          tabs: targets.map(t => {
+            const attempt = sshAttempts.ownerAttempt(t);
+            return { tabId: t.tabId || null, retryToken: t._sshRetryToken || 0, retried: t._sshRetried || 0,
+              attemptId: attempt, ownerWants: attempt ? sshAttempts.ownerWants(attempt) === true : false,
+              finalState: attempt ? sshAttempts.finalState(attempt) : null,
+              connecting: t._sshConnecting === true, errored: t._sshErrored === true };
+          }),
+        };
+      })()`).catch(() => null);
+      throw new Error(`Automatic SSH retry did not complete a full failure cycle before cleanup (waited 20s): ${JSON.stringify(consentRetryState)}`);
+    }
     await cdp.eval(`(() => {
       for (const t of TabManager.tabs) {
         t._sshRetryToken = (t._sshRetryToken || 0) + 1;
