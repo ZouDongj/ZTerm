@@ -93,7 +93,8 @@ test('T12: mkdir commit is refused while the listing never loaded, then re-arms 
     const mk = vm.of('sftp-mkdir')[0];
     assert.ok(mk, 'retry commits after the listing landed');
     assert.equal(mk.args.tabId, 'sessA');
-    assert.equal(mk.args.path, '/early', 'commit targets the directory of the landed listing');
+    assert.equal(mk.args.base, '/', 'commit targets the directory of the landed listing');
+    assert.equal(mk.args.name, 'early');
 });
 
 test('T12: a background cwd follow preserves the mkdir input and re-targets its commit', async () => {
@@ -121,7 +122,8 @@ test('T12: a background cwd follow preserves the mkdir input and re-targets its 
     const mk = vm.of('sftp-mkdir')[0];
     assert.ok(mk, 'commit dispatched');
     assert.equal(mk.args.tabId, 'sessA');
-    assert.equal(mk.args.path, '/tmp/followed/newdir', 'commit uses the re-targeted snapshot, not a stale directory');
+    assert.equal(mk.args.base, '/tmp/followed', 'commit uses the re-targeted snapshot, not a stale directory');
+    assert.equal(mk.args.name, 'newdir');
 });
 
 test('T12: a user navigation retires the pending mkdir edit', async () => {

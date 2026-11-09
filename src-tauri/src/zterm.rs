@@ -5904,18 +5904,20 @@ pub async fn sftp_mkdir(
 ) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
     let tab_id = params.get("tabId").and_then(|v| v.as_str()).unwrap_or("");
-    let path = params
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if path.is_empty() {
-        return Ok(json!({ "error": "missing path" }));
-    }
+    // base + name contract: the renderer sends the listed directory and the
+    // RAW typed name; validation sees exactly the user's component and the
+    // join happens only after it passes, so no name — absolute, nested or
+    // parent-escaping — can target anything but a child of the base.
+    let base = params.get("base").and_then(|v| v.as_str()).unwrap_or("");
+    let name =
+        match validate_panel_mkdir_name(params.get("name").and_then(|v| v.as_str()).unwrap_or("")) {
+            Ok(v) => v,
+            Err(m) => return Ok(json!({ "error": m })),
+        };
+    let path = sftp_child_path(base, &name);
     match panel_sftp_op(&state, tab_id, move |sftp| {
         let path = path.clone();
-        async move { sftp.create_dir(path).await.map_err(SftpOpFailure::sftp) }
+        async move { panel_mkdir_op(sftp, path).await }
     })
     .await
     {
@@ -5999,6 +6001,34 @@ fn validate_panel_remove(path: &str) -> Result<String, String> {
     Ok(path.to_string())
 }
 
+/// Mkdir validation — the backend twin of the renderer's single-entry name
+/// rule, applied to the TYPED NAME (the command receives base and name
+/// separately, so validation sees exactly the user's component and the
+/// target is joined only after it passes: no name can smuggle an absolute,
+/// nested or parent-escaping path past this check). A legal name is ONE
+/// component: non-empty, neither "." nor "..", and free of "/" and NUL.
+/// Everything else — inner, leading and trailing spaces, Unicode — is a
+/// legal remote name and travels byte-for-byte; the name is NEVER trimmed
+/// or normalized (unlike rename/remove, whose paths list REAL entries and
+/// stay verbatim per their own contract, everything here is newly typed).
+fn validate_panel_mkdir_name(name: &str) -> Result<String, String> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {
+        return Err("invalid directory name".into());
+    }
+    Ok(name.to_string())
+}
+
+/// Join a panel base and a validated entry name into the mutation target —
+/// the same join the renderer uses for navigation (`base + "/" + name`,
+/// with "/" itself and an absent base carrying no prefix). Purely textual:
+/// the base travels verbatim and nothing is lexically folded.
+fn sftp_child_path(base: &str, name: &str) -> String {
+    match base {
+        "" | "/" => format!("/{name}"),
+        _ => format!("{base}/{name}"),
+    }
+}
+
 /// The panel rename op: one bare SSH_FXP_RENAME, never a shell command.
 /// Renaming onto an existing target fails server-side (OpenSSH semantics),
 /// which is the no-overwrite behavior the renderer's confirmations rely on.
@@ -6010,6 +6040,16 @@ async fn panel_rename_op(
     sftp.rename(old_path, new_path)
         .await
         .map_err(SftpOpFailure::sftp)
+}
+
+/// The panel mkdir op: one bare SSH_FXP_MKDIR of the already-validated and
+/// joined child path, never a shell command; the server refuses a nested
+/// target (MKDIR never recurses) and an existing one.
+async fn panel_mkdir_op(
+    sftp: Arc<russh_sftp::client::SftpSession>,
+    path: String,
+) -> Result<(), SftpOpFailure> {
+    sftp.create_dir(path).await.map_err(SftpOpFailure::sftp)
 }
 
 /// The panel removal op: files remove via REMOVE, directories via RMDIR.
@@ -8173,11 +8213,16 @@ mod tests {
     // sources / remove targets to fail, so finalize's recovery paths can be
     // exercised deterministically. `opens` fails AFTER the file is created
     // server-side — the dropped-reply shape of an init dying mid-open.
+    // `mkdirs` is not a failure arm: it records the exact MKDIR path strings
+    // the handler received, the byte-exact protocol evidence mkdir binding
+    // tests assert on (Windows FS normalization strips trailing spaces from
+    // on-disk names, so the disk alone is not a faithful witness).
     #[derive(Clone, Default)]
     struct SftpFailures {
         renames: Arc<Mutex<Vec<String>>>,
         removes: Arc<Mutex<Vec<String>>>,
         opens: Arc<Mutex<Vec<String>>>,
+        mkdirs: Arc<Mutex<Vec<String>>>,
     }
 
     impl SftpFailures {
@@ -8203,6 +8248,14 @@ mod tests {
 
         fn blocks_remove(&self, filename: &str) -> bool {
             self.removes.lock().iter().any(|p| p == filename)
+        }
+
+        fn record_mkdir(&self, path: &str) {
+            self.mkdirs.lock().push(path.to_string());
+        }
+
+        fn mkdir_calls(&self) -> Vec<String> {
+            self.mkdirs.lock().clone()
         }
     }
 
@@ -8330,6 +8383,18 @@ mod tests {
             // the server-side refusal (bare RMDIR never recurses) that the
             // panel's empty-directory contract surfaces to the user.
             std::fs::remove_dir(self.path(&path))
+                .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
+            Ok(sftp_ok_status(id))
+        }
+
+        async fn mkdir(
+            &mut self,
+            id: u32,
+            path: String,
+            _attrs: russh_sftp::protocol::FileAttributes,
+        ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            self.failures.record_mkdir(&path);
+            std::fs::create_dir(self.path(&path))
                 .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
             Ok(sftp_ok_status(id))
         }
@@ -9427,6 +9492,128 @@ mod tests {
         for alias in ["/", "//", "/.", "/..", "/a/.."] {
             assert!(validate_panel_remove(alias).is_err(), "path={alias}");
         }
+    }
+
+    #[test]
+    fn panel_mkdir_name_validation_refuses_illegal_components() {
+        // The command receives the TYPED NAME alone (base travels
+        // separately), so these are exactly the shapes a crafted name can
+        // take: a slash — nested "a/b" (MKDIR never recurses), an escape
+        // "../x" or an absolute "/abs" — is refused before any join happens,
+        // "." and ".." are not named entries, "" is no name at all, and NUL
+        // is not a legal filename byte.
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "../x",
+            "/abs",
+            "x/y/z",
+            "a\0b",
+            "\0",
+        ] {
+            assert!(
+                validate_panel_mkdir_name(bad).is_err(),
+                "name={bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn panel_mkdir_name_validation_passes_spaces_and_unicode_verbatim() {
+        // NO trimming, anywhere: leading, trailing and pure-space names are
+        // legal single components (`dir`, ` dir`, `dir ` and `   ` are four
+        // different remote directories), and Unicode/dotfile names pass
+        // byte-for-byte. The rule never rewrites what it accepts.
+        for legal in [
+            "dir",
+            "my dir",
+            "数据 夹",
+            ".hidden",
+            "  padded  ",
+            "   ",
+            " dir",
+            "dir ",
+            "100%load",
+        ] {
+            assert_eq!(
+                validate_panel_mkdir_name(legal).unwrap(),
+                legal,
+                "name={legal:?} must pass untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn panel_mkdir_join_composes_base_and_name_without_normalization() {
+        // The join mirrors the renderer's `_childPath`: "/" (and an absent
+        // base) carries no prefix, everything else is a verbatim
+        // base + "/" + name. No lexical folding — a base already ending in
+        // "/" keeps its double slash and the server reads it as-is.
+        assert_eq!(sftp_child_path("/srv/app", "x"), "/srv/app/x");
+        assert_eq!(sftp_child_path("/", "early"), "/early");
+        assert_eq!(sftp_child_path("", "early"), "/early");
+        assert_eq!(
+            sftp_child_path("/srv/app", "  padded  "),
+            "/srv/app/  padded  "
+        );
+        assert_eq!(sftp_child_path("/srv/my app", "数据 夹"), "/srv/my app/数据 夹");
+        assert_eq!(sftp_child_path("/srv/app/", "x"), "/srv/app//x");
+    }
+
+    #[tokio::test]
+    async fn panel_mkdir_binds_validated_names_to_the_base_through_the_protocol() {
+        // The full command seam minus the Tauri state: validate the typed
+        // name, join the base, run the op — then assert the REAL protocol
+        // path the server received. Spaces (leading, trailing, pure) are
+        // asserted at the protocol layer because Windows FS normalization
+        // strips trailing spaces from on-disk names, so the disk alone
+        // cannot witness byte-exactness.
+        let dir = config_test_dir("sftp-panel-mkdir-bind");
+        let (session, failures) = test_sftp_session(dir.clone()).await;
+        let sftp: Arc<russh_sftp::client::SftpSession> = Arc::new(session);
+        std::fs::create_dir_all(dir.join("srv/app")).unwrap();
+        let base = "srv/app";
+        for name in ["dir", "  padded  ", "数据 夹", ".hidden", "   "] {
+            let validated = validate_panel_mkdir_name(name)
+                .unwrap_or_else(|_| panic!("legal name {name:?} refused"));
+            assert_eq!(validated, name, "validation never rewrites the name");
+            panel_mkdir_op(sftp.clone(), sftp_child_path(base, &validated))
+                .await
+                .unwrap_or_else(|e| panic!("mkdir {name:?} failed: {}", e.message));
+            assert_eq!(
+                failures.mkdir_calls().last(),
+                Some(&format!("{base}/{name}")),
+                "the protocol carried the composed path byte-for-byte"
+            );
+        }
+        // The op really executes server-side (trailing-space-free witnesses).
+        assert!(dir.join("srv/app/dir").is_dir());
+        assert!(dir.join("srv/app/数据 夹").is_dir());
+        assert!(dir.join("srv/app/.hidden").is_dir());
+        // Nothing was created outside the base — an escape cannot even be
+        // EXPRESSED through this contract (see the dotdot control below for
+        // what a forwarded ".." would do at the protocol layer).
+        assert!(!dir.join("srv/..anything").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn panel_mkdir_dotdot_would_escape_at_the_protocol_layer() {
+        // Control documenting WHY the command refuses ".." components: a
+        // server resolves them, and a forwarded "base/../x" lands OUTSIDE
+        // the base the user is looking at (one bare MKDIR, no recursion).
+        let dir = config_test_dir("sftp-panel-mkdir-escape");
+        let (sftp, _failures) = test_sftp_session(dir.clone()).await;
+        std::fs::create_dir(dir.join("base")).unwrap();
+        sftp.create_dir("base/../escaped").await.unwrap();
+        assert!(dir.join("escaped").exists(), "the forwarded path escapes the base");
+        assert!(
+            !dir.join("base/escaped").exists(),
+            "nothing was created inside the base"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
