@@ -5909,11 +5909,12 @@ pub async fn sftp_mkdir(
     // join happens only after it passes, so no name — absolute, nested or
     // parent-escaping — can target anything but a child of the base.
     let base = params.get("base").and_then(|v| v.as_str()).unwrap_or("");
-    let name =
-        match validate_panel_mkdir_name(params.get("name").and_then(|v| v.as_str()).unwrap_or("")) {
-            Ok(v) => v,
-            Err(m) => return Ok(json!({ "error": m })),
-        };
+    let name = match validate_panel_mkdir_name(
+        params.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+    ) {
+        Ok(v) => v,
+        Err(m) => return Ok(json!({ "error": m })),
+    };
     let path = sftp_child_path(base, &name);
     match panel_sftp_op(&state, tab_id, move |sftp| {
         let path = path.clone();
@@ -9502,17 +9503,7 @@ mod tests {
         // "../x" or an absolute "/abs" — is refused before any join happens,
         // "." and ".." are not named entries, "" is no name at all, and NUL
         // is not a legal filename byte.
-        for bad in [
-            "",
-            ".",
-            "..",
-            "a/b",
-            "../x",
-            "/abs",
-            "x/y/z",
-            "a\0b",
-            "\0",
-        ] {
+        for bad in ["", ".", "..", "a/b", "../x", "/abs", "x/y/z", "a\0b", "\0"] {
             assert!(
                 validate_panel_mkdir_name(bad).is_err(),
                 "name={bad:?} must be refused"
@@ -9558,7 +9549,10 @@ mod tests {
             sftp_child_path("/srv/app", "  padded  "),
             "/srv/app/  padded  "
         );
-        assert_eq!(sftp_child_path("/srv/my app", "数据 夹"), "/srv/my app/数据 夹");
+        assert_eq!(
+            sftp_child_path("/srv/my app", "数据 夹"),
+            "/srv/my app/数据 夹"
+        );
         assert_eq!(sftp_child_path("/srv/app/", "x"), "/srv/app//x");
     }
 
@@ -9608,7 +9602,10 @@ mod tests {
         let (sftp, _failures) = test_sftp_session(dir.clone()).await;
         std::fs::create_dir(dir.join("base")).unwrap();
         sftp.create_dir("base/../escaped").await.unwrap();
-        assert!(dir.join("escaped").exists(), "the forwarded path escapes the base");
+        assert!(
+            dir.join("escaped").exists(),
+            "the forwarded path escapes the base"
+        );
         assert!(
             !dir.join("base/escaped").exists(),
             "nothing was created inside the base"
