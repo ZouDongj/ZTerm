@@ -864,6 +864,7 @@ test('issue #31 parser replay: captured nvim 0.12.6 merged command-line w near t
 for (const [name, input, update, initialTarget] of [
   ['an unchanged target row is navigation even with exact matching input', 'nav', 'nav', 'nav'],
   ['reordered input cannot classify a cross-row command-line run', 'w:', ':w', 'zz'],
+  ['reordered input cannot classify a cross-row search command-line run', 'f/', '/f', 'zz'],
   ['a single-codepoint cross-row rewrite stays ambiguous', 'x', 'x', 'y'],
 ]) {
   test(`issue #31 cross-row echo guard: ${name}`, async t => {
@@ -928,6 +929,142 @@ test('issue #31 cross-row echo guard: a stale target-row baseline fails closed',
   assert.equal(f.source.buffer.active.getLine(33).translateToString(true), ':w');
   assert.equal(moving.drawPassStatus, 'base+rectangle+glyph');
   assert.ok(moving.glyphDrawPasses > 0, 'fresh cells and input cannot revive an expired row baseline');
+});
+
+// ── PR40 review: real nvim 0.12.6 command-line capture ──
+// tests/fixtures/pr40-nvim-cmdline-capture.json holds a genuine per-pty-read
+// event capture of nvim 0.12.6 (80x24, `-u NONE -i NONE -n`, synthetic
+// L01..L26 buffer): every output entry is one pty read exactly as the
+// terminal received it. The replay below feeds those chunks verbatim through
+// the real parser + IPC + observer + adapter seam, with the capture's input
+// events mirrored into noteInput and inter-event settle renders modeling the
+// 500-700ms gaps between real keystrokes. Section names refer to the
+// capture's input labels; the caret sits on the last text row, two rows
+// above the command line, so every command-line hop is a real slide.
+const nvimCmdlineCapture = JSON.parse(readFileSync(new URL('./fixtures/pr40-nvim-cmdline-capture.json', import.meta.url), 'utf8'));
+
+async function replayNvimCmdlineCapture(t, { through, inputOverride } = {}) {
+  const f = ipcParserFixture(t, { cols: nvimCmdlineCapture.cols, rows: nvimCmdlineCapture.rows, reduced: false });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  let time = 0;
+  let section = 'startup';
+  const sections = new Map();
+  for (const event of nvimCmdlineCapture.events) {
+    if (event.kind === 'input') {
+      if (section === through) break;
+      section = event.name;
+      f.adapter.noteInput(inputOverride && inputOverride(event) !== undefined
+        ? inputOverride(event) : event.data);
+      continue;
+    }
+    time += 50;
+    f.setTime(time);
+    const before = f.adapter.snapshot();
+    await f.write(event.data);
+    const after = f.adapter.snapshot();
+    // Count glyph passes only while the slide is in flight (the retarget
+    // frame plus one mid-slide draw). The settled frame afterwards inverts
+    // the cell under the resting caret by design — steady-state look, not
+    // the slide flash these tests police.
+    let glyphDelta = after.counters.glyphDrawPasses - before.counters.glyphDrawPasses;
+    if (after.animationActive && !f.source._core.coreService.isCursorHidden) {
+      time += 40;
+      f.setTime(time);
+      render(f);
+      glyphDelta = f.adapter.snapshot().counters.glyphDrawPasses - before.counters.glyphDrawPasses;
+      time += 150;
+      f.setTime(time);
+      render(f);
+    } else if (!f.source._core.coreService.isCursorHidden) {
+      time += 150;
+      f.setTime(time);
+      render(f);
+    }
+    const entry = {
+      status: after.drawPassStatus,
+      glyphDelta,
+      animationActive: after.animationActive,
+      target: after.target ? { ...after.target } : null,
+      cursorX: f.source.buffer.active.cursorX,
+      cmdline: f.source.buffer.active.getLine(nvimCmdlineCapture.rows - 1).translateToString(true),
+    };
+    if (after.retargets.length > before.retargets.length) {
+      const list = sections.get(section) || [];
+      list.push(entry);
+      sections.set(section, list);
+    }
+  }
+  return { f, sections };
+}
+
+function soleRetarget(sections, section) {
+  const frames = sections.get(section);
+  assert.ok(frames, `the capture's ${section} section must produce a retarget`);
+  assert.equal(frames.length, 1, `the ${section} section must produce exactly one retarget`);
+  return frames[0];
+}
+
+for (const [section, text] of [
+  ['search-fwd-merged', '/f'], ['search-back-merged', '?b'], ['colon-merged', ':x'],
+]) {
+  test(`pr40 nvim 0.12.6 capture: merged ${text} command-line entry replays as typing echo`, async t => {
+    const { sections } = await replayNvimCmdlineCapture(t, { through: section });
+    const m = soleRetarget(sections, section);
+    assert.equal(m.animationActive, true);
+    assert.deepEqual(m.target, { x: 2, y: nvimCmdlineCapture.rows - 1 });
+    assert.ok(m.cmdline.startsWith(text), `command line must start with ${text}`);
+    assert.equal(m.status, 'base+rectangle');
+    assert.equal(m.glyphDelta, 0, `no ${text} command-line character may enter the inverse glyph pass`);
+  });
+}
+
+for (const [section, lead] of [
+  ['search-fwd-lead', '/'], ['search-back-lead', '?'], ['colon-lead', ':'],
+]) {
+  test(`pr40 nvim 0.12.6 capture: bare ${lead} lead keystroke (single-codepoint run) replays as typing echo`, async t => {
+    const { sections } = await replayNvimCmdlineCapture(t, { through: section });
+    const m = soleRetarget(sections, section);
+    assert.equal(m.animationActive, true);
+    assert.deepEqual(m.target, { x: 1, y: nvimCmdlineCapture.rows - 1 });
+    assert.ok(m.cmdline.startsWith(lead), `command line must start with ${lead}`);
+    assert.equal(m.status, 'base+rectangle');
+    assert.equal(m.glyphDelta, 0, `the bare ${lead} command-line opener must not invert during the slide`);
+  });
+}
+
+test('pr40 nvim 0.12.6 capture: per-keystroke second char keeps the plain echo slide', async t => {
+  const { sections } = await replayNvimCmdlineCapture(t, { through: 'search-fwd-char' });
+  const m = soleRetarget(sections, 'search-fwd-char');
+  assert.equal(m.animationActive, true);
+  assert.ok(m.cmdline.startsWith('/o'));
+  assert.equal(m.status, 'base+rectangle');
+  assert.equal(m.glyphDelta, 0);
+});
+
+test('pr40 nvim 0.12.6 capture: a bare / lead with non-matching input stays navigation', async t => {
+  // Exact-input guard for the single-codepoint positive: the same captured
+  // '/' frame, but the keystroke was not '/'.
+  const { sections } = await replayNvimCmdlineCapture(t, {
+    through: 'search-fwd-lead',
+    inputOverride: event => (event.name === 'search-fwd-lead' ? 'l' : undefined),
+  });
+  const m = soleRetarget(sections, 'search-fwd-lead');
+  assert.ok(m.cmdline.startsWith('/'));
+  assert.equal(m.status, 'base+rectangle+glyph');
+  assert.ok(m.glyphDelta > 0, 'an input mismatch must keep the inverted glyph pass');
+});
+
+test('pr40 nvim 0.12.6 capture: ESC cancel slides back to the text row with inversion kept', async t => {
+  const { sections } = await replayNvimCmdlineCapture(t, { through: 'search-fwd-esc' });
+  const m = soleRetarget(sections, 'search-fwd-esc');
+  assert.equal(m.animationActive, true);
+  assert.deepEqual(m.target, { x: 0, y: 21 });
+  assert.equal(m.status, 'base+rectangle+glyph');
+  assert.ok(m.glyphDelta > 0, 'leaving the command line inverts the status text it slides across');
 });
 
 // ── issue #31 chunk-evidence classification ──
@@ -1140,6 +1277,64 @@ test('issue #31 chunk evidence stays gated to the alternate buffer (normal buffe
   f.adapter.noteInput('e');
   const moving2 = await drawNvimProtocolFrame(f, [editorFrame('\x1b[1;4He\x1b[1;5H')]);
   assert.equal(moving2.drawPassStatus, 'base+rectangle');
+});
+
+// PR40 review: the row-text snapshot in noteChunkWrites reads EVERY column of
+// the written row. That evidence only feeds the alternate-buffer protocol
+// echo path, so a chunk-write report on the normal buffer must not touch the
+// buffer at all — count loadCell reads inside the _inkFeed window (observer
+// chunk-write reporting, strictly before xterm parses the chunk; nothing else
+// reads the buffer there).
+test('pr40 review: chunk write reports never read the whole row on the normal buffer', async t => {
+  const f = ipcParserFixture(t, { cols: 80, rows: 24, reduced: false });
+  Object.defineProperty(f.coreService, 'isCursorHidden', {
+    get: () => f.source._core.coreService.isCursorHidden,
+    set: value => { f.source._core.coreService.isCursorHidden = value; },
+  });
+  f.adapter.setCursorStyle('block');
+  await f.write('\x1b[1;1Hab'); // normal buffer, no ?1049h
+  render(f);
+  assert.equal(f.source.buffer.active.type, 'normal');
+  const instrumented = new WeakSet();
+  const reads = { loadCells: 0 };
+  const instrument = () => {
+    const lines = f.source._core.buffer.lines;
+    if (!lines || typeof lines.get !== 'function' || instrumented.has(lines)) return;
+    instrumented.add(lines);
+    const originalGet = lines.get;
+    lines.get = function countedGet(index) {
+      const line = originalGet.call(this, index);
+      if (line && typeof line.loadCell === 'function' && !instrumented.has(line)) {
+        instrumented.add(line);
+        const originalLoadCell = line.loadCell;
+        line.loadCell = function countedLoadCell(x, cell) {
+          reads.loadCells += 1;
+          return originalLoadCell.call(this, x, cell);
+        };
+      }
+      return line;
+    };
+  };
+  const feedChunk = async chunk => {
+    instrument();
+    reads.loadCells = 0;
+    const ink = f.context._inkFeed(f.owner, f.owner, null, chunk);
+    const feedReads = reads.loadCells;
+    await new Promise(resolve => f.source.write(chunk, () => { f.context._outputParsed(f.owner, ink)(); resolve(); }));
+    render(f);
+    return feedReads;
+  };
+  const chunk = '\x1b[24;1Hxy'; // small chunk writing column zero of the last row
+  assert.equal(await feedChunk(chunk), 0,
+    'a normal-buffer chunk-write report must not loadCell-scan the written row');
+
+  // Control: the same chunk on the alternate buffer still snapshots exactly
+  // the one whole target row (the echo path that consumes the evidence).
+  await f.write('\x1b[?1049h');
+  render(f);
+  assert.equal(f.source.buffer.active.type, 'alternate');
+  assert.equal(await feedChunk(chunk), f.source.cols,
+    'the alternate buffer snapshots exactly one whole target row');
 });
 
 test('issue #31 chunk evidence never classifies the software caret (credits still own that path)', () => {

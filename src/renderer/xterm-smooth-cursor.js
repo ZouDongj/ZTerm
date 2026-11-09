@@ -331,8 +331,12 @@
       // This callback runs before xterm parses the chunk. Preserve the prior
       // text only for small chunks that write column zero: a cross-row echo
       // must later prove that its target row changed, not merely that it was
-      // rewritten with the same characters during navigation.
-      if (info.cells.length > 0 && info.cells.length <= ECHO_INPUT_QUEUE_MAX) {
+      // rewritten with the same characters during navigation. The snapshot
+      // loads every column of the row, so it is alternate-buffer only — the
+      // one buffer whose protocol-cursor echo path consumes row-text
+      // evidence; the normal buffer keeps the time window and must never pay
+      // for a whole-line read here.
+      if (bufferType === 'alternate' && info.cells.length > 0 && info.cells.length <= ECHO_INPUT_QUEUE_MAX) {
         const rows = new Set();
         for (const cell of info.cells) {
           if (Array.isArray(cell) && cell.length >= 4 && cell[1] === 0) rows.add(cell[0]);
@@ -424,9 +428,16 @@
     // Cross-row merged input lands at the target row instead of the vacated
     // cell (nvim's coalesced command-line entry). A changed target row with a
     // fresh contiguous write from column zero to the caret is applicable rich
-    // evidence. Only colon-led command lines have a verified positive shape;
-    // every other cross-row printable run, including normal-mode commands
-    // such as 2j, remains navigation even when the input exactly matches.
+    // evidence. Only ex/search command lines have verified positive shapes —
+    // ':' , '/' and '?' (captured nvim 0.12.6: the merged multi-char entry
+    // AND the bare first keystroke, a single-codepoint run at column zero) —
+    // every vi-lineage editor renders them identically: the lead char at
+    // column zero plus the typed pattern. The exact ordered input match is
+    // still required, so a single-codepoint positive needs the user to have
+    // typed exactly that lead. Every other cross-row printable run, including
+    // normal-mode commands such as 2j, remains navigation even when the input
+    // exactly matches.
+    const ECHO_TARGET_RUN_LEADS = new Set([':', '/', '?']);
     function classifyTargetRunEcho(target) {
       if (target.y === lastTarget.y || target.x === 0) return null;
       const first = echoChunkCells.get(target.y + ':0');
@@ -448,7 +459,7 @@
         run.push(entry.char);
         x += Math.max(1, parsed.width);
       }
-      if (x !== target.x || run.length < 2 || run[0] !== ':') return 'nav';
+      if (x !== target.x || !ECHO_TARGET_RUN_LEADS.has(run[0])) return 'nav';
       return consumeInputRun(run) ? 'echo' : 'nav';
     }
 
