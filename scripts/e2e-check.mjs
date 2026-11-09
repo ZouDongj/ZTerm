@@ -502,6 +502,407 @@ async function main() {
     // sessions were protected on disk before launch by startApp().
     await installIsolatedShellGuard(cdp);
 
+    // Configuration values must remain inert through the real WebView2 HTML
+    // parser and event dispatcher. The focused mode keeps this rendering check
+    // independent from the longer native interaction suite.
+    const rendererConfigIds = { complex: 'legacy \' " < > \t\n 雪 😀 &' };
+    const rendererConfigSecurity = await cdp.eval(`(async () => {
+      const ids = ${JSON.stringify(rendererConfigIds)};
+      const probe = window.__rendererConfigProbe = { quick: [], local: [] };
+      const original = {
+        highlight: _highlightRules,
+        quick: _qcCommands,
+        profiles: TabManager.profiles,
+        sshProfiles: TabManager.sshProfiles,
+        settings: _settingsConfig,
+        executeQuickCommand,
+        persistSettings,
+        syncOsc52: typeof _syncOsc52Permission === 'function' ? _syncOsc52Permission : null,
+        createTab: TabManager.createTab,
+      };
+      const eventAttributes = root => [...root.querySelectorAll('*')].flatMap(el =>
+        [...el.attributes].map(a => a.name)).filter(name => /^on/.test(name));
+      let outcome;
+      try {
+        _highlightRules = [{ id: ids.complex, text: 'rule', enabled: true }];
+        renderHighlightRulesList();
+        const highlightRoot = document.getElementById('highlight-rules-list');
+        const highlightDomSafe = eventAttributes(highlightRoot).length === 0;
+        highlightRoot.querySelector('.ssh-item-info').click();
+        const highlightAction = _editingHLId === ids.complex
+          && document.getElementById('hl-edit-text').value === 'rule';
+        closeHighlightEdit();
+
+        executeQuickCommand = cmd => probe.quick.push(cmd);
+        _qcCommands = [{ id: ids.complex, name: ids.complex, command: 'echo safe', group: ids.complex }];
+        qcFilter();
+        const quickRoot = document.getElementById('qc-list');
+        const quickDomSafe = eventAttributes(quickRoot).length === 0;
+        quickRoot.querySelector('.v3-item').click();
+        const quickAction = probe.quick.length === 1 && probe.quick[0].id === ids.complex;
+        renderQCCommandsList();
+        document.querySelector('#qc-commands-list .ssh-mgr-identity').click();
+        const quickSettingsAction = _editingQCId === ids.complex;
+        closeQCEdit();
+
+        TabManager.profiles = [{ id: ids.complex, name: ids.complex, command: 'powershell.exe', args: ['-NoProfile'] }];
+        loadSettingsIntoForm();
+        const profileRoot = document.getElementById('shell-visibility-list');
+        const toggle = document.getElementById('toggle-shell-' + ids.complex);
+        const profileDomSafe = !!toggle && eventAttributes(profileRoot).length === 0;
+        persistSettings = () => Promise.resolve();
+        _syncOsc52Permission = () => {};
+        toggle?.click();
+        const profileAction = (_settingsConfig.hiddenProfiles || []).includes(ids.complex);
+
+        TabManager.sshProfiles = [{
+          id: ids.complex, name: ids.complex, host: '127.0.0.1', port: 22,
+          username: 'probe', group: ids.complex, loginScripts: [],
+        }];
+        renderSSHManagerInto(document.getElementById('ssh-manager-list'), _sshMgrView('ssh-manager-list'));
+        document.querySelector('#ssh-manager-list .ssh-mgr-identity').click();
+        const sshAction = _editingSSHId === ids.complex;
+        closeSSHEdit();
+        clearLoginScripts();
+        const scriptValue = ids.complex.replaceAll(String.fromCharCode(13), '').replaceAll(String.fromCharCode(10), '');
+        addLoginScriptRow(scriptValue, scriptValue, false, false);
+        const loginScriptRoundTrip = document.querySelector('#login-scripts-container .ls-expect').value === scriptValue
+          && document.querySelector('#login-scripts-container .ls-send').value === scriptValue;
+
+        _settingsConfig.hiddenProfiles = [];
+        renderSessionList('');
+        TabManager.createTab = options => { probe.local.push(options); return 'probe-tab'; };
+        const localRow = [...document.querySelectorAll('#sessions-list .ss-row')]
+          .find(row => row.dataset.id === 'local_' + ids.complex);
+        localRow?.click();
+        const sessionAction = probe.local.length === 1 && probe.local[0].command === 'powershell.exe';
+        outcome = {
+          highlightDomSafe, quickDomSafe, profileDomSafe,
+          highlightAction, quickAction, quickSettingsAction, profileAction,
+          sshAction, loginScriptRoundTrip, sessionAction,
+        };
+      } finally {
+        _highlightRules = original.highlight;
+        _qcCommands = original.quick;
+        TabManager.profiles = original.profiles;
+        TabManager.sshProfiles = original.sshProfiles;
+        _settingsConfig = original.settings;
+        executeQuickCommand = original.executeQuickCommand;
+        persistSettings = original.persistSettings;
+        if (original.syncOsc52) _syncOsc52Permission = original.syncOsc52;
+        TabManager.createTab = original.createTab;
+        closeHighlightEdit();
+        closeQCEdit();
+        closeSSHEdit();
+        clearLoginScripts();
+        renderHighlightRulesList();
+        qcFilter();
+        renderQCCommandsList();
+        renderSSHManager();
+        loadSettingsIntoForm();
+        delete window.__rendererConfigProbe;
+      }
+      return outcome;
+    })()`);
+    const rendererConfigSafe = rendererConfigSecurity
+      && ['highlightDomSafe', 'quickDomSafe', 'profileDomSafe', 'highlightAction',
+        'quickAction', 'quickSettingsAction', 'profileAction', 'sshAction',
+        'loginScriptRoundTrip', 'sessionAction'].every(key => rendererConfigSecurity[key] === true);
+    check('渲染配置：特殊字符 ID 不执行、不逃逸，既有高亮/命令/连接/会话交互保持可用',
+      rendererConfigSafe, JSON.stringify(rendererConfigSecurity));
+
+    const rendererReviewIds = {
+      crlf: 'pair\r\nid', cr: 'pair\rid', lf: 'pair\nid',
+      attackHighlight: "legacy');window.__rendererReviewProbe.executed++;//",
+      attackQuick: "legacy');window.__rendererReviewProbe.executed++;//",
+      attackProfile: 'legacy" data-review-probe="attribute" onmouseover="window.__rendererReviewProbe.executed++" data-tail="',
+      rawExpect: 'first\r\nsecond\nthird\rfourth 雪 😀 &',
+      rawSend: 'send\r\nnext\nlast\rend " < > &',
+      otherExpect: 'other\r\nexpect 雪',
+      otherSend: 'other\nsend 😀',
+    };
+    const rendererReviewSecurity = await cdp.eval(`(async () => {
+      const ids = ${JSON.stringify(rendererReviewIds)};
+      const probe = window.__rendererReviewProbe = { executed: 0, calls: [] };
+      const original = {
+        highlight: _highlightRules, quick: _qcCommands,
+        profiles: TabManager.profiles, sshProfiles: TabManager.sshProfiles,
+        settings: _settingsConfig,
+        editingHighlight: _editingHLId, editingQuick: _editingQCId, editingSsh: _editingSSHId,
+        openHighlightEdit, toggleHighlightRule, deleteHighlightRule, saveHighlightRules,
+        executeQuickCommand, qcSelect, openQCEdit, deleteQC, saveQuickCommands,
+        openSSHEdit, deleteSSHProfile, saveTerminal, persistSettings, showConfirm,
+        syncOsc52: typeof _syncOsc52Permission === 'function' ? _syncOsc52Permission : null,
+        createTab: TabManager.createTab,
+      };
+      const callsFor = name => probe.calls.filter(call => call[0] === name);
+      const resetCalls = () => { probe.calls.length = 0; };
+      const triplet = () => [
+        { id: ids.crlf, name: 'CRLF', text: 'CRLF', command: 'first', enabled: true },
+        { id: ids.cr, name: 'CR', text: 'CR', command: 'second', enabled: true },
+        { id: ids.lf, name: 'LF', text: 'LF', command: 'third', enabled: true },
+      ];
+      let outcome;
+      try {
+        _highlightRules = [{ id: ids.attackHighlight, text: 'probe', enabled: true }];
+        renderHighlightRulesList();
+        document.querySelector('#highlight-rules-list .ssh-item-info').click();
+        _qcCommands = [{ id: ids.attackQuick, name: 'probe', command: 'probe', group: 'probe' }];
+        qcFilter();
+        document.querySelector('#qc-list .v3-item').click();
+        TabManager.profiles = [{ id: ids.attackProfile, name: 'probe', command: 'powershell.exe', args: ['-NoProfile'] }];
+        loadSettingsIntoForm();
+        const injected = document.querySelector('[data-review-probe="attribute"]');
+        injected?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        const executionSentinelZero = probe.executed === 0 && !injected;
+
+        saveHighlightRules = () => {};
+        saveQuickCommands = () => {};
+        persistSettings = () => Promise.resolve();
+        _syncOsc52Permission = () => {};
+        showConfirm = (message, onOk) => onOk();
+        openHighlightEdit = (isNew, id) => {
+          probe.calls.push(['highlightEdit', id]);
+          return original.openHighlightEdit(isNew, id);
+        };
+        toggleHighlightRule = id => {
+          probe.calls.push(['highlightToggle', id]);
+          return original.toggleHighlightRule(id);
+        };
+        deleteHighlightRule = id => {
+          probe.calls.push(['highlightDelete', id]);
+          return original.deleteHighlightRule(id);
+        };
+        executeQuickCommand = cmd => probe.calls.push(['quickRun', cmd.id]);
+        qcSelect = index => {
+          probe.calls.push(['quickSelect', index]);
+          return original.qcSelect(index);
+        };
+        openQCEdit = (isNew, id) => {
+          probe.calls.push(['quickEdit', id]);
+          return original.openQCEdit(isNew, id);
+        };
+        deleteQC = id => {
+          probe.calls.push(['quickDelete', id]);
+          return original.deleteQC(id);
+        };
+        openSSHEdit = (isNew, id) => {
+          probe.calls.push(['sshEdit', id]);
+          return original.openSSHEdit(isNew, id);
+        };
+        deleteSSHProfile = id => {
+          probe.calls.push(['sshDelete', id]);
+          return original.deleteSSHProfile(id);
+        };
+        saveTerminal = () => {
+          probe.calls.push(['profileToggle']);
+          return original.saveTerminal();
+        };
+        TabManager.createTab = options => {
+          probe.calls.push([options.type === 'ssh' ? 'sshConnect' : 'sessionSelect', options.sshProfileId || options.name]);
+          return 'probe-tab';
+        };
+
+        _highlightRules = triplet();
+        renderHighlightRulesList();
+        let rows = [...document.querySelectorAll('#highlight-rules-list .ssh-item')];
+        const highlightIdsExact = rows.map(row => row.dataset.highlightId).join('|') === [ids.crlf, ids.cr, ids.lf].join('|');
+        resetCalls();
+        rows[0].querySelector('.ssh-item-info').click();
+        const highlightEditOnce = callsFor('highlightEdit').length === 1
+          && callsFor('highlightEdit')[0][1] === ids.crlf
+          && _editingHLId === ids.crlf && document.getElementById('hl-edit-text').value === 'CRLF';
+        closeHighlightEdit();
+        resetCalls();
+        rows = [...document.querySelectorAll('#highlight-rules-list .ssh-item')];
+        rows[0].querySelector('[data-action="toggle"]').click();
+        const highlightToggleOnce = callsFor('highlightToggle').length === 1
+          && callsFor('highlightToggle')[0][1] === ids.crlf
+          && _highlightRules[0].enabled === false
+          && _highlightRules[1].enabled === true && _highlightRules[2].enabled === true;
+        resetCalls();
+        rows = [...document.querySelectorAll('#highlight-rules-list .ssh-item')];
+        rows[0].querySelector('[data-action="delete"]').click();
+        const highlightDeleteOnce = callsFor('highlightDelete').length === 1
+          && callsFor('highlightDelete')[0][1] === ids.crlf
+          && _highlightRules.map(rule => rule.id).join('|') === [ids.cr, ids.lf].join('|')
+          && _highlightRules.every(rule => rule.enabled === true);
+
+        _qcCommands = triplet().map(command => ({ ...command, group: 'pair' }));
+        qcFilter();
+        rows = [...document.querySelectorAll('#qc-list .v3-item')];
+        const quickIdsExact = rows.map(row => row.dataset.quickCommandId).join('|') === [ids.crlf, ids.cr, ids.lf].join('|');
+        resetCalls();
+        rows[1].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        rows[1].querySelector('.v3-name').dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: rows[1] }));
+        const quickHoverOnce = callsFor('quickSelect').length === 1
+          && callsFor('quickSelect')[0][1] === 1 && _qcSelected === 1
+          && document.querySelector('#qc-list .v3-item[data-selected]').dataset.quickCommandId === ids.cr;
+        resetCalls();
+        rows[0].click();
+        const quickClickOnce = callsFor('quickRun').length === 1 && callsFor('quickRun')[0][1] === ids.crlf;
+        qcFilter();
+        resetCalls();
+        const quickInput = document.getElementById('qc-input');
+        quickInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        const quickKeyboardOnce = callsFor('quickRun').length === 1 && callsFor('quickRun')[0][1] === ids.crlf;
+        resetCalls();
+        quickInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+        quickInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        const quickKeyboardNextOnce = callsFor('quickRun').length === 1 && callsFor('quickRun')[0][1] === ids.cr;
+
+        _qcCommands = triplet().map(command => ({ ...command, group: 'pair' }));
+        renderQCCommandsList();
+        rows = [...document.querySelectorAll('#qc-commands-list .ssh-mgr-row')];
+        const quickSettingsIdsExact = rows.map(row => row.dataset.qcId).join('|') === [ids.crlf, ids.cr, ids.lf].join('|');
+        resetCalls();
+        rows[0].querySelector('.ssh-mgr-identity').click();
+        const quickSettingsEditOnce = callsFor('quickEdit').length === 1
+          && callsFor('quickEdit')[0][1] === ids.crlf && _editingQCId === ids.crlf;
+        closeQCEdit();
+        resetCalls();
+        rows[0].querySelector('[data-action="delete"]').click();
+        const quickSettingsDeleteOnce = callsFor('quickDelete').length === 1
+          && callsFor('quickDelete')[0][1] === ids.crlf
+          && _qcCommands.map(command => command.id).join('|') === [ids.cr, ids.lf].join('|');
+
+        TabManager.profiles = triplet().map(profile => ({ ...profile, args: ['-NoProfile'] }));
+        loadSettingsIntoForm();
+        resetCalls();
+        document.getElementById('toggle-shell-' + ids.crlf).click();
+        const profileToggleOnce = callsFor('profileToggle').length === 1
+          && (_settingsConfig.hiddenProfiles || []).join('|') === ids.crlf;
+
+        TabManager.sshProfiles = triplet().map((profile, index) => ({
+          ...profile, host: '127.0.0.' + (index + 1), port: 22, username: 'probe', group: 'pair', loginScripts: [],
+        }));
+        renderSSHManagerInto(document.getElementById('ssh-manager-list'), _sshMgrView('ssh-manager-list'));
+        rows = [...document.querySelectorAll('#ssh-manager-list .ssh-mgr-row')];
+        const sshIdsExact = rows.map(row => row.dataset.profileId).join('|') === [ids.crlf, ids.cr, ids.lf].join('|');
+        resetCalls();
+        rows[0].querySelector('.ssh-mgr-identity').click();
+        const sshEditOnce = callsFor('sshEdit').length === 1
+          && callsFor('sshEdit')[0][1] === ids.crlf && _editingSSHId === ids.crlf;
+        closeSSHEdit();
+        resetCalls();
+        rows[0].querySelector('[data-action="connect"]').click();
+        const sshConnectOnce = callsFor('sshConnect').length === 1 && callsFor('sshConnect')[0][1] === ids.crlf;
+        resetCalls();
+        rows[0].querySelector('[data-action="delete"]').click();
+        for (let i = 0; i < 100 && TabManager.sshProfiles.length === 3; i++) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        const sshDeleteOnce = callsFor('sshDelete').length === 1
+          && callsFor('sshDelete')[0][1] === ids.crlf
+          && TabManager.sshProfiles.map(profile => profile.id).join('|') === [ids.cr, ids.lf].join('|');
+
+        _settingsConfig.hiddenProfiles = [];
+        renderSessionList('');
+        rows = [...document.querySelectorAll('#sessions-list .ss-row')].filter(row => row.dataset.id.startsWith('local_'));
+        const sessionIdsExact = rows.map(row => row.dataset.id).join('|') === [ids.crlf, ids.cr, ids.lf].map(id => 'local_' + id).join('|');
+        resetCalls();
+        rows[0].click();
+        const sessionSelectOnce = callsFor('sessionSelect').length === 1 && callsFor('sessionSelect')[0][1] === 'CRLF';
+
+        clearLoginScripts();
+        addLoginScriptRow(ids.rawExpect, ids.rawSend, false, false);
+        const collected = collectLoginScripts();
+        const loginRawRoundTrip = collected.length === 1
+          && collected[0].expect === ids.rawExpect && collected[0].send === ids.rawSend;
+        addLoginScriptRow(ids.otherExpect, ids.otherSend, true, false);
+        const scriptRows = [...document.querySelectorAll('#login-scripts-container .login-script-row')];
+        const firstRow = scriptRows[0], secondRow = scriptRows[1];
+        const firstToggles = firstRow.querySelectorAll('.ls-toggle');
+        const secondToggles = secondRow.querySelectorAll('.ls-toggle');
+        firstToggles[0].click();
+        const regexClick = firstToggles[0].classList.contains('on')
+          && !firstToggles[1].classList.contains('on')
+          && secondToggles[0].classList.contains('on')
+          && !secondToggles[1].classList.contains('on');
+        firstToggles[1].click();
+        const optionalClick = firstToggles[0].classList.contains('on')
+          && firstToggles[1].classList.contains('on')
+          && secondToggles[0].classList.contains('on')
+          && !secondToggles[1].classList.contains('on');
+        const afterToggles = collectLoginScripts();
+        const loginToggleClicks = regexClick && optionalClick && afterToggles.length === 2
+          && afterToggles[0].expect === ids.rawExpect && afterToggles[0].send === ids.rawSend
+          && afterToggles[0].isRegex === true && afterToggles[0].optional === true
+          && afterToggles[1].expect === ids.otherExpect && afterToggles[1].send === ids.otherSend
+          && afterToggles[1].isRegex === true && afterToggles[1].optional === false;
+        firstRow.querySelector('.ls-del').click();
+        const remainingRows = [...document.querySelectorAll('#login-scripts-container .login-script-row')];
+        const afterDelete = collectLoginScripts();
+        const loginDeleteClick = remainingRows.length === 1 && remainingRows[0] === secondRow
+          && secondToggles[0].classList.contains('on') && !secondToggles[1].classList.contains('on')
+          && afterDelete.length === 1 && afterDelete[0].expect === ids.otherExpect
+          && afterDelete[0].send === ids.otherSend
+          && afterDelete[0].isRegex === true && afterDelete[0].optional === false;
+        const directInput = document.createElement('input');
+        directInput.value = ids.rawExpect;
+        const nativeInputValuePreservesNewlines = directInput.value === ids.rawExpect;
+        outcome = {
+          executionSentinelZero,
+          highlightIdsExact, highlightEditOnce, highlightToggleOnce, highlightDeleteOnce,
+          quickIdsExact, quickHoverOnce, quickClickOnce, quickKeyboardOnce, quickKeyboardNextOnce,
+          quickSettingsIdsExact, quickSettingsEditOnce, quickSettingsDeleteOnce,
+          profileToggleOnce, sshIdsExact, sshEditOnce, sshConnectOnce, sshDeleteOnce,
+          sessionIdsExact, sessionSelectOnce, loginRawRoundTrip, loginToggleClicks, loginDeleteClick,
+          nativeInputValuePreservesNewlines, calls: probe.calls,
+        };
+      } finally {
+        _highlightRules = original.highlight;
+        _qcCommands = original.quick;
+        TabManager.profiles = original.profiles;
+        TabManager.sshProfiles = original.sshProfiles;
+        _settingsConfig = original.settings;
+        _editingHLId = original.editingHighlight;
+        _editingQCId = original.editingQuick;
+        _editingSSHId = original.editingSsh;
+        openHighlightEdit = original.openHighlightEdit;
+        toggleHighlightRule = original.toggleHighlightRule;
+        deleteHighlightRule = original.deleteHighlightRule;
+        saveHighlightRules = original.saveHighlightRules;
+        executeQuickCommand = original.executeQuickCommand;
+        qcSelect = original.qcSelect;
+        openQCEdit = original.openQCEdit;
+        deleteQC = original.deleteQC;
+        saveQuickCommands = original.saveQuickCommands;
+        openSSHEdit = original.openSSHEdit;
+        deleteSSHProfile = original.deleteSSHProfile;
+        saveTerminal = original.saveTerminal;
+        persistSettings = original.persistSettings;
+        showConfirm = original.showConfirm;
+        if (original.syncOsc52) _syncOsc52Permission = original.syncOsc52;
+        TabManager.createTab = original.createTab;
+        closeHighlightEdit();
+        closeQCEdit();
+        closeSSHEdit();
+        clearLoginScripts();
+        renderHighlightRulesList();
+        qcFilter();
+        renderQCCommandsList();
+        renderSSHManager();
+        loadSettingsIntoForm();
+        delete window.__rendererReviewProbe;
+      }
+      return outcome;
+    })()`);
+    const rendererReviewSafe = rendererReviewSecurity
+      && ['executionSentinelZero', 'highlightIdsExact', 'highlightEditOnce', 'highlightToggleOnce',
+        'highlightDeleteOnce', 'quickIdsExact', 'quickHoverOnce', 'quickClickOnce',
+        'quickKeyboardOnce', 'quickKeyboardNextOnce', 'quickSettingsIdsExact',
+        'quickSettingsEditOnce', 'quickSettingsDeleteOnce', 'profileToggleOnce',
+        'sshIdsExact', 'sshEditOnce', 'sshConnectOnce', 'sshDeleteOnce', 'sessionIdsExact',
+        'sessionSelectOnce', 'loginRawRoundTrip', 'loginToggleClicks', 'loginDeleteClick']
+        .every(key => rendererReviewSecurity[key] === true);
+    check('渲染配置：换行 ID 不碰撞，执行哨兵为零，目标动作均恰好一次，登录脚本原值与控件点击正确',
+      rendererReviewSafe, JSON.stringify(rendererReviewSecurity));
+    if (process.env.ZTERM_E2E_RENDERER_CONFIG_ONLY === '1') {
+      if (!rendererConfigSafe || !rendererReviewSafe) throw new Error('Focused renderer configuration security check failed');
+      return;
+    }
+
     // 0.5 Native WebView2 UI policy: the browser UI integrations must be
     // disabled AS READ BACK through the settings getters (the probe command
     // exists only under the owned background E2E runtime; production
