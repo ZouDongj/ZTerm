@@ -1133,12 +1133,13 @@ const SFTP = {
                 return;
             }
             if (e.key !== 'Enter') return;
-            // RAW value, no trimming: a directory name is one component and
-            // spaces are legal (`dir`, ` dir` and `dir ` are three different
-            // directories, and a pure-space name is legal too); only a truly
-            // empty input keeps its silent close.
-            const name = String(input.value == null ? '' : input.value);
-            if (name === '') { close(); return; }
+            // Product decision for NEW names: surrounding whitespace trims
+            // away before validation and dispatch (a rename target, by
+            // contrast, travels byte-for-byte), and a value left empty by
+            // the trim — blank input included — closes silently like an
+            // empty one. Inner spaces and Unicode stay verbatim.
+            const name = String(input.value == null ? '' : input.value).trim();
+            if (!name) { close(); return; }
             if (!snap.ready) {
                 // Listing not ready: the snapshot's base is a still-loading
                 // view's '/' placeholder — refuse and keep the row (a
@@ -1151,8 +1152,9 @@ const SFTP = {
             // named component of the listed base: "../x" would escape the
             // base through a bare MKDIR, "a/b" is a nested target the
             // server refuses. Refuse here and keep the row for a fix; the
-            // dispatch carries the base and the RAW name, and the backend
-            // applies the same rule before joining them itself.
+            // dispatch carries the base and the trimmed name, and the
+            // backend applies the same rule (plus a blank refusal) before
+            // joining them itself.
             const nameError = this._entryNameError(name);
             if (nameError) {
                 showToast(nameError, true);
@@ -1224,9 +1226,10 @@ const SFTP = {
 
     // One name rule shared by the panel's entry editors (rename, mkdir): a
     // remote entry name is a SINGLE component — non-empty, neither "." nor
-    // "..", and free of "/" and NUL. Everything else (inner, leading and
-    // trailing spaces; Unicode) is a legal name and travels byte-for-byte;
-    // this rule never trims or rewrites what it accepts.
+    // "..", and free of "/" and NUL. Everything else (inner spaces,
+    // Unicode) is a legal name and travels byte-for-byte. The rule itself
+    // never trims or rewrites what it accepts: rename names pass through
+    // untouched, and mkdir applies its own trim before calling it.
     _entryNameError(name) {
         if (name === '' || name === '.' || name === '..'
             || name.indexOf('/') !== -1 || name.indexOf('\0') !== -1) {

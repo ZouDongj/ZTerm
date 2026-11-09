@@ -6007,13 +6007,21 @@ fn validate_panel_remove(path: &str) -> Result<String, String> {
 /// separately, so validation sees exactly the user's component and the
 /// target is joined only after it passes: no name can smuggle an absolute,
 /// nested or parent-escaping path past this check). A legal name is ONE
-/// component: non-empty, neither "." nor "..", and free of "/" and NUL.
-/// Everything else — inner, leading and trailing spaces, Unicode — is a
-/// legal remote name and travels byte-for-byte; the name is NEVER trimmed
-/// or normalized (unlike rename/remove, whose paths list REAL entries and
-/// stay verbatim per their own contract, everything here is newly typed).
+/// component: not blank (empty or whitespace-only — the renderer trims
+/// before dispatching, so a blank here is a direct caller's mistake),
+/// neither "." nor "..", and free of "/" and NUL. Everything else — inner,
+/// leading and trailing spaces, Unicode — is a legal remote name and
+/// travels byte-for-byte: the backend never trims or rewrites what it
+/// accepts (the surrounding-whitespace trim is the renderer's product
+/// decision; unlike rename/remove, whose paths list REAL entries under
+/// their own verbatim contract, everything here is newly typed).
 fn validate_panel_mkdir_name(name: &str) -> Result<String, String> {
-    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {
+    if name.trim().is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\0')
+    {
         return Err("invalid directory name".into());
     }
     Ok(name.to_string())
@@ -9502,8 +9510,13 @@ mod tests {
         // take: a slash — nested "a/b" (MKDIR never recurses), an escape
         // "../x" or an absolute "/abs" — is refused before any join happens,
         // "." and ".." are not named entries, "" is no name at all, and NUL
-        // is not a legal filename byte.
-        for bad in ["", ".", "..", "a/b", "../x", "/abs", "x/y/z", "a\0b", "\0"] {
+        // is not a legal filename byte. A blank name (empty or whitespace
+        // only) is refused too — the renderer trims before dispatching, so a
+        // blank here is a direct caller's mistake, and refusing it beats
+        // silently creating a whitespace-named directory.
+        for bad in [
+            "", "   ", " ", " \t ", ".", "..", "a/b", "../x", "/abs", "x/y/z", "a\0b", "\0",
+        ] {
             assert!(
                 validate_panel_mkdir_name(bad).is_err(),
                 "name={bad:?} must be refused"
@@ -9513,17 +9526,17 @@ mod tests {
 
     #[test]
     fn panel_mkdir_name_validation_passes_spaces_and_unicode_verbatim() {
-        // NO trimming, anywhere: leading, trailing and pure-space names are
-        // legal single components (`dir`, ` dir`, `dir ` and `   ` are four
-        // different remote directories), and Unicode/dotfile names pass
-        // byte-for-byte. The rule never rewrites what it accepts.
+        // The backend NEVER trims what it accepts: the surrounding-whitespace
+        // trim is the renderer's product decision, applied before dispatch,
+        // so a padded name that arrives anyway is someone else's deliberate
+        // call and travels byte-for-byte. Inner spaces, Unicode and dotfile
+        // names pass untouched as well.
         for legal in [
             "dir",
             "my dir",
             "数据 夹",
             ".hidden",
             "  padded  ",
-            "   ",
             " dir",
             "dir ",
             "100%load",
@@ -9560,16 +9573,17 @@ mod tests {
     async fn panel_mkdir_binds_validated_names_to_the_base_through_the_protocol() {
         // The full command seam minus the Tauri state: validate the typed
         // name, join the base, run the op — then assert the REAL protocol
-        // path the server received. Spaces (leading, trailing, pure) are
-        // asserted at the protocol layer because Windows FS normalization
-        // strips trailing spaces from on-disk names, so the disk alone
-        // cannot witness byte-exactness.
+        // path the server received. Spaces (leading, trailing) are asserted
+        // at the protocol layer because Windows FS normalization strips
+        // trailing spaces from on-disk names, so the disk alone cannot
+        // witness byte-exactness. Blank names never reach this loop: the
+        // renderer trims them away, and the backend refuses them outright.
         let dir = config_test_dir("sftp-panel-mkdir-bind");
         let (session, failures) = test_sftp_session(dir.clone()).await;
         let sftp: Arc<russh_sftp::client::SftpSession> = Arc::new(session);
         std::fs::create_dir_all(dir.join("srv/app")).unwrap();
         let base = "srv/app";
-        for name in ["dir", "  padded  ", "数据 夹", ".hidden", "   "] {
+        for name in ["dir", "  padded  ", "数据 夹", ".hidden"] {
             let validated = validate_panel_mkdir_name(name)
                 .unwrap_or_else(|_| panic!("legal name {name:?} refused"));
             assert_eq!(validated, name, "validation never rewrites the name");
@@ -9582,6 +9596,20 @@ mod tests {
                 "the protocol carried the composed path byte-for-byte"
             );
         }
+        // Blank names are refused before any op — nothing more hits the wire
+        // than the four validated targets above.
+        let wire_calls = failures.mkdir_calls().len();
+        for blank in ["", "   ", " ", " \t "] {
+            assert!(
+                validate_panel_mkdir_name(blank).is_err(),
+                "blank name {blank:?} must be refused"
+            );
+        }
+        assert_eq!(
+            failures.mkdir_calls().len(),
+            wire_calls,
+            "a refused blank never reaches the protocol"
+        );
         // The op really executes server-side (trailing-space-free witnesses).
         assert!(dir.join("srv/app/dir").is_dir());
         assert!(dir.join("srv/app/数据 夹").is_dir());
