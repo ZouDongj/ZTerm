@@ -1253,15 +1253,17 @@ pub fn get_profiles(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
 /// OSC 7 cwd report pattern (`ESC]7;file://host/path` + BEL/ST terminator).
 const OSC7_CWD_PATTERN: &str = r"\x1b\]7;file://[^/\x07\x1b\\]*(/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)";
 
-/// Parse an OSC 7 cwd (`ESC]7;file://host/pathESC\`, as printed by _zt_cwd's printf).
+/// Parse an OSC 7 cwd (`ESC]7;file://host/pathESC\`, as printed by _zt_cwd's
+/// printf). Valid %XX escapes are decoded leniently, matching
+/// latest_cwd_report: standard emitters percent-encode the file URI path, and
+/// the built-in wrapper escapes each literal % to %25 so decoding is lossless.
 /// Pure function for unit tests; returns the path (with leading /) of the
 /// LATEST complete report — the reader feeds a rolling window that can retain
 /// earlier reports — or None when unmatched.
 #[cfg(test)]
 fn parse_osc7_cwd(text: &str) -> Option<String> {
-    let re = regex::Regex::new(OSC7_CWD_PATTERN).ok()?;
-    let caps = re.captures_iter(text).last()?;
-    caps.get(1).map(|g| g.as_str().to_string())
+    let caps = OSC7_CWD_RE.captures_iter(text).last()?;
+    caps.get(1).map(|g| percent_decode_loose(g.as_str()))
 }
 
 /// Parse an iTerm2 OSC 1337 CurrentDir (`ESC]1337;CurrentDir=<path>BEL` or `ST`).
@@ -1276,11 +1278,19 @@ fn parse_osc7_cwd(text: &str) -> Option<String> {
 const CURRENTDIR_1337_PATTERN: &str =
     r"\x1b\]1337;CurrentDir=(?:file://[^/\x07\x1b\\]*)?(/[^\x07\x1b\\]*?)(?:\x07|\x1b\\)";
 
+// Compiled once: latest_cwd_report runs on every SSH data chunk, so the two
+// regexes must not be rebuilt per chunk.
+static OSC7_CWD_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(OSC7_CWD_PATTERN).expect("OSC7_CWD_PATTERN is a valid regex")
+});
+static CURRENTDIR_1337_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(CURRENTDIR_1337_PATTERN).expect("CURRENTDIR_1337_PATTERN is a valid regex")
+});
+
 #[cfg(test)]
 fn parse_1337_currentdir(text: &str) -> Option<String> {
     // path segment: up to the terminator; an optional file://[host] prefix is allowed (take from the first /)
-    let re = regex::Regex::new(CURRENTDIR_1337_PATTERN).ok()?;
-    let caps = re.captures_iter(text).last()?;
+    let caps = CURRENTDIR_1337_RE.captures_iter(text).last()?;
     let raw = caps.get(1)?.as_str();
     // fish prints $PWD verbatim (spaces unescaped); iTerm2 variants may %XX-encode, so decode where possible
     let decoded = percent_decode_loose(raw);
@@ -1314,17 +1324,18 @@ fn window_cwd_after(window: &mut String, text: &str) -> Option<String> {
 /// login wrapper's OSC 7 and fish's per-prompt 1337 CurrentDir). Reports never
 /// overlap, so sequence start order equals emission order: the report that
 /// starts latest is the newest, and older reports retained in the rolling
-/// window must not shadow it. Reports whose path is not absolute are skipped.
+/// window must not shadow it. Both protocols decode valid %XX escapes
+/// leniently (percent_decode_loose): standard emitters percent-encode the
+/// file URI path, while the built-in wrapper escapes each literal % to %25 so
+/// its reports stay lossless. Reports whose path is not absolute are skipped.
 fn latest_cwd_report(window: &str) -> Option<String> {
-    let osc7 = regex::Regex::new(OSC7_CWD_PATTERN).ok()?;
-    let c1337 = regex::Regex::new(CURRENTDIR_1337_PATTERN).ok()?;
     let mut reports: Vec<(usize, String)> = Vec::new();
-    for caps in osc7.captures_iter(window) {
+    for caps in OSC7_CWD_RE.captures_iter(window) {
         if let (Some(all), Some(path)) = (caps.get(0), caps.get(1)) {
-            reports.push((all.start(), path.as_str().to_string()));
+            reports.push((all.start(), percent_decode_loose(path.as_str())));
         }
     }
-    for caps in c1337.captures_iter(window) {
+    for caps in CURRENTDIR_1337_RE.captures_iter(window) {
         if let (Some(all), Some(path)) = (caps.get(0), caps.get(1)) {
             reports.push((all.start(), percent_decode_loose(path.as_str())));
         }
@@ -2313,6 +2324,8 @@ async fn detect_shell(sftp: &russh_sftp::client::SftpSession, username: &str) ->
 
 /// Generate the followCwd RC wrapper files (pure function, unit-testable).
 /// Returns (file list [(remote path, content)], exec command); None for non-bash/zsh shells.
+/// The _zt_cwd printf escapes each literal % in $PWD to %25 so the reader's
+/// %XX decoding stays lossless for directories like /data/v2%20final.
 fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>, String)> {
     if shell.ends_with("/bash") {
         let rc_path = format!("/tmp/.zterm-rc-{}", stamp);
@@ -2325,7 +2338,7 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
         let rc = format!(
             "[ -f /etc/profile ] && . /etc/profile\n\
              {{ [ -f ~/.bash_profile ] && . ~/.bash_profile; }} || {{ [ -f ~/.bash_login ] && . ~/.bash_login; }} || {{ [ -f ~/.profile ] && . ~/.profile; }} || {{ [ -f ~/.bashrc ] && . ~/.bashrc; }}\n\
-             _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }}\n\
+             _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"${{PWD//%/%25}}\"; }}\n\
              PROMPT_COMMAND=\"_zt_cwd;${{PROMPT_COMMAND}}\"\n\
              export COLORTERM=truecolor\n\
              rm -f {}\n",
@@ -2351,7 +2364,7 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
         // disabled — nothing is lost by not saving).
         let zshrc = format!(
             "[ -f ~/.zshrc ] && . ~/.zshrc\n\
-             _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"$PWD\"; }}\n\
+             _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"${{PWD//%/%25}}\"; }}\n\
              precmd_functions+=(_zt_cwd)\n\
              export COLORTERM=truecolor\n\
              if [ -n \"$HISTFILE\" ] && [ \"${{HISTFILE#{dir}/}}\" != \"$HISTFILE\" ]; then export HISTFILE=\"$HOME/.zsh_history\"; fi\n"
@@ -10363,7 +10376,7 @@ mod tests {
 
     #[test]
     fn parse_osc7_bash_rc_wrapper_format() {
-        // bash rc wrapper: _zt_cwd() { printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "$PWD"; }
+        // bash rc wrapper: _zt_cwd() { printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "${PWD//%/%25}"; }
         // output = ESC]7;file://myserver/home/userESC\
         let out = format!("\x1b]7;file://myserver/home/user\x1b\\");
         assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/home/user"));
@@ -10373,6 +10386,12 @@ mod tests {
         // path with spaces/special characters
         let out = format!("\x1b]7;file://srv/opt/my app/logs\x1b\\");
         assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/opt/my app/logs"));
+        // wrapper escapes each literal % to %25; parsing decodes it back
+        let out = format!("\x1b]7;file://srv/data/v2%2520final\x1b\\");
+        assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/data/v2%20final"));
+        // standard-encoded emitter: %XX escapes (space) are decoded
+        let out = format!("\x1b]7;file://host/home/my%20dir\x1b\\");
+        assert_eq!(parse_osc7_cwd(&out).as_deref(), Some("/home/my dir"));
     }
 
     #[test]
@@ -10399,6 +10418,73 @@ mod tests {
         assert_eq!(
             parse_osc7_cwd(&noisy).as_deref(),
             Some("/home/user/project")
+        );
+    }
+
+    #[test]
+    fn latest_cwd_report_decodes_percent_encoded_osc7() {
+        // Standard OSC 7 emitters (VTE/kitty/WezTerm shell integrations) send
+        // an RFC 8089 file URI: spaces become %20 and CJK paths become UTF-8
+        // %XX sequences. The tracked cwd must decode them, or every follow-cwd
+        // SFTP operation targets the encoded string and misses the directory.
+        assert_eq!(
+            latest_cwd_report("\u{1b}]7;file://host/home/my%20dir\u{7}").as_deref(),
+            Some("/home/my dir")
+        );
+        assert_eq!(
+            latest_cwd_report("\u{1b}]7;file://host/home/user/%E4%B8%AD%E6%96%87\u{7}").as_deref(),
+            Some("/home/user/中文")
+        );
+        // Unencoded third-party paths keep working verbatim (no %, no decoding).
+        assert_eq!(
+            latest_cwd_report("\u{1b}]7;file://srv/opt/my app/logs\u{7}").as_deref(),
+            Some("/opt/my app/logs")
+        );
+        // A % not followed by two hex digits is a literal %, never decoded.
+        assert_eq!(
+            latest_cwd_report("\u{1b}]7;file://h/data/100%load\u{7}").as_deref(),
+            Some("/data/100%load")
+        );
+    }
+
+    #[test]
+    fn osc7_wrapper_percent_escape_round_trips() {
+        // The built-in _zt_cwd wrapper emits $PWD with each literal % escaped
+        // to %25 (see cwd_wrapper_files), so a directory whose name really
+        // contains %XX survives the parser's decoding: emit %25, decode back
+        // to %. A raw %XX emitter is indistinguishable from an encoded one —
+        // the same tradeoff percent_decode_loose already makes for OSC 1337.
+        let mut w = String::new();
+        assert_eq!(
+            window_cwd_after(&mut w, "\u{1b}]7;file://h/data/v2%2520final\u{7}").as_deref(),
+            Some("/data/v2%20final")
+        );
+        // Spaces/UTF-8 stay verbatim in the wrapper output; decoding is a no-op.
+        let mut w = String::new();
+        assert_eq!(
+            window_cwd_after(&mut w, "\u{1b}]7;file://h/opt/my app/中文\u{7}").as_deref(),
+            Some("/opt/my app/中文")
+        );
+    }
+
+    #[test]
+    fn wrapper_escapes_literal_percent_in_osc7_pwd() {
+        // _zt_cwd must not print $PWD verbatim: latest_cwd_report decodes %XX,
+        // so every literal % has to be emitted as %25 to round-trip. Both
+        // shells use the same ${PWD//%/%25} substitution.
+        let (files, _) = cwd_wrapper_files("/bin/bash", "t").expect("bash wrapper");
+        let rc = String::from_utf8_lossy(&files[0].1);
+        assert!(
+            rc.contains("\"${PWD//%/%25}\""),
+            "bash rc must escape %: {rc}"
+        );
+
+        let (files, _) = cwd_wrapper_files("/bin/zsh", "t").expect("zsh wrapper");
+        let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
+        let text = String::from_utf8_lossy(&zshrc.1);
+        assert!(
+            text.contains("\"${PWD//%/%25}\""),
+            "zsh .zshrc must escape %: {text}"
         );
     }
 
