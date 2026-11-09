@@ -1,4 +1,4 @@
-// Regression: an armed shortcut capture (settings → shortcuts → 修改) leaked
+// Regression: an armed shortcut capture (settings → shortcuts → edit) leaked
 // its keydown listener when the user left without pressing a key (tab switch,
 // settings close, any click). The next combo pressed anywhere — e.g. Ctrl+C in
 // the terminal — was swallowed and silently persisted as the new binding.
@@ -14,10 +14,11 @@ const source = fs.readFileSync(new URL('../src/renderer/shortcuts.js', import.me
 // Loads the REAL shortcut-utils.js + shortcuts.js in one VM; faked is only the
 // environment (document listener registry, ipcRenderer recording bus, toasts).
 // document.getElementById resolves a bare shortcuts-table so the post-cancel
-// re-render (which restores the 修改 button label) is observable.
+// re-render (which restores the edit button label) is observable.
 function fixture() {
     const listeners = new Map(); // `${type}:${capture ? 'c' : 'b'}` -> [fn]
     const sends = [];
+    const toasts = [];
     const table = { innerHTML: '' };
     const document = {
         addEventListener(type, fn, capture) {
@@ -38,7 +39,7 @@ function fixture() {
         document, console,
         _settingsConfig: {},
         ipcRenderer: { send: (cmd, payload) => sends.push({ cmd, payload }) },
-        showToast() {},
+        showToast: msg => toasts.push(String(msg)),
         escHtml: s => String(s),
         Icons: { iconSvg: () => '' },
         TabManager: { tabs: [], getActive: () => null },
@@ -64,7 +65,7 @@ function fixture() {
         return ev;
     };
     return {
-        context, table, sends, dispatch, keydown,
+        context, table, sends, toasts, dispatch, keydown,
         captureState: () => vm.runInContext('_shortcutCapture', context),
         arm: (actionId = 'closeTab') => {
             const btn = { textContent: '修改', classList: { add() {} } };
@@ -202,6 +203,92 @@ test('resetShortcut after a clear restores the default binding', () => {
         'the empty override was removed');
     assert.equal(f.context._getShortcutBindings().closeTab, 'Ctrl+Shift+W', 'default binding restored');
     assert.match(f.table.innerHTML, /Ctrl\+Shift\+W/, 'the list shows the default combo again');
+});
+
+// ── Reset-vs-conflict guard (issue #33) ──
+// Repro: clear quickCommands (Alt+Q), rebind SFTP onto the freed Alt+Q, then
+// press the row's reset button. resetShortcut used to delete the '' override
+// unconditionally, silently binding Alt+Q to BOTH actions. A reset must go
+// through the same conflict check a fresh capture does: name the holder,
+// keep the binding.
+
+// Builds the issue #33 repro state through the REAL capture flow:
+// overrides { quickCommands: '', sftp: 'Alt+Q' } (Alt+Q held by SFTP).
+function issue33State() {
+    const f = fixture();
+    f.arm('quickCommands');
+    f.keydown({ key: 'Backspace', target: XTERM_TARGET });       // clear → ''
+    f.arm('sftp');
+    f.keydown({ key: 'q', altKey: true, target: XTERM_TARGET }); // SFTP takes Alt+Q
+    return f;
+}
+
+test('resetShortcut refuses when the default combo is held by another action (issue #33)', () => {
+    const f = issue33State();
+    assert.deepEqual(JSON.parse(JSON.stringify(f.context._settingsConfig.shortcuts)), { quickCommands: '', sftp: 'Alt+Q' });
+
+    f.context.resetShortcut('quickCommands');
+
+    assert.equal(f.context._getShortcutBindings().quickCommands, '', 'the cleared binding is kept');
+    assert.equal(f.context._getShortcutBindings().sftp, 'Alt+Q', 'the holder is untouched');
+    const holders = Object.values(f.context._getShortcutBindings()).filter(c => c === 'Alt+Q');
+    assert.equal(holders.length, 1, 'no duplicate Alt+Q binding was created');
+    assert.equal(f.sends.length, 2, 'the refused reset persists nothing');
+    assert.ok(f.toasts.some(t => t.includes('SFTP 文件面板')), 'toast names the conflicting operation');
+    assert.ok(f.toasts.every(t => !t.includes('快捷命令')), 'the toast does not blame the action being reset');
+});
+
+test('resetShortcut on a conflict-free override still restores the default', () => {
+    const f = fixture();
+    f.arm('closeTab');
+    f.keydown({ key: 'k', ctrlKey: true, metaKey: true, target: XTERM_TARGET }); // Ctrl+Win+K, unclaimed
+
+    f.context.resetShortcut('closeTab');
+
+    assert.equal(f.context._getShortcutBindings().closeTab, 'Ctrl+Shift+W', 'default restored');
+    assert.equal(f.toasts.length, 0, 'no conflict toast on a clean reset');
+});
+
+test('resetAllShortcuts in the repro state lands on unique defaults', () => {
+    const f = issue33State();
+
+    f.context.resetAllShortcuts();
+
+    assert.deepEqual(JSON.parse(JSON.stringify(f.context._settingsConfig.shortcuts)), {}, 'all overrides wiped');
+    const merged = f.context._getShortcutBindings();
+    assert.equal(merged.quickCommands, 'Alt+Q', 'quickCommands back on its default');
+    assert.equal(merged.sftp, 'Ctrl+Shift+F', 'sftp back on its default');
+    const combos = Object.values(merged);
+    assert.equal(new Set(combos).size, combos.length, 'no combo is bound twice after the reset');
+});
+
+test('resetAllShortcuts refuses when two defaults collide and keeps current bindings (issue #33)', () => {
+    const f = fixture();
+    f.context._settingsConfig.shortcuts = { quickCommands: 'Ctrl+Alt+Q' };
+    // A full reset lands exactly on DEFAULT_SHORTCUTS, so the only duplicate
+    // it could create is one baked into the defaults themselves. Simulate a
+    // future defaults edit that claims sftp's combo for perfCapture.
+    vm.runInContext("DEFAULT_SHORTCUTS.perfCapture = 'Ctrl+Shift+F'", f.context);
+
+    f.context.resetAllShortcuts();
+
+    assert.deepEqual(JSON.parse(JSON.stringify(f.context._settingsConfig.shortcuts)), { quickCommands: 'Ctrl+Alt+Q' },
+        'the current bindings are kept');
+    assert.equal(f.sends.length, 0, 'nothing was persisted');
+    const toast = f.toasts[f.toasts.length - 1];
+    assert.ok(toast && toast.includes('SFTP 文件面板') && toast.includes('性能采样'),
+        'toast names both colliding operations: ' + toast);
+});
+
+test('a capture re-claiming a default held by another action is still refused (shared conflict rule)', () => {
+    // The reset guard must not weaken the capture guard: re-recording the
+    // default combo onto a second action stays impossible.
+    const f = fixture();
+    f.arm('sftp');
+    const ev = f.keydown({ key: 'q', altKey: true, target: XTERM_TARGET }); // Alt+Q = quickCommands default
+    assert.equal(ev.defaultPrevented, true);
+    assert.equal(f.context._settingsConfig.shortcuts, undefined, 'nothing recorded');
+    assert.ok(f.toasts.some(t => t.includes('快捷命令')), 'toast names the default holder');
 });
 
 // ── Win as a first-class modifier (issue #23) ──

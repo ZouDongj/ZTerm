@@ -505,8 +505,7 @@ function startShortcutCapture(actionId, btn) {
             // capture open until a non-modifier key arrives.
             const ok = combo.includes('Ctrl+') || combo.includes('Alt+') || combo.includes('Win+')
                 || /^F\d{1,2}$/.test(keyPart);
-            const bindings = _getShortcutBindings();
-            const conflict = ok && Object.keys(bindings).find(id => id !== actionId && bindings[id] === combo);
+            const conflict = ok && _findShortcutConflict(combo, actionId);
             if (!ok) showToast('普通按键不能单独作为快捷键（需含 Ctrl/Alt/Win，或使用 F1-F12）');
             else if (conflict) showToast('快捷键已被「' + SHORTCUT_LABELS[conflict] + '」占用');
             else {
@@ -524,7 +523,25 @@ function startShortcutCapture(actionId, btn) {
     document.addEventListener('mousedown', onMouseDown, true);
 }
 
+// First action other than excludeId currently bound to this combo, or null.
+// Shared by the capture path and both reset paths so their conflict rules
+// cannot drift apart.
+function _findShortcutConflict(combo, excludeId) {
+    if (!combo) return null;
+    const bindings = _getShortcutBindings();
+    return Object.keys(bindings).find(id => id !== excludeId && bindings[id] === combo) || null;
+}
+
 function resetShortcut(actionId) {
+    // Restoring a default must not duplicate another action's live combo
+    // (issue #33): with quickCommands cleared and SFTP rebound onto the freed
+    // Alt+Q, an unconditional delete bound Alt+Q twice. Same rule as a fresh
+    // capture: name the holder and keep the current binding.
+    const conflict = _findShortcutConflict(DEFAULT_SHORTCUTS[actionId], actionId);
+    if (conflict) {
+        showToast('快捷键已被「' + SHORTCUT_LABELS[conflict] + '」占用');
+        return;
+    }
     if (_settingsConfig.shortcuts) delete _settingsConfig.shortcuts[actionId];
     persistShortcuts();
     renderShortcutsList();
@@ -532,6 +549,20 @@ function resetShortcut(actionId) {
 }
 
 function resetAllShortcuts() {
+    // A full reset lands exactly on DEFAULT_SHORTCUTS, so the only duplicate
+    // it could create is one baked into the defaults themselves (a future
+    // defaults edit claiming the same combo twice). Same rule as the single
+    // reset: name the collision and keep the current bindings (issue #33).
+    const seen = new Map();
+    for (const id of Object.keys(DEFAULT_SHORTCUTS)) {
+        const combo = DEFAULT_SHORTCUTS[id];
+        if (seen.has(combo)) {
+            showToast('默认快捷键冲突：「' + SHORTCUT_LABELS[seen.get(combo)] + '」与「'
+                + SHORTCUT_LABELS[id] + '」均为 ' + _comboDisplay(combo) + '，已保留当前快捷键');
+            return;
+        }
+        seen.set(combo, id);
+    }
     _settingsConfig.shortcuts = {};
     persistShortcuts();
     renderShortcutsList();
