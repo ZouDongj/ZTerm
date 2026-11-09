@@ -178,7 +178,7 @@ test('chunk report scopes text effects to written cells, erased rows, buffer swi
   assert.equal(reports[1].text, false);
   assert.deepEqual(reports[1].rows, []);
   assert.equal(reports[1].buffer, false);
-  assert.equal(reports[2].scroll, true);
+  assert.equal(reports[2].scroll, 'full');
   assert.equal(reports[3].buffer, true);
   assert.equal(reports[3].text, true);
   assert.equal(reports[3].complete, false, 'printable output at unknown coordinates is incomplete evidence');
@@ -211,4 +211,41 @@ test('RI is conservative only at the top where it can scroll text', () => {
   const movementOnly = observeChunks(['\u001b[2;1H\u001bM']).reports[0];
   assert.equal(movementOnly.text, false);
   assert.equal(movementOnly.complete, true);
+});
+
+
+test('chunk scroll evidence distinguishes full, partial and non-scrolling regions', () => {
+  const { reports } = observeChunks([
+    '\u001b[1;2r\u001b[2;1H\n',
+    '\u001b[24;1H\n',
+    '\u001b[r\u001b[24;1H\n',
+  ]);
+  assert.equal(reports[0].scroll, 'partial');
+  assert.equal(reports[1].scroll, null);
+  assert.equal(reports[2].scroll, 'full');
+});
+
+
+test('DECOM home and relative CUP produce partial-region LF/RI evidence', () => {
+  const lf = observeChunks(['\u001b[2;4r\u001b[?6h\u001b[3;1H\n']);
+  assert.equal(lf.reports[0].scroll, 'partial');
+  const ri = observeChunks(['\u001b[2;4r\u001b[?6h\u001bM']);
+  assert.equal(ri.reports[0].scroll, 'partial');
+  assert.equal(ri.reports[0].text, true);
+  assert.equal(ri.reports[0].complete, false);
+  assert.equal(ri.state.positionKnown, false, 'DECOM/DECSTBM keep caret recovery conservative');
+  const outside = observeChunks(['\u001b[2;4r\u001b[?6l\u001b[1;1H\u001bM']);
+  assert.equal(outside.reports[0].scroll, null);
+  assert.equal(outside.reports[0].text, false);
+});
+
+test('RIS and resize restore full-region scroll evidence', () => {
+  const ris = observeChunks(['\u001b[2;4r\u001b[?6h', '\u001bc\u001b[24;1H\n']);
+  assert.equal(ris.reports[1].scroll, 'full');
+  const reports = [];
+  const observer = createInkCaretObserver({ onChunkWrites: w => reports.push(w) });
+  observer.push('\u001b[2;4r\u001b[?6h');
+  observer.setSize(30, 80);
+  observer.push('\u001b[30;1H\n');
+  assert.equal(reports[1].scroll, 'full');
 });

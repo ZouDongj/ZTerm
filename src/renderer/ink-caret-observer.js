@@ -106,6 +106,8 @@
     // by the live terminal size at wiring time (ipc.js).
     let rows = Math.max(2, Math.floor(options?.rows) || 24);
     let cols = Math.max(2, Math.floor(options?.cols) || 80);
+    let scrollTop = 0, scrollBottom = rows - 1;
+    let originMode = false;
     // Cursor model inside the current unit (1-based row/col like CUP).
     let row = Math.min(rows, Math.max(1, Math.floor(options?.row) || 1));
     let col = Math.min(cols, Math.max(1, Math.floor(options?.col) || 1));
@@ -131,19 +133,22 @@
     let chunkText = false;
     let chunkComplete = true;
     let chunkBuffer = false;
-    let chunkScroll = false;
+    let chunkScroll = null;
 
     function lineFeed() {
-      // LF at the bottom row scrolls the viewport: the cursor STICKS to the
-      // bottom instead of moving past it.
-      if (chunkCellWrites && row >= rows) chunkScroll = true;
-      row = row >= rows ? rows : row + 1;
+      // xterm scrolls only when LF starts at the active region's bottom.
+      if (chunkCellWrites && row - 1 === scrollBottom) {
+        chunkScroll = scrollTop === 0 && scrollBottom === rows - 1 ? 'full' : 'partial';
+      }
+      if (row - 1 !== scrollBottom) row = Math.min(rows, row + 1);
       pendingWrap = false;
     }
 
     function clampMove() {
-      if (row > rows) row = rows;
-      if (row < 1) row = 1;
+      const minRow = originMode ? scrollTop + 1 : 1;
+      const maxRow = originMode ? scrollBottom + 1 : rows;
+      if (row > maxRow) row = maxRow;
+      if (row < minRow) row = minRow;
       if (col > cols) col = cols;
       if (col < 1) col = 1;
       pendingWrap = false;
@@ -392,13 +397,23 @@
       if (second !== '[') {
         if (seq === '\u001bc') {
           if (chunkCellWrites) { chunkText = true; chunkComplete = false; }
+          scrollTop = 0; scrollBottom = rows - 1; originMode = false;
           losePosition();
         } else if (seq === '\u001b7' || seq === '\u001b8') {
           losePosition();
         } else if (seq === '\u001bM') {
-          // RI mutates content only when the top edge forces a reverse scroll.
-          if (chunkCellWrites && row === 1) { chunkText = true; chunkComplete = false; }
-          row = Math.max(1, row - 1); pendingWrap = false;
+          // RI mutates content only at the active region's top edge.
+          clampMove();
+          if (row - 1 === scrollTop) {
+            if (chunkCellWrites) {
+              chunkText = true; chunkComplete = false;
+              chunkScroll = scrollTop === 0 && scrollBottom === rows - 1 ? 'full' : 'partial';
+            }
+          } else {
+            row--;
+            clampMove();
+          }
+          pendingWrap = false;
         } else if (seq === '\u001bD') {
           lineFeed(); // IND: one row down with bottom-stick scroll
         } else if (seq === '\u001bE') {
@@ -430,6 +445,11 @@
         if (fin === 'h' || fin === 'l') {
           const modes = params.split(';');
           if (chunkCellWrites && modes.some(p => /^(?:\?)?(?:47|1047|1049)$/.test(p))) chunkBuffer = true;
+          if (modes.some(p => /^(?:\?)?6$/.test(p))) {
+            originMode = fin === 'h';
+            row = originMode ? scrollTop + 1 : 1; col = 1;
+            pendingWrap = false;
+          }
           if (modes.some(p => /^(?:\?)?(?:6|7|47|1047|1048|1049)$/.test(p))) losePosition();
           return;
         }
@@ -437,13 +457,26 @@
         return;
       }
       const n = params === '' ? 1 : (parseInt(params.split(';')[0], 10) || 1);
+      if (fin === 'r') {
+        const parts = params.split(';');
+        const top = parts[0] === '' ? 1 : (parseInt(parts[0], 10) || 1);
+        let bottom = parts.length < 2 ? rows : parseInt(parts[1], 10);
+        if (!bottom || bottom > rows) bottom = rows;
+        losePosition();
+        if (bottom > top) {
+          scrollTop = top - 1; scrollBottom = bottom - 1;
+          row = originMode ? scrollTop + 1 : 1; col = 1;
+          pendingWrap = false;
+        }
+        return;
+      }
       // Cursor-affecting finals move the cursor REGARDLESS of unit state —
       // position is continuous stream state, and the ConPTY sync form
       // addresses its units purely relatively. Erases/modes/queries below
       // this block never move the cursor.
       if (fin === 'H' || fin === 'f') {
         const parts = params.split(';');
-        row = parts[0] === '' ? 1 : (parseInt(parts[0], 10) || 1);
+        row = (originMode ? scrollTop : 0) + (parts[0] === '' ? 1 : (parseInt(parts[0], 10) || 1));
         col = parts[1] === '' ? 1 : (parseInt(parts[1], 10) || 1);
         clampMove();
         positionKnown = true;
@@ -607,7 +640,7 @@
         chunkText = false;
         chunkComplete = true;
         chunkBuffer = false;
-        chunkScroll = false;
+        chunkScroll = null;
       }
       buffer += chunk;
       let index = 0;
@@ -675,7 +708,11 @@
       setSize: function (nextRows, nextCols) {
         if ((Number.isFinite(nextRows) && nextRows >= 2 && nextRows !== rows)
           || (Number.isFinite(nextCols) && nextCols >= 2 && nextCols !== cols)) losePosition('resize');
-        if (Number.isFinite(nextRows) && nextRows >= 2) rows = Math.floor(nextRows);
+        if (Number.isFinite(nextRows) && nextRows >= 2) {
+          const changed = nextRows !== rows;
+          rows = Math.floor(nextRows);
+          if (changed) { scrollTop = 0; scrollBottom = rows - 1; }
+        }
         if (Number.isFinite(nextCols) && nextCols >= 2) cols = Math.floor(nextCols);
       },
       state: function () {

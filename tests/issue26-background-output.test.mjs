@@ -30,9 +30,10 @@ const source = f => readFileSync(new URL('../src/renderer/' + f, import.meta.url
 const write = (term, data) => new Promise(resolve => term.write(data, resolve));
 const settled = term => write(term, '');
 
-function installParser(owner, cols = 32, rows = 4) {
+function installParser(owner, cols = 32, rows = 4, scrollback) {
     owner.term?.dispose();
-    const term = new globalThis.TabbyXterm.Terminal({ cols, rows, allowProposedApi: true });
+    const term = new globalThis.TabbyXterm.Terminal({ cols, rows, allowProposedApi: true,
+        ...(scrollback === undefined ? {} : { scrollback }) });
     owner.term = term;
     return term;
 }
@@ -730,5 +731,119 @@ for (const [name, initial, update, expected] of [
             assert.equal(term.buffer.active.getLine(row).translateToString(true), text, `${name} changed real text`);
         }
         assert.equal(bg._bgUnread, true, `${name} must not be lost as a text:false/no-op chunk`);
+    });
+}
+
+
+for (const [name, scrollback, initialLines, expectedBaseY, expectedLength, expectedFull] of [
+    ['not full', 3, 2, 1, 3, false],
+    ['full with 1 line', 1, 3, 1, 3, true],
+    ['full with 3 lines', 3, 5, 3, 5, true],
+    ['zero', 0, 2, 0, 2, true],
+]) {
+    test(`real IPC bottom-line LF marks when scrollback is ${name}, while focus controls stay silent`, async t => {
+        const ctx = loadVm();
+        outputFixture(ctx);
+        wiredTab(ctx, 't_a', 'local_a', '');
+        const bg = wiredTab(ctx, 't_scrollback', 'ssh_scrollback', '', { type: 'ssh' });
+        const term = installParser(bg, 16, 2, scrollback);
+        t.after(() => term.dispose());
+        ctx.TabManager.activeId = 't_a';
+        await write(term, '\r\n'.repeat(initialLines - 1));
+        const buffer = term.buffer.active;
+        assert.equal(term.options.scrollback, scrollback);
+        assert.equal(buffer.length, initialLines);
+        assert.equal(buffer._buffer.lines.isFull, expectedFull, 'fixture reaches the intended xterm capacity state');
+        const before = visibleText(term);
+
+        ctx.__emit('pty-output', { tabId: 'ssh_scrollback',
+            data: '\x1b[?25l\x1b[1;1H\x1b[31m\x1b[0m\x1b[?25h' });
+        await settled(term);
+        assert.equal(visibleText(term), before);
+        assert.equal(bg._bgUnread, undefined, 'focus/style controls are not scrolling output');
+
+        ctx.__emit('pty-output', { tabId: 'ssh_scrollback', data: '\x1b[2;1H\n' });
+        await settled(term);
+
+        assert.equal(visibleText(term), before, 'blank lines look identical before and after LF');
+        assert.equal(buffer.baseY, expectedBaseY);
+        assert.equal(buffer.length, expectedLength);
+        assert.equal(buffer._buffer.lines.isFull, expectedFull);
+        assert.equal(bg._bgUnread, true, `${name}: bottom-line LF is real output even without a text diff`);
+    });
+}
+
+
+for (const [name, row, expectedUnread, expectedLines] of [
+    ['partial-region LF', 2, true, ['two', '', 'three', 'four']],
+    ['outside-region last-line LF', 4, undefined, ['one', 'two', 'three', 'four']],
+]) {
+    test(`real IPC DECSTBM ${name} follows actual xterm scrolling`, async t => {
+        const ctx = loadVm();
+        outputFixture(ctx);
+        wiredTab(ctx, 't_a', 'local_a', '');
+        const bg = wiredTab(ctx, 't_region', 'ssh_region', '', { type: 'ssh' });
+        const term = installParser(bg, 16, 4, 0);
+        t.after(() => term.dispose());
+        ctx.TabManager.activeId = 't_a';
+        await write(term, 'one\r\ntwo\r\nthree\r\nfour');
+        const buffer = term.buffer.active;
+        assert.equal(buffer._buffer.lines.isFull, true);
+
+        ctx.__emit('pty-output', { tabId: 'ssh_region', data: '\x1b[1;2r' });
+        await settled(term);
+        assert.equal(bg._bgUnread, undefined, 'DECSTBM itself does not change text');
+        ctx.__emit('pty-output', { tabId: 'ssh_region', data: '\x1b[31m\x1b[?25l\x1b[?25h' });
+        await settled(term);
+        assert.equal(bg._bgUnread, undefined, 'focus/SGR remains silent with a partial region');
+
+        ctx.__emit('pty-output', { tabId: 'ssh_region', data: `\x1b[${row};1H\n` });
+        await settled(term);
+
+        assert.deepEqual(Array.from({ length: 4 }, (_, i) =>
+            buffer.getLine(i).translateToString(true)), expectedLines);
+        assert.equal(buffer.baseY, 0);
+        assert.equal(buffer.length, 4);
+        assert.equal(bg._bgUnread, expectedUnread);
+    });
+}
+
+
+for (const [name, setup, update, expectedUnread, expectedLines] of [
+    ['DECOM bottom LF', '\x1b[2;4r\x1b[?6h', '\x1b[3;1H\n', true,
+        ['one', 'three', 'four', '', 'five']],
+    ['region-top RI', '\x1b[2;4r', '\x1b[2;1H\x1bM', true,
+        ['one', '', 'two', 'three', 'five']],
+    ['outside-region RI', '\x1b[2;4r', '\x1b[1;1H\x1bM', undefined,
+        ['one', 'two', 'three', 'four', 'five']],
+    ['DECOM home RI', '\x1b[2;4r\x1b[?6h', '\x1bM', true,
+        ['one', '', 'two', 'three', 'five']],
+]) {
+    test(`real IPC origin/region ${name} matches xterm scrolling`, async t => {
+        const ctx = loadVm();
+        outputFixture(ctx);
+        wiredTab(ctx, 't_a', 'local_a', '');
+        const bg = wiredTab(ctx, 't_origin', 'ssh_origin', '', { type: 'ssh' });
+        const term = installParser(bg, 16, 5, 0);
+        t.after(() => term.dispose());
+        ctx.TabManager.activeId = 't_a';
+        await write(term, 'one\r\ntwo\r\nthree\r\nfour\r\nfive');
+        const buffer = term.buffer.active;
+        assert.equal(buffer._buffer.lines.isFull, true);
+
+        ctx.__emit('pty-output', { tabId: 'ssh_origin', data: setup });
+        await settled(term);
+        assert.equal(bg._bgUnread, undefined, 'region/origin setup does not change text');
+        ctx.__emit('pty-output', { tabId: 'ssh_origin', data: '\x1b[31m\x1b[?25l\x1b[?25h' });
+        await settled(term);
+        assert.equal(bg._bgUnread, undefined, 'focus/SGR remains silent');
+
+        ctx.__emit('pty-output', { tabId: 'ssh_origin', data: update });
+        await settled(term);
+
+        assert.deepEqual(Array.from({ length: 5 }, (_, i) =>
+            buffer.getLine(i).translateToString(true)), expectedLines);
+        assert.equal(buffer.baseY, 0);
+        assert.equal(bg._bgUnread, expectedUnread);
     });
 }

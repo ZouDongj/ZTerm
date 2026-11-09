@@ -142,8 +142,15 @@ function _backgroundOutputParsed(unread) {
     if (report.scroll && afterBuffer && unread.beforeBuffer) {
         const beforeType = unread.beforeBuffer.type || 'normal';
         const afterType = afterBuffer.type || 'normal';
-        if (afterType === beforeType && ((afterBuffer.baseY || 0) !== unread.beforeBaseY
-            || afterType === 'alternate')) {
+        const fullScroll = report.scroll === 'full' || report.scroll === true;
+        const scrollback = unread.term.options?.scrollback;
+        // Only a full-screen scroll can trim the normal buffer. Partial-region
+        // scrolling is real output too, but never satisfies this capacity path.
+        const trimmedNormal = fullScroll && afterType === 'normal' && Number.isFinite(scrollback)
+            && afterBuffer.length === unread.term.rows + scrollback;
+        if (afterType === beforeType && (report.scroll === 'partial' || (fullScroll
+            && ((afterBuffer.baseY || 0) !== unread.beforeBaseY
+                || afterType === 'alternate' || trimmedNormal)))) {
             TabManager.markBackgroundOutput(resolved.tab, resolved.owner);
             return;
         }
