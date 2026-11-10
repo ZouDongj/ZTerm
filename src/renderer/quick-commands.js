@@ -73,7 +73,7 @@ function qcFilter() {
         html += `<div class="v3-section">${escHtml(g)}</div>`;
         arr.forEach(({ c, i }) => {
             html += `
-        <div class="v3-item" role="option" aria-selected="${i === _qcSelected}" data-index="${i}" ${i === _qcSelected ? 'data-selected' : ''} onclick="qcRun('${c.id}')" onmouseenter="qcSelect(${i})">
+        <div class="v3-item" role="option" aria-selected="${i === _qcSelected}" data-index="${i}" data-quick-command-id="${escAttr(c.id)}" ${i === _qcSelected ? 'data-selected' : ''}>
             <span class="v3-name">${escHtml(c.name)}</span>
             <span class="v3-cmd">${escHtml(c.command)}</span>
             <span class="v3-kbd">Enter</span>
@@ -82,6 +82,28 @@ function qcFilter() {
     });
     list.innerHTML = html;
 }
+
+(function bindQCPanelDelegation() {
+    const wire = () => {
+        const list = document.getElementById('qc-list');
+        if (!list || list._qcPanelBound) return;
+        list._qcPanelBound = true;
+        list.addEventListener('click', e => {
+            const row = e.target.closest('.v3-item');
+            if (!row || !list.contains(row)) return;
+            const id = row.dataset.quickCommandId;
+            if (id !== undefined) qcRun(id);
+        });
+        list.addEventListener('mouseover', e => {
+            const row = e.target.closest('.v3-item');
+            if (!row || !list.contains(row) || row.contains(e.relatedTarget)) return;
+            const index = Number(row.dataset.index);
+            if (Number.isInteger(index)) qcSelect(index);
+        });
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire);
+    else wire();
+})();
 
 function qcSelect(i) {
     _qcSelected = i;

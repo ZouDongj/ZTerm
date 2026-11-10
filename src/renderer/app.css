@@ -170,6 +170,12 @@ body.no-animations .startup-splash .cell{transition:none}
 .tab-icon.disconnected{background:#8a8f99}
 .tab-icon.error{background:#ff6b60}
 .tab-icon.connecting{background:transparent;border:1.5px solid rgba(255,255,255,0.22);border-top-color:#f2b64e;animation:status-spin 1s linear infinite}
+/* Background-output unread (issue #26): non-active tab received output.
+   Same 8px dot, accent tint instead of the idle green. The class is swapped
+   in EXCLUSIVELY for `connected` (never combined with error/connecting/
+   disconnected), so those states keep priority without a specificity fight;
+   the active tab never carries it (switchTo consumes the flag). */
+.tab-icon.bg-unread{background:rgb(var(--accent-rgb))}
 @keyframes status-spin{to{transform:rotate(360deg)}}
 .tab-close{font-size:13px;line-height:1;color:var(--text-3);cursor:pointer;opacity:0;pointer-events:none;transition:opacity 0.12s,color 0.12s;flex-shrink:0}
 /* Pin the trailing action group (reconnect + close) to the tab's trailing

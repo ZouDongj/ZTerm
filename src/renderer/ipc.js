@@ -42,6 +42,125 @@ function _aggregateSplitConnected(tab) {
     tab.connected = getAllPanes(tab).some(alive);
 }
 
+// Issue #26: unread is a backend-owner property, aggregated onto its tab.
+// Mounted and replayed terminals decide only after xterm parses the write.
+// Ordinary chunks compare just the cells/rows reported by the ink observer;
+// buffer switches use one bounded screen comparison, while missing or
+// incomplete evidence takes an O(1) conservative path instead of rescanning.
+function _terminalBufferSnapshot(term) {
+    const buffer = term?.buffer?.active;
+    if (!buffer || typeof buffer.getLine !== 'function' || !(term.rows > 0)) return null;
+    const lines = [];
+    for (let row = 0; row < term.rows; row++) {
+        const line = buffer.getLine((buffer.baseY || 0) + row);
+        lines.push(line ? line.translateToString(false) : '');
+    }
+    return { type: buffer.type || 'normal', baseY: buffer.baseY || 0, text: lines.join('\n') };
+}
+
+function _terminalWriteSnapshot(buffer, baseY, report) {
+    const cells = report?.cells || [];
+    const rows = report?.rows || [];
+    if (!cells.length && !rows.length) return { cells: [], rows: [] };
+    if (!buffer || typeof buffer.getLine !== 'function') return null;
+    const lines = new Map();
+    const lineAt = row => {
+        if (!lines.has(row)) lines.set(row, buffer.getLine((baseY || 0) + row));
+        return lines.get(row);
+    };
+    const cellState = [];
+    const seen = new Set();
+    for (const [row, col] of cells) {
+        const key = row + ':' + col;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const cell = lineAt(row)?.getCell?.(col);
+        cellState.push([row, col, cell ? cell.getChars() : null, cell ? cell.getWidth() : -1]);
+    }
+    const rowState = rows.map(row => {
+        const line = lineAt(row);
+        return line ? line.translateToString(false) : null;
+    });
+    return { cells: cellState, rows: rowState };
+}
+
+function _writeSnapshotChanged(before, after) {
+    if (before && before.cells.length === 0 && before.rows.length === 0) return false;
+    if (!before || !after) return true;
+    for (let i = 0; i < before.cells.length; i++) {
+        const a = before.cells[i], b = after.cells[i];
+        if (!b || a[2] !== b[2] || a[3] !== b[3]) return true;
+    }
+    for (let i = 0; i < before.rows.length; i++) {
+        if (before.rows[i] !== after.rows[i]) return true;
+    }
+    return false;
+}
+
+function _backgroundOutputSnapshot(tab, owner, data, ink, options) {
+    if (!tab || tab.id === TabManager.activeId || tab._bgUnread) return null;
+    if (typeof data !== 'string' || !data || !owner?.term) return null;
+    const term = owner.term;
+    const report = ink?.writes || null;
+    const beforeBuffer = term.buffer?.active;
+    const hasEffects = !report || report.text || report.buffer || report.scroll
+        || !!(report.cells?.length || report.rows?.length);
+    let conservative = !report || (options?.conservative && hasEffects)
+        || (!report.buffer && report.text && !report.complete);
+    const beforeScreen = !conservative && report.buffer ? _terminalBufferSnapshot(term) : null;
+    const beforeWrites = !conservative && !report.buffer
+        ? _terminalWriteSnapshot(beforeBuffer, beforeBuffer?.baseY || 0, report) : null;
+    if (!conservative && ((report.buffer && !beforeScreen)
+        || (!report.buffer && (report.scroll || report.cells?.length || report.rows?.length)
+            && (!beforeBuffer || !beforeWrites)))) conservative = true;
+    return { owner, term, backendId: owner.tabId, report, conservative,
+        beforeBuffer, beforeBaseY: beforeBuffer?.baseY || 0, beforeScreen, beforeWrites };
+}
+
+function _backgroundOutputParsed(unread) {
+    const resolved = typeof _resolveTermOwner === 'function'
+        ? _resolveTermOwner(unread.term)
+        : (unread.owner.term === unread.term ? { tab: unread.owner, owner: unread.owner } : null);
+    if (!resolved || resolved.owner.tabId !== unread.backendId) return;
+    if (resolved.tab.id === TabManager.activeId || resolved.tab._bgUnread) return;
+    if (typeof TabManager.markBackgroundOutput !== 'function') return;
+    if (unread.conservative) {
+        TabManager.markBackgroundOutput(resolved.tab, resolved.owner);
+        return;
+    }
+    const report = unread.report;
+    const afterBuffer = unread.term.buffer?.active;
+    if (report.buffer) {
+        const after = _terminalBufferSnapshot(unread.term);
+        const before = unread.beforeScreen;
+        if (after && before && (after.text !== before.text
+            || (after.type === before.type && after.baseY !== before.baseY))) {
+            TabManager.markBackgroundOutput(resolved.tab, resolved.owner);
+        }
+        return;
+    }
+    if (report.scroll && afterBuffer && unread.beforeBuffer) {
+        const beforeType = unread.beforeBuffer.type || 'normal';
+        const afterType = afterBuffer.type || 'normal';
+        const fullScroll = report.scroll === 'full' || report.scroll === true;
+        const scrollback = unread.term.options?.scrollback;
+        // Only a full-screen scroll can trim the normal buffer. Partial-region
+        // scrolling is real output too, but never satisfies this capacity path.
+        const trimmedNormal = fullScroll && afterType === 'normal' && Number.isFinite(scrollback)
+            && afterBuffer.length === unread.term.rows + scrollback;
+        if (afterType === beforeType && (report.scroll === 'partial' || (fullScroll
+            && ((afterBuffer.baseY || 0) !== unread.beforeBaseY
+                || afterType === 'alternate' || trimmedNormal)))) {
+            TabManager.markBackgroundOutput(resolved.tab, resolved.owner);
+            return;
+        }
+    }
+    const afterWrites = _terminalWriteSnapshot(afterBuffer, afterBuffer?.baseY || 0, report);
+    if (_writeSnapshotChanged(unread.beforeWrites, afterWrites)) {
+        TabManager.markBackgroundOutput(resolved.tab, resolved.owner);
+    }
+}
+
 // ConPTY rewrites the app's trailing `ESC[?25h` into `ESC[?25l` and paints its
 // own reverse-video caret cell, which permanently hides the real cursor and
 // kills smooth-cursor animations inside TUI apps (herdr etc.). The filter is
@@ -84,20 +203,27 @@ function _conPtyCaretFix(owner, data, ownerType) {
     return typeof out === 'string' ? out : data;
 }
 
-// Feed the RAW stream (pre-filter, pre-highlight) into the
-// per-owner ink caret observer and return this chunk's ordinal. The write
-// callback in pty-output reports the ordinal back to the adapter once xterm
-// has fully parsed it (the watermark binding).
+// Feed the RAW stream (pre-filter, pre-highlight) into the per-owner ink
+// observer. The parse callback returns the ordinal to the caret adapter and
+// uses the bounded write report for unread comparison after xterm parses it.
 function _inkFeed(owner, tab, pane, data) {
     if (typeof data !== 'string' || !data) return null;
+    const liveTerm = (pane || tab)?.term;
+    if (!liveTerm) return null;
     const adapter = (pane || tab)?._smoothCursor?._adapter;
     const port = adapter?.softwareCaretPort;
-    if (!port) return null;
+    const trackUnread = tab && tab.id !== TabManager.activeId && !tab._bgUnread;
+    if (!port && !trackUnread && !owner._inkObserver) return null;
     // Adapter identity changes on WebGL context loss / renderer rebuild —
     // the observer's port closure would feed a disposed adapter. Recreate
-    // with the live port whenever the adapter changed.
-    if (owner._inkObserver && owner._inkObserverAdapter !== adapter) owner._inkObserver = null;
+    // with the live port whenever the adapter changed. An adapter-less DOM
+    // terminal keeps one observer for bounded unread write reports.
+    if (owner._inkObserver && (owner._inkObserverAdapter !== adapter || owner._inkObserverTerm !== liveTerm)) {
+        owner._inkObserver = null;
+    }
     owner._inkObserverAdapter = adapter;
+    owner._inkObserverTerm = liveTerm;
+    owner._inkWrites = null;
     if (!owner._inkObserver) {
         const factory = typeof createInkCaretObserver === 'function'
             ? createInkCaretObserver
@@ -110,24 +236,26 @@ function _inkFeed(owner, tab, pane, data) {
         // BEFORE the first push (port.candidate fires synchronously inside
         // it) or the Math.max-pinned counters suspend the cursor chain until
         // a reconnect. No-op for genuinely fresh adapters/sessions.
-        port.rebindObserver?.();
-        const term = (pane || tab)?.term;
+        port?.rebindObserver?.();
+        const buffer = liveTerm?.buffer?.active;
         owner._inkObserver = factory({
-            rows: term?.rows,
-            cols: term?.cols,
-            onCandidate: c => port.candidate(c),
-            onUnit: u => port.unit(u),
-            onChunkWrites: w => port.chunkWrites?.(w),
-            onInvalidate: reason => port.invalidate('observer:' + reason),
+            rows: liveTerm?.rows,
+            cols: liveTerm?.cols,
+            row: (buffer?.cursorY || 0) + 1,
+            col: (buffer?.cursorX || 0) + 1,
+            pendingWrap: !!liveTerm && buffer?.cursorX === liveTerm.cols,
+            onCandidate: c => port?.candidate(c),
+            onUnit: u => port?.unit(u),
+            onChunkWrites: w => { owner._inkWrites = w; port?.chunkWrites?.(w); },
+            onInvalidate: reason => port?.invalidate('observer:' + reason),
         });
     }
     // Scroll/wrap modeling needs the live geometry (cheap no-op normally).
-    const liveTerm = (pane || tab)?.term;
     if (liveTerm) owner._inkObserver.setSize?.(liveTerm.rows, liveTerm.cols);
     const seq = owner._inkObserver.push(data).chunkSeq;
-    port.enqueued?.(seq);
-    return { seq, port, adapter, observer: owner._inkObserver, term: liveTerm,
-        generation: port.generation?.(), epoch: owner._inkSessionEpoch || 0 };
+    port?.enqueued?.(seq);
+    return { seq, port, adapter, observer: owner._inkObserver, term: liveTerm, writes: owner._inkWrites,
+        generation: port?.generation?.(), epoch: owner._inkSessionEpoch || 0 };
 }
 
 function _inkParsedCheckpoint(ink) {
@@ -148,16 +276,25 @@ function _inkParsedCheckpoint(ink) {
         rows: term.rows, cols: term.cols });
 }
 
-function _outputParsed(owner, ink, diagnostic) {
-    if (!ink && !diagnostic) return undefined;
+function _outputParsed(owner, ink, diagnostic, tab, data, options) {
+    const unread = _backgroundOutputSnapshot(tab, owner, data, ink, options);
+    const hasInk = !!ink?.port;
+    if (!hasInk && !diagnostic && !unread) return undefined;
     return () => {
-        if (ink && (owner._inkSessionEpoch || 0) === ink.epoch && owner._smoothCursor?._adapter === ink.adapter
+        if (hasInk && (owner._inkSessionEpoch || 0) === ink.epoch && owner._smoothCursor?._adapter === ink.adapter
             && owner._inkObserver === ink.observer && owner.term === ink.term) {
             ink.port.parsed(ink.seq);
             if (ink.port.generation?.() === ink.generation) _inkParsedCheckpoint(ink);
         }
         if (diagnostic) globalThis.ZTermDiagnostics?.parsed(diagnostic);
+        if (unread) _backgroundOutputParsed(unread);
     };
+}
+
+function _writeBufferedOutput(tab, owner, data, options) {
+    if (!owner?.term || typeof data !== 'string' || !data) return;
+    const ink = _inkFeed(owner, tab, owner === tab ? null : owner, data);
+    owner.term.write(data, _outputParsed(owner, ink, null, tab, data, options));
 }
 
 // Drop the caret filter at session boundaries. If a TUI left the filter in
@@ -217,7 +354,7 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
                 const highlighted = applyHighlight(data, tabId);
                 if (pane.term) {
                     pane.term.write(highlighted,
-                        _outputParsed(pane, inkSeq, diagnostic));
+                        _outputParsed(pane, inkSeq, diagnostic, tab, data));
                 } else {
                     let pending = (ptyBuffers[tabId] || '') + data;
                     if (pending.length > 1048576) {
@@ -232,6 +369,11 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
         if (tab.tabId === tabId) {
             diagnostics?.routed(diagnostic, tab, data);
             if (!tab._contentBuffer) tab._contentBuffer = '';
+            if (tab.term && ptyBuffers[tabId]) {
+                const pending = ptyBuffers[tabId];
+                delete ptyBuffers[tabId];
+                _writeBufferedOutput(tab, tab, pending);
+            }
             const inkSeq = _inkFeed(tab, tab, null, data);
             if (typeof data === 'string' && data) data = _conPtyCaretFix(tab, data, tab.type);
             diagnostics?.filtered(diagnostic, data);
@@ -246,12 +388,8 @@ ipcRenderer.on('pty-output', (event, { tabId, data, nativeTrace }) => {
             if (!tab._altScreen) tab._contentBuffer = appendContentTail(tab._contentBuffer, data);
             const highlighted = applyHighlight(data, tabId);
             if (tab.term) {
-                if (ptyBuffers[tabId]) {
-                    tab.term.write(ptyBuffers[tabId]);
-                    delete ptyBuffers[tabId];
-                }
                 tab.term.write(highlighted,
-                    _outputParsed(tab, inkSeq, diagnostic));
+                    _outputParsed(tab, inkSeq, diagnostic, tab, data));
             } else {
                 let pending = (ptyBuffers[tabId] || '') + data;
                 if (pending.length > 1048576) {

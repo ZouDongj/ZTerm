@@ -78,11 +78,13 @@ test('T12: mkdir commit is refused while the listing never loaded, then re-arms 
     assert.ok(vm.toasts.some(t => t.isErr && t.msg.includes('尚未加载')),
         `refusal toast shown: ${JSON.stringify(vm.toasts.map(t => t.msg))}`);
 
-    // Recovery path: a background refresh lands a real listing while the row
-    // stays open, re-arming the snapshot — the retry then commits normally.
+    // Recovery path: a background refresh retries the initial open and lands a
+    // real listing while the row stays open, re-arming the snapshot.
     const r = vm.SFTP.refresh();
     await vm.drain();
-    vm.settle(vm.pending('sftp-readdir')[0], { files: [] });
+    const retry = vm.pending('sftp-open')[0];
+    assert.ok(retry, 'an unlisted panel retries its initial open');
+    vm.settle(retry, { path: '/', files: [] });
     await vm.drain();
     await r;
     assert.ok(vm.ctx.document.getElementById('sftp-mkdir-row'), 'row survives the background refresh');
@@ -91,7 +93,8 @@ test('T12: mkdir commit is refused while the listing never loaded, then re-arms 
     const mk = vm.of('sftp-mkdir')[0];
     assert.ok(mk, 'retry commits after the listing landed');
     assert.equal(mk.args.tabId, 'sessA');
-    assert.equal(mk.args.path, '/early', 'commit targets the directory of the landed listing');
+    assert.equal(mk.args.base, '/', 'commit targets the directory of the landed listing');
+    assert.equal(mk.args.name, 'early');
 });
 
 test('T12: a background cwd follow preserves the mkdir input and re-targets its commit', async () => {
@@ -119,7 +122,8 @@ test('T12: a background cwd follow preserves the mkdir input and re-targets its 
     const mk = vm.of('sftp-mkdir')[0];
     assert.ok(mk, 'commit dispatched');
     assert.equal(mk.args.tabId, 'sessA');
-    assert.equal(mk.args.path, '/tmp/followed/newdir', 'commit uses the re-targeted snapshot, not a stale directory');
+    assert.equal(mk.args.base, '/tmp/followed', 'commit uses the re-targeted snapshot, not a stale directory');
+    assert.equal(mk.args.name, 'newdir');
 });
 
 test('T12: a user navigation retires the pending mkdir edit', async () => {

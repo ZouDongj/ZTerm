@@ -913,11 +913,20 @@ const TabManager = {
         return id;
     },
 
+    // Insert `tab` immediately after the anchor tab (issue #34: a clone sits
+    // to the RIGHT of its source, plain and split alike). No anchor — or an
+    // anchor no longer in the list — appends at the end like before.
+    _insertTabAfter(tab, anchorId) {
+        const idx = anchorId == null ? -1 : this.tabs.findIndex(t => t.id === anchorId);
+        if (idx < 0) this.tabs.push(tab);
+        else this.tabs.splice(idx + 1, 0, tab);
+    },
+
     createTab(options = {}) {
         // A new tab is an explicit geometry change: drop any close-deferral
         // so the strip re-plans immediately and the new tab is reachable.
         this._deferStripRelayout = false;
-        const { name, type, command, args, host, port, user, credId, privateKey, sshProfileId } = options;
+        const { name, type, command, args, host, port, user, credId, privateKey, sshProfileId, afterId } = options;
         const id = 't_' + (this._counter++);
         const isSSH = type === 'ssh';
         const tab = {
@@ -928,7 +937,7 @@ const TabManager = {
             connected: !isSSH,
             host, port, user, _credId: credId, privateKey, sshProfileId,
         };
-        this.tabs.push(tab);
+        this._insertTabAfter(tab, afterId);
         this.switchTo(id);
         this.render();
         if (isSSH) {
@@ -970,6 +979,7 @@ const TabManager = {
             }
         }
         this.activeId = id;
+        this._consumeBackgroundUnread(id);
         this.updateActiveClass();
         // Active-tab expansion: in sharing/overflow the newly active tab
         // widens toward its content width (FLIP-animated; a no-op in sparse,
@@ -1040,6 +1050,68 @@ const TabManager = {
         // SFTP dock reflects the newly active tab's own open state (hidden on
         // tabs that never opened it; settings never targets)
         if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
+    },
+
+    // ── Background-output unread marker (issue #26) ──
+    // Runtime-only flags live on backend owners. A split tab's flag is only
+    // their aggregate, rebuilt after extraction/collapse/migration so a moved
+    // or closed pane cannot leave stale unread state on its former tab.
+    markBackgroundOutput(tab, owner) {
+        if (!tab || tab.id === this.activeId) return;
+        if (tab.splitRoot) {
+            const panes = getAllPanes(tab);
+            const backendOwner = panes.find(p => p === owner || (owner?.tabId && p.tabId === owner.tabId));
+            if (!backendOwner) return;
+            backendOwner._bgUnread = true;
+        } else {
+            if (owner && owner !== tab) return;
+            tab._bgUnread = true;
+        }
+        this._reaggregateBackgroundUnread(tab);
+    },
+
+    _reaggregateBackgroundUnread(tab) {
+        if (!tab) return;
+        let unread = tab.splitRoot
+            ? getAllPanes(tab).some(p => p._bgUnread === true)
+            : tab._bgUnread === true;
+        if (tab.id === this.activeId && unread) {
+            if (tab.splitRoot) getAllPanes(tab).forEach(p => { p._bgUnread = false; });
+            unread = false;
+        }
+        tab._bgUnread = unread;
+        // In-place patch only: output and structural migrations must not add a
+        // full strip rebuild beyond the renders those migrations already own.
+        const icon = this._tabIconEl(tab.id);
+        if (unread && icon && icon.classList.contains('connected')) {
+            icon.classList.remove('connected');
+            icon.classList.add('bg-unread');
+        } else if (!unread && icon && icon.classList.contains('bg-unread')) {
+            icon.classList.remove('bg-unread');
+            icon.classList.add('connected');
+        }
+    },
+
+    // Consume every owner's marker on activation and restore the idle dot in
+    // place (switchTo keeps the strip node; no full render).
+    _consumeBackgroundUnread(id) {
+        const tab = this.tabs.find(t => t.id === id);
+        if (!tab) return;
+        if (tab.splitRoot) getAllPanes(tab).forEach(p => { p._bgUnread = false; });
+        tab._bgUnread = false;
+        const icon = this._tabIconEl(id);
+        if (icon && icon.classList.contains('bg-unread')) {
+            icon.classList.remove('bg-unread');
+            icon.classList.add('connected');
+        }
+    },
+
+    // Live status-dot span of a strip entry (null before the first render or
+    // while the dot is hidden by settings).
+    _tabIconEl(id) {
+        const bar = document.getElementById('tabbar');
+        const el = bar && bar.querySelector(`.tab[data-tab="${id}"]`);
+        return (el && el.querySelector('.tab-icon')) || null;
     },
 
     // Tabs that are not currently closing (rapid-close safe count: the
@@ -1667,6 +1739,11 @@ const TabManager = {
                         dotClass = 'error';
                     }
                 }
+                // Background-output unread (issue #26): the tint rides ONLY
+                // the idle connected dot — connecting / error / disconnected
+                // keep their own paint. The flag is runtime-only and consumed
+                // by switchTo.
+                if (t._bgUnread && dotClass === 'connected') dotClass = 'bg-unread';
                 const showDot = _settingsConfig.showStatusDot !== false;
                 inner = (showDot ? `<span class="tab-icon ${dotClass}"></span>` : '') + `<span class="tab-name">${escHtml(this._tabDisplayName(t))}</span>`;
                 // In split mode the tab label shows no reconnect button; each pane reconnects via its own pane header
@@ -1900,9 +1977,11 @@ const TabManager = {
     _resetSplitCapture(tab, owner) {
         // Split sessions do not capture restore content. Every boundary drops
         // the old tab snapshot; the live terminal buffer stays untouched. The
-        // resumed gate belongs to the surviving session, not the container.
+        // resumed gate and unread state belong to the surviving session, not
+        // the container.
         tab._contentBuffer = '';
         tab._altScreen = owner?._altScreen === true;
+        tab._bgUnread = owner?._bgUnread === true;
     },
 
     _newPaneData(tab, srcPane) {
@@ -1961,6 +2040,7 @@ const TabManager = {
             existing._smoothCursor = tab._smoothCursor;
             existing.tabId = tab.tabId;
             existing._altScreen = tab._altScreen === true;
+            existing._bgUnread = tab._bgUnread === true;
             existing.focused = false;
             // An in-flight SSH attempt follows its session onto the pane
             // (identity transfer; migrations never create attempts).
@@ -2009,6 +2089,7 @@ const TabManager = {
             // of truth); the new pane must enter a visible layout, not stay
             // hidden behind a stale maximized-pane reference
             tab._maximizedPaneId = null;
+            this._reaggregateBackgroundUnread(tab);
             this._renderSplit(tab);
             this._spawnBackendForPane(newPane, tab);
             // The active terminal moved to the newly focused pending pane
@@ -2616,6 +2697,8 @@ const TabManager = {
         pane.tabId = null;
         pane.requestId = null;
         pane._pendingAttempt = null;
+        pane._bgUnread = false;
+        this._reaggregateBackgroundUnread(tab);
         // A pane committed to close can never reconnect: drop the pending
         // flag too, or a lone survivor check below would read this dying
         // pane as "awaiting its reconnect" instead of dead.
@@ -2913,6 +2996,8 @@ const TabManager = {
         // connected flag (B-P2-09). The collapsed branch re-synced via
         // adoptPaneFieldsIntoTab, where the helper early-returns anyway.
         _aggregateSplitConnected(st);
+        this._reaggregateBackgroundUnread(st);
+        this._reaggregateBackgroundUnread(nt);
         this.render();
         this.switchTo(nt.id);
         this.updateStatus();
@@ -3096,6 +3181,7 @@ const TabManager = {
             fp._smoothCursor = targetTab._smoothCursor;
             fp.tabId = targetTab.tabId;
             fp._altScreen = targetTab._altScreen === true;
+            fp._bgUnread = targetTab._bgUnread === true;
             fp.focused = false;
             // Same transfer rule as the first-split promotion: the target's
             // existing session keeps its liveness marker on the fp pane.
@@ -3141,6 +3227,7 @@ const TabManager = {
             name: paneName, type: paneType,
             ...(manualName ? { _manualName: true } : {}),
             _altScreen: movedOwner._altScreen === true,
+            _bgUnread: movedOwner._bgUnread === true,
             connected: mconn,
             // Known-failed liveness marker travels with the moved session
             // (ipc.js owns its lifecycle; see the ssh-error/pty-exit handlers)
@@ -3192,8 +3279,12 @@ const TabManager = {
         // Structural moves changed both tabs' pane sets: re-aggregate the
         // tab-level connected flags from the panes (B-P2-09). Removed or
         // collapsed source tabs early-return inside the helper.
-        if (sourceTab && this.tabs.includes(sourceTab)) _aggregateSplitConnected(sourceTab);
+        if (sourceTab && this.tabs.includes(sourceTab)) {
+            _aggregateSplitConnected(sourceTab);
+            this._reaggregateBackgroundUnread(sourceTab);
+        }
         _aggregateSplitConnected(targetTab);
+        this._reaggregateBackgroundUnread(targetTab);
         this._renderSplit(targetTab);
         if (this.activeId !== targetTab.id) this.switchTo(targetTab.id);
         this._updateTabName(targetTab);
@@ -3283,6 +3374,7 @@ const TabManager = {
         // window disposes the term and nulls tab.term; the old
         // captured-slot deref threw).
         if (this.activeId === tab.id && tab.term) _scheduleTerminalFocus(() => tab.term, 100, true);
+        this._reaggregateBackgroundUnread(tab);
         // The split tree collapsed onto a single tab-owned session: the dock's
         // focused-pane resolution changed shape — re-evaluate the binding
         if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
@@ -3914,8 +4006,8 @@ const TabManager = {
         // Has splits: deep-clone the split tree and start a new backend for each pane
         if (src.splitRoot) return this._cloneSplitTab(src);
 
-        // Single pane: plain createTab
-        const options = { name: src.name, type: src.type };
+        // Single pane: plain createTab anchored right after the source
+        const options = { name: src.name, type: src.type, afterId: src.id };
         if (src.type === 'ssh') {
             options.host = src.host;
             options.port = src.port;
@@ -3985,7 +4077,9 @@ const TabManager = {
         };
         tab.splitRoot = cloneTree(src.splitRoot);
 
-        this.tabs.push(tab);
+        // Same insertion semantics as the plain clone (issue #34): the split
+        // copy sits immediately right of its source, not at the strip's end.
+        this._insertTabAfter(tab, src.id);
         this._renderSplit(tab);
 
         // During _renderSplit the old and new split-root are both visible, causing layout contention,

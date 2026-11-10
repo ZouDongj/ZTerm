@@ -52,7 +52,7 @@ test('lost native proof withdraws the lease and releases a pending command into 
     try { renewNativeLease({ readStatus, expected, now: () => 10000, renew: () => { renewals++; } }); }
     catch (error) { reason = error; }
     assert.ok(reason);
-    stopBackgroundRun({ leasePath, abortController: controller, timer: null }, reason);
+    await stopBackgroundRun({ leasePath, abortController: controller, timer: null }, reason);
     assert.equal(existsSync(leasePath), false);
     assert.equal(controller.signal.aborted, true);
     assert.deepEqual(leaseAtAbort, [false]);

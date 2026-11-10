@@ -133,6 +133,59 @@ test('observer startup waits for its own complete fresh sample before host spawn
   } finally { observation.stop(); }
 });
 
+test('single and short foreground identity transients recover before host spawn', async () => {
+  for (const transientCount of [1, 3]) {
+    const observer = observerChild();
+    const transientReasons = [];
+    const failures = [];
+    const observation = observeDesktopStream({ observer, baseline: fresh(), startupTimeoutMs: 100,
+      onTransient: error => transientReasons.push(error.message), onFailure: error => failures.push(error) });
+    let spawned = false;
+    const launch = (async () => { await observation.ready; observation.assertHealthy(); spawned = true; })();
+    const recovered = assert.doesNotReject(launch);
+    try {
+      for (let i = 0; i < transientCount; i++) {
+        observer.stdout.emit('data', '{"ok":false,"transient":true,"error":"foreground identity unavailable"}\n');
+      }
+      await Promise.resolve();
+      assert.equal(spawned, false);
+      assert.throws(() => observation.assertHealthy());
+      emitSample(observer);
+      await recovered;
+      assert.equal(spawned, true);
+      assert.deepEqual(transientReasons, ['foreground identity unavailable']);
+      assert.deepEqual(failures, []);
+    } finally { observation.stop(); }
+  }
+});
+
+test('a persistent foreground identity transient times out with its real reason', async () => {
+  const observer = observerChild();
+  const failures = [];
+  let spawned = false;
+  const observation = observeDesktopStream({ observer, baseline: fresh(), startupTimeoutMs: 25,
+    onFailure: error => failures.push(error) });
+  const launch = (async () => { await observation.ready; spawned = true; })();
+  const rejected = assert.rejects(launch, error => {
+    assert.equal(error.code, 'ZTERM_E2E_DESKTOP_OBSERVER_TRANSIENT');
+    assert.match(error.message, /did not recover.*foreground identity unavailable/);
+    return true;
+  });
+  const transient = () => observer.stdout.emit('data',
+    '{"ok":false,"transient":true,"error":"foreground identity unavailable"}\n');
+  transient();
+  const interval = setInterval(transient, 5);
+  try {
+    await rejected;
+    assert.equal(spawned, false);
+    assert.equal(failures.length, 1);
+    assert.match(failures[0].message, /foreground identity unavailable/);
+  } finally {
+    clearInterval(interval);
+    observation.stop();
+  }
+});
+
 test('failed, absent, or unsafe first observer proof never reaches host spawn', async () => {
   for (const failure of ['exit', 'error', 'malformed', 'desktop', 'foreground', 'stale', 'future', 'absent']) {
     const observer = observerChild();
@@ -177,6 +230,60 @@ test('a ready observer still fails on stale proof, lost ownership continuity, or
     observer.emit('exit', 0);
     assert.equal(failures.length, 1);
   } finally { observation.stop(); }
+});
+
+test('an owned-phase foreground identity transient is typed and immediately fatal', async () => {
+  const observer = observerChild();
+  const failures = [];
+  const transients = [];
+  let ownedPid = null;
+  const observation = observeDesktopStream({ observer, baseline: fresh(), getOwnedPid: () => ownedPid,
+    onTransient: error => transients.push(error), onFailure: error => failures.push(error) });
+  try {
+    emitSample(observer);
+    await observation.ready;
+    ownedPid = 20;
+    observer.stdout.emit('data', '{"ok":false,"transient":true,"error":"foreground identity unavailable"}\n');
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].code, 'ZTERM_E2E_DESKTOP_OBSERVER_TRANSIENT');
+    assert.equal(failures[0].message, 'foreground identity unavailable');
+    assert.equal(transients.length, 0, 'owned runs never enter the pre-launch recovery window');
+    assert.throws(() => observation.assertHealthy(), /foreground identity unavailable/);
+    emitSample(observer);
+    assert.equal(failures.length, 1, 'a later healthy sample cannot revoke the failure');
+  } finally { observation.stop(); }
+});
+
+test('unsafe snapshots and non-target observer errors fail immediately without recovery', async () => {
+  const cases = [
+    ['owned foreground', now => JSON.stringify({ ...baseline, observedAt: now, foregroundPid: 20, foregroundOwnerPids: [20] }), /acquired foreground/],
+    ['desktop change', now => JSON.stringify({ ...baseline, observedAt: now, currentDesktopId: '33333333-3333-3333-3333-333333333333' }), /Desktop changed/],
+    ['active target', now => JSON.stringify({ ...baseline, observedAt: now, currentDesktopId: baseline.targetDesktopId }), /requested test desktop is active/],
+    ['forged proof', now => JSON.stringify({ ...baseline, observedAt: now, foregroundOwnerPids: [] }), /inspection is incomplete/],
+    ['stale proof', now => JSON.stringify({ ...baseline, observedAt: now - 1501 }), /Fresh background observer proof/],
+    ['generic error', () => '{"ok":false,"error":"foreground owner identity unavailable"}', /foreground owner identity unavailable/],
+    ['mislabelled transient', () => '{"ok":false,"transient":true,"error":"current desktop identity unavailable"}', /current desktop identity unavailable/],
+  ];
+  for (const [name, line, reason] of cases) {
+    const now = 10000;
+    const observer = observerChild();
+    const failures = [];
+    const transients = [];
+    const observation = observeDesktopStream({ observer, baseline: { ...baseline, observedAt: now },
+      now: () => now, startedAt: now, getOwnedPid: () => 20,
+      onTransient: error => transients.push(error), onFailure: error => failures.push(error) });
+    try {
+      observer.stdout.emit('data', JSON.stringify({ ...baseline, observedAt: now }) + '\n');
+      await observation.ready;
+      observer.stdout.emit('data', line(now) + '\n');
+      assert.equal(failures.length, 1, name);
+      assert.match(failures[0].message, reason, name);
+      assert.equal(transients.length, 0, name);
+      assert.throws(() => observation.assertHealthy(), reason, name);
+      observer.stdout.emit('data', JSON.stringify({ ...baseline, observedAt: now }) + '\n');
+      assert.equal(failures.length, 1, `${name}: healthy output cannot revoke failure`);
+    } finally { observation.stop(); }
+  }
 });
 
 test('shown proof rejects a still minimized, activatable, hidden, or misplaced host', async () => {

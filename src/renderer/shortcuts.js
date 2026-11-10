@@ -186,14 +186,28 @@ const SHORTCUT_ACTIONS = {
             TabManager.cloneTab(tab.id);
         }
     },
-    reconnectTab: () => {
+    reconnectTab: (fromKeyboard) => {
         // Only SSH tabs have a session to reconnect; local/settings tabs no-op
         // (TabManager.reconnectTab guards the same way). An open overlay owns
-        // the keyboard, same rule as cloneTab.
+        // the keyboard, same rule as cloneTab. Direct callers (the command
+        // palette entry) get the original FORCE semantics: an explicitly
+        // picked command may intentionally drop a live session. The keyboard
+        // dispatcher passes fromKeyboard=true, and issue #37 gates only that
+        // path — a bound key is a reconnect gesture, so the TARGET session
+        // must already be down: the focused pane in a split, the tab itself
+        // otherwise (the same target TabManager.reconnectTab routes to).
+        // _paneReconnectWanted is the pane-header offer predicate (SSH type +
+        // explicitly disconnected + not connecting); a non-split tab carries
+        // the same field family, so it decides both shapes. The mouse buttons
+        // (tab-strip force button / pane-header) call into TabManager
+        // directly and are unaffected either way.
         const tab = TabManager.getActive();
-        if (tab && tab.type === 'ssh' && !document.querySelector('.overlay.open')) {
-            TabManager.reconnectTab(tab.id);
+        if (!tab || tab.type !== 'ssh' || document.querySelector('.overlay.open')) return;
+        if (fromKeyboard) {
+            const target = tab.splitRoot ? getAllPanes(tab).find(p => p.focused) : tab;
+            if (!target || !_paneReconnectWanted(target)) return;
         }
+        TabManager.reconnectTab(tab.id);
     },
     'toggle-statusbar': () => {
         // Show/hide bottom status bar; feedback toast names the CURRENT binding
@@ -505,8 +519,7 @@ function startShortcutCapture(actionId, btn) {
             // capture open until a non-modifier key arrives.
             const ok = combo.includes('Ctrl+') || combo.includes('Alt+') || combo.includes('Win+')
                 || /^F\d{1,2}$/.test(keyPart);
-            const bindings = _getShortcutBindings();
-            const conflict = ok && Object.keys(bindings).find(id => id !== actionId && bindings[id] === combo);
+            const conflict = ok && _findShortcutConflict(combo, actionId);
             if (!ok) showToast('普通按键不能单独作为快捷键（需含 Ctrl/Alt/Win，或使用 F1-F12）');
             else if (conflict) showToast('快捷键已被「' + SHORTCUT_LABELS[conflict] + '」占用');
             else {
@@ -524,7 +537,25 @@ function startShortcutCapture(actionId, btn) {
     document.addEventListener('mousedown', onMouseDown, true);
 }
 
+// First action other than excludeId currently bound to this combo, or null.
+// Shared by the capture path and both reset paths so their conflict rules
+// cannot drift apart.
+function _findShortcutConflict(combo, excludeId) {
+    if (!combo) return null;
+    const bindings = _getShortcutBindings();
+    return Object.keys(bindings).find(id => id !== excludeId && bindings[id] === combo) || null;
+}
+
 function resetShortcut(actionId) {
+    // Restoring a default must not duplicate another action's live combo
+    // (issue #33): with quickCommands cleared and SFTP rebound onto the freed
+    // Alt+Q, an unconditional delete bound Alt+Q twice. Same rule as a fresh
+    // capture: name the holder and keep the current binding.
+    const conflict = _findShortcutConflict(DEFAULT_SHORTCUTS[actionId], actionId);
+    if (conflict) {
+        showToast('快捷键已被「' + SHORTCUT_LABELS[conflict] + '」占用');
+        return;
+    }
     if (_settingsConfig.shortcuts) delete _settingsConfig.shortcuts[actionId];
     persistShortcuts();
     renderShortcutsList();
@@ -532,6 +563,20 @@ function resetShortcut(actionId) {
 }
 
 function resetAllShortcuts() {
+    // A full reset lands exactly on DEFAULT_SHORTCUTS, so the only duplicate
+    // it could create is one baked into the defaults themselves (a future
+    // defaults edit claiming the same combo twice). Same rule as the single
+    // reset: name the collision and keep the current bindings (issue #33).
+    const seen = new Map();
+    for (const id of Object.keys(DEFAULT_SHORTCUTS)) {
+        const combo = DEFAULT_SHORTCUTS[id];
+        if (seen.has(combo)) {
+            showToast('默认快捷键冲突：「' + SHORTCUT_LABELS[seen.get(combo)] + '」与「'
+                + SHORTCUT_LABELS[id] + '」均为 ' + _comboDisplay(combo) + '，已保留当前快捷键');
+            return;
+        }
+        seen.set(combo, id);
+    }
     _settingsConfig.shortcuts = {};
     persistShortcuts();
     renderShortcutsList();
@@ -549,10 +594,17 @@ function persistShortcuts() {
 async function loadDataDirInfo() {
     const el = document.getElementById('data-dir-path');
     if (!el) return;
-    const info = await ipcRenderer.invoke('get-data-dir-info');
-    if (!info) return;
-    el.textContent = info.current + (info.isCustom ? '（自定义）' : '（默认）');
-    document.getElementById('data-dir-reset').style.display = info.isCustom ? '' : 'none';
+    try {
+        const info = await ipcRenderer.invoke('get-data-dir-info');
+        if (!info) return;
+        el.textContent = info.current + (info.isCustom ? '（自定义）' : '（默认）');
+        document.getElementById('data-dir-reset').style.display = info.isCustom ? '' : 'none';
+    } catch (e) {
+        // The main process refuses to resolve any path when no per-account
+        // profile root exists; surface that loudly instead of guessing a path.
+        el.textContent = '数据目录不可用：' + (e && e.message ? e.message : e);
+        document.getElementById('data-dir-reset').style.display = 'none';
+    }
 }
 
 // ── About info (version numbers read dynamically by the main process) ──
@@ -996,6 +1048,10 @@ document.addEventListener('keydown', e => {
     const actionId = Object.keys(bindings).find(id => bindings[id] === combo);
     if (!actionId || !SHORTCUT_ACTIONS[actionId]) return;
     e.preventDefault(); e.stopPropagation();
-    SHORTCUT_ACTIONS[actionId]();
+    // Keyboard-origin flag: the only caller that distinguishes dispatch
+    // provenance today is reconnectTab (issue #37) — a bound key reconnects
+    // only an already-down session, while direct action callers (command
+    // palette) keep force semantics. Every other action ignores the flag.
+    SHORTCUT_ACTIONS[actionId](true);
 }, true);
 

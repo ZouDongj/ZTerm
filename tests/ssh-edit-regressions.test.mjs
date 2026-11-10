@@ -1,12 +1,9 @@
 // SSH edit dialog regressions (ssh.js), driven through the REAL script in
 // the manager VM (tests/helpers/manager-vm.mjs).
 //
-// 1. Login-script quoting: addLoginScriptRow put Expect/Send into
-//    double-quoted value="..." attributes via escHtml, which does NOT escape
-//    quotes — the browser tokenizer ended the attribute at the first ",
-//    reopening the dialog showed a truncated value, and saving it silently
-//    corrupted the profile. Attribute contexts must use escAttr (same rule
-//    as the group-name XSS fix elsewhere in the file).
+// 1. Login-script values must survive rendering and collection byte-for-byte,
+//    including quotes, markup characters and every newline convention. The
+//    single-line input's native newline stripping must not corrupt stored data.
 // 2. Listener stacking: openSSHEdit ran on every dialog open but its targets
 //    (group combobox input, save button, inline password buttons) are static
 //    page elements — a fresh addEventListener per open piled up handlers and
@@ -35,28 +32,17 @@ function withRealEscapers(ctx) {
     return ctx;
 }
 
-// Emulate the browser tokenizer for a double-quoted attribute: it ends at
-// the first raw " — exactly the truncation the defect relied on.
-const ATTR_VALUE = /<input class="(ls-expect|ls-send)" placeholder="(?:Expect|Send)" value="([^"]*)">/g;
-const decodeEntities = (s) => s
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&');
-
-// The fake DOM's innerHTML getter does not serialize children, so read the
-// row's own markup (set verbatim by addLoginScriptRow) instead of the
-// container's serialized form.
 function paintedScripts(ctx) {
     const container = ctx.document.getElementById('login-scripts-container');
     const rows = container.children.filter(c => c.className === 'login-script-row');
     assert.equal(rows.length, 1, 'one script row appended');
-    const html = rows[0]._innerHTML;
-    const got = {};
-    for (const m of html.matchAll(ATTR_VALUE)) got[m[1]] = decodeEntities(m[2]);
-    assert.deepEqual(Object.keys(got).sort(), ['ls-expect', 'ls-send'], 'both step inputs rendered');
-    return got;
+    const querySelectorAll = ctx.document.querySelectorAll;
+    ctx.document.querySelectorAll = selector => selector === '#login-scripts-container .login-script-row'
+        ? rows
+        : querySelectorAll(selector);
+    const collected = ctx.collectLoginScripts();
+    assert.equal(collected.length, 1, 'one script survives collection');
+    return { 'ls-expect': collected[0].expect, 'ls-send': collected[0].send };
 }
 
 const listenerCount = (el, type) => (el._listeners.get(type) || []).length;
@@ -67,8 +53,8 @@ test('a login script with quotes, ampersand and angle brackets round-trips throu
     const ctx = withRealEscapers(loadSshVm());
     ctx.addLoginScriptRow('prompt "yes/no"?', 'echo "done" & <exit>');
     const got = paintedScripts(ctx);
-    assert.equal(got['ls-expect'], 'prompt "yes/no"?', 'Expect survives the double-quoted attribute');
-    assert.equal(got['ls-send'], 'echo "done" & <exit>', 'Send survives the double-quoted attribute');
+    assert.equal(got['ls-expect'], 'prompt "yes/no"?', 'Expect survives rendering and collection');
+    assert.equal(got['ls-send'], 'echo "done" & <exit>', 'Send survives rendering and collection');
 });
 
 test('reopening a profile with quoted login scripts repaints them intact', () => {
@@ -82,6 +68,16 @@ test('reopening a profile with quoted login scripts repaints them intact', () =>
     const got = paintedScripts(ctx);
     assert.equal(got['ls-expect'], 'want "yes"?');
     assert.equal(got['ls-send'], 'send "ok"');
+});
+
+test('login scripts preserve CR, CRLF and LF byte sequences through collection', () => {
+    const ctx = withRealEscapers(loadSshVm());
+    const expect = 'first\r\nsecond\nthird\rfourth 雪 😀';
+    const send = 'send\r\nnext\nlast\rend " < > &';
+    ctx.addLoginScriptRow(expect, send);
+    const got = paintedScripts(ctx);
+    assert.equal(got['ls-expect'], expect);
+    assert.equal(got['ls-send'], send);
 });
 
 // ── One-shot dialog bindings (listener count constant across opens) ──
