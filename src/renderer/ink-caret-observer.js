@@ -107,6 +107,8 @@
     let rows = Math.max(2, Math.floor(options?.rows) || 24);
     let cols = Math.max(2, Math.floor(options?.cols) || 80);
     let scrollTop = 0, scrollBottom = rows - 1;
+    let normalScrollTop = 0, normalScrollBottom = rows - 1;
+    let regionBuffer = 'normal';
     let originMode = false;
     // Cursor model inside the current unit (1-based row/col like CUP).
     let row = Math.min(rows, Math.max(1, Math.floor(options?.row) || 1));
@@ -397,7 +399,9 @@
       if (second !== '[') {
         if (seq === '\u001bc') {
           if (chunkCellWrites) { chunkText = true; chunkComplete = false; }
-          scrollTop = 0; scrollBottom = rows - 1; originMode = false;
+          scrollTop = 0; scrollBottom = rows - 1;
+          normalScrollTop = 0; normalScrollBottom = rows - 1;
+          regionBuffer = 'normal'; originMode = false;
           losePosition();
         } else if (seq === '\u001b7' || seq === '\u001b8') {
           losePosition();
@@ -423,6 +427,12 @@
         }
         return;
       }
+      if (seq === '\u001b[!p') {
+        scrollTop = 0; scrollBottom = rows - 1; originMode = false;
+        if (regionBuffer === 'normal') { normalScrollTop = 0; normalScrollBottom = rows - 1; }
+        losePosition();
+        return;
+      }
       // SGR is STREAM-GLOBAL state (a real terminal's attributes persist
       // across frames): track it even between units. Without this, the
       // frame-form prefix's SGR(0) — which arrives BEFORE the unit opens —
@@ -444,7 +454,16 @@
         if (fin === 'p') return; // DECRQM queries do not change the screen.
         if (fin === 'h' || fin === 'l') {
           const modes = params.split(';');
-          if (chunkCellWrites && modes.some(p => /^(?:\?)?(?:47|1047|1049)$/.test(p))) chunkBuffer = true;
+          if (modes.some(p => /^(?:\?)?(?:47|1047|1049)$/.test(p))) {
+            if (chunkCellWrites) chunkBuffer = true;
+            if (fin === 'h' && regionBuffer === 'normal') {
+              normalScrollTop = scrollTop; normalScrollBottom = scrollBottom;
+              regionBuffer = 'alternate'; scrollTop = 0; scrollBottom = rows - 1;
+            } else if (fin === 'l' && regionBuffer === 'alternate') {
+              regionBuffer = 'normal';
+              scrollTop = normalScrollTop; scrollBottom = normalScrollBottom;
+            }
+          }
           if (modes.some(p => /^(?:\?)?6$/.test(p))) {
             originMode = fin === 'h';
             row = originMode ? scrollTop + 1 : 1; col = 1;
@@ -711,7 +730,10 @@
         if (Number.isFinite(nextRows) && nextRows >= 2) {
           const changed = nextRows !== rows;
           rows = Math.floor(nextRows);
-          if (changed) { scrollTop = 0; scrollBottom = rows - 1; }
+          if (changed) {
+            scrollTop = 0; scrollBottom = rows - 1;
+            normalScrollTop = 0; normalScrollBottom = rows - 1;
+          }
         }
         if (Number.isFinite(nextCols) && nextCols >= 2) cols = Math.floor(nextCols);
       },

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const { createInkCaretObserver } = require('../src/renderer/ink-caret-observer.js');
+require('../src/vendor/xterm.js');
 
 const dsh = readFileSync(join(here, 'fixtures/dshtui-b0-nav-delete.txt'), 'utf8');
 const kimi = readFileSync(join(here, 'fixtures/kimi-b0-nav-delete.txt'), 'utf8');
@@ -249,3 +250,46 @@ test('RIS and resize restore full-region scroll evidence', () => {
   observer.push('\u001b[30;1H\n');
   assert.equal(reports[1].scroll, 'full');
 });
+
+
+async function differential(chunks) {
+  const terminal = new globalThis.TabbyXterm.Terminal({ cols: 8, rows: 24, scrollback: 0, allowProposedApi: true });
+  const reports = [];
+  const observer = createInkCaretObserver({ rows: 24, cols: 8, onChunkWrites: w => reports.push(w) });
+  for (const chunk of chunks) {
+    observer.push(chunk);
+    await new Promise(resolve => terminal.write(chunk, resolve));
+  }
+  return { terminal, reports, state: observer.state() };
+}
+
+function xLocations(terminal) {
+  const cells = [];
+  for (let row = 0; row < terminal.rows; row++) {
+    const cell = terminal.buffer.active.getLine(row)?.getCell(0);
+    if (cell?.getChars() === 'X') cells.push([row, 0, 'X', 1]);
+  }
+  return cells;
+}
+
+for (const [name, chunks, expectedScroll] of [
+  ['1049l discards the alternate region', [
+    '\u001b[?1049h', '\u001b[1;23r', '\u001b[?1049l', '\u001b[23;1H\nX',
+  ], null],
+  ['1049l restores the saved normal region', [
+    '\u001b[1;22r', '\u001b[?1049h', '\u001b[1;23r', '\u001b[?1049l', '\u001b[22;1H\nX',
+  ], 'partial'],
+  ['DECSTR resets region and origin', [
+    '\u001b[1;23r\u001b[?6h', '\u001b[!p', '\u001b[23;1H\nX',
+  ], null],
+]) {
+  test(`real xterm differential: ${name}`, async t => {
+    const { terminal, reports, state } = await differential(chunks);
+    t.after(() => terminal.dispose());
+    const actual = xLocations(terminal);
+    assert.equal(actual.length, 1, 'the real xterm fixture writes exactly one X');
+    assert.deepEqual(reports.at(-1).cells, actual, 'observer and xterm write X at the same cell');
+    assert.equal(reports.at(-1).scroll, expectedScroll);
+    assert.equal(state.positionKnown, true, 'CUP restores known coordinates after the buffer/reset transition');
+  });
+}
