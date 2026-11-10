@@ -260,7 +260,7 @@ async function startApp(dataConfig) {
     env: {
       ...process.env,
       APPDATA: sandbox.appData,
-      LOCALAPPDATA: sandbox.appData,
+      LOCALAPPDATA: sandbox.localAppData,
       ZTERM_E2E_BACKGROUND_POLICY: policyPath,
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${launchPort} --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`,
       WEBVIEW2_USER_DATA_FOLDER: udf,

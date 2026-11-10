@@ -25,6 +25,12 @@ static CONFIG_CORRUPT_HANDLED: std::sync::atomic::AtomicBool =
 // clears it, so saving resumes as soon as the real config is readable again.
 static CONFIG_PERSIST_SUPPRESSED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+// Set for the whole process when the one-time account seed could not publish
+// its config (unwritable target dir): a save would plant a derived/default
+// config over the seed source's data, so save_config refuses everything
+// until the next launch retries the seed (see seed_account_config).
+static CONFIG_SEED_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 // Serial write lock for config/known_hosts: the load-modify-save cycle of the
 // save_* commands must be atomic, or concurrent saves overwrite each other with stale snapshots
 static CONFIG_WRITE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
@@ -856,88 +862,309 @@ pub fn cancel_execution(app: AppHandle, args: Vec<Value>) -> Result<(), String> 
 
 // ── Config helpers ──
 
-// ── Data directory resolution (aligned with Electron session-store design) ──
+// ── Data directory resolution (per-account isolation, fail-closed) ──
 // Anchor: %APPDATA%\ZTerm\config.json — holds the optional dataDir pointer
 // (custom data dir) and acts as the fallback/mirror.
-// Default data dir (no pointer): dev build = anchor dir, release build =
-// <install dir>/data (same as the Electron packaged build).
+// Default data dir (no pointer): the current account's Local App Data
+// (release builds) or the anchor dir (dev builds). The install directory is
+// never the default: a per-machine install would make every account share
+// one `<exe>/data` config. The legacy release copy beside the executable is
+// only a one-time seed source for the account-local dir (see
+// migrate_legacy_config).
+// Every path is derived from AccountDirs, which fails closed when neither
+// APPDATA nor HOME names an account profile: the current working directory
+// or a shared temporary location must never become a configuration path.
 
-fn anchor_dir() -> PathBuf {
-    std::env::var("APPDATA")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".into())
-        .into()
+/// The per-account directory roots every configuration path is derived from.
+#[derive(Clone, Debug)]
+struct AccountDirs {
+    roaming_root: PathBuf,
+    local_root: Option<PathBuf>,
 }
 
-fn anchor_config_path() -> PathBuf {
-    anchor_dir().join("ZTerm").join("config.json")
-}
-
-fn default_data_dir() -> PathBuf {
-    #[cfg(debug_assertions)]
-    {
-        // dev build: keep using the anchor dir (matches Electron dev behavior)
-        return anchor_dir().join("ZTerm");
+impl AccountDirs {
+    fn anchor_config_path(&self) -> PathBuf {
+        self.roaming_root.join("ZTerm").join("config.json")
     }
-    #[cfg(not(debug_assertions))]
-    {
-        // release build: <exe dir>/data
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                return parent.join("data");
+
+    fn default_data_dir(&self) -> PathBuf {
+        release_default_data_dir(self.local_root.as_deref(), &self.roaming_root)
+    }
+
+    // Resolve the effective data dir: anchor dataDir pointer first, else
+    // default.
+    fn resolve_data_dir(&self) -> PathBuf {
+        let anchor = self.anchor_config_path();
+        if anchor.exists() {
+            if let Some(dir) = anchor_data_dir_pointer(&anchor) {
+                return PathBuf::from(dir);
             }
         }
-        anchor_dir().join("ZTerm")
+        self.default_data_dir()
+    }
+
+    fn config_path(&self) -> PathBuf {
+        self.resolve_data_dir().join("config.json")
     }
 }
 
-// Resolve the effective data dir: anchor dataDir pointer first, else default.
-fn resolve_data_dir() -> PathBuf {
-    let anchor = anchor_config_path();
-    if anchor.exists() {
-        if let Ok(content) = std::fs::read_to_string(&anchor) {
-            if let Ok(v) = serde_json::from_str::<Value>(&content) {
-                if let Some(d) = v.get("dataDir").and_then(|x| x.as_str()) {
-                    if !d.is_empty() {
-                        return PathBuf::from(d);
-                    }
-                }
-            }
-        }
-    }
-    default_data_dir()
+fn account_dirs() -> Result<AccountDirs, String> {
+    account_dirs_from(
+        std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME")),
+        account_local_app_data(),
+    )
 }
 
-// One-time migration: if the default data dir has no config yet but the
-// anchor has one (and no custom pointer is set), copy it over. This covers
-// first launch of a packaged build and config wipe after reinstall.
+/// Split from the environment lookup for unit tests. An empty environment
+/// value is no root at all: without a roaming root there is no anchor, no
+/// pointer to read and no account-owned default dir, so the whole config
+/// pipeline fails closed instead of touching a shared location.
+fn account_dirs_from(
+    roaming: Option<std::ffi::OsString>,
+    local_root: Option<PathBuf>,
+) -> Result<AccountDirs, String> {
+    let roaming_root = roaming
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            "no per-account profile directory is available (APPDATA and HOME are unset)".to_string()
+        })?;
+    Ok(AccountDirs {
+        roaming_root,
+        local_root,
+    })
+}
+
+#[cfg(all(windows, not(debug_assertions)))]
+fn account_local_app_data() -> Option<PathBuf> {
+    use winapi::um::knownfolders::FOLDERID_LocalAppData;
+    crate::execution_trust::known_folder(&FOLDERID_LocalAppData)
+        .map_err(|error| eprintln!("[zterm] account local app data unavailable: {error}"))
+        .ok()
+}
+
+#[cfg(any(not(windows), debug_assertions))]
+fn account_local_app_data() -> Option<PathBuf> {
+    // Dev builds resolve no local-app-data root, so the account's roaming
+    // anchor dir stays the default data dir — the historical dev behavior.
+    None
+}
+
+/// The release default data dir follows the Windows account, not the install
+/// location. Split from the known-folder lookup for unit tests; a missing
+/// known folder falls back to the account's roaming profile dir — never to
+/// the executable's directory.
+fn release_default_data_dir(
+    local_app_data: Option<&std::path::Path>,
+    roaming_root: &std::path::Path,
+) -> PathBuf {
+    local_app_data.unwrap_or(roaming_root).join("ZTerm")
+}
+
+/// The anchor's custom dataDir pointer, when it parses to a non-empty string.
+/// Tolerant by design (startup resolution), unlike set_data_dir's strict read.
+fn anchor_data_dir_pointer(anchor: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(anchor).ok()?;
+    let value = serde_json::from_str::<Value>(&content).ok()?;
+    value
+        .get("dataDir")?
+        .as_str()
+        .filter(|dir| !dir.is_empty())
+        .map(str::to_owned)
+}
+
+/// What the one-time account seed did. `Failed` means nothing was published:
+/// no file was overwritten and config saves stay suppressed until the next
+/// launch retries the seed.
+#[derive(Debug, PartialEq, Eq)]
+enum AccountSeed {
+    Skipped,
+    Seeded,
+    Failed,
+}
+
+// One-time per-account seed of the default data dir's config, run at startup
+// before the first load. Precedence:
+//   1. a valid custom dataDir pointer already routes this account to its own
+//      dir — nothing to seed;
+//   2. an existing config in the target dir wins — never overwritten;
+//   3. the seed source is the legacy release config (`<exe>/data/config.json`
+//      of pre-isolation builds), falling back to the anchor mirror when the
+//      legacy copy is gone;
+//   4. the seed publishes through a unique temp sibling plus a
+//      non-overwriting hard link, so a concurrent writer can never be clobbered.
+// Only config.json travels: sibling files (private keys) are never copied,
+// and DPAPI ciphertext inside the config stays bound to the account that
+// encrypted it — a copied file grants no new decryption or authorization.
+// A publish failure publishes nothing and suppresses default-config saves for
+// the process (CONFIG_SEED_PENDING): the seed retries on the next launch
+// instead of masking the seed source's data with derived defaults.
+// Dev builds resolve the anchor dir itself as the data dir, so the existing
+// target check makes this a natural no-op there.
 pub fn migrate_legacy_config() {
-    let anchor = anchor_config_path();
-    if !anchor.exists() {
-        return;
+    migrate_legacy_config_with(account_dirs(), legacy_release_data_config())
+}
+
+fn migrate_legacy_config_with(dirs: Result<AccountDirs, String>, legacy: Option<PathBuf>) {
+    let dirs = match dirs {
+        Ok(dirs) => dirs,
+        Err(error) => {
+            // Without account roots there is nothing account-owned to seed
+            // into and no pointer to honor: reading or writing a shared
+            // location here would defeat the isolation the seed exists for.
+            // The load that follows fails closed the same way.
+            eprintln!("[zterm] account config seed skipped: {error}");
+            return;
+        }
+    };
+    let anchor = dirs.anchor_config_path();
+    let target_dir = dirs.default_data_dir();
+    match seed_account_config(&anchor, &target_dir, legacy.as_deref()) {
+        AccountSeed::Seeded => eprintln!(
+            "[zterm] seeded the account config in {}",
+            target_dir.join("config.json").display()
+        ),
+        AccountSeed::Failed => {
+            eprintln!(
+                "[zterm] account config seed to {} failed; it retries on the next launch",
+                target_dir.join("config.json").display()
+            );
+        }
+        AccountSeed::Skipped => {}
     }
-    // Skip migration when a custom dataDir pointer exists
-    if let Ok(content) = std::fs::read_to_string(&anchor) {
-        if let Ok(v) = serde_json::from_str::<Value>(&content) {
-            if let Some(d) = v.get("dataDir").and_then(|x| x.as_str()) {
-                if !d.is_empty() {
-                    return;
-                }
-            }
+}
+
+fn legacy_release_data_config() -> Option<PathBuf> {
+    legacy_release_data_config_from(
+        std::env::current_exe()
+            .ok()
+            .as_deref()
+            .and_then(|exe| exe.parent()),
+    )
+}
+
+/// The config location used by pre-isolation release builds: `<exe
+/// dir>/data/config.json`. Split from the current_exe lookup for unit tests.
+fn legacy_release_data_config_from(exe_dir: Option<&std::path::Path>) -> Option<PathBuf> {
+    Some(exe_dir?.join("data").join("config.json"))
+}
+
+fn seed_account_config(
+    anchor: &std::path::Path,
+    target_dir: &std::path::Path,
+    legacy: Option<&std::path::Path>,
+) -> AccountSeed {
+    let outcome = seed_account_config_inner(anchor, target_dir, legacy);
+    if outcome == AccountSeed::Failed {
+        // Every failure path funnels here — a remnant that cannot be cleared
+        // or a publish that cannot land: nothing was published, and saves
+        // stay suppressed until the next launch retries the seed.
+        CONFIG_SEED_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    outcome
+}
+
+fn seed_account_config_inner(
+    anchor: &std::path::Path,
+    target_dir: &std::path::Path,
+    legacy: Option<&std::path::Path>,
+) -> AccountSeed {
+    if anchor_data_dir_pointer(anchor).is_some() {
+        return AccountSeed::Skipped;
+    }
+    let target = target_dir.join("config.json");
+    if config_has_content(&target) {
+        return AccountSeed::Skipped;
+    }
+    // A zero-length remnant counts as absent (same rule as the data-dir
+    // switch): clear it so the non-overwriting publish can land. Anything
+    // with content keeps winning above.
+    if matches!(std::fs::metadata(&target), Ok(meta) if meta.is_file() && meta.len() == 0) {
+        if let Err(error) = std::fs::remove_file(&target) {
+            eprintln!("[zterm] remove {} failed: {error}", target.display());
+            return AccountSeed::Failed;
         }
     }
-    let target_dir = default_data_dir();
-    let target = target_dir.join("config.json");
-    if !target.exists() {
-        let _ = std::fs::create_dir_all(&target_dir);
-        if std::fs::copy(&anchor, &target).is_ok() {
-            eprintln!("[zterm] migrated config to {}", target.display());
+    let seed = legacy
+        .filter(|path| config_has_content(path))
+        .or_else(|| (anchor != target && config_has_content(anchor)).then_some(anchor));
+    let Some(seed) = seed else {
+        return AccountSeed::Skipped;
+    };
+    match publish_account_seed(seed, target_dir, &target) {
+        Ok(true) => AccountSeed::Seeded,
+        Ok(false) => AccountSeed::Skipped,
+        Err(()) => AccountSeed::Failed,
+    }
+}
+
+/// Write the seed bytes to a unique temp sibling, flush them, then publish
+/// with a hard link: linking fails when the target already exists, so the
+/// publish can never overwrite an account config that appeared meanwhile.
+/// Returns Ok(false) for that benign lost race, Err(()) when nothing was
+/// published. The temp sibling is removed on every path.
+fn publish_account_seed(
+    seed: &std::path::Path,
+    target_dir: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<bool, ()> {
+    if let Err(error) = std::fs::create_dir_all(target_dir) {
+        eprintln!("[zterm] create {} failed: {error}", target_dir.display());
+        return Err(());
+    }
+    let bytes = match std::fs::read(seed) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("[zterm] read {} failed: {error}", seed.display());
+            return Err(());
+        }
+    };
+    let tmp = target_dir.join(format!("config.json.{}-seed.tmp", unique_file_suffix()));
+    let publish = (|| -> std::io::Result<bool> {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        match std::fs::hard_link(&tmp, target) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Only a raced non-empty regular file is a benign skip: an
+                // empty or non-file target would mask the seed source forever,
+                // so anything else fails loudly and retries on the next
+                // launch.
+                if matches!(std::fs::metadata(target), Ok(meta) if meta.is_file() && meta.len() > 0)
+                {
+                    Ok(false)
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    match publish {
+        Ok(published) => Ok(published),
+        Err(error) => {
+            eprintln!(
+                "[zterm] seed publish to {} failed: {error}",
+                target.display()
+            );
+            Err(())
         }
     }
 }
 
-fn config_path() -> PathBuf {
-    resolve_data_dir().join("config.json")
+fn unique_file_suffix() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}-{nanos}", std::process::id())
 }
 
 fn default_config() -> Value {
@@ -1002,7 +1229,22 @@ fn sanitize_config(raw: Value) -> (Value, bool) {
 }
 
 fn load_config() -> Value {
-    load_config_from(&config_path(), &anchor_config_path())
+    load_config_with(account_dirs())
+}
+
+/// Split from the environment lookup for unit tests: without account roots
+/// the load returns defaults with saves suppressed — a later save must not
+/// plant those defaults into a shared working directory.
+fn load_config_with(dirs: Result<AccountDirs, String>) -> Value {
+    let dirs = match dirs {
+        Ok(dirs) => dirs,
+        Err(error) => {
+            eprintln!("[zterm] config load failed closed: {error}");
+            CONFIG_PERSIST_SUPPRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
+            return default_config();
+        }
+    };
+    load_config_from(&dirs.config_path(), &dirs.anchor_config_path())
 }
 
 /// Data-dir config first; when it is missing entirely or cannot be READ (an
@@ -1138,7 +1380,18 @@ fn write_config_tmp(tmp: &std::path::Path, content: &str) -> std::io::Result<()>
 }
 
 fn save_config(config: &Value) -> Result<(), String> {
-    save_config_to(&config_path(), &anchor_config_path(), config)
+    save_config_with(account_dirs(), config)
+}
+
+/// Split from the environment lookup for unit tests: without account roots
+/// there is no account-owned path to write, so the save fails loudly rather
+/// than touching a shared location.
+fn save_config_with(dirs: Result<AccountDirs, String>, config: &Value) -> Result<(), String> {
+    let dirs = dirs.map_err(|error| {
+        eprintln!("[zterm] config save failed closed: {error}");
+        error
+    })?;
+    save_config_to(&dirs.config_path(), &dirs.anchor_config_path(), config)
 }
 
 /// Save body split from save_config's path resolution for unit testing
@@ -1148,6 +1401,9 @@ fn save_config(config: &Value) -> Result<(), String> {
 /// SSH profiles, encrypted passwords — with factory defaults once the IO
 /// condition heals. The next successful load clears the flag and saving
 /// resumes automatically (every save_* command re-loads before saving).
+/// Also refuses while CONFIG_SEED_PENDING is set: the account seed failed to
+/// publish, and a save now could plant derived defaults over the seed
+/// source's data; the next launch retries the seed instead.
 fn save_config_to(
     path: &std::path::Path,
     anchor: &std::path::Path,
@@ -1159,6 +1415,15 @@ fn save_config_to(
         );
         return Err(
             "config save suppressed: the on-disk config was unreadable, writing defaults would destroy it"
+                .to_string(),
+        );
+    }
+    if CONFIG_SEED_PENDING.load(std::sync::atomic::Ordering::SeqCst) {
+        eprintln!(
+            "[zterm] config save suppressed: the account config seed did not complete; it retries on the next launch"
+        );
+        return Err(
+            "config save suppressed: the account config seed did not complete; it retries on the next launch"
                 .to_string(),
         );
     }
@@ -4190,28 +4455,21 @@ pub fn get_local_shells(args: Vec<Value>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub fn get_data_dir_info(args: Vec<Value>) -> Value {
+pub fn get_data_dir_info(args: Vec<Value>) -> Result<Value, String> {
     let _ = args;
-    let current = resolve_data_dir().to_string_lossy().to_string();
-    let default_dir = default_data_dir().to_string_lossy().to_string();
-    // Custom data dir = anchor holds a dataDir pointer pointing elsewhere
-    let anchor_path = anchor_config_path();
-    let is_custom = if anchor_path.exists() {
-        std::fs::read_to_string(&anchor_path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|v| v.get("dataDir").cloned())
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .map(|d| !d.is_empty() && d != default_dir)
-            .unwrap_or(false)
-    } else {
-        false
-    };
-    json!({
+    // Fails closed with a loud error when no account profile root resolves:
+    // the renderer must never be handed a working-directory path.
+    let dirs = account_dirs()?;
+    let current = dirs.resolve_data_dir().to_string_lossy().to_string();
+    let default_dir = dirs.default_data_dir().to_string_lossy().to_string();
+    // Custom data dir = the anchor holds a dataDir pointer pointing elsewhere
+    let is_custom =
+        anchor_data_dir_pointer(&dirs.anchor_config_path()).is_some_and(|dir| dir != default_dir);
+    Ok(json!({
         "current": current,
         "defaultDir": default_dir,
         "isCustom": is_custom
-    })
+    }))
 }
 
 #[tauri::command]
@@ -4229,9 +4487,15 @@ pub fn set_data_dir(args: Vec<Value>) -> Result<Value, String> {
         .get("force")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let dirs = match account_dirs() {
+        Ok(dirs) => dirs,
+        Err(error) => {
+            return Ok(json!({ "error": error, "code": "account-unavailable" }));
+        }
+    };
     Ok(set_data_dir_from_anchor(
-        &anchor_config_path(),
-        &default_data_dir().join("config.json"),
+        &dirs.anchor_config_path(),
+        &dirs.default_data_dir().join("config.json"),
         &dir,
         force,
     ))
@@ -12375,6 +12639,864 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&anchor).unwrap()).unwrap();
         assert_eq!(pointer["dataDir"], target.to_string_lossy().as_ref());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // ── Per-machine data isolation: account-local default dir, one-time seed ──
+
+    fn write_json(path: &std::path::Path, value: &Value) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(value).unwrap_or_default(),
+        )
+        .unwrap();
+    }
+
+    fn read_json(path: &std::path::Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn release_default_data_dir_follows_the_account_not_the_install_dir() {
+        // The release default must live in the account's Local App Data: on a
+        // per-machine install (Program Files, shared by every account) the old
+        // `<exe>/data` default made all accounts write one shared config. The
+        // install directory is deliberately not an input to this function.
+        let root = config_test_dir("release-default");
+        let roaming = root.join("roaming");
+        let account_a = root.join("users/a/AppData/Local");
+        let account_b = root.join("users/b/AppData/Local");
+        assert_eq!(
+            release_default_data_dir(Some(&account_a), &roaming),
+            account_a.join("ZTerm")
+        );
+        assert_eq!(
+            release_default_data_dir(Some(&account_b), &roaming),
+            account_b.join("ZTerm")
+        );
+        assert_ne!(
+            release_default_data_dir(Some(&account_a), &roaming),
+            release_default_data_dir(Some(&account_b), &roaming),
+            "two accounts on one machine must never share a default data dir"
+        );
+        // A missing known folder falls back to the account's roaming profile,
+        // never to a directory beside the executable.
+        assert_eq!(
+            release_default_data_dir(None, &roaming),
+            roaming.join("ZTerm")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_release_config_is_the_executables_data_config() {
+        let root = config_test_dir("legacy-path");
+        let install = root.join("install");
+        assert_eq!(
+            legacy_release_data_config_from(Some(&install)),
+            Some(install.join("data").join("config.json"))
+        );
+        assert_eq!(legacy_release_data_config_from(None), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_seed_prefers_the_legacy_release_config_over_the_anchor_mirror() {
+        let root = config_test_dir("seed-legacy-first");
+        let anchor = root.join("anchor/config.json");
+        let target_dir = root.join("users/a/AppData/Local/ZTerm");
+        let legacy = root.join("install/data/config.json");
+        write_json(
+            &anchor,
+            &json!({ "appearance": { "fontSize": 18 }, "lastTabs": ["anchor-tab"] }),
+        );
+        write_json(
+            &legacy,
+            &json!({ "appearance": { "fontSize": 21 }, "lastTabs": ["legacy-tab"] }),
+        );
+        assert_eq!(
+            seed_account_config(&anchor, &target_dir, Some(&legacy)),
+            AccountSeed::Seeded
+        );
+        let seeded = read_json(&target_dir.join("config.json"));
+        assert_eq!(seeded["appearance"]["fontSize"], 21);
+        assert_eq!(seeded["lastTabs"], json!(["legacy-tab"]));
+        // The seed is a verbatim copy: the legacy shared file is untouched.
+        assert_eq!(
+            read_json(&legacy)["appearance"]["fontSize"],
+            json!(21),
+            "the legacy shared config must not be modified or removed"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_seed_falls_back_to_the_anchor_mirror_when_no_legacy_config_exists() {
+        let root = config_test_dir("seed-anchor-fallback");
+        let anchor = root.join("anchor/config.json");
+        let target_dir = root.join("users/a/AppData/Local/ZTerm");
+        let legacy = root.join("install/data/config.json");
+        write_json(&anchor, &json!({ "appearance": { "fontSize": 18 } }));
+        // The legacy path is absent on disk (fresh per-user install) and also
+        // unavailable as a path (current_exe failed): both fall back to the
+        // anchor mirror.
+        assert_eq!(
+            seed_account_config(&anchor, &target_dir, Some(&legacy)),
+            AccountSeed::Seeded
+        );
+        assert_eq!(
+            read_json(&target_dir.join("config.json"))["appearance"]["fontSize"],
+            18
+        );
+        let target_dir_b = root.join("users/b/AppData/Local/ZTerm");
+        assert_eq!(
+            seed_account_config(&anchor, &target_dir_b, None),
+            AccountSeed::Seeded
+        );
+        assert_eq!(
+            read_json(&target_dir_b.join("config.json"))["appearance"]["fontSize"],
+            18
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_seed_respects_custom_pointer_and_existing_target_config() {
+        let root = config_test_dir("seed-skip");
+        let legacy = root.join("install/data/config.json");
+        write_json(&legacy, &json!({ "appearance": { "fontSize": 21 } }));
+        // A valid custom dataDir pointer already routes this account to its
+        // own directory: no seed, nothing created.
+        let anchor = root.join("anchor-pointer/config.json");
+        write_json(&anchor, &json!({ "dataDir": "D:/zterm-data" }));
+        let target_dir = root.join("users/a/AppData/Local/ZTerm");
+        assert_eq!(
+            seed_account_config(&anchor, &target_dir, Some(&legacy)),
+            AccountSeed::Skipped
+        );
+        assert!(!target_dir.exists());
+        // An existing target config wins over any seed source.
+        let anchor = root.join("anchor-plain/config.json");
+        write_json(&anchor, &json!({ "appearance": { "fontSize": 18 } }));
+        let target_dir = root.join("users/b/AppData/Local/ZTerm");
+        write_json(
+            &target_dir.join("config.json"),
+            &json!({ "appearance": { "fontSize": 30 }, "marker": "account-b" }),
+        );
+        assert_eq!(
+            seed_account_config(&anchor, &target_dir, Some(&legacy)),
+            AccountSeed::Skipped
+        );
+        let kept = read_json(&target_dir.join("config.json"));
+        assert_eq!(kept["marker"], "account-b");
+        assert_eq!(kept["appearance"]["fontSize"], 30);
+        // A zero-length remnant counts as absent and is replaced by the seed.
+        let target_dir = root.join("users/c/AppData/Local/ZTerm");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("config.json"), "").unwrap();
+        assert_eq!(
+            seed_account_config(&anchor, &target_dir, Some(&legacy)),
+            AccountSeed::Seeded
+        );
+        assert_eq!(
+            read_json(&target_dir.join("config.json"))["appearance"]["fontSize"],
+            21
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_seed_failure_suppresses_config_saves_and_retries_next_launch() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        CONFIG_SEED_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        let root = config_test_dir("seed-fail-suppress");
+        let anchor = root.join("anchor/config.json");
+        let target_dir = root.join("users/a/AppData/Local/ZTerm");
+        let legacy = root.join("install/data/config.json");
+        write_json(&anchor, &json!({ "appearance": { "fontSize": 18 } }));
+        write_json(&legacy, &json!({ "appearance": { "fontSize": 21 } }));
+        // A file where the target directory belongs makes the publish fail.
+        std::fs::create_dir_all(root.join("users/a/AppData")).unwrap();
+        std::fs::write(root.join("users/a/AppData/Local"), b"").unwrap();
+        assert_eq!(
+            seed_account_config(&anchor, &target_dir, Some(&legacy)),
+            AccountSeed::Failed
+        );
+        assert!(
+            CONFIG_SEED_PENDING.load(std::sync::atomic::Ordering::SeqCst),
+            "a failed seed must suppress saves: writing now could plant defaults over the seed source"
+        );
+        // Saves are refused while the seed is pending: neither the account
+        // target nor the anchor may be written.
+        let anchor_before = std::fs::read_to_string(&anchor).unwrap();
+        let error = save_config_to(&target_dir.join("config.json"), &anchor, &default_config())
+            .unwrap_err();
+        assert!(error.contains("seed"), "{error}");
+        assert_eq!(std::fs::read_to_string(&anchor).unwrap(), anchor_before);
+        // Next launch (fresh process state): the blocker is gone and the seed
+        // retry publishes the real legacy content — never masked by defaults.
+        std::fs::remove_file(root.join("users/a/AppData/Local")).unwrap();
+        CONFIG_SEED_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            seed_account_config(&anchor, &target_dir, Some(&legacy)),
+            AccountSeed::Seeded
+        );
+        assert_eq!(
+            read_json(&target_dir.join("config.json"))["appearance"]["fontSize"],
+            21
+        );
+        // With the seed landed, a normal save works again.
+        let mut config = default_config();
+        config["appearance"]["fontSize"] = json!(24);
+        save_config_to(&target_dir.join("config.json"), &anchor, &config).unwrap();
+        assert_eq!(
+            read_json(&target_dir.join("config.json"))["appearance"]["fontSize"],
+            24
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn one_legacy_config_seeds_two_accounts_independently() {
+        // Calls save_config_to: hold the shared flag lock so a parallel test
+        // latching the seed-pending suppression cannot refuse this save.
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_SEED_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        // Per-machine upgrade: the legacy shared config is readable by every
+        // account (installer leaves it read-only); each account seeds its own
+        // copy once and later saves never cross account boundaries.
+        let root = config_test_dir("seed-two-accounts");
+        let legacy = root.join("install/data/config.json");
+        write_json(
+            &legacy,
+            &json!({ "appearance": { "fontSize": 21 }, "sshProfiles": [{ "id": "s1" }] }),
+        );
+        let anchor_a = root.join("users/a/Roaming/ZTerm/config.json");
+        let target_a = root.join("users/a/Local/ZTerm");
+        let anchor_b = root.join("users/b/Roaming/ZTerm/config.json");
+        let target_b = root.join("users/b/Local/ZTerm");
+        assert_eq!(
+            seed_account_config(&anchor_a, &target_a, Some(&legacy)),
+            AccountSeed::Seeded
+        );
+        assert_eq!(
+            seed_account_config(&anchor_b, &target_b, Some(&legacy)),
+            AccountSeed::Seeded
+        );
+        // Account A edits and saves; account B and the shared copy stay intact.
+        let mut config = read_json(&target_a.join("config.json"));
+        config["appearance"]["fontSize"] = json!(32);
+        save_config_to(&target_a.join("config.json"), &anchor_a, &config).unwrap();
+        assert_eq!(
+            read_json(&target_a.join("config.json"))["appearance"]["fontSize"],
+            32
+        );
+        assert_eq!(
+            read_json(&target_b.join("config.json"))["appearance"]["fontSize"],
+            21,
+            "account B's copy is untouched by account A's save"
+        );
+        assert_eq!(
+            read_json(&legacy)["appearance"]["fontSize"],
+            21,
+            "the legacy shared config is never written again"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_seed_copies_only_config_json_and_leaves_no_temp_files() {
+        let root = config_test_dir("seed-copy-scope");
+        let anchor = root.join("anchor/config.json");
+        let target_dir = root.join("users/a/AppData/Local/ZTerm");
+        let legacy_dir = root.join("install/data");
+        write_json(
+            &legacy_dir.join("config.json"),
+            &json!({ "appearance": { "fontSize": 21 } }),
+        );
+        // Sensitive siblings must never travel with the seed: private key
+        // files stay in the legacy location and DPAPI ciphertext inside
+        // config.json stays bound to the account that encrypted it.
+        std::fs::write(legacy_dir.join("id_ed25519"), "private key fixture").unwrap();
+        std::fs::write(legacy_dir.join("known_hosts.json"), "{}").unwrap();
+        assert_eq!(
+            seed_account_config(&anchor, &target_dir, Some(&legacy_dir.join("config.json"))),
+            AccountSeed::Seeded
+        );
+        let entries: Vec<String> = std::fs::read_dir(&target_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["config.json".to_string()]);
+        assert!(std::fs::read_to_string(legacy_dir.join("id_ed25519"))
+            .is_ok_and(|content| content == "private key fixture"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_seed_failed_publish_leaves_no_temp_files() {
+        // Takes the shared flag lock: a Failed outcome latches the global
+        // seed-pending suppression, which must not leak into parallel tests.
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_SEED_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        let root = config_test_dir("seed-fail-hygiene");
+        let anchor = root.join("anchor/config.json");
+        let legacy = root.join("install/data/config.json");
+        write_json(&anchor, &json!({ "appearance": { "fontSize": 18 } }));
+        write_json(&legacy, &json!({ "appearance": { "fontSize": 21 } }));
+        // A directory at the config.json name defeats the publish (the temp
+        // file lands, the non-overwriting hard link cannot): the temp sibling
+        // must be cleaned up and the failure must be reported.
+        let target_dir = root.join("users/a/AppData/Local/ZTerm");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::create_dir(target_dir.join("config.json")).unwrap();
+        let outcome = seed_account_config(&anchor, &target_dir, Some(&legacy));
+        assert_eq!(outcome, AccountSeed::Failed);
+        let leftovers: Vec<String> = std::fs::read_dir(&target_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "config.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "failed publish must clean its temp siblings: {leftovers:?}"
+        );
+        CONFIG_SEED_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // ── Installer ACL contract (static: never run the installer in tests) ──
+
+    fn installer_nsh_text() -> String {
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), r"\installer.nsh")).unwrap()
+    }
+
+    fn installer_postinstall_macro(text: &str) -> &str {
+        let start = text
+            .find("!macro NSIS_HOOK_POSTINSTALL")
+            .expect("POSTINSTALL hook present");
+        let end = text[start..]
+            .find("!macroend")
+            .map(|offset| start + offset + "!macroend".len())
+            .expect("POSTINSTALL hook terminated");
+        &text[start..end]
+    }
+
+    #[test]
+    fn installer_never_creates_or_grants_write_access_on_the_data_dir() {
+        let text = installer_nsh_text();
+        let postinstall = installer_postinstall_macro(&text);
+        assert!(
+            !postinstall.contains("CreateDirectory \"$INSTDIR\\data\""),
+            "the installer must not pre-create a shared data directory"
+        );
+        for grant in ["(OI)(CI)(M)", "(M)\"", ":(M)"] {
+            assert!(
+                !postinstall.contains(grant),
+                "no account may receive modify access: found {grant}"
+            );
+        }
+    }
+
+    #[test]
+    fn installer_locks_legacy_shared_data_to_read_execute_or_aborts() {
+        let text = installer_nsh_text();
+        let postinstall = installer_postinstall_macro(&text);
+        let reset = "icacls \"$INSTDIR\\data\" /reset /T /C /Q";
+        let restrict = "icacls \"$INSTDIR\\data\" /inheritance:r /grant:r \"*S-1-5-32-545:(RX)\" /grant:r \"*S-1-5-32-544:(F)\" /grant:r \"*S-1-5-18:(F)\" /T /C /Q";
+        let reset_at = postinstall.find(reset).expect("reset command present");
+        let restrict_at = postinstall
+            .find(restrict)
+            .expect("inheritance cut with explicit Users/Admins/SYSTEM grants present");
+        assert!(
+            reset_at < restrict_at,
+            "the ACL reset (which clears every explicit ACE) must run before the inheritance cut"
+        );
+        // Enabling inheritance would keep a parent's inheritable Users Modify
+        // alive: only cutting inheritance removes it. Comments are excluded —
+        // the check targets executable lines only.
+        let code_lines: String = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with(';'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code_lines.contains("/inheritance:e"),
+            "inheritance must be cut, not enabled"
+        );
+        // S-1-5-20 is NETWORK SERVICE, not Administrators (S-1-5-32-544):
+        // granting the wrong stable SID would hand a service account full
+        // control while leaving Administrators with nothing explicit.
+        assert!(
+            !code_lines.contains("*S-1-5-20:"),
+            "NETWORK SERVICE must not receive rights"
+        );
+        // Only when a legacy data dir actually exists.
+        let gate = postinstall
+            .find("${If} ${FileExists} \"$INSTDIR\\data\"")
+            .expect("the ACL commands must be gated on an existing legacy data directory");
+        assert!(gate < reset_at);
+        // Every icacls run is checked: Pop immediately after nsExec, and a
+        // non-zero exit aborts the install instead of silently succeeding.
+        let exec_count = postinstall.matches("nsExec::ExecToLog").count();
+        assert_eq!(exec_count, 2, "exactly the two ACL commands run");
+        let aborts = postinstall.matches("Abort").count();
+        assert!(aborts >= 2, "each failing ACL command must abort");
+        let mut cursor = 0;
+        for _ in 0..exec_count {
+            let at = postinstall[cursor..]
+                .find("nsExec::ExecToLog")
+                .expect("nsExec command")
+                + cursor;
+            let follow = &postinstall[at..];
+            let next_code = follow
+                .lines()
+                .skip(1)
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with(';'))
+                .unwrap_or_default();
+            assert!(
+                next_code.starts_with("Pop "),
+                "nsExec must be followed immediately by Pop, found: {next_code}"
+            );
+            cursor = at + "nsExec::ExecToLog".len();
+        }
+    }
+
+    #[test]
+    fn installer_keeps_per_user_installs_and_existing_data_alone() {
+        let text = installer_nsh_text();
+        assert!(
+            !text.contains("RMDir /r \"$INSTDIR\\data\""),
+            "legacy data is kept, never deleted"
+        );
+        assert!(
+            !text.contains("Delete \"$INSTDIR\\data"),
+            "legacy data files are never deleted by the installer"
+        );
+        // The ACL hardening lives only inside the per-machine mode gate.
+        let postinstall = installer_postinstall_macro(&text);
+        let gate = postinstall
+            .find("$MultiUser.InstallMode == \"AllUsers\"")
+            .expect("per-machine mode gate");
+        assert!(
+            postinstall.find("icacls").is_some_and(|at| at > gate),
+            "ACL commands run only for per-machine installs"
+        );
+    }
+
+    #[test]
+    fn installer_hardens_legacy_data_by_install_mode_not_by_path() {
+        let text = installer_nsh_text();
+        let postinstall = installer_postinstall_macro(&text);
+        // Per-machine scope is decided by the installer's mode, not by
+        // guessing the default Program Files path: a per-machine install into
+        // a custom directory is covered too.
+        let mode_gate = postinstall
+            .find("$MultiUser.InstallMode == \"AllUsers\"")
+            .expect("the ACL hardening must be gated on the AllUsers install mode");
+        assert!(
+            postinstall.find("icacls").is_some_and(|at| at > mode_gate),
+            "ACL commands run only for AllUsers installs"
+        );
+        assert!(
+            !postinstall.contains("$INSTDIR == \"$PROGRAMFILES"),
+            "the default Program Files path must not be the per-machine test"
+        );
+    }
+
+    // ── Real-tree ACL proof (fixture under artifacts/e2e-tmp; no Program
+    // Files, no UAC, no installer run — the icacls commands are extracted
+    // verbatim from installer.nsh and executed against the fixture) ──
+
+    fn run_icacls(target: &std::path::Path, args: &[&str]) -> std::process::Output {
+        let output = std::process::Command::new("icacls.exe")
+            .arg(target)
+            .args(args)
+            .output()
+            .expect("icacls.exe is a Windows system component");
+        assert!(
+            output.status.success(),
+            "icacls {} {:?} failed: {}",
+            target.display(),
+            args,
+            String::from_utf8_lossy(&output.stdout)
+        );
+        output
+    }
+
+    fn installer_icacls_commands(data_dir: &std::path::Path) -> Vec<Vec<String>> {
+        let text = installer_nsh_text();
+        let postinstall = installer_postinstall_macro(&text);
+        postinstall
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("nsExec::ExecToLog "))
+            .map(|wrapped| wrapped.trim().trim_matches('\''))
+            .filter(|command| command.starts_with("icacls "))
+            .map(|command| {
+                command
+                    .replace("$INSTDIR\\data", &data_dir.to_string_lossy())
+                    .split_whitespace()
+                    .map(|token| token.trim_matches('"').to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// icacls /save writes UTF-16LE (with or without a BOM depending on how
+    /// it was invoked): decode by shape rather than trusting the BOM.
+    fn decode_icacls_dump(bytes: &[u8]) -> String {
+        let body = bytes.strip_prefix(&[0xff, 0xfe]).unwrap_or(bytes);
+        let looks_utf16 = !body.is_empty()
+            && body.len() % 2 == 0
+            && body.chunks_exact(2).all(|pair| pair[1] == 0);
+        if looks_utf16 {
+            let units: Vec<u16> = body
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            String::from_utf16(&units).unwrap()
+        } else {
+            String::from_utf8(body.to_vec()).unwrap()
+        }
+    }
+
+    /// icacls /save line 2 carries the SDDL DACL.
+    fn node_sddl(node: &std::path::Path, dump: &std::path::Path) -> String {
+        let _ = std::fs::remove_file(dump);
+        run_icacls(node, &["/save", &dump.to_string_lossy()]);
+        let bytes = std::fs::read(dump).unwrap();
+        let _ = std::fs::remove_file(dump);
+        decode_icacls_dump(&bytes)
+            .lines()
+            .nth(1)
+            .unwrap_or_default()
+            .trim_end()
+            .to_string()
+    }
+
+    /// True when the test process token is elevated; an elevated token cannot
+    /// prove that a standard user is denied, so behavioral probes are skipped.
+    fn process_is_elevated() -> bool {
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
+        use winapi::um::securitybaseapi::GetTokenInformation;
+        use winapi::um::winnt::{TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+        unsafe {
+            let mut token = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return true;
+            }
+            let mut elevation: TOKEN_ELEVATION = std::mem::zeroed();
+            let mut size = 0;
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut size,
+            );
+            CloseHandle(token);
+            ok != 0 && elevation.TokenIsElevated != 0
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn installer_acl_commands_neutralize_modify_on_a_real_tree() {
+        // The exact ACEs every node must end with: SYSTEM full,
+        // Administrators (S-1-5-32-544) full, Users (S-1-5-32-545)
+        // read-and-execute only, inheritance cut (no inherited ACE flags).
+        let expected_dacl = "D:PAI(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)";
+        let root = config_test_dir("acl-tree");
+        let parent = root.join("parent");
+        let data = parent.join("data");
+        std::fs::create_dir_all(data.join("sub")).unwrap();
+        std::fs::write(data.join("config.json"), b"cfg-sentinel").unwrap();
+        std::fs::write(data.join("sub").join("nested.json"), b"nested-sentinel").unwrap();
+        // Vulnerable legacy state: the parent carries an inheritable
+        // BUILTIN\Users Modify ACE (as old per-machine installs did), and the
+        // tree holds explicit junk grants (Authenticated Users Modify
+        // tree-wide, an explicit Users Modify on the config) that a plain
+        // grant:r pass would not remove for other SIDs.
+        run_icacls(
+            &parent,
+            &[
+                "/inheritance:r",
+                "/grant:r",
+                "*S-1-5-32-545:(OI)(CI)(M)",
+                "/grant:r",
+                "*S-1-5-18:(OI)(CI)(F)",
+                "/grant:r",
+                "*S-1-5-32-544:(OI)(CI)(F)",
+            ],
+        );
+        run_icacls(
+            &data,
+            &["/grant", "*S-1-5-11:(OI)(CI)(M)", "/T", "/C", "/Q"],
+        );
+        run_icacls(&data.join("config.json"), &["/grant", "*S-1-5-32-545:(M)"]);
+        let dump = root.join("acl-dump.sddl");
+        let before = node_sddl(&data, &dump);
+        assert!(
+            before.contains("0x1301bf") && before.contains("ID"),
+            "fixture must reproduce the vulnerable inherited Modify state: {before}"
+        );
+        // The shipped commands, verbatim.
+        let commands = installer_icacls_commands(&data);
+        assert_eq!(commands.len(), 2, "exactly the two ACL commands ship");
+        for command in &commands {
+            let (program, args) = command.split_first().expect("non-empty command");
+            assert_eq!(program, "icacls");
+            let output = std::process::Command::new("icacls.exe")
+                .args(args)
+                .output()
+                .expect("icacls.exe is a Windows system component");
+            assert!(
+                output.status.success(),
+                "shipped command {:?} failed: {}",
+                command,
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        // Every directory and file in the tree ends with the exact ACE set,
+        // inheritance cut, and no Modify mask anywhere.
+        for node in [
+            data.clone(),
+            data.join("config.json"),
+            data.join("sub"),
+            data.join("sub").join("nested.json"),
+        ] {
+            let sddl = node_sddl(&node, &dump);
+            assert_eq!(
+                sddl,
+                expected_dacl,
+                "node {} must carry exactly SYSTEM/Administrators full and Users read-execute",
+                node.display()
+            );
+        }
+        let _ = std::fs::remove_file(&dump);
+        run_icacls(&data, &["/save", &dump.to_string_lossy(), "/T"]);
+        let tree_bytes = std::fs::read(&dump).unwrap();
+        let _ = std::fs::remove_file(&dump);
+        let tree = decode_icacls_dump(&tree_bytes);
+        assert!(
+            !tree.contains("0x1301bf"),
+            "no Modify mask may survive anywhere in the tree"
+        );
+        assert!(
+            !tree.contains("ID;") && !tree.contains("(I;"),
+            "no inherited ACE flags may survive"
+        );
+        // Content survives and stays readable by a standard token.
+        assert_eq!(
+            std::fs::read(data.join("config.json")).unwrap(),
+            b"cfg-sentinel"
+        );
+        assert_eq!(
+            std::fs::read(data.join("sub").join("nested.json")).unwrap(),
+            b"nested-sentinel"
+        );
+        if !process_is_elevated() {
+            assert!(
+                std::fs::File::create(data.join("should-fail.txt")).is_err(),
+                "a standard token must no longer write into the locked tree"
+            );
+            assert!(
+                std::fs::remove_file(data.join("config.json")).is_err(),
+                "a standard token must no longer delete the legacy config"
+            );
+        } else {
+            eprintln!(
+                "[test] elevated token: write/delete denial probes skipped (ACL state asserted)"
+            );
+        }
+        // Teardown: restore inheritance from the fixture chain so the scratch
+        // dir is deletable again.
+        run_icacls(&root, &["/reset", "/T", "/C", "/Q"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
+    #[cfg(windows)]
+    fn account_seed_zero_length_target_removal_failure_suppresses_saves() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        CONFIG_SEED_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        let root = config_test_dir("seed-zerolen-remove-fail");
+        let anchor = root.join("anchor/config.json");
+        let target_dir = root.join("users/a/AppData/Local/ZTerm");
+        let legacy = root.join("install/data/config.json");
+        write_json(&anchor, &json!({ "appearance": { "fontSize": 18 } }));
+        write_json(&legacy, &json!({ "appearance": { "fontSize": 21 } }));
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("config.json"), "").unwrap();
+        // Delete sharing denied: the zero-length remnant cannot be cleared.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(target_dir.join("config.json"))
+            .unwrap();
+        assert_eq!(
+            seed_account_config(&anchor, &target_dir, Some(&legacy)),
+            AccountSeed::Failed
+        );
+        assert!(
+            CONFIG_SEED_PENDING.load(std::sync::atomic::Ordering::SeqCst),
+            "a failed remnant removal must suppress saves exactly like a failed publish"
+        );
+        let error = save_config_to(&target_dir.join("config.json"), &anchor, &default_config())
+            .unwrap_err();
+        assert!(error.contains("seed"), "{error}");
+        // Next launch (fresh process state): the lock is gone, the remnant is
+        // still a zero-length placeholder (the suppressed save replaced
+        // nothing), and the seed publishes the legacy content over it.
+        drop(lock);
+        assert_eq!(
+            std::fs::read(target_dir.join("config.json")).unwrap(),
+            b"",
+            "nothing may replace the remnant while suppressed"
+        );
+        CONFIG_SEED_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            seed_account_config(&anchor, &target_dir, Some(&legacy)),
+            AccountSeed::Seeded
+        );
+        assert_eq!(
+            read_json(&target_dir.join("config.json"))["appearance"]["fontSize"],
+            21
+        );
+        CONFIG_SEED_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn publish_race_treats_only_a_non_empty_target_file_as_benign() {
+        let root = config_test_dir("publish-race");
+        let seed = root.join("install/config.json");
+        let target_dir = root.join("account/ZTerm");
+        write_json(&seed, &json!({ "appearance": { "fontSize": 21 } }));
+        // A raced non-empty target file wins: a benign skip, source intact.
+        write_json(
+            &target_dir.join("config.json"),
+            &json!({ "appearance": { "fontSize": 30 } }),
+        );
+        assert_eq!(
+            publish_account_seed(&seed, &target_dir, &target_dir.join("config.json")),
+            Ok(false)
+        );
+        assert_eq!(
+            read_json(&target_dir.join("config.json"))["appearance"]["fontSize"],
+            30
+        );
+        // A raced zero-length target is NOT a win: treating it as one would
+        // leave an empty target masking the seed source forever. It must
+        // fail so the seed retries on the next launch.
+        let empty_dir = root.join("account-empty/ZTerm");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        std::fs::write(empty_dir.join("config.json"), "").unwrap();
+        assert_eq!(
+            publish_account_seed(&seed, &empty_dir, &empty_dir.join("config.json")),
+            Err(()),
+            "an empty raced target must not become the account config"
+        );
+        assert_eq!(
+            std::fs::read(empty_dir.join("config.json")).unwrap(),
+            b"",
+            "the losing race must not touch the target"
+        );
+        // A directory at the target name is a conflict, never a benign skip.
+        let dir_target = root.join("account-dir/ZTerm");
+        std::fs::create_dir_all(dir_target.join("config.json")).unwrap();
+        assert_eq!(
+            publish_account_seed(&seed, &dir_target, &dir_target.join("config.json")),
+            Err(())
+        );
+        for target_dir in [&target_dir, &empty_dir, &dir_target] {
+            let leftovers: Vec<String> = std::fs::read_dir(target_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".tmp"))
+                .collect();
+            assert!(leftovers.is_empty(), "temp siblings cleaned: {leftovers:?}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_dirs_fail_closed_without_a_profile_root() {
+        let error = account_dirs_from(None, None).unwrap_err();
+        assert!(
+            error.to_lowercase().contains("account"),
+            "the failure must name the missing account root: {error}"
+        );
+        // An empty environment value is no root at all.
+        assert!(account_dirs_from(Some(std::ffi::OsString::new()), None).is_err());
+        // A roaming root alone (no known folder) keeps every config path in
+        // the account profile — never the working directory.
+        let dirs =
+            account_dirs_from(Some(std::ffi::OsString::from("P:/users/a/roaming")), None).unwrap();
+        assert_eq!(
+            dirs.anchor_config_path(),
+            PathBuf::from("P:/users/a/roaming/ZTerm/config.json")
+        );
+        assert_eq!(
+            dirs.default_data_dir(),
+            PathBuf::from("P:/users/a/roaming/ZTerm")
+        );
+        // A local root routes the default data dir there; the anchor stays
+        // in the roaming profile.
+        let dirs = account_dirs_from(
+            Some(std::ffi::OsString::from("P:/users/a/roaming")),
+            Some(PathBuf::from("P:/users/a/local")),
+        )
+        .unwrap();
+        assert_eq!(
+            dirs.default_data_dir(),
+            PathBuf::from("P:/users/a/local/ZTerm")
+        );
+        assert_eq!(
+            dirs.anchor_config_path(),
+            PathBuf::from("P:/users/a/roaming/ZTerm/config.json")
+        );
+    }
+
+    #[test]
+    fn config_pipeline_fails_closed_without_account_dirs() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        CONFIG_SEED_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        let root = config_test_dir("no-account-dirs");
+        let unavailable: Result<AccountDirs, String> =
+            Err("no per-account profile directory is available".into());
+        // Load: defaults, and saves suppressed — a later save must not plant
+        // those defaults into some shared working directory.
+        let config = load_config_with(unavailable.clone());
+        assert_eq!(config, default_config());
+        assert!(
+            CONFIG_PERSIST_SUPPRESSED.load(std::sync::atomic::Ordering::SeqCst),
+            "defaults without an account dir must suppress saves"
+        );
+        // Save: a loud error, nothing written.
+        assert!(save_config_with(unavailable.clone(), &config).is_err());
+        // Seed: no read or write of any location it cannot attribute to the
+        // account — the shared legacy copy is left exactly as it was.
+        let legacy = root.join("install/data/config.json");
+        write_json(&legacy, &json!({ "appearance": { "fontSize": 21 } }));
+        migrate_legacy_config_with(unavailable, Some(legacy.clone()));
+        assert_eq!(
+            read_json(&legacy)["appearance"]["fontSize"],
+            21,
+            "the legacy shared config must stay untouched"
+        );
+        assert!(
+            !root.join("ZTerm").exists(),
+            "no config directory may appear beside the fixtures"
+        );
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        CONFIG_SEED_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

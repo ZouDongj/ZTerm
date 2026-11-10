@@ -594,10 +594,17 @@ function persistShortcuts() {
 async function loadDataDirInfo() {
     const el = document.getElementById('data-dir-path');
     if (!el) return;
-    const info = await ipcRenderer.invoke('get-data-dir-info');
-    if (!info) return;
-    el.textContent = info.current + (info.isCustom ? '（自定义）' : '（默认）');
-    document.getElementById('data-dir-reset').style.display = info.isCustom ? '' : 'none';
+    try {
+        const info = await ipcRenderer.invoke('get-data-dir-info');
+        if (!info) return;
+        el.textContent = info.current + (info.isCustom ? '（自定义）' : '（默认）');
+        document.getElementById('data-dir-reset').style.display = info.isCustom ? '' : 'none';
+    } catch (e) {
+        // The main process refuses to resolve any path when no per-account
+        // profile root exists; surface that loudly instead of guessing a path.
+        el.textContent = '数据目录不可用：' + (e && e.message ? e.message : e);
+        document.getElementById('data-dir-reset').style.display = 'none';
+    }
 }
 
 // ── About info (version numbers read dynamically by the main process) ──

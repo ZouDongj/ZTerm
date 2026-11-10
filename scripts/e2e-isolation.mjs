@@ -59,26 +59,30 @@ export function createE2eSandbox(sourceExe, tempRoot = E2E_TMP_ROOT) {
   sweepStaleSandboxes(tempRoot);
   const directory = mkdtempSync(join(tempRoot, 'zterm-e2e-'));
   const exe = join(directory, 'zterm.exe');
+  // The sandbox mirrors the per-account layout the release build resolves:
+  // a roaming profile (anchor location) and a local profile (default data
+  // dir). The executable directory stays a pure install location — release
+  // builds no longer keep configuration beside the executable.
   const appData = join(directory, 'appdata');
+  const localAppData = join(directory, 'localappdata');
   mkdirSync(appData);
-  mkdirSync(join(directory, 'data'));
+  mkdirSync(localAppData);
   copyFileSync(resolve(sourceExe), exe);
   registerExitCleanup(directory);
-  return { directory, exe, appData };
+  return { directory, exe, appData, localAppData };
 }
 
 // Live probes that keep the REAL APPDATA (herdr session discovery only works
-// under %APPDATA%\herdr) would otherwise leak the user's configuration into
-// the sandbox: on first launch migrate_legacy_config() copies the anchor
-// config (%APPDATA%\ZTerm\config.json — sshProfiles with DPAPI credentials,
-// lastTabs) into the empty sandbox data dir, and the frontend then
-// auto-reconnects the user's SSH tabs from the sandboxed instance.
-// Pre-seeding an empty config makes that migration a no-op (the target
-// exists) while sanitize_config merges it over the built-in defaults, so
-// the sandbox behaves like a stock first run. When the anchor redirects the
-// data dir via `dataDir`, the sandbox would read/write that real directory —
-// refuse to run instead. Only the key's presence is inspected; no config
-// content is read beyond the pointer itself.
+// under %APPDATA%\herdr) must never leak the user's configuration into the
+// sandbox or the sandbox's writes back into the user's profile. The release
+// build resolves its default data dir from the account's local app data — a
+// Windows Known Folder the LOCALAPPDATA env var cannot redirect — so the
+// sandbox anchor pins a `dataDir` pointer at an isolated local-profile ZTerm
+// directory: the same per-account semantics, redirected inside the sandbox.
+// A pre-seeded empty config keeps the first run stock, and when the user's
+// real anchor redirects via `dataDir` the sandbox would share that real
+// directory — refuse to run instead. Only the key's presence is inspected;
+// no config content is read beyond the pointer itself.
 export function seedIsolatedConfig(sandbox, appData = process.env.APPDATA) {
   const anchor = join(appData || '', 'ZTerm', 'config.json');
   if (existsSync(anchor)) {
@@ -90,7 +94,18 @@ export function seedIsolatedConfig(sandbox, appData = process.env.APPDATA) {
       throw new Error('anchor config sets a custom dataDir; the sandbox would share that real directory — aborting');
     }
   }
-  const dataDir = join(sandbox.directory, 'data');
+  const dataDir = join(sandbox.localAppData ?? join(sandbox.directory, 'localappdata'), 'ZTerm');
+  const sandboxAnchor = join(sandbox.appData, 'ZTerm', 'config.json');
+  mkdirSync(dirname(sandboxAnchor), { recursive: true });
+  let anchorValue = {};
+  try {
+    anchorValue = JSON.parse(readFileSync(sandboxAnchor, 'utf8'));
+  } catch { /* absent or unparseable: rebuilt below with the pointer */ }
+  if (typeof anchorValue !== 'object' || anchorValue === null || Array.isArray(anchorValue)) {
+    anchorValue = {};
+  }
+  anchorValue.dataDir = dataDir;
+  writeFileSync(sandboxAnchor, JSON.stringify(anchorValue));
   mkdirSync(dataDir, { recursive: true });
   const target = join(dataDir, 'config.json');
   if (!existsSync(target)) writeFileSync(target, '{}\n');

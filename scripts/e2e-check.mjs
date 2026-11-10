@@ -22,7 +22,7 @@ import { resolve, dirname, join } from 'node:path';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { createE2eSandbox, restartOwnedApp, killOwnedRuntime, probeDebugPortRange } from './e2e-isolation.mjs';
+import { createE2eSandbox, restartOwnedApp, killOwnedRuntime, probeDebugPortRange, seedIsolatedConfig } from './e2e-isolation.mjs';
 import { backgroundDesktopIndex, validateFreshDesktopSnapshot, observeDesktopStream, completeBackgroundHandshake,
   validateNativeHostHealth, renewNativeLease, createBackgroundLease, backgroundNow,
   stopBackgroundRun, readHostProcessDiagnostic } from './e2e-background-policy.mjs';
@@ -71,9 +71,9 @@ let configBackup = null;
 let configExistedAtStart = null;
 
 function backupConfig() {
-  // Tabs/SSH profiles created by the E2E run are persisted into
-  // data/config.json by the frontend's 15s periodic save and would pollute
-  // the next launch's tab restore — back up before launch, restore at the end.
+  // Tabs/SSH profiles created by the E2E run are persisted into the isolated
+  // account config by the frontend's 15s periodic save and would pollute the
+  // next launch's tab restore — back up before launch, restore at the end.
   try {
     configExistedAtStart = existsSync(DATA_CONFIG);
     if (configExistedAtStart) {
@@ -331,7 +331,7 @@ async function startApp() {
     env: {
       ...process.env,
       APPDATA: sandbox.appData,
-      LOCALAPPDATA: sandbox.appData,
+      LOCALAPPDATA: sandbox.localAppData,
       ZTERM_E2E_BACKGROUND_POLICY: policyPath,
       // The anti-throttling flags keep rAF/rendering/timers running while the
       // window sits on a non-visible virtual desktop (occlusion would
@@ -467,7 +467,7 @@ async function main() {
   await assertUnusedPort(BASE_PORT);
   sandbox = createE2eSandbox(SOURCE_EXE);
   EXE = sandbox.exe;
-  DATA_CONFIG = join(sandbox.directory, 'data', 'config.json');
+  DATA_CONFIG = seedIsolatedConfig(sandbox);
   console.log(`E2E source: ${SOURCE_EXE}\nIsolated runtime: ${sandbox.directory}\n`);
 
   killExisting();
