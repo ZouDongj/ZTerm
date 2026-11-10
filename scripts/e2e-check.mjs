@@ -25,12 +25,15 @@ import { randomUUID } from 'node:crypto';
 import { createE2eSandbox, restartOwnedApp, killOwnedRuntime, probeDebugPortRange, seedIsolatedConfig } from './e2e-isolation.mjs';
 import { backgroundDesktopIndex, validateFreshDesktopSnapshot, observeDesktopStream, completeBackgroundHandshake,
   validateNativeHostHealth, renewNativeLease, createBackgroundLease, backgroundNow,
-  stopBackgroundRun, readHostProcessDiagnostic } from './e2e-background-policy.mjs';
+  stopBackgroundRun, readHostProcessDiagnostic, captureProcessExit } from './e2e-background-policy.mjs';
 import { connectVerifiedEndpoint } from './e2e-ownership.mjs';
 import { requireBackgroundCapability } from './e2e-background-capability.mjs';
 import { writeBackgroundJson } from './e2e-background-json.mjs';
 import { consentCancellationPassed, executionConsent, createSshFailureApproval, createUiSshFixture, createSshFailureEndpoint } from './e2e-execution-fixtures.mjs';
 import { runWebglAtlasChecks } from './e2e-webgl-atlas.mjs';
+import { respawnDesktopProcess, runWithDesktopRetry } from './e2e-desktop-retry.mjs';
+import { runSupervisedScript } from './e2e-process-supervisor.mjs';
+import { createOwnedCleanupCoordinator } from './e2e-owned-cleanup.mjs';
 
 const SOURCE_EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
 let EXE = SOURCE_EXE;
@@ -60,6 +63,7 @@ const DESKTOP_INDEX = backgroundDesktopIndex(process.env.ZTERM_E2E_DESKTOP ?? '2
 let vdHelperExe = null;
 let backgroundRun = null;
 let backgroundFailure = null;
+let backgroundObserverCleanup = null;
 
 // ── Launch the exe (with WebView2 remote debugging) ──
 let DATA_CONFIG = null;
@@ -115,21 +119,21 @@ function restoreConfig() {
 // stays alive and is reported. Returns exactly true when cleanup is
 // established, or { ok: false, reasons } — restarts and the final gate treat
 // that as a failure instead of silently assuming a clean state.
-function killExisting() {
-  stopBackgroundObserver();
-  if (!sandbox && !ownedChild) return true;
-  const child = ownedChild;
-  const result = killOwnedRuntime({
-    child,
-    executable: EXE,
-    sandboxDirectory: sandbox?.directory,
-    launchPort,
-    launched: launchCount > 0,
-  });
-  if (result === true) { ownedChild = null; return true; }
-  // Keep the handle only while it still refers to something that may be ours
-  // (mismatch/unknown/failed); dead/killed handles are released.
-  if (result.hostDisposition === 'dead' || result.hostDisposition === 'killed') ownedChild = null;
+const ownedCleanupCoordinator = createOwnedCleanupCoordinator({ stopBackgroundObserver, cleanOwnedRuntime });
+function killExisting() { return ownedCleanupCoordinator.killExisting(); }
+function cleanOwnedRuntime() {
+  let result = true;
+  if (sandbox || ownedChild) {
+    const child = ownedChild;
+    result = killOwnedRuntime({
+      child,
+      executable: EXE,
+      sandboxDirectory: sandbox?.directory,
+      launchPort,
+      launched: launchCount > 0,
+    });
+  }
+  if (result === true || result.hostDisposition === 'dead' || result.hostDisposition === 'killed') ownedChild = null;
   return result;
 }
 // Compile a read-only observer before any app launch. No foreground fallback.
@@ -159,22 +163,22 @@ async function inspectDesktop() {
 }
 
 function stopBackgroundObserver(reason = new Error('Owned background runtime stopped')) {
+  if (backgroundObserverCleanup) return backgroundObserverCleanup;
   const run = backgroundRun;
-  if (!run) return;
-  stopBackgroundRun(run, reason, error => console.error('[e2e] observer cleanup failed: ' + error.message));
+  if (!run) return Promise.resolve(true);
+  backgroundObserverCleanup = stopBackgroundRun(run, reason, error => console.error('[e2e] observer cleanup failed: ' + error.message));
   backgroundRun = null;
+  return backgroundObserverCleanup;
 }
 
 function failBackground(error) {
   if (backgroundFailure) return;
   backgroundFailure = error instanceof Error ? error : new Error(String(error));
   console.error('[e2e] background isolation failed: ' + (backgroundFailure.stack || backgroundFailure.message));
-  // Withdraw the lease and reject pending CDP work before any blocking OS query.
-  stopBackgroundObserver(backgroundFailure);
-  try {
-    const stopped = killExisting();
+  // killExisting withdraws the lease and aborts CDP before blocking OS queries.
+  void killExisting().then(stopped => {
     if (stopped !== true) console.error('[e2e] owned cleanup incomplete: ' + stopped.reasons.join('; '));
-  } catch (cleanupError) { console.error('[e2e] owned cleanup failed: ' + cleanupError.message); }
+  }).catch(cleanupError => console.error('[e2e] owned cleanup failed: ' + cleanupError.message));
 }
 
 function nativeExpected(run) {
@@ -212,18 +216,21 @@ function renewBackgroundLease() {
 
 async function beginBackgroundObserver(baseline, token) {
   if (backgroundFailure) throw backgroundFailure;
+  backgroundObserverCleanup = null;
   const helper = resolveVdHelper();
   const startedAt = backgroundNow();
   const observer = spawn(helper, ['watch', String(DESKTOP_INDEX), String(process.pid)],
     { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  const run = { baseline, token, observer, observation: null, stopping: false, released: false,
+  const run = { baseline, token, observer, observerExit: captureProcessExit(observer), observation: null, stopping: false, released: false,
     leasePath: join(sandbox.directory, 'background-' + token + '.lease.json'),
     statusPath: join(sandbox.directory, 'background-' + token + '.status.json'),
     binding: null, timer: null, abortController: new AbortController() };
   backgroundRun = run;
   run.observation = observeDesktopStream({
     observer, baseline, startedAt, getOwnedPid: () => ownedChild?.pid,
-    requireSameForeground: () => !run.released, onFailure: failBackground,
+    requireSameForeground: () => !run.released,
+    onTransient: error => console.error('[e2e] transient desktop observation before host launch: ' + error.message),
+    onFailure: failBackground,
   });
   await run.observation.ready;
   assertBackgroundHealthy();
@@ -248,9 +255,8 @@ async function waitForBackgroundPhase(path, phase) {
   throw new Error('Background host timed out waiting for ' + phase);
 }
 
-// Safety net for exit paths that skip the explicit killExisting() calls
-// (unexpected early throw, unhandled rejection): never leave a PTY tree behind.
-process.on('exit', () => killExisting());
+// Best-effort synchronous teardown only; the OS process supervisor covers abrupt exits.
+process.on('exit', () => { void killExisting(); });
 
 function isolatedShellArgs(command, args = []) {
   const name = String(command || 'powershell.exe').replaceAll('\\', '/').split('/').pop().toLowerCase();
@@ -294,6 +300,8 @@ async function installIsolatedShellGuard(cdp) {
 
 async function startApp() {
   if (ownedChild) throw new Error('Previous owned process has not been released');
+  const previousCleanup = await ownedCleanupCoordinator.beginNextRun();
+  if (previousCleanup !== true) throw new Error('Previous owned cleanup was not established: ' + previousCleanup.reasons.join('; '));
   await requireBackgroundCapability(EXE);
   // USERPROFILE must remain valid for WebView2. Isolate shell startup explicitly
   // instead of allowing restored shells to execute the operator's profiles.
@@ -470,7 +478,7 @@ async function main() {
   DATA_CONFIG = seedIsolatedConfig(sandbox);
   console.log(`E2E source: ${SOURCE_EXE}\nIsolated runtime: ${sandbox.directory}\n`);
 
-  killExisting();
+  await killExisting();
   backupConfig();
   await startApp();
   // Identity gate BEFORE any attach/evaluate: /json discovery is harmless,
@@ -7006,7 +7014,7 @@ async function main() {
       }
       return { max: null, w: 0, dpr: 1 };
     }
-    killExisting();
+    await killExisting();
     await sleep(500);
     await writeWindowState({ x: 50, y: 50, width: 800, height: 600, maximized: true });
     const cdp2 = await restartAndConnect();
@@ -7056,7 +7064,7 @@ async function main() {
 
     // (a) raw string tail: a line split across capture chunks must restore as
     // ONE line — the vertical-letters regression pin.
-    killExisting();
+    await killExisting();
     await sleep(500);
     await seedRestoreTabs('[root@x ~]# echo test\r\ntest output\r\n');
     const cdpR1 = await restartAndConnect();
@@ -7067,7 +7075,7 @@ async function main() {
     cdpR1.close();
 
     // (b) legacy array-of-lines save migrates through the same replay intact.
-    killExisting();
+    await killExisting();
     await sleep(500);
     await seedRestoreTabs(['[root@y ~]# ls', 'file1']);
     const cdpR2 = await restartAndConnect();
@@ -7079,7 +7087,7 @@ async function main() {
 
     // (c) state-reset epilogue: a tail ending inside a killed TUI (cursor
     // hidden) must end the replay with the cursor visible again.
-    killExisting();
+    await killExisting();
     await sleep(500);
     await seedRestoreTabs('restore-epilogue-check\x1b[?25l');
     const cdpR3 = await restartAndConnect();
@@ -7105,11 +7113,11 @@ async function main() {
       JSON.stringify(r3state));
     cdpR3.close();
 
-    killExisting();
+    await killExisting();
     await sleep(500);
   } finally {
     cdp.close();
-    const stopped = killExisting();
+    const stopped = await killExisting();
     restoreConfig();
     await sshFailureEndpoint?.close();
     // Anything other than exactly true — owned kill failure or an explicit
@@ -7128,4 +7136,19 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(`E2E 失败: ${e.stack || e.message}`); killExisting(); restoreConfig(); process.exit(1); });
+runSupervisedScript({
+  script: fileURLToPath(import.meta.url), args: process.argv.slice(2),
+  preflight: async () => {
+    if (!existsSync(SOURCE_EXE)) throw new Error(`exe 不存在: ${SOURCE_EXE}`);
+    await requireBackgroundCapability(SOURCE_EXE);
+  },
+  main: () => runWithDesktopRetry({
+    main: () => main().catch(error => { throw backgroundFailure ?? error; }),
+    cleanup: async () => {
+      let stopped;
+      try { stopped = await killExisting(); } finally { restoreConfig(); }
+      return stopped;
+    },
+    respawn: () => respawnDesktopProcess({ script: fileURLToPath(import.meta.url), args: process.argv.slice(2) }),
+  }),
+}).then(code => process.exit(code));

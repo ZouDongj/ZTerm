@@ -1353,6 +1353,41 @@ test('restart never replaces ownership when cleanup or port teardown failed', as
   assert.deepEqual(calls, ['stop', 'quiet', 'start']);
 });
 
+test('restart awaits asynchronous cleanup while retaining synchronous callback support', async () => {
+  const calls = [];
+  let release;
+  const restarting = restartOwnedApp({
+    stop: () => {
+      calls.push('stop');
+      return new Promise(resolve => { release = resolve; });
+    },
+    waitUntilQuiet: async () => { calls.push('quiet'); },
+    start: () => { calls.push('start'); },
+  });
+  await Promise.resolve();
+  assert.deepEqual(calls, ['stop'], 'quiet and start must wait for the async stop result');
+  release(true);
+  await restarting;
+  assert.deepEqual(calls, ['stop', 'quiet', 'start']);
+
+  for (const stop of [
+    async () => false,
+    async () => ({ ok: false, reasons: ['observer exit timed out'] }),
+    async () => { throw new Error('async cleanup failed'); },
+  ]) {
+    let starts = 0;
+    await assert.rejects(restartOwnedApp({ stop,
+      waitUntilQuiet: async () => { starts++; }, start: () => { starts++; } }));
+    assert.equal(starts, 0);
+  }
+
+  const synchronous = [];
+  await restartOwnedApp({ stop: () => true,
+    waitUntilQuiet: async () => { synchronous.push('quiet'); },
+    start: () => { synchronous.push('start'); } });
+  assert.deepEqual(synchronous, ['quiet', 'start']);
+});
+
 test('seedIsolatedConfig aborts before seeding when the anchor sets a custom dataDir', () => {
   const root = freshScratch('seed-test-');
   const source = join(root, 'source');

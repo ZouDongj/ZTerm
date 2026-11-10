@@ -53,11 +53,14 @@ import { randomUUID } from 'node:crypto';
 import { createE2eSandbox, killOwnedRuntime, probeDebugPortRange, seedIsolatedConfig, resolveE2eTmpSubdir } from './e2e-isolation.mjs';
 import { backgroundDesktopIndex, validateFreshDesktopSnapshot, observeDesktopStream, completeBackgroundHandshake,
   validateNativeHostHealth, renewNativeLease, createBackgroundLease, backgroundNow,
-  stopBackgroundRun, readHostProcessDiagnostic } from './e2e-background-policy.mjs';
+  stopBackgroundRun, readHostProcessDiagnostic, captureProcessExit } from './e2e-background-policy.mjs';
 import { connectVerifiedEndpoint } from './e2e-ownership.mjs';
 import { requireBackgroundCapability } from './e2e-background-capability.mjs';
 import { writeBackgroundJson } from './e2e-background-json.mjs';
 import { Cdp } from './e2e-cdp.mjs';
+import { respawnDesktopProcess, runWithDesktopRetry } from './e2e-desktop-retry.mjs';
+import { runSupervisedScript } from './e2e-process-supervisor.mjs';
+import { createOwnedCleanupCoordinator } from './e2e-owned-cleanup.mjs';
 
 const SOURCE_EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
 const PORT = Number(process.argv[3] ?? 9222);
@@ -75,6 +78,7 @@ let ownedChild = null;
 let vdHelperExe = null;
 let backgroundRun = null;
 let backgroundFailure = null;
+let backgroundObserverCleanup = null;
 let launchPort = PORT;
 
 // Same isolated shell startup policy as e2e-check.mjs (local tabs only).
@@ -116,21 +120,22 @@ async function inspectDesktop() {
 }
 
 function stopBackgroundObserver(reason = new Error('Owned background runtime stopped')) {
+  if (backgroundObserverCleanup) return backgroundObserverCleanup;
   const run = backgroundRun;
-  if (!run) return;
-  stopBackgroundRun(run, reason, error => console.error('[e2e] observer cleanup failed: ' + error.message));
+  if (!run) return Promise.resolve(true);
+  backgroundObserverCleanup = stopBackgroundRun(run, reason, error => console.error('[e2e] observer cleanup failed: ' + error.message));
   backgroundRun = null;
+  return backgroundObserverCleanup;
 }
 
 function failBackground(error) {
   if (backgroundFailure) return;
   backgroundFailure = error instanceof Error ? error : new Error(String(error));
   console.error('[e2e] background isolation failed: ' + (backgroundFailure.stack || backgroundFailure.message));
-  stopBackgroundObserver(backgroundFailure);
-  try {
-    const stopped = killExisting();
+  // killExisting withdraws the lease and aborts CDP before blocking OS queries.
+  void killExisting().then(stopped => {
     if (stopped !== true) console.error('[e2e] owned cleanup incomplete: ' + stopped.reasons.join('; '));
-  } catch (cleanupError) { console.error('[e2e] owned cleanup failed: ' + cleanupError.message); }
+  }).catch(cleanupError => console.error('[e2e] owned cleanup failed: ' + cleanupError.message));
 }
 
 function nativeExpected(run) {
@@ -168,18 +173,21 @@ function renewBackgroundLease() {
 
 async function beginBackgroundObserver(baseline, token) {
   if (backgroundFailure) throw backgroundFailure;
+  backgroundObserverCleanup = null;
   const helper = resolveVdHelper();
   const startedAt = backgroundNow();
   const observer = spawn(helper, ['watch', String(DESKTOP_INDEX), String(process.pid)],
     { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  const run = { baseline, token, observer, observation: null, stopping: false, released: false,
+  const run = { baseline, token, observer, observerExit: captureProcessExit(observer), observation: null, stopping: false, released: false,
     leasePath: join(sandbox.directory, 'background-' + token + '.lease.json'),
     statusPath: join(sandbox.directory, 'background-' + token + '.status.json'),
     binding: null, timer: null, abortController: new AbortController() };
   backgroundRun = run;
   run.observation = observeDesktopStream({
     observer, baseline, startedAt, getOwnedPid: () => ownedChild?.pid,
-    requireSameForeground: () => !run.released, onFailure: failBackground,
+    requireSameForeground: () => !run.released,
+    onTransient: error => console.error('[e2e] transient desktop observation before host launch: ' + error.message),
+    onFailure: failBackground,
   });
   await run.observation.ready;
   assertBackgroundHealthy();
@@ -204,21 +212,26 @@ async function waitForBackgroundPhase(path, phase) {
   throw new Error('Background host timed out waiting for ' + phase);
 }
 
-function killExisting() {
-  stopBackgroundObserver();
-  if (!sandbox && !ownedChild) return true;
-  const child = ownedChild;
-  const result = killOwnedRuntime({
-    child,
-    executable: sandbox?.exe,
-    sandboxDirectory: sandbox?.directory,
-    launchPort,
-    launched: !!ownedChild,
-  });
-  if (result === true) { ownedChild = null; return true; }
-  if (result.hostDisposition === 'dead' || result.hostDisposition === 'killed') ownedChild = null;
+const ownedCleanupCoordinator = createOwnedCleanupCoordinator({ stopBackgroundObserver, cleanOwnedRuntime });
+function killExisting() { return ownedCleanupCoordinator.killExisting(); }
+function cleanOwnedRuntime() {
+  let result = true;
+  if (sandbox || ownedChild) {
+    const child = ownedChild;
+    result = killOwnedRuntime({
+      child,
+      executable: sandbox?.exe,
+      sandboxDirectory: sandbox?.directory,
+      launchPort,
+      launched: !!ownedChild,
+    });
+  }
+  if (result === true || result.hostDisposition === 'dead' || result.hostDisposition === 'killed') ownedChild = null;
   return result;
 }
+
+// Best-effort synchronous teardown only; the OS process supervisor covers abrupt exits.
+process.on('exit', () => { void killExisting(); });
 
 async function assertUnusedPort(port) {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid CDP port');
@@ -230,6 +243,8 @@ async function assertUnusedPort(port) {
 }
 
 async function startApp(dataConfig) {
+  const previousCleanup = await ownedCleanupCoordinator.beginNextRun();
+  if (previousCleanup !== true) throw new Error('Previous owned cleanup was not established: ' + previousCleanup.reasons.join('; '));
   await requireBackgroundCapability(sandbox.exe);
   // Seed an isolated local-only tab set before launch; restoreLocalContent
   // stays off and no SSH profile exists, so nothing here ever touches a real
@@ -975,7 +990,7 @@ async function main() {
     }
   } finally {
     cdp.close();
-    const stopped = killExisting();
+    const stopped = await killExisting();
     if (stopped !== true) throw new Error(`Owned runtime cleanup failed: ${stopped.reasons.join('; ')}`);
   }
 
@@ -989,4 +1004,15 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(`E2E 失败: ${e.stack || e.message}`); killExisting(); process.exit(1); });
+runSupervisedScript({
+  script: fileURLToPath(import.meta.url), args: process.argv.slice(2),
+  preflight: async () => {
+    if (!existsSync(SOURCE_EXE)) throw new Error(`exe 不存在: ${SOURCE_EXE}`);
+    await requireBackgroundCapability(SOURCE_EXE);
+  },
+  main: () => runWithDesktopRetry({
+    main: () => main().catch(error => { throw backgroundFailure ?? error; }),
+    cleanup: killExisting,
+    respawn: () => respawnDesktopProcess({ script: fileURLToPath(import.meta.url), args: process.argv.slice(2) }),
+  }),
+}).then(code => process.exit(code));

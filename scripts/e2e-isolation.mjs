@@ -873,10 +873,10 @@ export async function acquireVerifiedPage({ discover, expectedPort, verify }) {
 }
 
 export async function restartOwnedApp({ stop, waitUntilQuiet, start }) {
-  // stop must return exactly true: a hard failure AND an incomplete-cleanup
+  // stop must resolve exactly true: a hard failure AND an incomplete-cleanup
   // report object both refuse the restart — an uncertain cleanup is never
   // treated as established.
-  if (stop() !== true) throw new Error('Owned process cleanup was not established; refusing restart');
+  if (await stop() !== true) throw new Error('Owned process cleanup was not established; refusing restart');
   await waitUntilQuiet();
   return start();
 }
