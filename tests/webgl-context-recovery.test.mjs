@@ -71,11 +71,11 @@ function attachActive(ctx, tab) {
     ctx._attachWebglRenderer(tab, tab.term);
 }
 
-// Module-private record access: _webglByTerm is a top-level const in the VM.
-let _recordOf = null;
+// Module-private record access: _webglByTerm is a top-level const in the VM,
+// so each context needs its own accessor (a VM-realm closure cannot be shared
+// across contexts).
 function recOf(ctx, tab) {
-    if (!_recordOf) _recordOf = ctx.__eval('(term) => _webglByTerm.get(term)');
-    return _recordOf(tab.term);
+    return ctx.__eval('(term) => _webglByTerm.get(term)')(tab.term);
 }
 function fireWindow(ctx, type) {
     for (const fn of (ctx.__windowListeners.get(type) || []).slice()) fn({});
@@ -250,6 +250,32 @@ test('a quick re-loss after an automatic recovery keeps the remaining bounded bu
     ctx.__tq.advance(10 * 60 * 1000);
     assert.equal(rec.retryAttempts, 7, 'the remaining budget is consumed, not reset');
     assert.equal(rec.lastRetryResult, 'exhausted');
+    assert.equal(instances.length, 2);
+});
+
+test('a user-driven re-attach that fails during an outage continues the bounded retry', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_switch', 'local_switch', 'x');
+    attachActive(ctx, tab);
+    state.outage = 'fail-create';
+    instances[0].loseContextUnrecovered();
+    ctx.__tq.advance(0);
+    const rec = recOf(ctx, tab);
+    assert.equal(rec.retryAttempts, 1);
+
+    // The user switches back to the tab while the GPU is still down: the
+    // normal attach path replaces the dead context, fails, and must keep the
+    // bounded episode alive instead of stranding the terminal on the DOM
+    // renderer until the next manual activation.
+    attachActive(ctx, tab);
+    ctx.__tq.advance(0); // the attach-failed retry is scheduled immediately
+    assert.equal(rec.retryAttempts, 1, 'the failed user attach restarted a bounded attempt');
+    assert.ok(rec.retryTimer);
+
+    state.outage = 'none';
+    ctx.__tq.advance(10 * 60 * 1000);
+    assert.ok(tab._smoothCursor?._adapter, 'the episode heals without another user action');
     assert.equal(instances.length, 2);
 });
 
