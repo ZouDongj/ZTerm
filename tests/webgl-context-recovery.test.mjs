@@ -228,14 +228,17 @@ test('a persistent GPU failure drains the bounded schedule and stops creating co
         'retries follow the bounded 0/2s/4s/8s/16s/32s/60s schedule');
 
     // An exhausted episode keeps a bounded user-return probe path, and every
-    // probe is one context attempt per minute at most.
+    // probe is one context attempt per minute at most. The real clock advanced
+    // past the 60s cooldown while the 122s schedule drained; the fake timer
+    // queue does not move Date.now, so age the probe clock explicitly.
     assert.equal(pendingSetHas(ctx, tab), true, 'the exhausted terminal stays discoverable');
-    fireWindow(ctx, 'focus'); // lastUserRetryAt is stale: one bounded probe runs
+    ageUserProbe(ctx, tab, 62000);
+    fireWindow(ctx, 'focus'); // one bounded probe runs
     assert.equal(state.createAttempts, 9, 'one bounded probe attempt ran');
     ctx.__tq.advance(10 * 60 * 1000);
     assert.equal(state.createAttempts, 9, 'no timer re-arms an exhausted episode');
     assert.equal(rec.retryAttempts, 7, 'the probe never changes the automatic budget');
-    ageUserProbe(ctx, tab, 61000);
+    ageUserProbe(ctx, tab, 62000);
     fireWindow(ctx, 'focus');
     assert.equal(state.createAttempts, 10, 'the next bounded probe runs a minute later');
 });
@@ -296,17 +299,54 @@ test('a failed user-driven attach backs off instead of building twice', () => {
     assert.equal(state.createAttempts, beforeAttach + 2, 'the next attempt waits for the 2s backoff');
     assert.equal(rec.retryAttempts, 2);
 
-    // Window focus can still reach the pending episode with a bounded probe.
+    // Window focus can still reach the pending episode with a bounded probe:
+    // the probe fails against the outage but must leave the automatic deadline
+    // exactly where it was.
     const beforeProbe = state.createAttempts;
-    ageUserProbe(ctx, tab, 31000);
+    const dueAt = rec.nextRetryAt;
+    ageUserProbe(ctx, tab, 32000);
     fireWindow(ctx, 'focus');
     assert.equal(state.createAttempts, beforeProbe + 1, 'a user probe reaches the pending episode');
     assert.equal(rec.retryAttempts, 2, 'the probe does not consume an automatic attempt');
+    assert.equal(rec.nextRetryAt, dueAt, 'the failed probe keeps the automatic deadline');
+    assert.equal(rec.lastRetrySource, 'user:window-focus', 'the probe source survives diagnostics');
+    assert.equal(rec.lastRetryResult, 'probe-load-failed');
 
     state.outage = 'none';
     ctx.__tq.advance(10 * 60 * 1000);
     assert.ok(tab._smoothCursor?._adapter, 'the episode heals without another user action');
     assert.equal(instances.length, 2);
+});
+
+test('a failed user attach is not followed by an immediate probe from the focus handler', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_focus_guard', 'local_focus_guard', 'x');
+    tab.term.textarea = ctx.document.createElement('textarea'); // xterm's helper textarea
+    attachActive(ctx, tab);
+    state.outage = 'fail-create';
+    instances[0].loseContextUnrecovered();
+    ctx.__tq.advance(0); // automatic attempt 1 fails
+    const rec = recOf(ctx, tab);
+    assert.equal(rec.retryAttempts, 1);
+    const beforeAttach = state.createAttempts;
+
+    // A user-driven attach fails; the episode restarts with the first attempt
+    // already spent and the 2s backoff armed.
+    attachActive(ctx, tab);
+    assert.equal(state.createAttempts, beforeAttach + 1, 'the failed attach built once');
+    assert.equal(rec.retryAttempts, 1);
+    assert.ok(rec.lastUserRetryAt > 0, 'the reset starts the probe throttle window');
+
+    // tabs.js focuses a terminal right after activation; that delayed focus
+    // must not immediately build a second context.
+    tab.term.textarea.dispatch('focus');
+    assert.equal(state.createAttempts, beforeAttach + 1, 'the focus probe is throttled after reset');
+
+    ctx.__tq.advance(2000); // the automatic 2s slot still runs
+    assert.equal(state.createAttempts, beforeAttach + 2, 'the automatic backoff attempt still fires');
+    assert.equal(rec.retryAttempts, 2);
+    assert.equal(pendingSetHas(ctx, tab), true);
 });
 
 test('a context that stays healthy for the reset window re-arms the bounded budget', () => {
@@ -396,17 +436,30 @@ test('typing during a GPU outage cannot drain the automatic retry budget', () =>
     const rec = recOf(ctx, tab);
     assert.equal(rec.retryAttempts, 1);
     assert.ok(rec.retryTimer, 'the automatic schedule is armed');
+    const dueAt = rec.nextRetryAt;
+    const beforeProbe = state.createAttempts;
+    // The terminal has been open longer than the probe threshold (the fake
+    // timer queue does not move Date.now, so model that explicitly).
+    rec.lastUserRetryAt = Date.now() - 32000;
 
-    // A user easily emits six keystrokes before the 2s slot. The old design
-    // spent one automatic attempt per keystroke (1s throttle) and exhausted
-    // the episode; user signals are an independent probe now.
-    for (let i = 0; i < 6; i += 1) {
+    // The FIRST user action may probe (the automatic slot is not imminent):
+    // it fails against the outage, but the episode and its deadline survive.
+    tab.term.paste('x');
+    assert.equal(state.createAttempts, beforeProbe + 1, 'the first user action probed once');
+    assert.equal(rec.retryAttempts, 1, 'the probe never consumes an automatic attempt');
+    assert.equal(rec.nextRetryAt, dueAt, 'the probe never moves the automatic deadline');
+    assert.equal(rec.lastRetrySource, 'user:terminal-input');
+
+    // The following keystrokes are inside the 30s probe threshold: they must
+    // not create anything and must not touch the automatic schedule.
+    for (let i = 0; i < 5; i += 1) {
         rec.lastUserRetryAt = Date.now() - 1100;
         tab.term.paste('x');
     }
     assert.equal(rec.retryAttempts, 1, 'user input never consumes automatic attempts');
+    assert.equal(rec.nextRetryAt, dueAt, 'the automatic deadline is untouched');
     assert.ok(rec.retryTimer, 'the automatic retry timer is untouched');
-    assert.equal(state.createAttempts, 2, 'no context was built by the keystrokes');
+    assert.equal(state.createAttempts, beforeProbe + 1, 'no context was built by the keystrokes');
 
     // GPU returns: the untouched automatic schedule heals the terminal with no
     // explicit attach (tab switch) at all.
@@ -432,18 +485,22 @@ test('window focus probes a pending recovery without consuming the automatic bud
     fireWindow(ctx, 'focus');
     assert.equal(state.createAttempts, beforeProbe, 'the probe is rate limited to once per 30s');
 
-    ageUserProbe(ctx, tab, 31000);
+    ageUserProbe(ctx, tab, 32000);
+    const dueAt = rec.nextRetryAt;
     fireWindow(ctx, 'focus'); // outage still active: the probe fails
     assert.equal(state.createAttempts, beforeProbe + 1, 'one probe attempt ran');
     assert.equal(rec.retryAttempts, 1, 'a failed probe does not consume an automatic attempt');
     assert.ok(rec.retryTimer, 'the automatic retry timer is untouched');
+    assert.equal(rec.nextRetryAt, dueAt, 'a failed probe does not move the automatic deadline');
+    assert.equal(rec.lastRetrySource, 'user:window-focus', 'the probe source is not overwritten');
+    assert.equal(rec.lastRetryResult, 'probe-load-failed');
     assert.equal(pendingSetHas(ctx, tab), true);
     fireWindow(ctx, 'focus');
     assert.equal(state.createAttempts, beforeProbe + 1, 'the 30s probe rate limit holds');
 
     // GPU returns: the next allowed probe heals without any tab switch.
     state.outage = 'none';
-    ageUserProbe(ctx, tab, 31000);
+    ageUserProbe(ctx, tab, 32000);
     fireWindow(ctx, 'focus');
     assert.ok(tab._smoothCursor?._adapter, 'the user-return probe restores the adapter');
     assert.equal(rec.retryAttempts, 1, 'a successful probe does not rewrite the automatic budget');
@@ -471,7 +528,7 @@ test('visibilitychange probes only when visible and inside the probe threshold',
     assert.equal(state.createAttempts, beforeProbe, 'the 30s probe threshold holds');
 
     state.outage = 'none';
-    ageUserProbe(ctx, tab, 31000);
+    ageUserProbe(ctx, tab, 32000);
     fireDocument(ctx, 'visibilitychange');
     assert.ok(tab._smoothCursor?._adapter, 'returning to visible probes the pending recovery');
     assert.equal(rec.retryAttempts, 1, 'the probe does not consume an automatic attempt');
@@ -490,7 +547,7 @@ test('terminal input probes a pending recovery instead of spending automatic att
     assert.equal(state.createAttempts, beforeProbe, 'input inside the probe threshold does not try');
 
     state.outage = 'none';
-    ageUserProbe(ctx, tab, 31000);
+    ageUserProbe(ctx, tab, 32000);
     tab.term.paste('x');
     assert.ok(tab._smoothCursor?._adapter, 'terminal input probes the pending recovery');
     assert.equal(rec.retryAttempts, 1, 'the probe does not consume an automatic attempt');
@@ -507,7 +564,7 @@ test('terminal textarea focus probes a pending recovery', () => {
     assert.ok((tab.term.textarea._listeners.get('focus') || []).length > 0,
         'the terminal textarea focus listener is registered');
     state.outage = 'none';
-    ageUserProbe(ctx, tab, 31000);
+    ageUserProbe(ctx, tab, 32000);
     tab.term.textarea.dispatch('focus');
     assert.ok(tab._smoothCursor?._adapter, 'terminal focus probes the pending recovery');
     assert.equal(rec.retryAttempts, 1, 'the probe does not consume an automatic attempt');
@@ -530,13 +587,13 @@ test('an exhausted episode keeps a bounded user-return probe to heal', () => {
     assert.equal(pendingSetHas(ctx, tab), true, 'an exhausted terminal stays discoverable');
 
     // Inside the 60s exhausted-probe threshold nothing happens.
-    rec.lastUserRetryAt = Date.now() - 59000;
+    rec.lastUserRetryAt = Date.now() - 58000;
     const beforeProbe = state.createAttempts;
     fireWindow(ctx, 'focus');
     assert.equal(state.createAttempts, beforeProbe, 'the exhausted probe is rate limited to 60s');
 
     state.outage = 'none';
-    ageUserProbe(ctx, tab, 61000);
+    ageUserProbe(ctx, tab, 62000);
     fireWindow(ctx, 'focus');
     assert.ok(tab._smoothCursor?._adapter, 'a bounded probe heals an exhausted episode');
     assert.equal(rec.retryAttempts, 7, 'the probe does not rewrite the automatic budget');
@@ -563,22 +620,127 @@ test('exhausted probes are bounded to one context attempt per minute', () => {
     assert.equal(pendingSetHas(ctx, tab), true);
     const beforeProbe = state.createAttempts;
 
-    ageUserProbe(ctx, tab, 61000);
+    ageUserProbe(ctx, tab, 62000);
     fireWindow(ctx, 'focus'); // outage still active: the probe fails
     assert.equal(state.createAttempts, beforeProbe + 1, 'one bounded probe attempt ran');
     assert.equal(rec.retryAttempts, 7, 'the failed probe never spends automatic attempts');
     assert.equal(rec.retryTimer, null, 'the exhausted episode never re-arms a timer');
     assert.equal(rec.lastRetryResult, 'probe-load-failed');
+    assert.ok(rec.lastRetrySource.startsWith('user:'), 'the exhausted probe source survives');
     assert.equal(pendingSetHas(ctx, tab), true);
 
     fireWindow(ctx, 'focus');
-    rec.lastUserRetryAt = Date.now() - 59000;
+    rec.lastUserRetryAt = Date.now() - 58000;
     fireWindow(ctx, 'focus');
     assert.equal(state.createAttempts, beforeProbe + 1, 'one probe per 60s at most');
 
-    ageUserProbe(ctx, tab, 61000);
+    ageUserProbe(ctx, tab, 62000);
     fireWindow(ctx, 'focus');
     assert.equal(state.createAttempts, beforeProbe + 2, 'the next bounded probe runs');
+});
+
+test('a probe never races an automatic retry that is due within 1.5s', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_guard', 'local_guard', 'x');
+    const rec = armPendingRetry(ctx, tab, state, instances);
+    const beforeProbe = state.createAttempts;
+
+    // The scheduled automatic attempt is due inside the guard window: the
+    // probe must not build a second context.
+    rec.nextRetryAt = Date.now() + 1000;
+    ageUserProbe(ctx, tab, 32000);
+    fireWindow(ctx, 'focus');
+    assert.equal(state.createAttempts, beforeProbe, 'the due automatic attempt owns the window');
+    assert.equal(rec.retryAttempts, 1);
+
+    // Once the automatic retry is not imminent, the same signal probes.
+    const dueAt = Date.now() + 5000;
+    rec.nextRetryAt = dueAt;
+    ageUserProbe(ctx, tab, 32000);
+    fireWindow(ctx, 'focus');
+    assert.equal(state.createAttempts, beforeProbe + 1, 'the probe runs outside the guard window');
+    assert.equal(rec.retryAttempts, 1, 'the probe does not consume an automatic attempt');
+    assert.equal(rec.nextRetryAt, dueAt, 'the probe restores the original automatic deadline');
+});
+
+test('a failed probe does not move the scheduled automatic deadline', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_deadline', 'local_deadline', 'x');
+    attachActive(ctx, tab);
+    state.outage = 'fail-create';
+    instances[0].loseContextUnrecovered();
+    ctx.__tq.advance(0); // automatic attempt 1 fails
+    // Walk the automatic schedule to the 32s slot (attempts = 5).
+    for (const delay of [2000, 4000, 8000, 16000]) ctx.__tq.advance(delay);
+    const rec = recOf(ctx, tab);
+    assert.equal(rec.retryAttempts, 5);
+    assert.ok(rec.retryTimer);
+    const dueAt = rec.nextRetryAt;
+    const beforeProbe = state.createAttempts;
+
+    ageUserProbe(ctx, tab, 32000);
+    fireWindow(ctx, 'focus'); // outage still active: the probe fails
+    assert.equal(state.createAttempts, beforeProbe + 1, 'the probe attempted one context');
+    assert.equal(rec.retryAttempts, 5, 'the probe does not consume an automatic attempt');
+    assert.equal(rec.nextRetryAt, dueAt, 'the automatic deadline is unchanged');
+    assert.ok(rec.retryTimer, 'the automatic timer is still armed');
+    assert.equal(rec.lastRetrySource, 'user:window-focus', 'the probe source is not overwritten');
+    assert.equal(rec.lastRetryResult, 'probe-load-failed');
+
+    // The automatic attempt still fires at its original deadline and advances
+    // the episode normally.
+    ctx.__tq.advance(40000);
+    assert.equal(rec.retryAttempts, 6, 'the scheduled attempt fired and advanced the episode');
+    assert.equal(state.createAttempts, beforeProbe + 2);
+});
+
+test('sustained probes cannot stall the automatic episode', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_sustained', 'local_sustained', 'x');
+    attachActive(ctx, tab);
+    state.outage = 'fail-create';
+    instances[0].loseContextUnrecovered();
+    ctx.__tq.advance(0); // automatic attempt 1
+    const rec = recOf(ctx, tab);
+    assert.equal(rec.retryAttempts, 1);
+
+    // One failed probe per backoff slot (the way a user keeps returning during
+    // a long GPU outage). The automatic episode must still walk the full
+    // schedule and reach the bounded exhausted state.
+    for (const delay of [2000, 4000, 8000, 16000, 32000, 60000]) {
+        ageUserProbe(ctx, tab, 32000);
+        const deadline = rec.nextRetryAt;
+        const beforeProbe = state.createAttempts;
+        fireWindow(ctx, 'focus');
+        assert.equal(state.createAttempts, beforeProbe + 1, 'one probe per slot');
+        assert.equal(rec.nextRetryAt, deadline, 'the probe keeps the automatic deadline');
+        const attemptsBefore = rec.retryAttempts;
+        ctx.__tq.advance(delay);
+        assert.equal(rec.retryAttempts, attemptsBefore + 1,
+            'the automatic attempt still advances the schedule');
+    }
+    assert.equal(rec.retryAttempts, 7, 'the automatic episode still reaches exhausted');
+    assert.equal(rec.retryTimer, null, 'exhaustion leaves no automatic timer');
+    assert.equal(rec.nextRetryAt, 0);
+    assert.equal(pendingSetHas(ctx, tab), true);
+    // One initial attach + seven automatic attempts + six in-slot probes:
+    // probes are bounded by their own rate limit, not by the episode budget.
+    assert.equal(state.createAttempts, 14);
+
+    // Even after exhaustion a user return probes once per minute and never
+    // re-arms an automatic timer.
+    const beforeExhaustedProbe = state.createAttempts;
+    ageUserProbe(ctx, tab, 62000);
+    fireWindow(ctx, 'focus');
+    assert.equal(state.createAttempts, beforeExhaustedProbe + 1);
+    assert.equal(state.createAttempts, 15);
+    assert.equal(rec.retryAttempts, 7);
+    assert.equal(rec.retryTimer, null);
+    ctx.__tq.advance(10 * 60 * 1000);
+    assert.equal(state.createAttempts, beforeExhaustedProbe + 1, 'no timer was re-armed');
 });
 
 test('the Ctrl+Shift+D webgl segment is read-only metadata without terminal content', () => {
