@@ -249,10 +249,11 @@ const WEBGL_RECOVERY_HEALTHY_RESET_MS = 60000;
 // are an INDEPENDENT bounded probe, not part of the automatic episode budget:
 // typing while the GPU is down must never consume the timed retries (a user
 // emits several keystrokes before the first 2s backoff slot). A probe never
-// increments retryAttempts and never moves the automatic retry timer. Probes
-// are rate limited per terminal: 30s while the episode still has automatic
-// attempts left, 60s once it is exhausted — so an exhausted episode keeps a
-// bounded way back after sleep/lock without re-arming an automatic schedule.
+// increments retryAttempts and never moves the automatic retry deadline
+// (a failed probe re-arms the original deadline). Probes are rate limited per
+// terminal: 30s while the episode still has automatic attempts left, 60s once
+// it is exhausted — so an exhausted episode keeps a bounded way back after
+// sleep/lock without re-arming an automatic schedule.
 const WEBGL_RECOVERY_PROBE_MIN_MS = 30000;
 const WEBGL_RECOVERY_PROBE_EXHAUSTED_MIN_MS = 60000;
 // Do not race an automatic attempt that is already due: inside this window the
@@ -317,6 +318,21 @@ function _cancelWebglHealthReset(rec) {
     rec.healthTimer = null;
 }
 
+// Rebuild the automatic retry timer at its ORIGINAL deadline after an
+// independent probe borrowed the timer slot. The probe must not move the
+// automatic episode schedule; this helper only re-arms the same deadline and
+// never touches the diagnostics fields.
+function _armWebglRetryAt(term, rec, dueAt) {
+    if (!rec || rec.addon) return;
+    if (rec.retryTimer) { clearTimeout(rec.retryTimer); rec.retryTimer = null; }
+    rec.nextRetryAt = dueAt;
+    rec.retryTimer = setTimeout(() => {
+        rec.retryTimer = null;
+        rec.nextRetryAt = 0;
+        _attemptWebglRecovery(term, 'backoff');
+    }, Math.max(0, dueAt - Date.now()));
+}
+
 // Explicit user-driven attach starts a fresh bounded episode: pending timers
 // stop and the attempt budget is re-armed. Loss counters stay cumulative for
 // diagnostics (they answer "how often did this terminal lose WebGL?").
@@ -325,7 +341,10 @@ function _resetWebglRecovery(term, rec) {
     _cancelWebglHealthReset(rec);
     rec.retryAttempts = 0;
     rec.lastRetrySource = null;
-    rec.lastUserRetryAt = 0;
+    // Start the probe throttle window now: the delayed focus of the terminal
+    // being activated must not immediately build a second context after a
+    // failed user-driven attach.
+    rec.lastUserRetryAt = Date.now();
     _webglRecoveryPending.delete(term);
 }
 
@@ -507,6 +526,10 @@ function _tryWebglUserRetry(term, source) {
     // The scheduled automatic attempt owns a context creation that is already
     // due; racing it would build two contexts.
     if (rec.retryTimer && rec.nextRetryAt - now <= WEBGL_RECOVERY_PROBE_TIMER_GUARD_MS) return;
+    // The probe borrows the timer slot while it tries: the automatic episode
+    // must survive it with its deadline unchanged.
+    const hadRetryTimer = !!rec.retryTimer;
+    const retryDueAt = rec.nextRetryAt;
     rec.lastUserRetryAt = now;
     const result = _attachWebglRenderer(resolved.owner, term, { lossRecovery: true });
     if (result && result.ok) {
@@ -518,14 +541,16 @@ function _tryWebglUserRetry(term, source) {
         _scheduleWebglHealthReset(term, rec);
         return;
     }
+    // Failure: restore the automatic episode exactly where it was. A probe
+    // never consumes an attempt, never re-computes the backoff delay and never
+    // re-arms an exhausted episode.
+    if (hadRetryTimer) _armWebglRetryAt(term, rec, retryDueAt);
+    else _webglRecoveryPending.add(term);
+    // Diagnostics are assigned AFTER the timer restore so the automatic helper
+    // cannot overwrite the user-probe source.
     rec.lastRetrySource = 'user:' + source;
     rec.lastRetryResult = 'probe-' + (result?.reason || 'failed');
     rec.lastRetryError = result?.error || null;
-    // A failed probe leaves the automatic episode untouched: a pending timer
-    // stays authoritative; otherwise (< max) re-arm the normal backoff, or
-    // keep the exhausted state discoverable for the next bounded probe.
-    if (rec.retryAttempts < WEBGL_RECOVERY_MAX_ATTEMPTS) _scheduleWebglRecovery(term, 'probe-failed');
-    else _webglRecoveryPending.add(term);
 }
 
 // Read-only, metadata-only snapshot for the Ctrl+Shift+D report: renderer type,
