@@ -321,6 +321,10 @@ export function loadVm({ wireSmoothCursorStub = true } = {}) {
     // can fire the real registered handlers by hand (the click-outside closer
     // in sftp.js etc.); same convention as the recorded ResizeObservers.
     const docListeners = new Map();
+    // Window-level listeners follow the same recording convention: WebGL
+    // context-loss recovery retries on real user-return signals (window focus),
+    // so tests must be able to dispatch those handlers by hand.
+    const windowListeners = new Map();
 
     // Static page elements the product code reaches by id
     const root = mkEl({ _cw: 1200, _ch: 900 });
@@ -364,6 +368,15 @@ export function loadVm({ wireSmoothCursorStub = true } = {}) {
         },
         window: {
             __imeCaretAnchor: { patchTerminal: () => true },
+            addEventListener(type, fn) {
+                if (!windowListeners.has(type)) windowListeners.set(type, []);
+                windowListeners.get(type).push(fn);
+            },
+            removeEventListener(type, fn) {
+                const l = windowListeners.get(type) || [];
+                const i = l.indexOf(fn);
+                if (i >= 0) l.splice(i, 1);
+            },
         },
         ipcRenderer: {
             send: (cmd, payload) => sends.push({ cmd, payload }),
@@ -407,7 +420,7 @@ export function loadVm({ wireSmoothCursorStub = true } = {}) {
         _createWebLinksAddon: () => ({}),
         saveConfig() {},
         clearAlternateScreen() {},
-        __tq: tq, __sends: sends, __searchInput: searchInput, __searchCount: searchCount, __mainArea: mainArea, __body: body, __docListeners: docListeners,
+        __tq: tq, __sends: sends, __searchInput: searchInput, __searchCount: searchCount, __mainArea: mainArea, __body: body, __docListeners: docListeners, __windowListeners: windowListeners,
         // Dispatch synthetic backend events through the REAL ipc.js handlers.
         __emit: (ch, payload) => {
             (ipcHandlers.get(ch) || []).slice().forEach(fn => fn({}, payload));
@@ -432,6 +445,11 @@ export function loadVm({ wireSmoothCursorStub = true } = {}) {
     }
     ctx.TabManager = vm.runInContext('TabManager', ctx);
     if (wireSmoothCursorStub) ctx._wireSmoothCursorWebgl = () => ({ _adapter: null, dispose() {} });
+    // Escape hatch for module-private state that is declared with const/let
+    // (a lexical binding is visible to scripts and eval in this realm but is
+    // not a property of the context object): `ctx.__eval('(term) => ...')`
+    // returns a callable that receives test-side references.
+    ctx.__eval = (code) => vm.runInContext(code, ctx);
     activeDoc = ctx.document;
     return ctx;
 }
