@@ -246,10 +246,18 @@ const WEBGL_RECOVERY_BACKOFF_MS = [0, 2000, 4000, 8000, 16000, 32000, 60000];
 const WEBGL_RECOVERY_MAX_ATTEMPTS = WEBGL_RECOVERY_BACKOFF_MS.length;
 const WEBGL_RECOVERY_HEALTHY_RESET_MS = 60000;
 // User-return signals (window focus, tab visible again, terminal input/focus)
-// may retry ahead of the backoff timer, but at most once per second per
-// terminal. They consume the SAME bounded budget, so repeated user activity
-// cannot turn a broken GPU into unbounded context churn.
-const WEBGL_RECOVERY_USER_RETRY_MIN_MS = 1000;
+// are an INDEPENDENT bounded probe, not part of the automatic episode budget:
+// typing while the GPU is down must never consume the timed retries (a user
+// emits several keystrokes before the first 2s backoff slot). A probe never
+// increments retryAttempts and never moves the automatic retry timer. Probes
+// are rate limited per terminal: 30s while the episode still has automatic
+// attempts left, 60s once it is exhausted — so an exhausted episode keeps a
+// bounded way back after sleep/lock without re-arming an automatic schedule.
+const WEBGL_RECOVERY_PROBE_MIN_MS = 30000;
+const WEBGL_RECOVERY_PROBE_EXHAUSTED_MIN_MS = 60000;
+// Do not race an automatic attempt that is already due: inside this window the
+// scheduled retry owns the context creation (double build).
+const WEBGL_RECOVERY_PROBE_TIMER_GUARD_MS = 1500;
 const _webglByTerm = new WeakMap(); // term → WebGL record, see _ensureWebglRecord
 const _webglLive = new Set(); // terms holding a live addon, LRU attach order
 // Strong set of terminals with an active loss episode (a loss was seen and the
@@ -337,7 +345,9 @@ function _scheduleWebglRecovery(term, source) {
     if (rec.retryAttempts >= WEBGL_RECOVERY_MAX_ATTEMPTS) {
         rec.lastRetryResult = 'exhausted';
         rec.nextRetryAt = 0;
-        _webglRecoveryPending.delete(term);
+        // An exhausted episode must stay discoverable: the bounded user-return
+        // probes (window focus / visibility) are the only path back left.
+        _webglRecoveryPending.add(term);
         return;
     }
     const delay = WEBGL_RECOVERY_BACKOFF_MS[Math.min(rec.retryAttempts, WEBGL_RECOVERY_BACKOFF_MS.length - 1)];
@@ -348,6 +358,7 @@ function _scheduleWebglRecovery(term, source) {
         rec.nextRetryAt = 0;
         _attemptWebglRecovery(term, 'backoff');
     }, delay);
+    _webglRecoveryPending.add(term);
 }
 
 // One bounded recovery attempt. A live attach stops the episode (the health
@@ -360,6 +371,7 @@ function _attemptWebglRecovery(term, source) {
     if (rec.retryAttempts >= WEBGL_RECOVERY_MAX_ATTEMPTS) {
         rec.lastRetryResult = 'exhausted';
         rec.nextRetryAt = 0;
+        _webglRecoveryPending.add(term);
         return false;
     }
     _cancelWebglRetry(rec);
@@ -446,11 +458,12 @@ function _releaseWebglForTerm(term) {
 }
 
 // ── User-return signals ──
-// A lost context is retried when the user comes back (window focus, tab
-// visible again, typing/focusing the terminal): after a sleep/lock or a
-// remote-session switch the GPU is often back before the next backoff slot,
-// and the first user action should heal the cursor rather than wait for the
-// cap. Attempts are throttled per terminal and consume the same budget.
+// A lost context is probed when the user comes back (window focus, tab visible
+// again, typing/focusing the terminal): after a sleep/lock or a remote-session
+// switch the GPU is often back before the next backoff slot, and the first
+// user action should heal the cursor rather than wait for the cap. Probes are
+// independent of the automatic episode budget and rate limited per terminal —
+// see _tryWebglUserRetry and the probe constants above.
 let _webglUserSignalsWired = false;
 function _wireWebglUserSignals() {
     if (_webglUserSignalsWired) return;
@@ -481,13 +494,38 @@ function _retryWebglRecoveryForUserSignal(term, source) {
 function _tryWebglUserRetry(term, source) {
     const rec = term ? _webglByTerm.get(term) : null;
     if (!rec || rec.addon || !rec.lossCount) return;
-    if (rec.retryAttempts >= WEBGL_RECOVERY_MAX_ATTEMPTS) return;
     const resolved = _resolveTermOwner(term);
     if (!resolved || TabManager.activeId !== resolved.tab.id) return;
     const now = Date.now();
-    if (now - rec.lastUserRetryAt < WEBGL_RECOVERY_USER_RETRY_MIN_MS) return;
+    // Independent probe: never consumes retryAttempts and never moves the
+    // automatic retry timer. An exhausted episode gets a slower (but still
+    // bounded) path back.
+    const probeMinMs = rec.retryAttempts >= WEBGL_RECOVERY_MAX_ATTEMPTS
+        ? WEBGL_RECOVERY_PROBE_EXHAUSTED_MIN_MS
+        : WEBGL_RECOVERY_PROBE_MIN_MS;
+    if (now - rec.lastUserRetryAt < probeMinMs) return;
+    // The scheduled automatic attempt owns a context creation that is already
+    // due; racing it would build two contexts.
+    if (rec.retryTimer && rec.nextRetryAt - now <= WEBGL_RECOVERY_PROBE_TIMER_GUARD_MS) return;
     rec.lastUserRetryAt = now;
-    _attemptWebglRecovery(term, 'user:' + source);
+    const result = _attachWebglRenderer(resolved.owner, term, { lossRecovery: true });
+    if (result && result.ok) {
+        _cancelWebglRetry(rec);
+        rec.lastRetrySource = 'user:' + source;
+        rec.lastRetryResult = result.adapter ? 'attached' : 'attached-no-adapter';
+        rec.lastRetryError = null;
+        _webglRecoveryPending.add(term);
+        _scheduleWebglHealthReset(term, rec);
+        return;
+    }
+    rec.lastRetrySource = 'user:' + source;
+    rec.lastRetryResult = 'probe-' + (result?.reason || 'failed');
+    rec.lastRetryError = result?.error || null;
+    // A failed probe leaves the automatic episode untouched: a pending timer
+    // stays authoritative; otherwise (< max) re-arm the normal backoff, or
+    // keep the exhausted state discoverable for the next bounded probe.
+    if (rec.retryAttempts < WEBGL_RECOVERY_MAX_ATTEMPTS) _scheduleWebglRecovery(term, 'probe-failed');
+    else _webglRecoveryPending.add(term);
 }
 
 // Read-only, metadata-only snapshot for the Ctrl+Shift+D report: renderer type,
@@ -575,9 +613,12 @@ function _attachWebglRenderer(holder, term, opts) {
         rec.lastRetryError = error;
         // A user-driven attach after a loss re-arms the episode and continues
         // its bounded retries: a tab switch during a GPU outage must not strand
-        // the terminal on the DOM renderer.
+        // the terminal on the DOM renderer. The failed attach itself is the
+        // episode's first attempt, so the next one backs off (2s) instead of
+        // building a second context immediately.
         if (opts?.lossRecovery !== true && rec.lossCount > 0) {
             _resetWebglRecovery(term, rec);
+            rec.retryAttempts = 1;
             _scheduleWebglRecovery(term, 'attach-failed');
         }
         return { ok: false, reason: 'load-failed', error };
@@ -610,6 +651,7 @@ function _attachWebglRenderer(holder, term, opts) {
         rec.lastRetryError = 'context lost at creation';
         if (opts?.lossRecovery !== true && rec.lossCount > 0) {
             _resetWebglRecovery(term, rec);
+            rec.retryAttempts = 1;
             _scheduleWebglRecovery(term, 'attach-failed');
         }
         return { ok: false, reason: 'context-lost', error: 'context lost at creation' };

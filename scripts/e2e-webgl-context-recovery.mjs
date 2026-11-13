@@ -757,11 +757,18 @@ async function main() {
         outagePane?.nextRetryDelayMs > 0 &&
         (await cdp.eval(`TabManager.activeId`)) === tabA,
         `loss=${JSON.stringify(lossC)} during=${JSON.stringify(duringC)} diag=${JSON.stringify(outagePane)}`);
-      await sleep(2400); // a second backoff slot fires while the outage is still active
-      progressedPane = (await cdp.eval(`_webglDiagnosticsSnapshot()`))?.panes?.[0] ?? null;
+      // Bounded poll (no fixed sleep): the next backoff slot proves the
+      // timer-driven retry continues with no user action at all.
+      progressedPane = null;
+      for (let i = 0; i < 24; i += 1) {
+        const pane = (await cdp.eval(`_webglDiagnosticsSnapshot()`).catch(() => null))?.panes?.[0] ?? null;
+        if (pane && pane.reattachAttempts > outagePane.reattachAttempts) { progressedPane = pane; break; }
+        await sleep(250);
+      }
       const stillDom = await probeTab(cdp, tabA);
       check('C：无用户操作时退避计时器继续尝试（重挂次数递增，仍未新建 live context）',
-        progressedPane?.reattachAttempts > outagePane?.reattachAttempts &&
+        progressedPane !== null &&
+        progressedPane.reattachAttempts > outagePane?.reattachAttempts &&
         stillDom?.adapter === false && stillDom?.liveContexts === 0,
         `outage=${JSON.stringify(outagePane)} progressed=${JSON.stringify(progressedPane)}`);
     } finally {
@@ -795,41 +802,43 @@ async function main() {
 
     // The Ctrl+Shift+D report carries the read-only webgl segment. Capture the
     // clipboard payload through the real perfCapture path (the sandbox never
-    // touches the OS clipboard) and verify the metadata shape only.
+    // touches the OS clipboard). Fail closed: when the clipboard shim or the
+    // shortcut action is unavailable, perfCapture must not run at all.
     const reportTextC = await cdp.eval(`(async () => {
       window.__e2ePerfReport = null;
-      let restore = () => {};
+      const target = navigator.clipboard;
+      if (!target) return null;
+      const hadOwn = Object.prototype.hasOwnProperty.call(target, 'writeText');
+      const original = target.writeText;
       try {
-        const target = navigator.clipboard;
-        const hadOwn = Object.prototype.hasOwnProperty.call(target, 'writeText');
-        const original = target.writeText;
         Object.defineProperty(target, 'writeText', {
           configurable: true,
           value: text => { window.__e2ePerfReport = text; return Promise.resolve(); },
         });
-        restore = () => {
+      } catch (e) { return null; }
+      try {
+        if (typeof SHORTCUT_ACTIONS !== 'object' || typeof SHORTCUT_ACTIONS.perfCapture !== 'function') return null;
+        SHORTCUT_ACTIONS.perfCapture();
+        await new Promise(resolve => setTimeout(resolve, 4600));
+        return window.__e2ePerfReport;
+      } finally {
+        try {
           if (hadOwn) Object.defineProperty(target, 'writeText', { configurable: true, value: original });
           else delete target.writeText;
-        };
-      } catch (e) {}
-      if (typeof SHORTCUT_ACTIONS !== 'object' || typeof SHORTCUT_ACTIONS.perfCapture !== 'function') {
-        restore();
-        return null;
+        } catch (e) {}
       }
-      SHORTCUT_ACTIONS.perfCapture();
-      await new Promise(resolve => setTimeout(resolve, 4600));
-      restore();
-      return window.__e2ePerfReport;
     })()`).catch(() => null);
     let webglReport = null;
     try { webglReport = reportTextC ? JSON.parse(reportTextC).webgl : null; } catch (e) {}
     const reportPane = webglReport?.panes?.[0] ?? null;
     const paneKeys = ['renderer', 'lossCount', 'lastLossAgoMs', 'reattachAttempts', 'reattachLimit',
       'lastResult', 'lastError', 'lastRetrySource', 'nextRetryDelayMs'];
+    const reportPaneKeys = reportPane ? Object.keys(reportPane) : [];
+    const reportShapeOk = reportPaneKeys.length === paneKeys.length
+      && paneKeys.every(key => reportPaneKeys.includes(key));
     check('C：Ctrl+Shift+D 报告含只读 webgl 段（renderer/丢失/重挂/预算，仅元数据）',
       reportPane?.renderer === 'webgl' && reportPane?.lossCount >= 1 &&
-      reportPane?.reattachLimit === 7 && webglReport?.budget === 8 &&
-      Object.keys(reportPane).every(key => paneKeys.includes(key)),
+      reportPane?.reattachLimit === 7 && webglReport?.budget === 8 && reportShapeOk,
       `report=${JSON.stringify(webglReport)}`);
 
     // Re-arm through a real user switch before the simultaneous-loss phase.
