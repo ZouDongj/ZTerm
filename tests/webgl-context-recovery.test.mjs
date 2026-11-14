@@ -770,9 +770,11 @@ test('a failed probe restores the automatic schedule after an LRU release', () =
     assert.equal(rec.retryAttempts, 0);
     assert.equal(rec.lossCount, 1);
     assert.equal(pendingSetHas(ctx, tab), false);
-    // Only pending episodes are discoverable by window focus; stage the
-    // active-terminal discoverability the user-return path needs (the bug
-    // under test is the missing automatic timer, not set membership).
+    // This case covers the window-focus/pending-set discovery path: only
+    // pending episodes are discoverable by window focus, so the active
+    // terminal's discoverability is staged here. The terminal-input variant
+    // below covers the production-reachable per-terminal path without staging.
+    // The bug under test is the missing automatic timer, not set membership.
     markRecoveryPending(ctx, tab);
 
     // The GPU is down again: the user-return probe fails.
@@ -783,7 +785,9 @@ test('a failed probe restores the automatic schedule after an LRU release', () =
     assert.equal(state.createAttempts, beforeProbe + 1, 'the probe attempted one context');
     assert.equal(rec.retryAttempts, 0, 'the probe does not consume an automatic attempt');
     assert.ok(rec.retryTimer, 'the failed probe re-arms the bounded schedule');
-    assert.ok(rec.nextRetryAt > 0, 'the next automatic deadline is advertised');
+    // attempts=0 selects the immediate slot, so the re-armed deadline is due
+    // now (a positive-epoch check would be trivially true and prove nothing).
+    assert.ok(rec.nextRetryAt - Date.now() <= 1000, 'the immediate backoff slot is due now');
     assert.equal(pendingSetHas(ctx, tab), true);
     assert.ok(rec.lastRetrySource.startsWith('user:'), 'diagnostics keep the probe source');
     assert.equal(rec.lastRetryResult, 'probe-load-failed');
@@ -820,6 +824,86 @@ test('a failed probe on an exhausted episode never re-arms a timer', () => {
     assert.equal(rec.nextRetryAt, 0);
     assert.equal(pendingSetHas(ctx, tab), true);
     assert.ok(rec.lastRetrySource.startsWith('user:'));
+});
+
+test('terminal input restores the automatic schedule after an LRU release', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_lru_input', 'local_lru_input', 'x');
+    attachActive(ctx, tab);
+    instances[0].loseContextUnrecovered();
+    ctx.__tq.advance(0); // automatic recovery
+    assert.ok(tab._smoothCursor?._adapter);
+    ctx.__tq.advance(60000); // the health window re-arms the episode budget
+    const rec = recOf(ctx, tab);
+    assert.equal(rec.retryAttempts, 0);
+
+    // LRU force-release leaves the legitimate no-timer, non-exhausted state.
+    ctx._releaseWebglForTerm(tab.term);
+    assert.equal(rec.addon, null);
+    assert.equal(rec.retryTimer, null);
+    assert.equal(rec.retryAttempts, 0);
+    assert.equal(rec.lossCount, 1);
+    // No pending staging here: terminal input reaches the terminal through its
+    // own listener, so this is the production-reachable per-terminal probe
+    // path (the window-focus variant above covers the pending-set path).
+    assert.equal(pendingSetHas(ctx, tab), false);
+
+    // The GPU is down again: the user's next keystroke probes and fails.
+    state.outage = 'fail-create';
+    ageUserProbe(ctx, tab, 32000);
+    const beforeProbe = state.createAttempts;
+    tab.term.paste('x'); // real onData -> _sendInputForTerm -> probe
+    assert.equal(state.createAttempts, beforeProbe + 1, 'the input probe attempted one context');
+    assert.equal(rec.retryAttempts, 0, 'the probe does not consume an automatic attempt');
+    assert.ok(rec.retryTimer, 'the failed probe re-arms the bounded schedule');
+    assert.equal(pendingSetHas(ctx, tab), true, 'the re-armed episode is discoverable');
+    assert.ok(rec.lastRetrySource.startsWith('user:terminal-input'), 'the probe source is preserved');
+    assert.equal(rec.lastRetryResult, 'probe-load-failed');
+    // attempts=0 selects the immediate slot: the re-armed deadline is due now
+    // (a positive-epoch check would be trivially true).
+    assert.ok(rec.nextRetryAt - Date.now() <= 1000, 'the immediate backoff slot is due now');
+
+    // The re-armed schedule advances: attempt 1 fails, then the GPU returns
+    // and the 2s slot heals the terminal.
+    ctx.__tq.advance(0);
+    assert.equal(rec.retryAttempts, 1, 'the re-armed automatic attempt ran');
+    state.outage = 'none';
+    ctx.__tq.advance(2000);
+    assert.equal(rec.retryAttempts, 2);
+    assert.ok(tab._smoothCursor?._adapter, 'the re-armed schedule heals the terminal');
+});
+
+test('a failed probe re-arms the next backoff slot by its real delay', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_slot', 'local_slot', 'x');
+    attachActive(ctx, tab);
+    state.outage = 'fail-create';
+    instances[0].loseContextUnrecovered();
+    ctx.__tq.advance(0); // automatic attempt 1
+    // Walk the automatic schedule to attempts=6 (the 60s slot is armed).
+    for (const delay of [2000, 4000, 8000, 16000, 32000]) ctx.__tq.advance(delay);
+    const rec = recOf(ctx, tab);
+    assert.equal(rec.retryAttempts, 6);
+    assert.ok(rec.retryTimer);
+
+    // LRU force-release cancels the armed timer: attempts=6, no timer/addon.
+    ctx._releaseWebglForTerm(tab.term);
+    assert.equal(rec.retryAttempts, 6);
+    assert.equal(rec.retryTimer, null);
+    assert.equal(rec.nextRetryAt, 0);
+    assert.equal(pendingSetHas(ctx, tab), false);
+
+    // A failed per-terminal probe must select the next backoff slot for
+    // attempts=6, i.e. the 60s delay — not an immediate or earlier slot.
+    ageUserProbe(ctx, tab, 32000);
+    tab.term.paste('x');
+    assert.ok(rec.retryTimer, 'the failed probe re-arms the bounded schedule');
+    assert.equal(rec.retryAttempts, 6, 'the probe does not consume an automatic attempt');
+    const delayMs = rec.nextRetryAt - Date.now();
+    assert.ok(delayMs >= 59000 && delayMs <= 61000,
+        `the 60s backoff slot is selected (delay=${delayMs}ms)`);
 });
 
 test('the Ctrl+Shift+D webgl segment is read-only metadata without terminal content', () => {

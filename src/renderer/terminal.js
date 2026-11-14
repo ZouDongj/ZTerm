@@ -249,11 +249,13 @@ const WEBGL_RECOVERY_HEALTHY_RESET_MS = 60000;
 // are an INDEPENDENT bounded probe, not part of the automatic episode budget:
 // typing while the GPU is down must never consume the timed retries (a user
 // emits several keystrokes before the first 2s backoff slot). A probe never
-// increments retryAttempts and never moves the automatic retry deadline
-// (a failed probe re-arms the original deadline). Probes are rate limited per
-// terminal: 30s while the episode still has automatic attempts left, 60s once
-// it is exhausted — so an exhausted episode keeps a bounded way back after
-// sleep/lock without re-arming an automatic schedule.
+// increments retryAttempts and never recomputes a scheduled deadline: a
+// borrowed timer is restored at its original due time, a missing timer on a
+// non-exhausted episode re-arms the bounded schedule, and an exhausted episode
+// keeps only the bounded probe path (no automatic timer). Probes are rate
+// limited per terminal: 30s while the episode still has automatic attempts
+// left, 60s once it is exhausted — so an exhausted episode keeps a bounded way
+// back after sleep/lock without re-arming an automatic schedule.
 const WEBGL_RECOVERY_PROBE_MIN_MS = 30000;
 const WEBGL_RECOVERY_PROBE_EXHAUSTED_MIN_MS = 60000;
 // Do not race an automatic attempt that is already due: inside this window the
@@ -541,20 +543,20 @@ function _tryWebglUserRetry(term, source) {
         _scheduleWebglHealthReset(term, rec);
         return;
     }
-    // Failure: restore the automatic episode as it was. A probe never consumes
-    // an attempt and never recomputes a scheduled deadline.
+    // Failure: keep the automatic episode intact; a probe never consumes an
+    // attempt. Three cases:
+    // - the probe borrowed a scheduled timer slot: restore the original
+    //   deadline without recomputing the backoff;
+    // - no timer but attempts remain (e.g. a context-budget LRU release):
+    //   re-arm the bounded schedule, otherwise the terminal loses its
+    //   time-driven retries;
+    // - exhausted: keep the terminal discoverable for bounded probes only and
+    //   never create another automatic timer.
     if (hadRetryTimer) {
-        // Borrowed timer slot: put the same automatic deadline back.
         _armWebglRetryAt(term, rec, retryDueAt);
     } else if (rec.retryAttempts < WEBGL_RECOVERY_MAX_ATTEMPTS) {
-        // No timer and not exhausted (e.g. a healthy episode released by the
-        // context-budget LRU): re-arm the bounded schedule, otherwise the
-        // terminal loses its time-driven retries and can only recover through
-        // another user signal or an activation attach.
         _scheduleWebglRecovery(term, 'probe-failed');
     } else {
-        // Exhausted: stay discoverable for the next bounded probe, but never
-        // create another automatic timer.
         _webglRecoveryPending.add(term);
     }
     // Diagnostics are assigned AFTER the schedule restore so the automatic
