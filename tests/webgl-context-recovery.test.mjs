@@ -92,6 +92,12 @@ function ageUserProbe(ctx, tab, ms) {
 function pendingSetHas(ctx, tab) {
     return ctx.__eval('(term) => _webglRecoveryPending.has(term)')(tab.term);
 }
+// Window-focus signals only discover episodes registered in the pending set.
+// Tests that exercise that path from a state the production code leaves
+// unregistered (e.g. a budget-enforced release) stage that discoverability.
+function markRecoveryPending(ctx, tab) {
+    ctx.__eval('(term) => _webglRecoveryPending.add(term)')(tab.term);
+}
 
 // Drive the terminal into a pending backoff retry: the initial context dies
 // during a create-outage, so the immediate automatic attempt is swallowed.
@@ -741,6 +747,79 @@ test('sustained probes cannot stall the automatic episode', () => {
     assert.equal(rec.retryTimer, null);
     ctx.__tq.advance(10 * 60 * 1000);
     assert.equal(state.createAttempts, beforeExhaustedProbe + 1, 'no timer was re-armed');
+});
+
+test('a failed probe restores the automatic schedule after an LRU release', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_lru', 'local_lru', 'x');
+    attachActive(ctx, tab);
+    instances[0].loseContextUnrecovered();
+    ctx.__tq.advance(0); // automatic recovery
+    assert.ok(tab._smoothCursor?._adapter);
+    ctx.__tq.advance(60000); // the health window re-arms the episode budget
+    const rec = recOf(ctx, tab);
+    assert.equal(rec.retryAttempts, 0);
+
+    // LRU force-release (WEBGL_CONTEXT_BUDGET enforcement): the context is
+    // gone with no timer and attempts < max — a legitimate episode state.
+    ctx._releaseWebglForTerm(tab.term);
+    assert.equal(rec.addon, null);
+    assert.equal(rec.retryTimer, null);
+    assert.equal(rec.nextRetryAt, 0);
+    assert.equal(rec.retryAttempts, 0);
+    assert.equal(rec.lossCount, 1);
+    assert.equal(pendingSetHas(ctx, tab), false);
+    // Only pending episodes are discoverable by window focus; stage the
+    // active-terminal discoverability the user-return path needs (the bug
+    // under test is the missing automatic timer, not set membership).
+    markRecoveryPending(ctx, tab);
+
+    // The GPU is down again: the user-return probe fails.
+    state.outage = 'fail-create';
+    ageUserProbe(ctx, tab, 32000);
+    const beforeProbe = state.createAttempts;
+    fireWindow(ctx, 'focus');
+    assert.equal(state.createAttempts, beforeProbe + 1, 'the probe attempted one context');
+    assert.equal(rec.retryAttempts, 0, 'the probe does not consume an automatic attempt');
+    assert.ok(rec.retryTimer, 'the failed probe re-arms the bounded schedule');
+    assert.ok(rec.nextRetryAt > 0, 'the next automatic deadline is advertised');
+    assert.equal(pendingSetHas(ctx, tab), true);
+    assert.ok(rec.lastRetrySource.startsWith('user:'), 'diagnostics keep the probe source');
+    assert.equal(rec.lastRetryResult, 'probe-load-failed');
+
+    // The re-armed schedule advances the automatic episode (attempt 0 is the
+    // immediate slot).
+    ctx.__tq.advance(0);
+    assert.equal(rec.retryAttempts, 1, 'the re-armed automatic attempt ran');
+    assert.ok(rec.retryTimer, 'the next backoff step is armed');
+    ctx.__tq.advance(2000);
+    assert.equal(rec.retryAttempts, 2);
+});
+
+test('a failed probe on an exhausted episode never re-arms a timer', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_exhausted_probe', 'local_exhausted_probe', 'x');
+    attachActive(ctx, tab);
+    state.outage = 'fail-create';
+    instances[0].loseContextUnrecovered();
+    ctx.__tq.advance(0);
+    ctx.__tq.advance(10 * 60 * 1000); // drain the automatic schedule
+    const rec = recOf(ctx, tab);
+    assert.equal(rec.retryAttempts, 7);
+    assert.equal(rec.retryTimer, null);
+    assert.ok(pendingSetHas(ctx, tab));
+
+    ageUserProbe(ctx, tab, 62000);
+    const beforeProbe = state.createAttempts;
+    fireWindow(ctx, 'focus');
+    assert.equal(state.createAttempts, beforeProbe + 1, 'one bounded exhausted probe ran');
+    assert.equal(rec.retryAttempts, 7);
+    assert.equal(rec.retryTimer, null, 'an exhausted episode never re-arms an automatic timer');
+    assert.equal(rec.nextRetryAt, 0);
+    assert.equal(pendingSetHas(ctx, tab), true);
+    assert.ok(rec.lastRetrySource.startsWith('user:'));
 });
 
 test('the Ctrl+Shift+D webgl segment is read-only metadata without terminal content', () => {
