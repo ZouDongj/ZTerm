@@ -541,13 +541,24 @@ function _tryWebglUserRetry(term, source) {
         _scheduleWebglHealthReset(term, rec);
         return;
     }
-    // Failure: restore the automatic episode exactly where it was. A probe
-    // never consumes an attempt, never re-computes the backoff delay and never
-    // re-arms an exhausted episode.
-    if (hadRetryTimer) _armWebglRetryAt(term, rec, retryDueAt);
-    else _webglRecoveryPending.add(term);
-    // Diagnostics are assigned AFTER the timer restore so the automatic helper
-    // cannot overwrite the user-probe source.
+    // Failure: restore the automatic episode as it was. A probe never consumes
+    // an attempt and never recomputes a scheduled deadline.
+    if (hadRetryTimer) {
+        // Borrowed timer slot: put the same automatic deadline back.
+        _armWebglRetryAt(term, rec, retryDueAt);
+    } else if (rec.retryAttempts < WEBGL_RECOVERY_MAX_ATTEMPTS) {
+        // No timer and not exhausted (e.g. a healthy episode released by the
+        // context-budget LRU): re-arm the bounded schedule, otherwise the
+        // terminal loses its time-driven retries and can only recover through
+        // another user signal or an activation attach.
+        _scheduleWebglRecovery(term, 'probe-failed');
+    } else {
+        // Exhausted: stay discoverable for the next bounded probe, but never
+        // create another automatic timer.
+        _webglRecoveryPending.add(term);
+    }
+    // Diagnostics are assigned AFTER the schedule restore so the automatic
+    // helpers cannot overwrite the user-probe source.
     rec.lastRetrySource = 'user:' + source;
     rec.lastRetryResult = 'probe-' + (result?.reason || 'failed');
     rec.lastRetryError = result?.error || null;
