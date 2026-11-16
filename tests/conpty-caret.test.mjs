@@ -266,3 +266,105 @@ test('repair mode also answers the handshake', () => {
     assert.equal(f.push('\u001b[c'), '');
     assert.equal(calls, 1);
 });
+
+// ── Oversized sync blocks (MAX_BLOCK_TOKENS) ──
+// A local ConPTY frame can exceed the 20000-token post-processing cap (one
+// huge TUI redraw). The cap must never reorder the stream: the overflowing
+// token may only leave the filter AFTER everything already buffered for the
+// block, and the rest of that block passes through unmolested.
+
+const SYNC_BEGIN = '\u001b[?2026h';
+const SYNC_END = '\u001b[?2026l';
+const SHOW = '\u001b[?25h';
+const HIDE = '\u001b[?25l';
+// Minimal CSI token: one occurrence = one block token.
+const MARK = '\u001b[m';
+const PAINTED = '\u001b[0;7;39;49m';
+const PLAIN = '\u001b[0;39;49m';
+// 20000 tokens: 'A' plus 19999 standalone CSI sequences.
+const FULL_BLOCK_BODY = 'A' + MARK.repeat(19999);
+const OVERFLOW_STREAM =
+    SYNC_BEGIN + FULL_BLOCK_BODY + 'B' + MARK.repeat(2) + SYNC_END;
+
+test('oversized block: buffered content flushes before the overflow token', () => {
+    const f = createConPtyCaretFilter({ mode: 'fix' });
+    let out = f.push(SYNC_BEGIN);
+    assert.equal(f.push(FULL_BLOCK_BODY), '', 'block body stays buffered');
+    assert.equal(f.state().buffered, 20000);
+    // Token 20001: the flush carries the buffered prefix first, then itself.
+    assert.equal(f.push('B'), FULL_BLOCK_BODY + 'B');
+    assert.equal(f.state().buffered, 0, 'nothing stays held after the flush');
+    assert.equal(f.state().inSync, true, 'the block is still open');
+    out += FULL_BLOCK_BODY + 'B';
+    out += f.push(MARK.repeat(2));
+    out += f.push(SYNC_END);
+    assert.equal(out, OVERFLOW_STREAM + SHOW, 'byte order reconstructed, SHOW re-asserted');
+    const s = f.state();
+    assert.equal(s.inSync, false);
+    assert.equal(s.buffered, 0);
+    assert.equal(s.blocksSeen, 1);
+
+    // Chunk boundaries must not change the outcome (same contract as the
+    // small-block chunking test above).
+    for (const size of [1, 3, 17, 64, 1 << 20]) {
+        const g = createConPtyCaretFilter({ mode: 'fix' });
+        const bytes = enc(OVERFLOW_STREAM);
+        let acc = '';
+        for (let i = 0; i < bytes.length; i += size) acc += g.push(bytes.slice(i, i + size));
+        assert.equal(acc, OVERFLOW_STREAM + SHOW, `chunk size ${size}`);
+    }
+});
+
+test('a block of exactly MAX_BLOCK_TOKENS still gets full post-processing', () => {
+    // 19995 filler tokens + the 5-token painted-caret idiom = exactly 20000.
+    const body = MARK.repeat(19995) + PAINTED + ' ' + '\u001b[0m' + '\u001b[30;71H' + HIDE;
+    const f = createConPtyCaretFilter({ mode: 'fix' });
+    let out = f.push(SYNC_BEGIN);
+    assert.equal(f.push(body), '', 'exactly-at-limit stays buffered');
+    out += f.push(SYNC_END);
+    const expected = SYNC_BEGIN + MARK.repeat(19995) + PLAIN + ' ' + '\u001b[0m' +
+        '\u001b[30;71H' + SYNC_END + SHOW;
+    assert.equal(out, expected, 'painted caret de-reversed, hide stripped, SHOW re-asserted');
+    assert.equal(f.state().buffered, 0);
+});
+
+test('after an oversized block: SYNC_END passthrough, no state leak, later blocks repaired', () => {
+    let calls = 0;
+    const f = createConPtyCaretFilter({ mode: 'fix', onDa1Query: () => { calls += 1; } });
+    let out = f.push('\u001b[c'); // first DA1: swallowed, answered once
+    assert.equal(calls, 1);
+    out += f.push(SYNC_BEGIN);
+    f.push(FULL_BLOCK_BODY);
+    out += f.push('B'); // overflow: flush
+    // Remainder of the oversized block passes through in order, state tracked.
+    out += f.push(HIDE);
+    assert.equal(f.state().visible, false);
+    out += f.push('\u001b[c'); // later DA1 probe: passes through, not re-swallowed
+    assert.equal(calls, 1);
+    assert.equal(f.state().da1Seen, 2);
+    out += f.push(SYNC_END); // no trailing SHOW: the block really hid the caret
+    assert.equal(out,
+        SYNC_BEGIN + FULL_BLOCK_BODY + 'B' + HIDE + '\u001b[c' + SYNC_END);
+    assert.equal(f.state().blocksSeen, 1);
+    // The next block is a fresh, fully post-processed one.
+    out += f.push(HERDR_FRAME);
+    assert.ok(!out.includes(PAINTED), 'painted cell de-reversed in the later block');
+    assert.ok(out.includes(SHOW), 'SHOW re-asserted in the later block');
+    assert.equal(f.state().blocksSeen, 2);
+    assert.equal(f.state().buffered, 0);
+});
+
+test('multi-byte UTF-8 split across pushes survives the overflow flush', () => {
+    const f = createConPtyCaretFilter({ mode: 'fix' });
+    let out = f.push(SYNC_BEGIN);
+    f.push(FULL_BLOCK_BODY);
+    const pair = enc('\u4f60\u597d'); // 你好
+    // 你 completes inside the overflowing push and flushes; 好's first byte
+    // rides along and its tail arrives in the next chunk.
+    const flushed = f.push(pair.slice(0, 4));
+    assert.equal(flushed, FULL_BLOCK_BODY + '\u4f60');
+    out += flushed;
+    out += f.push(pair.slice(4));
+    out += f.push(SYNC_END);
+    assert.equal(out, SYNC_BEGIN + FULL_BLOCK_BODY + '\u4f60\u597d' + SYNC_END + SHOW);
+});

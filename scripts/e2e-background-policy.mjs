@@ -11,6 +11,15 @@ const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HWND = /^0x[0-9a-f]{1,16}$/i;
 const NIL_GUID = '00000000-0000-0000-0000-000000000000';
 const OBSERVATION_MAX_AGE_MS = 1500;
+const FOREGROUND_IDENTITY_TRANSIENT = 'foreground identity unavailable';
+
+export class DesktopObserverTransientError extends Error {
+  constructor(message = FOREGROUND_IDENTITY_TRANSIENT) {
+    super(message);
+    this.name = 'DesktopObserverTransientError';
+    this.code = 'ZTERM_E2E_DESKTOP_OBSERVER_TRANSIENT';
+  }
+}
 
 export function backgroundDesktopIndex(value = '2') {
   const desktop = Number(String(value).trim());
@@ -69,18 +78,22 @@ export function validateBackgroundContinuity(before, after, ownedPid, requireSam
 
 // This boundary consumes a read-only child stream; it never starts a host.
 export function observeDesktopStream({ observer, baseline, getOwnedPid = () => null,
-  requireSameForeground = () => false, onFailure = () => {}, now = backgroundNow, startedAt = now(), startupTimeoutMs = 3000 }) {
+  requireSameForeground = () => false, onTransient = () => {}, onFailure = () => {}, now = backgroundNow, startedAt = now(), startupTimeoutMs = 3000 }) {
   validateFreshDesktopSnapshot(baseline, now());
   if (!Number.isSafeInteger(startedAt) || startedAt < 0 || startedAt > now()) {
     throw new Error('Observer birth boundary is unavailable');
   }
   let latest = null;
   let failure = null;
+  let transientFailure = null;
+  let hasHealthySample = false;
   let stopped = false;
   let buffer = '';
   let resolveReady, rejectReady;
   const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
-  const startupTimer = setTimeout(() => fail(new Error('Desktop observer did not provide startup proof')), startupTimeoutMs);
+  const startupTimer = setTimeout(() => fail(transientFailure
+    ? new DesktopObserverTransientError('Desktop observer did not recover from transient failure: ' + transientFailure.message)
+    : new Error('Desktop observer did not provide startup proof')), startupTimeoutMs);
   function fail(error) {
     if (stopped || failure) return;
     failure = error instanceof Error ? error : new Error(String(error));
@@ -103,9 +116,24 @@ export function observeDesktopStream({ observer, baseline, getOwnedPid = () => n
       const line = buffer.slice(0, newline).trim(); buffer = buffer.slice(newline + 1);
       if (!line) continue;
       try {
-        const snapshot = validateFreshDesktopSnapshot(JSON.parse(line), now(), startedAt);
+        const parsed = JSON.parse(line);
+        if (parsed?.ok === false && parsed.transient === true && parsed.error === FOREGROUND_IDENTITY_TRANSIENT) {
+          const transient = new DesktopObserverTransientError();
+          if (hasHealthySample || getOwnedPid()) { fail(transient); return; }
+          if (!transientFailure) onTransient(transient);
+          transientFailure = transient;
+          continue;
+        }
+        if (parsed?.ok === false) {
+          fail(new Error(typeof parsed.error === 'string' && parsed.error
+            ? parsed.error : 'Desktop observer failed without an error reason'));
+          return;
+        }
+        const snapshot = validateFreshDesktopSnapshot(parsed, now(), startedAt);
         validateBackgroundContinuity(baseline, snapshot, getOwnedPid(), requireSameForeground());
         latest = snapshot;
+        hasHealthySample = true;
+        transientFailure = null;
         clearTimeout(startupTimer);
         resolveReady(snapshot);
       } catch (error) { fail(error); return; }
@@ -162,17 +190,57 @@ export function createBackgroundLease(binding, now = backgroundNow()) {
   return { ...binding, clockDomain: BACKGROUND_CLOCK_DOMAIN, renewedAt: now };
 }
 
-export function stopBackgroundRun(run, reason, onCleanupError = () => {}) {
-  run.stopping = true;
-  clearInterval(run.timer);
-  if (run.leasePath) {
-    try { rmSync(run.leasePath, { force: true }); } catch (error) { onCleanupError(error); }
-  }
-  run.abortController.abort(reason);
-  run.observation?.stop();
-  if (run.observer && run.observer.exitCode === null) {
-    try { run.observer.kill(); } catch (error) { onCleanupError(error); }
-  }
+export function captureProcessExit(child) {
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    child.once('error', error => finish({ exited: false, error }));
+    child.once('exit', (code, signal) => finish({ exited: true, code, signal }));
+    if (child.exitCode !== null || child.signalCode !== null) {
+      finish({ exited: true, code: child.exitCode, signal: child.signalCode });
+    }
+  });
+}
+
+export function stopBackgroundRun(run, reason, onCleanupError = () => {}, { timeoutMs = 3000 } = {}) {
+  if (run.cleanupPromise) return run.cleanupPromise;
+  run.cleanupPromise = (async () => {
+    const reasons = [];
+    run.stopping = true;
+    clearInterval(run.timer);
+    if (run.leasePath) {
+      try { rmSync(run.leasePath, { force: true }); }
+      catch (error) { reasons.push('observer lease cleanup failed: ' + error.message); onCleanupError(error); }
+    }
+    run.abortController.abort(reason);
+    run.observation?.stop();
+    if (run.observer) {
+      if (!run.observerExit) {
+        reasons.push('observer exit credential is unavailable');
+      } else {
+        if (run.observer.exitCode === null && run.observer.signalCode === null) {
+          try {
+            if (run.observer.kill() === false) reasons.push('observer kill returned false');
+          } catch (error) { reasons.push('observer kill failed: ' + error.message); onCleanupError(error); }
+        }
+        let timer;
+        const outcome = await Promise.race([
+          run.observerExit,
+          new Promise(resolve => { timer = setTimeout(() => resolve({ exited: false, timedOut: true }), timeoutMs); }),
+        ]);
+        clearTimeout(timer);
+        if (outcome?.timedOut) reasons.push(`observer exit timed out after ${timeoutMs}ms`);
+        else if (outcome?.error) reasons.push('observer exit proof failed: ' + outcome.error.message);
+        else if (outcome?.exited !== true) reasons.push('observer exit proof is unavailable');
+      }
+    }
+    return reasons.length > 0 ? { ok: false, reasons } : true;
+  })();
+  return run.cleanupPromise;
 }
 
 export async function readHostProcessDiagnostic(execFile, signal) {

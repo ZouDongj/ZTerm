@@ -98,7 +98,10 @@ async fn main() {
             background_e2e::configure().map_err(std::io::Error::other)?;
             // Register the global AppHandle (used to emit events such as config-corrupted)
             zterm::init_app_handle(app.handle());
-            // Data dir migration: if the default dir (packaged build = install dir/data) has no config but the anchor location does, copy it
+            // Per-account data seed: release builds keep config in the current
+            // account's Local AppData; a legacy release copy (<exe>/data) or
+            // the anchor mirror seeds that dir once, retrying on the next
+            // launch when the publish fails (saves stay suppressed meanwhile).
             zterm::migrate_legacy_config();
             // Create the main window manually (tauri.conf.json's windows list is empty):
             // enable_clipboard_access makes wry register a WebView2 PermissionRequested

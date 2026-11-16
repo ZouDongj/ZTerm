@@ -258,7 +258,7 @@ pub fn nonce() -> Result<String, String> {
 }
 
 #[cfg(windows)]
-fn known_folder(id: &winapi::shared::guiddef::GUID) -> Result<PathBuf, String> {
+pub(crate) fn known_folder(id: &winapi::shared::guiddef::GUID) -> Result<PathBuf, String> {
     use std::os::windows::ffi::OsStringExt;
     let mut ptr = std::ptr::null_mut();
     // DONT_VERIFY retrieves the account mapping without probing redirected storage.

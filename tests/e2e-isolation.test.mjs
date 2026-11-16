@@ -1353,6 +1353,41 @@ test('restart never replaces ownership when cleanup or port teardown failed', as
   assert.deepEqual(calls, ['stop', 'quiet', 'start']);
 });
 
+test('restart awaits asynchronous cleanup while retaining synchronous callback support', async () => {
+  const calls = [];
+  let release;
+  const restarting = restartOwnedApp({
+    stop: () => {
+      calls.push('stop');
+      return new Promise(resolve => { release = resolve; });
+    },
+    waitUntilQuiet: async () => { calls.push('quiet'); },
+    start: () => { calls.push('start'); },
+  });
+  await Promise.resolve();
+  assert.deepEqual(calls, ['stop'], 'quiet and start must wait for the async stop result');
+  release(true);
+  await restarting;
+  assert.deepEqual(calls, ['stop', 'quiet', 'start']);
+
+  for (const stop of [
+    async () => false,
+    async () => ({ ok: false, reasons: ['observer exit timed out'] }),
+    async () => { throw new Error('async cleanup failed'); },
+  ]) {
+    let starts = 0;
+    await assert.rejects(restartOwnedApp({ stop,
+      waitUntilQuiet: async () => { starts++; }, start: () => { starts++; } }));
+    assert.equal(starts, 0);
+  }
+
+  const synchronous = [];
+  await restartOwnedApp({ stop: () => true,
+    waitUntilQuiet: async () => { synchronous.push('quiet'); },
+    start: () => { synchronous.push('start'); } });
+  assert.deepEqual(synchronous, ['quiet', 'start']);
+});
+
 test('seedIsolatedConfig aborts before seeding when the anchor sets a custom dataDir', () => {
   const root = freshScratch('seed-test-');
   const source = join(root, 'source');
@@ -1363,7 +1398,8 @@ test('seedIsolatedConfig aborts before seeding when the anchor sets a custom dat
   mkdirSync(join(appData, 'ZTerm'), { recursive: true });
   writeFileSync(join(appData, 'ZTerm', 'config.json'), JSON.stringify({ dataDir: join(root, 'real-data') }));
   assert.throws(() => seedIsolatedConfig(box, appData), /dataDir/);
-  assert.equal(existsSync(join(box.directory, 'data', 'config.json')), false, 'aborted before seeding');
+  assert.equal(existsSync(join(box.appData, 'ZTerm', 'config.json')), false, 'aborted before touching the sandbox anchor');
+  assert.equal(existsSync(join(box.directory, 'localappdata', 'ZTerm', 'config.json')), false, 'aborted before seeding');
 });
 
 test('seedIsolatedConfig seeds an empty config and never overwrites an existing one', () => {
@@ -1378,6 +1414,51 @@ test('seedIsolatedConfig seeds an empty config and never overwrites an existing 
   writeFileSync(target, 'sentinel');
   seedIsolatedConfig(box, appData);
   assert.equal(readFileSync(target, 'utf8'), 'sentinel', 'existing config untouched');
+});
+
+test('the sandbox mirrors the per-account layout: no executable-relative data dir', () => {
+  // Release builds resolve their default data dir from the account's local
+  // app data, never from beside the executable; the sandbox must not pre-open
+  // an exe-relative data location the product no longer uses.
+  const root = freshScratch('seed-test-');
+  const source = join(root, 'source');
+  mkdirSync(join(source, 'data'), { recursive: true });
+  writeFileSync(join(source, 'zterm.exe'), 'test executable');
+  const box = createE2eSandbox(join(source, 'zterm.exe'), root);
+  assert.ok(existsSync(join(box.directory, 'appdata')), 'isolated roaming profile dir');
+  assert.ok(existsSync(join(box.directory, 'localappdata')), 'isolated local profile dir');
+  assert.equal(existsSync(join(box.directory, 'data')), false, 'no executable-relative data dir');
+});
+
+test('seedIsolatedConfig pins the sandbox anchor at the isolated account data dir', () => {
+  const root = freshScratch('seed-test-');
+  const source = join(root, 'source');
+  mkdirSync(source, { recursive: true });
+  writeFileSync(join(source, 'zterm.exe'), 'test executable');
+  const box = createE2eSandbox(join(source, 'zterm.exe'), root);
+  const appData = join(root, 'fake-appdata'); // no real anchor
+  const target = seedIsolatedConfig(box, appData);
+  assert.equal(target, join(box.directory, 'localappdata', 'ZTerm', 'config.json'));
+  const anchor = JSON.parse(readFileSync(join(box.appData, 'ZTerm', 'config.json'), 'utf8'));
+  assert.equal(anchor.dataDir, join(box.directory, 'localappdata', 'ZTerm'));
+  assert.equal(readFileSync(target, 'utf8').trim(), '{}', 'stock first-run config pre-seeded');
+});
+
+test('seedIsolatedConfig preserves sandbox anchor content while re-pinning the pointer', () => {
+  const root = freshScratch('seed-test-');
+  const source = join(root, 'source');
+  mkdirSync(source, { recursive: true });
+  writeFileSync(join(source, 'zterm.exe'), 'test executable');
+  const box = createE2eSandbox(join(source, 'zterm.exe'), root);
+  const appData = join(root, 'fake-appdata');
+  // An anchor mirror left by an earlier launch in this sandbox keeps its
+  // settings; the pointer is (re)pinned to the isolated data dir.
+  mkdirSync(join(box.appData, 'ZTerm'), { recursive: true });
+  writeFileSync(join(box.appData, 'ZTerm', 'config.json'), JSON.stringify({ appearance: { fontSize: 9 } }));
+  seedIsolatedConfig(box, appData);
+  const anchor = JSON.parse(readFileSync(join(box.appData, 'ZTerm', 'config.json'), 'utf8'));
+  assert.equal(anchor.appearance.fontSize, 9, 'existing mirror content survives');
+  assert.equal(anchor.dataDir, join(box.directory, 'localappdata', 'ZTerm'));
 });
 
 test('resolveE2eTmpSubdir accepts only the artifact root and its children', () => {

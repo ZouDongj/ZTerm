@@ -187,6 +187,21 @@ test('full E2E retains native failure and DOM checks with scoped fixture authori
   const automatic = source.indexOf('createSshFailureApproval.toString()');
   assert.ok(cancel > 0 && reconnect > cancel && allow > reconnect && automatic > allow,
     'native dialog cancellation and manual one-time allowance must precede automatic retry approvals');
+  const retryWait = source.indexOf('const consentRetryReady = await waitForValue');
+  const retryPredicate = source.indexOf('approval.prepares > 0 && approval.approvals > 0 && (window.__sshErrCount || 0) >= 2');
+  const retryThrow = source.indexOf('Automatic SSH retry did not complete a full failure cycle');
+  const tokenBump = source.indexOf('t._sshRetryToken = (t._sshRetryToken || 0) + 1');
+  const nativeCleanup = source.indexOf('const nativeFixtureCleanup =');
+  assert.ok(automatic > 0 && retryWait > automatic && retryPredicate > retryWait && retryThrow > retryPredicate,
+    'the runner must bounded-wait for one automatic retry cycle (fixture-approved prepare plus the second ssh-error) before cleanup');
+  assert.ok(tokenBump > retryThrow && nativeCleanup > tokenBump,
+    'the retry token may only be invalidated after the bounded wait, and only then may fixture cleanup run');
+  assert.ok(/waitForValue\(cdp,[\s\S]*?, true, 20000\)/.test(source.slice(retryWait, retryThrow)),
+    'the retry-cycle wait must stay bounded (20s), not block the runner forever');
+  for (const retained of [/nativeFixtureCleanup\.approvals > 0/, /nativeFixtureCleanup\.prepares >= nativeFixtureCleanup\.approvals/,
+    /sshFailureEndpoint\.state\.connections > 0/, /nativeFixtureCleanup\.restored === true/]) {
+    assert.ok(retained.test(source), `cleanup assertions must remain unchanged: ${retained}`);
+  }
   assert.ok(source.includes('sshFailureEndpoint.state.connections !== 0'), 'cancellation must fail on any loopback connection');
   assert.ok(source.includes('sshAttempts.finalState(token) != null'), 'cancellation must wait for owner retirement');
   assert.ok(source.includes("join(sandbox.directory, 'execution-trust.v1.bin')") && source.includes('!existsSync(consentGrantPath)'),

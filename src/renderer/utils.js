@@ -104,8 +104,8 @@ function formatDate(ts) {
 // Escape an HTML text node (only & < >; quotes have no special meaning in text nodes)
 function escHtml(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-// Escape an HTML attribute value (& < > " ', for attribute contexts like title="...")
-function escAttr(s) { return escHtml(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+// Escape an HTML attribute value, including newlines as reversible character references.
+function escAttr(s) { return escHtml(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\r/g,'&#13;').replace(/\n/g,'&#10;'); }
 
 // Escape a single-quoted JS string (' \ and newlines, for embedded-string contexts like onclick='fn("...")')
 // Prevents user-controlled data from closing the quote and injecting arbitrary JS (XSS)

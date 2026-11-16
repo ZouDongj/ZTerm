@@ -1,0 +1,269 @@
+{
+ "format": 1,
+ "cols": 80,
+ "rows": 24,
+ "source": "nvim 0.12.6 (authorized remote host), 80x24 pty, -u NONE -i NONE -n, synthetic L01..L26 buffer; events are genuine per-pty-read chunks",
+ "events": [
+  {
+   "kind": "output",
+   "data": "\u001b[?1049h\u001b[22;0;0t\u001b[?1h\u001b=\u001b[H\u001b[2J\u001b[?2004h\u001b[?69$p\u001b[?2026$p\u001b[?2027$p\u001b[?2031$p\u001b[?2048$p\u001b[0m\u001b[4:3m\u001bP$qm\u001b\\\u001b[?u\u001b[c\u001b]11;?\u0007\u001b[5n\u001b[?25h"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b]11;?\u0007\u001b[5n"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b(B\u001b[m\u001b[H                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \r\n                                                                                \u001b[1 q\u001b[?1002h\u001b[?1006h\u001b[H\u001b[?25h"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[?1004h\u001b[?25h"
+  },
+  {
+   "kind": "output",
+   "data": "\u001bP+q5463;524742;73657472676266;73657472676262\u001b\\\u001b[0m\u001b[48;2;1;2;3m\u001bP$qm\u001b\\"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b(B\u001b[m\u001b[23B\u001b[J\u001b[93mE1568: Terminal did not respond to DSR request for 'background' color. Startup m\u001b(B\u001b[m\u001b[H\u001b[K\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n\u001b(B\u001b[0;7mf.txt                                                         0,0-1          All\u001b[2 q\u001b[2 q\u001b(B\u001b[m\u001b[H\u001b[K\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n~\u001b[K\r\n\u001b(B\u001b[0;7mf.txt                                                         0,0-1          All\r\n\u001b(B\u001b[m\u001b[93mE1568: Terminal did not respond to DSR request for 'background' color. Startup m\u001b[H\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "enter-insert",
+   "data": "i"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[24;70H\u001b(B\u001b[mi         \u001b[H\u001b[?25h"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[24;70H \r\u001b[24;1H\u001b[92m-- INSERT --\u001b(B\u001b[m\u001b[K\u001b[23;65H\u001b(B\u001b[0;7m1  \u001b[6 q\u001b[H\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "type-lines",
+   "data": "L01\rL02\rL03\rL04\rL05\rL06\rL07\rL08\rL09\rL10\rL11\rL12\rL13\rL14\rL15\rL16\rL17\rL18\rL19\rL20\rL21\rL22\rL23\rL24\rL25\rL26\r"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b(B\u001b[mL06\r\nL07\u001b[K\r\nL08\u001b[K\r\nL09\u001b[K\r\nL10\u001b[K\r\nL11\u001b[K\r\nL12\u001b[K\r\nL13\u001b[K\r\nL14\u001b[K\r\nL15\u001b[K\r\nL16\u001b[K\r\nL17\u001b[K\r\nL18\u001b[K\r\nL19\u001b[K\r\nL20\u001b[K\r\nL21\u001b[K\r\nL22\u001b[K\r\nL23\u001b[K\r\nL24\u001b[K\r\nL25\u001b[K\r\nL26\u001b[K\r\n\u001b[K\u001b[23;7H\u001b(B\u001b[0;7m[+]                                                     27,1           Bot\r\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "leave-insert",
+   "data": "\u001b"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b(B\u001b[m\n\n\u001b[12X\u001b[23;66H\u001b(B\u001b[0;7m0-1\u001b[2 q\r\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "search-fwd-merged",
+   "data": "/f"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\n\n\u001b(B\u001b[m/f\u001b[2 q\u001b[?1002l\u001b[?1006l"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "search-fwd-esc",
+   "data": "\u001b"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\r\u001b[24;1H  \u001b[2 q\u001b[?1002h\u001b[?1006h\r\u001b[A\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "search-fwd-lead",
+   "data": "/"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[24;70H/\r\u001b[A\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[24;70H \r\u001b[24;1H/\u001b[2 q\u001b[?1002l\u001b[?1006l\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "search-fwd-char",
+   "data": "o"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25lo"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "search-fwd-esc2",
+   "data": "\u001b"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\r\u001b[24;1H  \u001b[2 q\u001b[?1002h\u001b[?1006h\r\u001b[A\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "search-back-merged",
+   "data": "?b"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\n\n?b\u001b[2 q\u001b[?1002l\u001b[?1006l"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "search-back-esc",
+   "data": "\u001b"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\r\u001b[24;1H  \u001b[2 q\u001b[?1002h\u001b[?1006h\r\u001b[A\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "search-back-lead",
+   "data": "?"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[24;70H?\r\u001b[A\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[24;70H \r\u001b[24;1H?\u001b[2 q\u001b[?1002l\u001b[?1006l\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "search-back-char",
+   "data": "c"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25lc"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "search-back-esc2",
+   "data": "\u001b"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\r\u001b[24;1H  \u001b[2 q\u001b[?1002h\u001b[?1006h\r\u001b[A\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "colon-lead",
+   "data": ":"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[24;70H:\r\u001b[A\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[24;70H \r\u001b[24;1H:\u001b[2 q\u001b[?1002l\u001b[?1006l\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "colon-char",
+   "data": "w"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25lw\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "colon-esc",
+   "data": "\u001b"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\r\u001b[24;1H  \u001b[2 q\u001b[?1002h\u001b[?1006h\r\u001b[A\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "colon-merged",
+   "data": ":x"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\n\n:x\u001b[2 q\u001b[?1002l\u001b[?1006l\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "colon-merged-esc",
+   "data": "\u001b"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\r\u001b[24;1H  \u001b[2 q\u001b[?1002h\u001b[?1006h\r\u001b[A\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "nav-count",
+   "data": "2"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[24;70H2\r\u001b[A\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "nav-j",
+   "data": "j"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[24;71Hj\r\u001b[A\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[24;70H  \r\u001b[A\u001b[A\u001b[?25h"
+  },
+  {
+   "kind": "input",
+   "name": "quit-vim",
+   "data": ":q!\r"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\n\n:q!\u001b[2 q\u001b[?1002l\u001b[?1006l\r\u001b[24;1H\u001b[?25h"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[2 q\u001b[?1002h\u001b[?1006h\u001b[?25h"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[2 q\u001b[?1002l\u001b[?1006l\u001b(B\u001b[m\u001b[?25h\u001b[0 q\u001b[?1l\u001b>\u001b[>4;0m\u001b[?2004l\u001b[?1004l\u001b[c\u001b[?25h"
+  },
+  {
+   "kind": "output",
+   "data": "\u001b[?25l\u001b[?1049l\u001b[23;0;0t\u001b[?25h"
+  }
+ ]
+}

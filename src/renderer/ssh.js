@@ -1644,16 +1644,38 @@ function addLoginScriptRow(expect, send, isRegex, optional) {
     if (!container) return;
     const row = document.createElement('div');
     row.className = 'login-script-row';
-    // The Expect/Send values sit in double-quoted attribute contexts: escAttr
-    // (unlike escHtml) also escapes quotes, so a value containing " survives
-    // the reopen round-trip instead of truncating the attribute and silently
-    // corrupting the profile on the next save.
-    row.innerHTML =
-        '<input class="ls-expect" placeholder="Expect" value="' + escAttr(expect || '') + '">' +
-        '<input class="ls-send" placeholder="Send" value="' + escAttr(send || '') + '">' +
-        '<span class="ls-toggle' + (isRegex ? ' on' : '') + '" title="正则匹配" onclick="this.classList.toggle(\'on\')">正则</span>' +
-        '<span class="ls-toggle' + (optional ? ' on' : '') + '" title="可选匹配" onclick="this.classList.toggle(\'on\')">可选</span>' +
-        '<button class="ls-del" onclick="deleteLoginScriptRow(this)">' + Icons.iconSvg('x', 12) + '</button>';
+    const makeValueInput = (className, placeholder, value) => {
+        const input = document.createElement('input');
+        input.className = className;
+        input.placeholder = placeholder;
+        input._rawValue = value || '';
+        input.value = input._rawValue;
+        // Single-line inputs strip newlines even through the value setter.
+        // Keep the stored bytes until a real edit replaces them.
+        input.addEventListener('input', () => { input._rawValue = input.value; });
+        return input;
+    };
+    const expectInput = makeValueInput('ls-expect', 'Expect', expect);
+    const sendInput = makeValueInput('ls-send', 'Send', send);
+    const makeToggle = (label, title, enabled) => {
+        const toggle = document.createElement('span');
+        toggle.className = 'ls-toggle' + (enabled ? ' on' : '');
+        toggle.title = title;
+        toggle.textContent = label;
+        toggle.addEventListener('click', () => toggle.classList.toggle('on'));
+        return toggle;
+    };
+    const regexToggle = makeToggle('正则', '正则匹配', isRegex);
+    const optionalToggle = makeToggle('可选', '可选匹配', optional);
+    const deleteButton = document.createElement('button');
+    deleteButton.className = 'ls-del';
+    deleteButton.innerHTML = Icons.iconSvg('x', 12);
+    deleteButton.addEventListener('click', () => deleteLoginScriptRow(deleteButton));
+    row.appendChild(expectInput);
+    row.appendChild(sendInput);
+    row.appendChild(regexToggle);
+    row.appendChild(optionalToggle);
+    row.appendChild(deleteButton);
     container.appendChild(row);
     _updateLSBadge();
 }
@@ -1666,9 +1688,10 @@ function deleteLoginScriptRow(btn) {
 function collectLoginScripts() {
     const rows = document.querySelectorAll('#login-scripts-container .login-script-row');
     const scripts = [];
+    const valueOf = input => input ? (input._rawValue ?? input.value ?? '') : '';
     rows.forEach(row => {
-        const expect = row.querySelector('.ls-expect')?.value || '';
-        const send = row.querySelector('.ls-send')?.value || '';
+        const expect = valueOf(row.querySelector('.ls-expect'));
+        const send = valueOf(row.querySelector('.ls-send'));
         const toggles = row.querySelectorAll('.ls-toggle');
         const isRegex = toggles[0]?.classList.contains('on') || false;
         const optional = toggles[1]?.classList.contains('on') || false;

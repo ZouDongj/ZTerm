@@ -88,18 +88,40 @@ function renderHighlightRulesList() {
         const bgStyle = bgColor ? 'background:' + bgColor + ';' : '';
         const truncateStyle = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px;display:inline-block;vertical-align:middle';
         const style = 'style="' + fgStyle + bgStyle + truncateStyle + '"';
-        return `<div class="ssh-item">
+        return `<div class="ssh-item" data-highlight-id="${escAttr(r.id)}">
             <div class="ssh-item-icon" style="background:rgba(var(--accent-rgb),0.08);color:rgb(var(--accent-rgb))">Aa</div>
-            <div class="ssh-item-info" style="cursor:pointer" onclick="openHighlightEdit(false,'${r.id}')">
+            <div class="ssh-item-info" style="cursor:pointer" data-action="edit">
                 <div class="ssh-item-name" ${style}>${escHtml(r.text)}</div>
                 <div class="ssh-item-detail">${r.isRegExp ? '正则' : '关键字'}${r.bold ? ' · 粗体' : ''}${r.italic ? ' · 斜体' : ''}${r.underline ? ' · 下划线' : ''}</div>
             </div>
-            <div class="toggle-switch small ${r.enabled ? 'on' : ''}" style="flex-shrink:0" onclick="toggleHighlightRule('${r.id}')"></div>
-            <button class="ssh-item-btn" title="编辑" onclick="openHighlightEdit(false,'${r.id}')">${Icons.iconSvg('pencil', 11)}</button>
-            <button class="ssh-item-btn danger" title="删除" onclick="deleteHighlightRule('${r.id}')">×</button>
+            <div class="toggle-switch small ${r.enabled ? 'on' : ''}" style="flex-shrink:0" data-action="toggle"></div>
+            <button class="ssh-item-btn" title="编辑" data-action="edit">${Icons.iconSvg('pencil', 11)}</button>
+            <button class="ssh-item-btn danger" title="删除" data-action="delete">×</button>
         </div>`;
     }).join('');
 }
+
+(function bindHighlightListDelegation() {
+    if (typeof document === 'undefined') return;
+    const wire = () => {
+        const container = document.getElementById('highlight-rules-list');
+        if (!container || container._highlightBound) return;
+        container._highlightBound = true;
+        container.addEventListener('click', e => {
+            const row = e.target.closest('.ssh-item');
+            const actionEl = e.target.closest('[data-action]');
+            if (!row || !container.contains(row) || !actionEl || !row.contains(actionEl)) return;
+            const id = row.dataset.highlightId;
+            if (id === undefined) return;
+            const action = actionEl.dataset.action;
+            if (action === 'edit') openHighlightEdit(false, id);
+            else if (action === 'toggle') toggleHighlightRule(id);
+            else if (action === 'delete') deleteHighlightRule(id);
+        });
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire);
+    else wire();
+})();
 
 function toggleHighlightRule(id) {
     const r = _highlightRules.find(x => x.id === id);

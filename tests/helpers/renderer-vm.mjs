@@ -241,12 +241,14 @@ export class RealTerm {
     onCursorMove(cb) { return sub(this._cursorMoveSubs, cb); }
     onSelectionChange() { return { dispose() {} }; }
     onBell() { return { dispose() {} }; }
-    write(data) {
+    write(data, callback) {
+        if (String(data).length === 0) { callback?.(); return; }
         const parts = String(data).split(/\r?\n/);
         const a = this.buffer.active;
         for (const p of parts) a.lines.push(new FakeLine(p));
         a.cursorY = a.lines.length - 1;
         a.cursorX = a.lines[a.lines.length - 1].length;
+        callback?.();
     }
     // Test-side trigger for what real xterm fires after parsing a write.
     __emitWriteParsed() { this._writeSubs.slice().forEach(cb => cb()); }

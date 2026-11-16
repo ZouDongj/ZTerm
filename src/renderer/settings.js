@@ -444,13 +444,24 @@ function loadSettingsIntoForm() {
     const svEl = document.getElementById('shell-visibility-list');
     if (svEl) {
         const hidden = config.hiddenProfiles || [];
-        svEl.innerHTML = (TabManager.profiles || []).map(p => `
-              <div class="settings-row">
-                <div class="settings-card-label">
-                  <div class="settings-card-title">${escHtml(p.name)}</div>
-                </div>
-                <div class="toggle-switch ${hidden.includes(p.id) ? '' : 'on'}" id="toggle-shell-${p.id}" onclick="toggleSwitch(this);saveTerminal()"></div>
-              </div>`).join('');
+        svEl.innerHTML = '';
+        (TabManager.profiles || []).forEach(p => {
+            const row = document.createElement('div');
+            row.className = 'settings-row';
+            const label = document.createElement('div');
+            label.className = 'settings-card-label';
+            const title = document.createElement('div');
+            title.className = 'settings-card-title';
+            title.textContent = p.name || '';
+            label.appendChild(title);
+            const toggle = document.createElement('div');
+            toggle.className = `toggle-switch ${hidden.includes(p.id) ? '' : 'on'}`;
+            toggle.id = 'toggle-shell-' + p.id;
+            toggle.addEventListener('click', () => { toggleSwitch(toggle); saveTerminal(); });
+            row.appendChild(label);
+            row.appendChild(toggle);
+            svEl.appendChild(row);
+        });
     }
     setToggle('toggle-autocopy', config.autoCopy !== false);
     setToggle('toggle-rightclick', config.rightClickPaste !== false);

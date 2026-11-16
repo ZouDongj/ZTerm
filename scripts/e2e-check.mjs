@@ -22,15 +22,18 @@ import { resolve, dirname, join } from 'node:path';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { createE2eSandbox, restartOwnedApp, killOwnedRuntime, probeDebugPortRange } from './e2e-isolation.mjs';
+import { createE2eSandbox, restartOwnedApp, killOwnedRuntime, probeDebugPortRange, seedIsolatedConfig } from './e2e-isolation.mjs';
 import { backgroundDesktopIndex, validateFreshDesktopSnapshot, observeDesktopStream, completeBackgroundHandshake,
   validateNativeHostHealth, renewNativeLease, createBackgroundLease, backgroundNow,
-  stopBackgroundRun, readHostProcessDiagnostic } from './e2e-background-policy.mjs';
+  stopBackgroundRun, readHostProcessDiagnostic, captureProcessExit } from './e2e-background-policy.mjs';
 import { connectVerifiedEndpoint } from './e2e-ownership.mjs';
 import { requireBackgroundCapability } from './e2e-background-capability.mjs';
 import { writeBackgroundJson } from './e2e-background-json.mjs';
 import { consentCancellationPassed, executionConsent, createSshFailureApproval, createUiSshFixture, createSshFailureEndpoint } from './e2e-execution-fixtures.mjs';
 import { runWebglAtlasChecks } from './e2e-webgl-atlas.mjs';
+import { respawnDesktopProcess, runWithDesktopRetry } from './e2e-desktop-retry.mjs';
+import { runSupervisedScript } from './e2e-process-supervisor.mjs';
+import { createOwnedCleanupCoordinator } from './e2e-owned-cleanup.mjs';
 
 const SOURCE_EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
 let EXE = SOURCE_EXE;
@@ -60,6 +63,7 @@ const DESKTOP_INDEX = backgroundDesktopIndex(process.env.ZTERM_E2E_DESKTOP ?? '2
 let vdHelperExe = null;
 let backgroundRun = null;
 let backgroundFailure = null;
+let backgroundObserverCleanup = null;
 
 // ── Launch the exe (with WebView2 remote debugging) ──
 let DATA_CONFIG = null;
@@ -71,9 +75,9 @@ let configBackup = null;
 let configExistedAtStart = null;
 
 function backupConfig() {
-  // Tabs/SSH profiles created by the E2E run are persisted into
-  // data/config.json by the frontend's 15s periodic save and would pollute
-  // the next launch's tab restore — back up before launch, restore at the end.
+  // Tabs/SSH profiles created by the E2E run are persisted into the isolated
+  // account config by the frontend's 15s periodic save and would pollute the
+  // next launch's tab restore — back up before launch, restore at the end.
   try {
     configExistedAtStart = existsSync(DATA_CONFIG);
     if (configExistedAtStart) {
@@ -115,21 +119,21 @@ function restoreConfig() {
 // stays alive and is reported. Returns exactly true when cleanup is
 // established, or { ok: false, reasons } — restarts and the final gate treat
 // that as a failure instead of silently assuming a clean state.
-function killExisting() {
-  stopBackgroundObserver();
-  if (!sandbox && !ownedChild) return true;
-  const child = ownedChild;
-  const result = killOwnedRuntime({
-    child,
-    executable: EXE,
-    sandboxDirectory: sandbox?.directory,
-    launchPort,
-    launched: launchCount > 0,
-  });
-  if (result === true) { ownedChild = null; return true; }
-  // Keep the handle only while it still refers to something that may be ours
-  // (mismatch/unknown/failed); dead/killed handles are released.
-  if (result.hostDisposition === 'dead' || result.hostDisposition === 'killed') ownedChild = null;
+const ownedCleanupCoordinator = createOwnedCleanupCoordinator({ stopBackgroundObserver, cleanOwnedRuntime });
+function killExisting() { return ownedCleanupCoordinator.killExisting(); }
+function cleanOwnedRuntime() {
+  let result = true;
+  if (sandbox || ownedChild) {
+    const child = ownedChild;
+    result = killOwnedRuntime({
+      child,
+      executable: EXE,
+      sandboxDirectory: sandbox?.directory,
+      launchPort,
+      launched: launchCount > 0,
+    });
+  }
+  if (result === true || result.hostDisposition === 'dead' || result.hostDisposition === 'killed') ownedChild = null;
   return result;
 }
 // Compile a read-only observer before any app launch. No foreground fallback.
@@ -159,22 +163,22 @@ async function inspectDesktop() {
 }
 
 function stopBackgroundObserver(reason = new Error('Owned background runtime stopped')) {
+  if (backgroundObserverCleanup) return backgroundObserverCleanup;
   const run = backgroundRun;
-  if (!run) return;
-  stopBackgroundRun(run, reason, error => console.error('[e2e] observer cleanup failed: ' + error.message));
+  if (!run) return Promise.resolve(true);
+  backgroundObserverCleanup = stopBackgroundRun(run, reason, error => console.error('[e2e] observer cleanup failed: ' + error.message));
   backgroundRun = null;
+  return backgroundObserverCleanup;
 }
 
 function failBackground(error) {
   if (backgroundFailure) return;
   backgroundFailure = error instanceof Error ? error : new Error(String(error));
   console.error('[e2e] background isolation failed: ' + (backgroundFailure.stack || backgroundFailure.message));
-  // Withdraw the lease and reject pending CDP work before any blocking OS query.
-  stopBackgroundObserver(backgroundFailure);
-  try {
-    const stopped = killExisting();
+  // killExisting withdraws the lease and aborts CDP before blocking OS queries.
+  void killExisting().then(stopped => {
     if (stopped !== true) console.error('[e2e] owned cleanup incomplete: ' + stopped.reasons.join('; '));
-  } catch (cleanupError) { console.error('[e2e] owned cleanup failed: ' + cleanupError.message); }
+  }).catch(cleanupError => console.error('[e2e] owned cleanup failed: ' + cleanupError.message));
 }
 
 function nativeExpected(run) {
@@ -212,18 +216,21 @@ function renewBackgroundLease() {
 
 async function beginBackgroundObserver(baseline, token) {
   if (backgroundFailure) throw backgroundFailure;
+  backgroundObserverCleanup = null;
   const helper = resolveVdHelper();
   const startedAt = backgroundNow();
   const observer = spawn(helper, ['watch', String(DESKTOP_INDEX), String(process.pid)],
     { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  const run = { baseline, token, observer, observation: null, stopping: false, released: false,
+  const run = { baseline, token, observer, observerExit: captureProcessExit(observer), observation: null, stopping: false, released: false,
     leasePath: join(sandbox.directory, 'background-' + token + '.lease.json'),
     statusPath: join(sandbox.directory, 'background-' + token + '.status.json'),
     binding: null, timer: null, abortController: new AbortController() };
   backgroundRun = run;
   run.observation = observeDesktopStream({
     observer, baseline, startedAt, getOwnedPid: () => ownedChild?.pid,
-    requireSameForeground: () => !run.released, onFailure: failBackground,
+    requireSameForeground: () => !run.released,
+    onTransient: error => console.error('[e2e] transient desktop observation before host launch: ' + error.message),
+    onFailure: failBackground,
   });
   await run.observation.ready;
   assertBackgroundHealthy();
@@ -248,9 +255,8 @@ async function waitForBackgroundPhase(path, phase) {
   throw new Error('Background host timed out waiting for ' + phase);
 }
 
-// Safety net for exit paths that skip the explicit killExisting() calls
-// (unexpected early throw, unhandled rejection): never leave a PTY tree behind.
-process.on('exit', () => killExisting());
+// Best-effort synchronous teardown only; the OS process supervisor covers abrupt exits.
+process.on('exit', () => { void killExisting(); });
 
 function isolatedShellArgs(command, args = []) {
   const name = String(command || 'powershell.exe').replaceAll('\\', '/').split('/').pop().toLowerCase();
@@ -294,6 +300,8 @@ async function installIsolatedShellGuard(cdp) {
 
 async function startApp() {
   if (ownedChild) throw new Error('Previous owned process has not been released');
+  const previousCleanup = await ownedCleanupCoordinator.beginNextRun();
+  if (previousCleanup !== true) throw new Error('Previous owned cleanup was not established: ' + previousCleanup.reasons.join('; '));
   await requireBackgroundCapability(EXE);
   // USERPROFILE must remain valid for WebView2. Isolate shell startup explicitly
   // instead of allowing restored shells to execute the operator's profiles.
@@ -331,7 +339,7 @@ async function startApp() {
     env: {
       ...process.env,
       APPDATA: sandbox.appData,
-      LOCALAPPDATA: sandbox.appData,
+      LOCALAPPDATA: sandbox.localAppData,
       ZTERM_E2E_BACKGROUND_POLICY: policyPath,
       // The anti-throttling flags keep rAF/rendering/timers running while the
       // window sits on a non-visible virtual desktop (occlusion would
@@ -467,10 +475,10 @@ async function main() {
   await assertUnusedPort(BASE_PORT);
   sandbox = createE2eSandbox(SOURCE_EXE);
   EXE = sandbox.exe;
-  DATA_CONFIG = join(sandbox.directory, 'data', 'config.json');
+  DATA_CONFIG = seedIsolatedConfig(sandbox);
   console.log(`E2E source: ${SOURCE_EXE}\nIsolated runtime: ${sandbox.directory}\n`);
 
-  killExisting();
+  await killExisting();
   backupConfig();
   await startApp();
   // Identity gate BEFORE any attach/evaluate: /json discovery is harmless,
@@ -501,6 +509,407 @@ async function main() {
     // startup flags are restricted by this test fixture. Existing restored
     // sessions were protected on disk before launch by startApp().
     await installIsolatedShellGuard(cdp);
+
+    // Configuration values must remain inert through the real WebView2 HTML
+    // parser and event dispatcher. The focused mode keeps this rendering check
+    // independent from the longer native interaction suite.
+    const rendererConfigIds = { complex: 'legacy \' " < > \t\n 雪 😀 &' };
+    const rendererConfigSecurity = await cdp.eval(`(async () => {
+      const ids = ${JSON.stringify(rendererConfigIds)};
+      const probe = window.__rendererConfigProbe = { quick: [], local: [] };
+      const original = {
+        highlight: _highlightRules,
+        quick: _qcCommands,
+        profiles: TabManager.profiles,
+        sshProfiles: TabManager.sshProfiles,
+        settings: _settingsConfig,
+        executeQuickCommand,
+        persistSettings,
+        syncOsc52: typeof _syncOsc52Permission === 'function' ? _syncOsc52Permission : null,
+        createTab: TabManager.createTab,
+      };
+      const eventAttributes = root => [...root.querySelectorAll('*')].flatMap(el =>
+        [...el.attributes].map(a => a.name)).filter(name => /^on/.test(name));
+      let outcome;
+      try {
+        _highlightRules = [{ id: ids.complex, text: 'rule', enabled: true }];
+        renderHighlightRulesList();
+        const highlightRoot = document.getElementById('highlight-rules-list');
+        const highlightDomSafe = eventAttributes(highlightRoot).length === 0;
+        highlightRoot.querySelector('.ssh-item-info').click();
+        const highlightAction = _editingHLId === ids.complex
+          && document.getElementById('hl-edit-text').value === 'rule';
+        closeHighlightEdit();
+
+        executeQuickCommand = cmd => probe.quick.push(cmd);
+        _qcCommands = [{ id: ids.complex, name: ids.complex, command: 'echo safe', group: ids.complex }];
+        qcFilter();
+        const quickRoot = document.getElementById('qc-list');
+        const quickDomSafe = eventAttributes(quickRoot).length === 0;
+        quickRoot.querySelector('.v3-item').click();
+        const quickAction = probe.quick.length === 1 && probe.quick[0].id === ids.complex;
+        renderQCCommandsList();
+        document.querySelector('#qc-commands-list .ssh-mgr-identity').click();
+        const quickSettingsAction = _editingQCId === ids.complex;
+        closeQCEdit();
+
+        TabManager.profiles = [{ id: ids.complex, name: ids.complex, command: 'powershell.exe', args: ['-NoProfile'] }];
+        loadSettingsIntoForm();
+        const profileRoot = document.getElementById('shell-visibility-list');
+        const toggle = document.getElementById('toggle-shell-' + ids.complex);
+        const profileDomSafe = !!toggle && eventAttributes(profileRoot).length === 0;
+        persistSettings = () => Promise.resolve();
+        _syncOsc52Permission = () => {};
+        toggle?.click();
+        const profileAction = (_settingsConfig.hiddenProfiles || []).includes(ids.complex);
+
+        TabManager.sshProfiles = [{
+          id: ids.complex, name: ids.complex, host: '127.0.0.1', port: 22,
+          username: 'probe', group: ids.complex, loginScripts: [],
+        }];
+        renderSSHManagerInto(document.getElementById('ssh-manager-list'), _sshMgrView('ssh-manager-list'));
+        document.querySelector('#ssh-manager-list .ssh-mgr-identity').click();
+        const sshAction = _editingSSHId === ids.complex;
+        closeSSHEdit();
+        clearLoginScripts();
+        const scriptValue = ids.complex.replaceAll(String.fromCharCode(13), '').replaceAll(String.fromCharCode(10), '');
+        addLoginScriptRow(scriptValue, scriptValue, false, false);
+        const loginScriptRoundTrip = document.querySelector('#login-scripts-container .ls-expect').value === scriptValue
+          && document.querySelector('#login-scripts-container .ls-send').value === scriptValue;
+
+        _settingsConfig.hiddenProfiles = [];
+        renderSessionList('');
+        TabManager.createTab = options => { probe.local.push(options); return 'probe-tab'; };
+        const localRow = [...document.querySelectorAll('#sessions-list .ss-row')]
+          .find(row => row.dataset.id === 'local_' + ids.complex);
+        localRow?.click();
+        const sessionAction = probe.local.length === 1 && probe.local[0].command === 'powershell.exe';
+        outcome = {
+          highlightDomSafe, quickDomSafe, profileDomSafe,
+          highlightAction, quickAction, quickSettingsAction, profileAction,
+          sshAction, loginScriptRoundTrip, sessionAction,
+        };
+      } finally {
+        _highlightRules = original.highlight;
+        _qcCommands = original.quick;
+        TabManager.profiles = original.profiles;
+        TabManager.sshProfiles = original.sshProfiles;
+        _settingsConfig = original.settings;
+        executeQuickCommand = original.executeQuickCommand;
+        persistSettings = original.persistSettings;
+        if (original.syncOsc52) _syncOsc52Permission = original.syncOsc52;
+        TabManager.createTab = original.createTab;
+        closeHighlightEdit();
+        closeQCEdit();
+        closeSSHEdit();
+        clearLoginScripts();
+        renderHighlightRulesList();
+        qcFilter();
+        renderQCCommandsList();
+        renderSSHManager();
+        loadSettingsIntoForm();
+        delete window.__rendererConfigProbe;
+      }
+      return outcome;
+    })()`);
+    const rendererConfigSafe = rendererConfigSecurity
+      && ['highlightDomSafe', 'quickDomSafe', 'profileDomSafe', 'highlightAction',
+        'quickAction', 'quickSettingsAction', 'profileAction', 'sshAction',
+        'loginScriptRoundTrip', 'sessionAction'].every(key => rendererConfigSecurity[key] === true);
+    check('渲染配置：特殊字符 ID 不执行、不逃逸，既有高亮/命令/连接/会话交互保持可用',
+      rendererConfigSafe, JSON.stringify(rendererConfigSecurity));
+
+    const rendererReviewIds = {
+      crlf: 'pair\r\nid', cr: 'pair\rid', lf: 'pair\nid',
+      attackHighlight: "legacy');window.__rendererReviewProbe.executed++;//",
+      attackQuick: "legacy');window.__rendererReviewProbe.executed++;//",
+      attackProfile: 'legacy" data-review-probe="attribute" onmouseover="window.__rendererReviewProbe.executed++" data-tail="',
+      rawExpect: 'first\r\nsecond\nthird\rfourth 雪 😀 &',
+      rawSend: 'send\r\nnext\nlast\rend " < > &',
+      otherExpect: 'other\r\nexpect 雪',
+      otherSend: 'other\nsend 😀',
+    };
+    const rendererReviewSecurity = await cdp.eval(`(async () => {
+      const ids = ${JSON.stringify(rendererReviewIds)};
+      const probe = window.__rendererReviewProbe = { executed: 0, calls: [] };
+      const original = {
+        highlight: _highlightRules, quick: _qcCommands,
+        profiles: TabManager.profiles, sshProfiles: TabManager.sshProfiles,
+        settings: _settingsConfig,
+        editingHighlight: _editingHLId, editingQuick: _editingQCId, editingSsh: _editingSSHId,
+        openHighlightEdit, toggleHighlightRule, deleteHighlightRule, saveHighlightRules,
+        executeQuickCommand, qcSelect, openQCEdit, deleteQC, saveQuickCommands,
+        openSSHEdit, deleteSSHProfile, saveTerminal, persistSettings, showConfirm,
+        syncOsc52: typeof _syncOsc52Permission === 'function' ? _syncOsc52Permission : null,
+        createTab: TabManager.createTab,
+      };
+      const callsFor = name => probe.calls.filter(call => call[0] === name);
+      const resetCalls = () => { probe.calls.length = 0; };
+      const triplet = () => [
+        { id: ids.crlf, name: 'CRLF', text: 'CRLF', command: 'first', enabled: true },
+        { id: ids.cr, name: 'CR', text: 'CR', command: 'second', enabled: true },
+        { id: ids.lf, name: 'LF', text: 'LF', command: 'third', enabled: true },
+      ];
+      let outcome;
+      try {
+        _highlightRules = [{ id: ids.attackHighlight, text: 'probe', enabled: true }];
+        renderHighlightRulesList();
+        document.querySelector('#highlight-rules-list .ssh-item-info').click();
+        _qcCommands = [{ id: ids.attackQuick, name: 'probe', command: 'probe', group: 'probe' }];
+        qcFilter();
+        document.querySelector('#qc-list .v3-item').click();
+        TabManager.profiles = [{ id: ids.attackProfile, name: 'probe', command: 'powershell.exe', args: ['-NoProfile'] }];
+        loadSettingsIntoForm();
+        const injected = document.querySelector('[data-review-probe="attribute"]');
+        injected?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        const executionSentinelZero = probe.executed === 0 && !injected;
+
+        saveHighlightRules = () => {};
+        saveQuickCommands = () => {};
+        persistSettings = () => Promise.resolve();
+        _syncOsc52Permission = () => {};
+        showConfirm = (message, onOk) => onOk();
+        openHighlightEdit = (isNew, id) => {
+          probe.calls.push(['highlightEdit', id]);
+          return original.openHighlightEdit(isNew, id);
+        };
+        toggleHighlightRule = id => {
+          probe.calls.push(['highlightToggle', id]);
+          return original.toggleHighlightRule(id);
+        };
+        deleteHighlightRule = id => {
+          probe.calls.push(['highlightDelete', id]);
+          return original.deleteHighlightRule(id);
+        };
+        executeQuickCommand = cmd => probe.calls.push(['quickRun', cmd.id]);
+        qcSelect = index => {
+          probe.calls.push(['quickSelect', index]);
+          return original.qcSelect(index);
+        };
+        openQCEdit = (isNew, id) => {
+          probe.calls.push(['quickEdit', id]);
+          return original.openQCEdit(isNew, id);
+        };
+        deleteQC = id => {
+          probe.calls.push(['quickDelete', id]);
+          return original.deleteQC(id);
+        };
+        openSSHEdit = (isNew, id) => {
+          probe.calls.push(['sshEdit', id]);
+          return original.openSSHEdit(isNew, id);
+        };
+        deleteSSHProfile = id => {
+          probe.calls.push(['sshDelete', id]);
+          return original.deleteSSHProfile(id);
+        };
+        saveTerminal = () => {
+          probe.calls.push(['profileToggle']);
+          return original.saveTerminal();
+        };
+        TabManager.createTab = options => {
+          probe.calls.push([options.type === 'ssh' ? 'sshConnect' : 'sessionSelect', options.sshProfileId || options.name]);
+          return 'probe-tab';
+        };
+
+        _highlightRules = triplet();
+        renderHighlightRulesList();
+        let rows = [...document.querySelectorAll('#highlight-rules-list .ssh-item')];
+        const highlightIdsExact = rows.map(row => row.dataset.highlightId).join('|') === [ids.crlf, ids.cr, ids.lf].join('|');
+        resetCalls();
+        rows[0].querySelector('.ssh-item-info').click();
+        const highlightEditOnce = callsFor('highlightEdit').length === 1
+          && callsFor('highlightEdit')[0][1] === ids.crlf
+          && _editingHLId === ids.crlf && document.getElementById('hl-edit-text').value === 'CRLF';
+        closeHighlightEdit();
+        resetCalls();
+        rows = [...document.querySelectorAll('#highlight-rules-list .ssh-item')];
+        rows[0].querySelector('[data-action="toggle"]').click();
+        const highlightToggleOnce = callsFor('highlightToggle').length === 1
+          && callsFor('highlightToggle')[0][1] === ids.crlf
+          && _highlightRules[0].enabled === false
+          && _highlightRules[1].enabled === true && _highlightRules[2].enabled === true;
+        resetCalls();
+        rows = [...document.querySelectorAll('#highlight-rules-list .ssh-item')];
+        rows[0].querySelector('[data-action="delete"]').click();
+        const highlightDeleteOnce = callsFor('highlightDelete').length === 1
+          && callsFor('highlightDelete')[0][1] === ids.crlf
+          && _highlightRules.map(rule => rule.id).join('|') === [ids.cr, ids.lf].join('|')
+          && _highlightRules.every(rule => rule.enabled === true);
+
+        _qcCommands = triplet().map(command => ({ ...command, group: 'pair' }));
+        qcFilter();
+        rows = [...document.querySelectorAll('#qc-list .v3-item')];
+        const quickIdsExact = rows.map(row => row.dataset.quickCommandId).join('|') === [ids.crlf, ids.cr, ids.lf].join('|');
+        resetCalls();
+        rows[1].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        rows[1].querySelector('.v3-name').dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: rows[1] }));
+        const quickHoverOnce = callsFor('quickSelect').length === 1
+          && callsFor('quickSelect')[0][1] === 1 && _qcSelected === 1
+          && document.querySelector('#qc-list .v3-item[data-selected]').dataset.quickCommandId === ids.cr;
+        resetCalls();
+        rows[0].click();
+        const quickClickOnce = callsFor('quickRun').length === 1 && callsFor('quickRun')[0][1] === ids.crlf;
+        qcFilter();
+        resetCalls();
+        const quickInput = document.getElementById('qc-input');
+        quickInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        const quickKeyboardOnce = callsFor('quickRun').length === 1 && callsFor('quickRun')[0][1] === ids.crlf;
+        resetCalls();
+        quickInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+        quickInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        const quickKeyboardNextOnce = callsFor('quickRun').length === 1 && callsFor('quickRun')[0][1] === ids.cr;
+
+        _qcCommands = triplet().map(command => ({ ...command, group: 'pair' }));
+        renderQCCommandsList();
+        rows = [...document.querySelectorAll('#qc-commands-list .ssh-mgr-row')];
+        const quickSettingsIdsExact = rows.map(row => row.dataset.qcId).join('|') === [ids.crlf, ids.cr, ids.lf].join('|');
+        resetCalls();
+        rows[0].querySelector('.ssh-mgr-identity').click();
+        const quickSettingsEditOnce = callsFor('quickEdit').length === 1
+          && callsFor('quickEdit')[0][1] === ids.crlf && _editingQCId === ids.crlf;
+        closeQCEdit();
+        resetCalls();
+        rows[0].querySelector('[data-action="delete"]').click();
+        const quickSettingsDeleteOnce = callsFor('quickDelete').length === 1
+          && callsFor('quickDelete')[0][1] === ids.crlf
+          && _qcCommands.map(command => command.id).join('|') === [ids.cr, ids.lf].join('|');
+
+        TabManager.profiles = triplet().map(profile => ({ ...profile, args: ['-NoProfile'] }));
+        loadSettingsIntoForm();
+        resetCalls();
+        document.getElementById('toggle-shell-' + ids.crlf).click();
+        const profileToggleOnce = callsFor('profileToggle').length === 1
+          && (_settingsConfig.hiddenProfiles || []).join('|') === ids.crlf;
+
+        TabManager.sshProfiles = triplet().map((profile, index) => ({
+          ...profile, host: '127.0.0.' + (index + 1), port: 22, username: 'probe', group: 'pair', loginScripts: [],
+        }));
+        renderSSHManagerInto(document.getElementById('ssh-manager-list'), _sshMgrView('ssh-manager-list'));
+        rows = [...document.querySelectorAll('#ssh-manager-list .ssh-mgr-row')];
+        const sshIdsExact = rows.map(row => row.dataset.profileId).join('|') === [ids.crlf, ids.cr, ids.lf].join('|');
+        resetCalls();
+        rows[0].querySelector('.ssh-mgr-identity').click();
+        const sshEditOnce = callsFor('sshEdit').length === 1
+          && callsFor('sshEdit')[0][1] === ids.crlf && _editingSSHId === ids.crlf;
+        closeSSHEdit();
+        resetCalls();
+        rows[0].querySelector('[data-action="connect"]').click();
+        const sshConnectOnce = callsFor('sshConnect').length === 1 && callsFor('sshConnect')[0][1] === ids.crlf;
+        resetCalls();
+        rows[0].querySelector('[data-action="delete"]').click();
+        for (let i = 0; i < 100 && TabManager.sshProfiles.length === 3; i++) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        const sshDeleteOnce = callsFor('sshDelete').length === 1
+          && callsFor('sshDelete')[0][1] === ids.crlf
+          && TabManager.sshProfiles.map(profile => profile.id).join('|') === [ids.cr, ids.lf].join('|');
+
+        _settingsConfig.hiddenProfiles = [];
+        renderSessionList('');
+        rows = [...document.querySelectorAll('#sessions-list .ss-row')].filter(row => row.dataset.id.startsWith('local_'));
+        const sessionIdsExact = rows.map(row => row.dataset.id).join('|') === [ids.crlf, ids.cr, ids.lf].map(id => 'local_' + id).join('|');
+        resetCalls();
+        rows[0].click();
+        const sessionSelectOnce = callsFor('sessionSelect').length === 1 && callsFor('sessionSelect')[0][1] === 'CRLF';
+
+        clearLoginScripts();
+        addLoginScriptRow(ids.rawExpect, ids.rawSend, false, false);
+        const collected = collectLoginScripts();
+        const loginRawRoundTrip = collected.length === 1
+          && collected[0].expect === ids.rawExpect && collected[0].send === ids.rawSend;
+        addLoginScriptRow(ids.otherExpect, ids.otherSend, true, false);
+        const scriptRows = [...document.querySelectorAll('#login-scripts-container .login-script-row')];
+        const firstRow = scriptRows[0], secondRow = scriptRows[1];
+        const firstToggles = firstRow.querySelectorAll('.ls-toggle');
+        const secondToggles = secondRow.querySelectorAll('.ls-toggle');
+        firstToggles[0].click();
+        const regexClick = firstToggles[0].classList.contains('on')
+          && !firstToggles[1].classList.contains('on')
+          && secondToggles[0].classList.contains('on')
+          && !secondToggles[1].classList.contains('on');
+        firstToggles[1].click();
+        const optionalClick = firstToggles[0].classList.contains('on')
+          && firstToggles[1].classList.contains('on')
+          && secondToggles[0].classList.contains('on')
+          && !secondToggles[1].classList.contains('on');
+        const afterToggles = collectLoginScripts();
+        const loginToggleClicks = regexClick && optionalClick && afterToggles.length === 2
+          && afterToggles[0].expect === ids.rawExpect && afterToggles[0].send === ids.rawSend
+          && afterToggles[0].isRegex === true && afterToggles[0].optional === true
+          && afterToggles[1].expect === ids.otherExpect && afterToggles[1].send === ids.otherSend
+          && afterToggles[1].isRegex === true && afterToggles[1].optional === false;
+        firstRow.querySelector('.ls-del').click();
+        const remainingRows = [...document.querySelectorAll('#login-scripts-container .login-script-row')];
+        const afterDelete = collectLoginScripts();
+        const loginDeleteClick = remainingRows.length === 1 && remainingRows[0] === secondRow
+          && secondToggles[0].classList.contains('on') && !secondToggles[1].classList.contains('on')
+          && afterDelete.length === 1 && afterDelete[0].expect === ids.otherExpect
+          && afterDelete[0].send === ids.otherSend
+          && afterDelete[0].isRegex === true && afterDelete[0].optional === false;
+        const directInput = document.createElement('input');
+        directInput.value = ids.rawExpect;
+        const nativeInputValuePreservesNewlines = directInput.value === ids.rawExpect;
+        outcome = {
+          executionSentinelZero,
+          highlightIdsExact, highlightEditOnce, highlightToggleOnce, highlightDeleteOnce,
+          quickIdsExact, quickHoverOnce, quickClickOnce, quickKeyboardOnce, quickKeyboardNextOnce,
+          quickSettingsIdsExact, quickSettingsEditOnce, quickSettingsDeleteOnce,
+          profileToggleOnce, sshIdsExact, sshEditOnce, sshConnectOnce, sshDeleteOnce,
+          sessionIdsExact, sessionSelectOnce, loginRawRoundTrip, loginToggleClicks, loginDeleteClick,
+          nativeInputValuePreservesNewlines, calls: probe.calls,
+        };
+      } finally {
+        _highlightRules = original.highlight;
+        _qcCommands = original.quick;
+        TabManager.profiles = original.profiles;
+        TabManager.sshProfiles = original.sshProfiles;
+        _settingsConfig = original.settings;
+        _editingHLId = original.editingHighlight;
+        _editingQCId = original.editingQuick;
+        _editingSSHId = original.editingSsh;
+        openHighlightEdit = original.openHighlightEdit;
+        toggleHighlightRule = original.toggleHighlightRule;
+        deleteHighlightRule = original.deleteHighlightRule;
+        saveHighlightRules = original.saveHighlightRules;
+        executeQuickCommand = original.executeQuickCommand;
+        qcSelect = original.qcSelect;
+        openQCEdit = original.openQCEdit;
+        deleteQC = original.deleteQC;
+        saveQuickCommands = original.saveQuickCommands;
+        openSSHEdit = original.openSSHEdit;
+        deleteSSHProfile = original.deleteSSHProfile;
+        saveTerminal = original.saveTerminal;
+        persistSettings = original.persistSettings;
+        showConfirm = original.showConfirm;
+        if (original.syncOsc52) _syncOsc52Permission = original.syncOsc52;
+        TabManager.createTab = original.createTab;
+        closeHighlightEdit();
+        closeQCEdit();
+        closeSSHEdit();
+        clearLoginScripts();
+        renderHighlightRulesList();
+        qcFilter();
+        renderQCCommandsList();
+        renderSSHManager();
+        loadSettingsIntoForm();
+        delete window.__rendererReviewProbe;
+      }
+      return outcome;
+    })()`);
+    const rendererReviewSafe = rendererReviewSecurity
+      && ['executionSentinelZero', 'highlightIdsExact', 'highlightEditOnce', 'highlightToggleOnce',
+        'highlightDeleteOnce', 'quickIdsExact', 'quickHoverOnce', 'quickClickOnce',
+        'quickKeyboardOnce', 'quickKeyboardNextOnce', 'quickSettingsIdsExact',
+        'quickSettingsEditOnce', 'quickSettingsDeleteOnce', 'profileToggleOnce',
+        'sshIdsExact', 'sshEditOnce', 'sshConnectOnce', 'sshDeleteOnce', 'sessionIdsExact',
+        'sessionSelectOnce', 'loginRawRoundTrip', 'loginToggleClicks', 'loginDeleteClick']
+        .every(key => rendererReviewSecurity[key] === true);
+    check('渲染配置：换行 ID 不碰撞，执行哨兵为零，目标动作均恰好一次，登录脚本原值与控件点击正确',
+      rendererReviewSafe, JSON.stringify(rendererReviewSecurity));
+    if (process.env.ZTERM_E2E_RENDERER_CONFIG_ONLY === '1') {
+      if (!rendererConfigSafe || !rendererReviewSafe) throw new Error('Focused renderer configuration security check failed');
+      return;
+    }
 
     // 0.5 Native WebView2 UI policy: the browser UI integrations must be
     // disabled AS READ BACK through the settings getters (the probe command
@@ -1614,6 +2023,41 @@ async function main() {
     // the retry token so scheduled retries no-op at fire time, and exhaust the
     // budget so an arriving in-flight error takes the terminal branch (no
     // updateTarget, no new attempt).
+    // Retiring the chain can also race it: when the runner reaches the bump
+    // below while the first automatic retry is still inside its backoff (or
+    // the serialized connect queue), the invalidated token no-ops that retry
+    // before any prepare-execution runs, and cleanup observes prepares=0/
+    // approvals=0 even though the authorized connection failed as designed.
+    // Wait, bounded, for ONE automatic retry to complete its own full cycle —
+    // prepare through the one-use fixture approval, native decision, connect,
+    // second ssh-error from the owned listener — before retiring the chain.
+    // No extra connection is driven manually: the product retry chain is the
+    // only producer of this evidence, and a timeout is a hard failure with
+    // owner/token diagnostics, never a silent pass.
+    const consentRetryReady = await waitForValue(cdp, `(() => {
+      const approval = window.__sshFailApproval;
+      return !!approval && approval.prepares > 0 && approval.approvals > 0 && (window.__sshErrCount || 0) >= 2;
+    })()`, true, 20000);
+    if (consentRetryReady !== true) {
+      const consentRetryState = await cdp.eval(`(() => {
+        const approval = window.__sshFailApproval;
+        const targets = TabManager.tabs.filter(t => t.type === 'ssh' && t.host === '127.0.0.1' && Number(t.port) === ${sshFailureEndpoint.port});
+        return {
+          sshErrCount: window.__sshErrCount || 0,
+          prepares: approval ? approval.prepares : null,
+          approvals: approval ? approval.approvals : null,
+          transportWrapped: !!approval && ipcRenderer.invoke === approval.invoke,
+          tabs: targets.map(t => {
+            const attempt = sshAttempts.ownerAttempt(t);
+            return { tabId: t.tabId || null, retryToken: t._sshRetryToken || 0, retried: t._sshRetried || 0,
+              attemptId: attempt, ownerWants: attempt ? sshAttempts.ownerWants(attempt) === true : false,
+              finalState: attempt ? sshAttempts.finalState(attempt) : null,
+              connecting: t._sshConnecting === true, errored: t._sshErrored === true };
+          }),
+        };
+      })()`).catch(() => null);
+      throw new Error(`Automatic SSH retry did not complete a full failure cycle before cleanup (waited 20s): ${JSON.stringify(consentRetryState)}`);
+    }
     await cdp.eval(`(() => {
       for (const t of TabManager.tabs) {
         t._sshRetryToken = (t._sshRetryToken || 0) + 1;
@@ -5585,9 +6029,11 @@ async function main() {
     await cdp.eval(`(() => { try { TabManager.closeTab(${WS2}); TabManager.closeTab(${WS}); } catch (e) {} return true; })()`);
     await sleep(300);
 
-    // 14.10 Reconnect shortcut + Win as its own modifier (issues #19, #23):
-    //     real Ctrl+Shift+R key events reconnect the active SSH tab and
-    //     no-op (but stay consumed) on a local tab; rebinding to Ctrl+Win+R
+    // 14.10 Reconnect shortcut + Win as its own modifier (issues #19, #23, #37):
+    //     a bound key is a reconnect gesture only (issue #37): real
+    //     Ctrl+Shift+R events no-op on a CONNECTED ssh tab (the live session
+    //     is never interrupted), reconnect once the tab is marked
+    //     disconnected, and no-op on a local tab; rebinding to Ctrl+Win+R
     //     moves the action to the exact new combo — Ctrl+Shift+R stops
     //     firing, proving Win is matched as a distinct modifier instead of
     //     folding into Ctrl. reconnectTab itself is spied, never dialed.
@@ -5599,7 +6045,9 @@ async function main() {
       window.__e2eReconnectCalls = 0;
       window.__e2eOrigReconnect = TabManager.reconnectTab.bind(TabManager);
       TabManager.reconnectTab = () => { window.__e2eReconnectCalls++; };
-      tab.type = 'ssh'; // routing guard only; the spy swallows the dial
+      tab.type = 'ssh'; // issue #37 fixture: a live ssh session; the spy swallows the dial
+      tab.connected = true;
+      tab._sshConnecting = false;
       TabManager.switchTo(${SC});
       return true;
     })()`);
@@ -5609,14 +6057,19 @@ async function main() {
       await sleep(120);
       return cdp.eval(`window.__e2eReconnectCalls`);
     }
-    const scOnSsh = await sendCombo('R', 'KeyR', 82, 2 | 8); // Ctrl+Shift+R
+    const scConnected = await sendCombo('R', 'KeyR', 82, 2 | 8); // Ctrl+Shift+R on the live session: no-op
+    await cdp.eval(`(() => { const t = TabManager.tabs.find(x => x.id === ${SC}); t.connected = false; return true; })()`);
+    const scDisconnected = await sendCombo('R', 'KeyR', 82, 2 | 8); // same key on the down session: reconnect
     await cdp.eval(`(() => { const t = TabManager.tabs.find(x => x.id === ${SC}); t.type = 'local'; return true; })()`);
     const scOnLocal = await sendCombo('R', 'KeyR', 82, 2 | 8);
-    check('重连快捷键：Ctrl+Shift+R 仅对 SSH 标签生效', scOnSsh === 1 && scOnLocal === 1, JSON.stringify({ ssh: scOnSsh, local: scOnLocal }));
+    check('重连快捷键：Ctrl+Shift+R 仅对已断开的 SSH 会话生效', scConnected === 0 && scDisconnected === 1 && scOnLocal === 1, JSON.stringify({ connected: scConnected, disconnected: scDisconnected, local: scOnLocal }));
     // Rebind to Ctrl+Win+R through the config object (the capture UI is unit
-    // covered; here the live matcher must honor the new combo exactly).
+    // covered; here the live matcher must honor the new combo exactly). The
+    // tab stays a DISCONNECTED ssh session so the keyboard guard passes and
+    // only the combo matching is under test.
     await cdp.eval(`(() => {
-      const t = TabManager.tabs.find(x => x.id === ${SC}); t.type = 'ssh';
+      const t = TabManager.tabs.find(x => x.id === ${SC});
+      t.type = 'ssh'; t.connected = false; t._sshConnecting = false;
       _settingsConfig.shortcuts = { ...(_settingsConfig.shortcuts || {}), reconnectTab: 'Ctrl+Win+R' };
       persistSettings();
       return true;
@@ -5638,7 +6091,7 @@ async function main() {
     await cdp.eval(`(() => {
       TabManager.reconnectTab = window.__e2eOrigReconnect;
       const t = TabManager.tabs.find(x => x.id === ${SC});
-      if (t) { t.type = 'local'; }
+      if (t) { t.type = 'local'; t.connected = true; t._sshConnecting = false; }
       if (_settingsConfig.shortcuts) { delete _settingsConfig.shortcuts.reconnectTab; persistSettings(); }
       try { TabManager.closeTab(${SC}); } catch (e) {}
       return true;
@@ -6280,6 +6733,235 @@ async function main() {
     await cdp.eval(`(() => { [${A}, ${B}, ${N}, ${C}, ${CC}, ${E}, ${F}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} }); return true; })()`).catch(() => null);
     await sleep(600); // let the staggered tab removals settle before section 14
 
+    // 13.9 Issue #26: background-output unread indicator on the tab status
+    //     dot, end to end against REAL local PTY streams — no synthetic
+    //     pty-output events anywhere: input goes through pty-input into the
+    //     real PowerShell session (same injection pattern as 9.5; xterm 5
+    //     drops synthetic keydown chars), output returns through the real
+    //     ConPTY flusher → pty-output → ipc.js router. Checks:
+    //     a) a background tab's multi-burst stream flips the LIVE dot to
+    //        bg-unread with the accent computed color and unchanged 8px
+    //        geometry (computed-style proof, not just the class name);
+    //     b) the whole stream adds ZERO TabManager.render calls and keeps
+    //        the strip node identity stable (no full strip redraw);
+    //     c) switchTo consumes the marker (dot back to connected green, same
+    //        node, still no render) and further REAL output while ACTIVE
+    //        never re-marks;
+    //     d) a background SPLIT pane's stream aggregates to its owning tab.
+    //     ZTERM_E2E_SHOTS additionally saves before/after-switch PNGs for
+    //     visual review.
+    const i26Fg = await cdp.eval(`TabManager.createTab({ name: 'E2E-I26-FG', type: 'local' })`);
+    const i26Bg = await cdp.eval(`TabManager.createTab({ name: 'E2E-I26-BG', type: 'local' })`);
+    const FG26 = JSON.stringify(i26Fg), BG26 = JSON.stringify(i26Bg);
+    await waitForValue(cdp, `(() => {
+      const a = TabManager.tabs.find(x => x.id === ${FG26});
+      const b = TabManager.tabs.find(x => x.id === ${BG26});
+      return !!(a && a.term && a.tabId && b && b.term && b.tabId);
+    })()`, true, 15000);
+    // Wait until the shells are interactive (first prompt painted) so the
+    // injected command is read by a live PowerShell, not raced against its
+    // startup.
+    await waitForValue(cdp, `TabManager.tabs.find(x => x.id === ${FG26}).term.buffer.active.length`, 1, 15000, 'gt0');
+    await waitForValue(cdp, `TabManager.tabs.find(x => x.id === ${BG26}).term.buffer.active.length`, 1, 15000, 'gt0');
+    // Arm the render counter and capture the pre-mark dot state while BG is
+    // still active (idle connected green baseline).
+    const i26Arm = await cdp.eval(`(() => {
+      const bgId = ${BG26};
+      const tab = TabManager.tabs.find(x => x.id === bgId);
+      const el = document.querySelector('.tab[data-tab="' + bgId + '"] .tab-icon');
+      if (!tab || !el || TabManager.activeId !== bgId) return { ok: false };
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      window.__e2eI26 = {
+        renders: 0,
+        bgEl: document.querySelector('.tab[data-tab="' + bgId + '"]'),
+        origRender: TabManager.render,
+        preClass: el.className,
+        preBg: cs.backgroundColor,
+        preW: r.width, preH: r.height, preX: r.x, preY: r.y,
+      };
+      TabManager.render = function (...args) { window.__e2eI26.renders += 1; return window.__e2eI26.origRender.apply(this, args); };
+      return { ok: true, preClass: el.className, preBg: cs.backgroundColor, preW: r.width, preH: r.height, active: TabManager.activeId };
+    })()`);
+    // Real stream: six separately-flushed bursts (~600ms apart) keep arriving
+    // AFTER the switch away, so the marker must come from real background
+    // output, not from anything observed while the tab was active.
+    const i26StreamSent = await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${BG26});
+      if (!tab || !tab.tabId) return false;
+      ipcRenderer.send('pty-input', { tabId: tab.tabId, data: "1..6 | ForEach-Object { Start-Sleep -Milliseconds 600; Write-Output ('I26-STREAM-' + \$_) }\\r" });
+      TabManager.switchTo(${FG26});
+      return TabManager.activeId === ${FG26};
+    })()`);
+    const i26Marked = await waitForValue(cdp, `(() => {
+      const bgId = ${BG26};
+      const tab = TabManager.tabs.find(x => x.id === bgId);
+      const el = document.querySelector('.tab[data-tab="' + bgId + '"] .tab-icon');
+      return (tab && tab._bgUnread === true && el && el.classList.contains('bg-unread')) ? el.className : '';
+    })()`, 'tab-icon bg-unread', 15000);
+    check('issue26：后台真实 PTY 输出把现有状态灯变为 bg-unread',
+      i26Arm.ok === true && i26StreamSent === true && i26Marked === 'tab-icon bg-unread',
+      `arm=${JSON.stringify(i26Arm)}, sent=${i26StreamSent}, cls=${i26Marked}`);
+    // Computed-color + geometry proof (a real WebView2 style/box read, not a
+    // class-name string): the dot must paint the resolved accent and keep its
+    // 8px box while every other state class is gone.
+    const i26Dot = await cdp.eval(`(() => {
+      const bgId = ${BG26};
+      const el = document.querySelector('.tab[data-tab="' + bgId + '"] .tab-icon');
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+      const rgb = s => { const m = String(s).match(/rgba?\\(([^)]+)\\)/); return m ? m[1].split(',').slice(0, 3).map(v => Math.round(parseFloat(v))) : null; };
+      return { cls: el.className, bg: cs.backgroundColor, bgRgb: rgb(cs.backgroundColor), accentRgb: rgb(accent), w: r.width, h: r.height, x: r.x, y: r.y };
+    })()`);
+    check('issue26：未读灯 computed 颜色等于 accent 且几何不变',
+      i26Dot.cls === 'tab-icon bg-unread' && !!i26Dot.accentRgb && JSON.stringify(i26Dot.bgRgb) === JSON.stringify(i26Dot.accentRgb)
+        && i26Dot.w === i26Arm.preW && i26Dot.h === i26Arm.preH,
+      JSON.stringify({ dot: i26Dot, pre: { cls: i26Arm.preClass, bg: i26Arm.preBg, w: i26Arm.preW, h: i26Arm.preH } }));
+    // Wait for the LAST real burst to reach the buffer (proves the whole
+    // stream traversed the real pipe), then read the render counter and node
+    // identity across the entire burst window.
+    const i26StreamDone = await waitForValue(cdp, `(() => {
+      const b = TabManager.tabs.find(x => x.id === ${BG26}).term.buffer.active;
+      for (let y = b.length - 1; y >= Math.max(0, b.length - 40); y--) {
+        if ((b.getLine(y)?.translateToString(true) || '').includes('I26-STREAM-6')) return true;
+      }
+      return false;
+    })()`, true, 15000);
+    const i26Cold = await cdp.eval(`(() => ({
+      renders: window.__e2eI26.renders,
+      sameNode: document.querySelector('.tab[data-tab="' + ${BG26} + '"]') === window.__e2eI26.bgEl,
+      unread: TabManager.tabs.find(x => x.id === ${BG26})._bgUnread === true,
+    }))()`);
+    check('issue26：连续真实输出块期间零次 TabManager.render 且标签节点身份稳定',
+      i26StreamDone === true && i26Cold.renders === 0 && i26Cold.sameNode === true && i26Cold.unread === true,
+      JSON.stringify({ done: i26StreamDone, cold: i26Cold }));
+    if (process.env.ZTERM_E2E_SHOTS) {
+      mkdirSync(process.env.ZTERM_E2E_SHOTS, { recursive: true });
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
+      if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'issue26-unread-before-switch.png'), Buffer.from(shot.data, 'base64'));
+    }
+    // Switching to the tab consumes the marker in place: same node, no full
+    // render, idle green restored.
+    const i26Switch = await cdp.eval(`(() => {
+      TabManager.switchTo(${BG26});
+      const tab = TabManager.tabs.find(x => x.id === ${BG26});
+      const el = document.querySelector('.tab[data-tab="' + ${BG26} + '"] .tab-icon');
+      const cs = getComputedStyle(el);
+      return { active: TabManager.activeId === ${BG26}, flag: tab._bgUnread, cls: el.className, bg: cs.backgroundColor,
+        sameNode: document.querySelector('.tab[data-tab="' + ${BG26} + '"]') === window.__e2eI26.bgEl,
+        renders: window.__e2eI26.renders };
+    })()`);
+    const i26Green = [108, 203, 95]; // #6ccb5f idle connected dot
+    const i26SwitchBg = (() => { const m = /rgba?\(([^)]+)\)/.exec(i26Switch.bg || ''); return m ? m[1].split(',').slice(0, 3).map(v => Math.round(parseFloat(v))) : null; })();
+    check('issue26：切回后标志与类就地清除（绿色恢复、节点不变、仍无 render）',
+      i26Switch.active === true && i26Switch.flag === false && i26Switch.cls === 'tab-icon connected'
+        && JSON.stringify(i26SwitchBg) === JSON.stringify(i26Green) && i26Switch.sameNode === true && i26Switch.renders === 0,
+      JSON.stringify(i26Switch));
+    if (process.env.ZTERM_E2E_SHOTS) {
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
+      if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'issue26-unread-after-switch.png'), Buffer.from(shot.data, 'base64'));
+    }
+    // Further REAL output on the now-active tab must not re-mark. Wait for
+    // the shell to sit at its prompt first (run evidence: input sent into
+    // the post-pipeline transition window can be lost before PSReadLine
+    // re-engages). The prompt is at the CURSOR row — the buffer's trailing
+    // viewport rows are legitimately blank, so `length - 1` is wrong here.
+    // Diagnostics dump the tail on ANY failure mode.
+    const i26PromptReady = await waitForValue(cdp, `(() => {
+      const b = TabManager.tabs.find(x => x.id === ${BG26}).term.buffer.active;
+      const l = (b.getLine(b.baseY + b.cursorY)?.translateToString(true) || '').trim();
+      return /PS .*>$/.test(l);
+    })()`, true, 15000);
+    await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${BG26});
+      ipcRenderer.send('pty-input', { tabId: tab.tabId, data: "Write-Output 'I26-AFTER-SWITCH'\\r" });
+      return true;
+    })()`);
+    const i26AfterSeen = await waitForValue(cdp, `(() => {
+      const b = TabManager.tabs.find(x => x.id === ${BG26}).term.buffer.active;
+      for (let y = b.length - 1; y >= Math.max(0, b.length - 60); y--) {
+        if ((b.getLine(y)?.translateToString(true) || '').includes('I26-AFTER-SWITCH')) return true;
+      }
+      return false;
+    })()`, true, 15000);
+    const i26NoRemark = await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${BG26});
+      const el = document.querySelector('.tab[data-tab="' + ${BG26} + '"] .tab-icon');
+      return { flag: tab._bgUnread === false, cls: el.className, renders: window.__e2eI26.renders };
+    })()`);
+    const i26AfterDiag = (i26AfterSeen === true && i26PromptReady === true) ? null : await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${BG26});
+      const b = tab.term && tab.term.buffer ? tab.term.buffer.active : null;
+      const tail = [];
+      if (b) for (let y = Math.max(0, b.length - 15); y < b.length; y++) tail.push(b.getLine(y)?.translateToString(true) || '');
+      return { promptReady: ${JSON.stringify(i26PromptReady === true)}, activeId: TabManager.activeId, tabId: tab.tabId, termAlive: !!tab.term,
+        bufLen: b ? b.length : -1, tail, pendingBufKeys: Object.keys(ptyBuffers || {}) };
+    })()`);
+    check('issue26：切回后的真实输出不再置未读',
+      i26PromptReady === true && i26AfterSeen === true && i26NoRemark.flag === true && i26NoRemark.cls === 'tab-icon connected' && i26NoRemark.renders === 0,
+      JSON.stringify({ promptReady: i26PromptReady, seen: i26AfterSeen, state: i26NoRemark, diag: i26AfterDiag }));
+    // Split aggregation: a background split pane's stream must mark the
+    // OWNING tab dot (pane-level output aggregates to the tab).
+    const i26Sp = await cdp.eval(`TabManager.createTab({ name: 'E2E-I26-SP', type: 'local' })`);
+    const SP26 = JSON.stringify(i26Sp);
+    await waitForValue(cdp, `(() => { const t = TabManager.tabs.find(x => x.id === ${SP26}); return !!(t && t.term && t.tabId); })()`, true, 15000);
+    await cdp.eval(`TabManager.splitHorizontal()`);
+    await waitForValue(cdp, `getAllPanes(TabManager.tabs.find(x => x.id === ${SP26})).filter(p => p.term && p.tabId).length`, 2, 15000);
+    await waitForValue(cdp, `(() => {
+      const t = TabManager.tabs.find(x => x.id === ${SP26});
+      const ps = getAllPanes(t);
+      return ps[ps.length - 1].term.buffer.active.length;
+    })()`, 1, 15000, 'gt0');
+    const i26SplitSent = await cdp.eval(`(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${SP26});
+      const panes = getAllPanes(tab);
+      const pane = panes[panes.length - 1];
+      if (!pane || !pane.tabId) return { sent: false };
+      window.__e2eI26SpEl = document.querySelector('.tab[data-tab="' + ${SP26} + '"]');
+      // Baseline BELOW the setup renders (createTab/splitHorizontal/pane
+      // pty-created each render once): the assertion is about the STREAM
+      // window only.
+      const rendersAtSend = window.__e2eI26.renders;
+      ipcRenderer.send('pty-input', { tabId: pane.tabId, data: "1..4 | ForEach-Object { Start-Sleep -Milliseconds 600; Write-Output ('I26-SP-' + \$_) }\\r" });
+      TabManager.switchTo(${FG26});
+      return { sent: true, active: TabManager.activeId === ${FG26}, rendersAtSend };
+    })()`);
+    const i26SpMarked = await waitForValue(cdp, `(() => {
+      const tab = TabManager.tabs.find(x => x.id === ${SP26});
+      const el = document.querySelector('.tab[data-tab="' + ${SP26} + '"] .tab-icon');
+      return (tab && tab._bgUnread === true && el && el.classList.contains('bg-unread')) ? el.className : '';
+    })()`, 'tab-icon bg-unread', 20000);
+    const i26SpDone = await waitForValue(cdp, `(() => {
+      const panes = getAllPanes(TabManager.tabs.find(x => x.id === ${SP26}));
+      const b = panes[panes.length - 1].term.buffer.active;
+      for (let y = b.length - 1; y >= Math.max(0, b.length - 40); y--) {
+        if ((b.getLine(y)?.translateToString(true) || '').includes('I26-SP-4')) return true;
+      }
+      return false;
+    })()`, true, 15000);
+    const i26SpCold = await cdp.eval(`(() => ({
+      sameNode: document.querySelector('.tab[data-tab="' + ${SP26} + '"]') === window.__e2eI26SpEl,
+      renders: window.__e2eI26.renders,
+    }))()`);
+    check('issue26：分屏后台 pane 输出聚合到所属 tab 状态灯（节点稳定、流窗口零 render）',
+      i26SplitSent.sent === true && i26SplitSent.active === true && i26SpMarked === 'tab-icon bg-unread' && i26SpDone === true
+        && i26SpCold.sameNode === true && i26SpCold.renders - i26SplitSent.rendersAtSend === 0,
+      JSON.stringify({ sent: i26SplitSent, cls: i26SpMarked, done: i26SpDone, cold: i26SpCold }));
+    if (process.env.ZTERM_E2E_SHOTS) {
+      const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
+      if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'issue26-split-pane-aggregated.png'), Buffer.from(shot.data, 'base64'));
+    }
+    // Tidy: restore the real render (section 14+ depends on it), close this
+    // section's tabs so later sections see a clean strip.
+    await cdp.eval(`(() => {
+      if (window.__e2eI26) { TabManager.render = window.__e2eI26.origRender; delete window.__e2eI26; }
+      delete window.__e2eI26SpEl;
+      [${SP26}, ${BG26}, ${FG26}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} });
+      return true;
+    })()`).catch(() => null);
+    await sleep(600); // let the staggered tab removals settle before section 14
+
     // 14. Window state restore: write the window field into config → restart →
     // verify maximized/size restore
     async function writeWindowState(state) {
@@ -6332,7 +7014,7 @@ async function main() {
       }
       return { max: null, w: 0, dpr: 1 };
     }
-    killExisting();
+    await killExisting();
     await sleep(500);
     await writeWindowState({ x: 50, y: 50, width: 800, height: 600, maximized: true });
     const cdp2 = await restartAndConnect();
@@ -6382,7 +7064,7 @@ async function main() {
 
     // (a) raw string tail: a line split across capture chunks must restore as
     // ONE line — the vertical-letters regression pin.
-    killExisting();
+    await killExisting();
     await sleep(500);
     await seedRestoreTabs('[root@x ~]# echo test\r\ntest output\r\n');
     const cdpR1 = await restartAndConnect();
@@ -6393,7 +7075,7 @@ async function main() {
     cdpR1.close();
 
     // (b) legacy array-of-lines save migrates through the same replay intact.
-    killExisting();
+    await killExisting();
     await sleep(500);
     await seedRestoreTabs(['[root@y ~]# ls', 'file1']);
     const cdpR2 = await restartAndConnect();
@@ -6405,7 +7087,7 @@ async function main() {
 
     // (c) state-reset epilogue: a tail ending inside a killed TUI (cursor
     // hidden) must end the replay with the cursor visible again.
-    killExisting();
+    await killExisting();
     await sleep(500);
     await seedRestoreTabs('restore-epilogue-check\x1b[?25l');
     const cdpR3 = await restartAndConnect();
@@ -6431,11 +7113,11 @@ async function main() {
       JSON.stringify(r3state));
     cdpR3.close();
 
-    killExisting();
+    await killExisting();
     await sleep(500);
   } finally {
     cdp.close();
-    const stopped = killExisting();
+    const stopped = await killExisting();
     restoreConfig();
     await sshFailureEndpoint?.close();
     // Anything other than exactly true — owned kill failure or an explicit
@@ -6454,4 +7136,19 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(`E2E 失败: ${e.stack || e.message}`); killExisting(); restoreConfig(); process.exit(1); });
+runSupervisedScript({
+  script: fileURLToPath(import.meta.url), args: process.argv.slice(2),
+  preflight: async () => {
+    if (!existsSync(SOURCE_EXE)) throw new Error(`exe 不存在: ${SOURCE_EXE}`);
+    await requireBackgroundCapability(SOURCE_EXE);
+  },
+  main: () => runWithDesktopRetry({
+    main: () => main().catch(error => { throw backgroundFailure ?? error; }),
+    cleanup: async () => {
+      let stopped;
+      try { stopped = await killExisting(); } finally { restoreConfig(); }
+      return stopped;
+    },
+    respawn: () => respawnDesktopProcess({ script: fileURLToPath(import.meta.url), args: process.argv.slice(2) }),
+  }),
+}).then(code => process.exit(code));

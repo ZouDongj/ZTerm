@@ -299,7 +299,7 @@ function armSplashHide() {
         }
     }
     const fontPreload = Promise.all(fontLoads).catch(() => { /* missing fonts fall back silently */ });
-    // The data directory is resolved by the main process (packaged builds default to <install dir>/data; a user-defined pointer is supported)
+    // The data directory is resolved by the main process (release builds default to the account's Local AppData; a user-defined pointer is supported)
     try {
         const info = await ipcRenderer.invoke('get-data-dir-info');
         if (info && info.current) CONFIG_FILE = path.join(info.current, 'config.json');

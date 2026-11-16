@@ -118,7 +118,14 @@ class E2eDesktopObserver {
             }
             do {
                 if (parent != null && parent.HasExited) break;
-                Console.WriteLine(Snapshot(manager, target));
+                try {
+                    Console.WriteLine(Snapshot(manager, target));
+                } catch (Exception error) {
+                    if (!watch || error.Message != "foreground identity unavailable") throw;
+                    // Node bounds pre-launch recovery and tears down an owned run immediately.
+                    // Inspect retains its original single-shot failure semantics.
+                    Console.WriteLine("{\"ok\":false,\"transient\":true,\"error\":" + Quote(error.Message) + "}");
+                }
                 Console.Out.Flush();
                 if (!watch) break;
                 Thread.Sleep(100);

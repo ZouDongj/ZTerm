@@ -982,16 +982,22 @@ function wireTerminal(tab, tabId) {
         _pasteFromClipboardInto(term);
     });
 
+    let historyReplay = false;
     if (_settingsConfig.restoreLocalContent && tab._contentBuffer) {
         const replay = replayPayload(tab._contentBuffer);
-        if (replay) term.write(replay);
+        if (replay) { historyReplay = true; term.write(replay); }
     }
 
     // Both writes share xterm's ordered queue. History is display-only, so
     // live input remains usable while it parses and live output follows it.
     if (ptyBuffers[tabId]) {
-        term.write(ptyBuffers[tabId]);
+        const pending = ptyBuffers[tabId];
         delete ptyBuffers[tabId];
+        if (typeof _writeBufferedOutput === 'function') {
+            _writeBufferedOutput(tab, tab, pending, { conservative: historyReplay });
+        } else {
+            term.write(pending);
+        }
     }
 
     if (TabManager.activeId === tab.id) {
@@ -1251,8 +1257,10 @@ function wireTerminalToPane(tab, pane) {
     }
 
     if (ptyBuffers[pane.tabId]) {
-        term.write(ptyBuffers[pane.tabId]);
+        const pending = ptyBuffers[pane.tabId];
         delete ptyBuffers[pane.tabId];
+        if (typeof _writeBufferedOutput === 'function') _writeBufferedOutput(tab, pane, pending);
+        else term.write(pending);
     }
 
     if (TabManager.activeId === tab.id && pane.focused) {

@@ -118,7 +118,7 @@ test('mkdir completion refresh does not supersede a newer in-flight navigation',
     startMkdir(vm, 'newdir');
     await vm.drain();
     const mk = vm.pending('sftp-mkdir')[0];
-    assert.ok(mk && mk.args.tabId === 'sessA' && mk.args.path === '/srv/app/newdir',
+    assert.ok(mk && mk.args.tabId === 'sessA' && mk.args.base === '/srv/app' && mk.args.name === 'newdir',
         `mkdir dispatched to the current directory: ${mk && JSON.stringify(mk.args)}`);
 
     const nav = vm.SFTP.navigate('/srv/sub'); // user navigates while mkdir is in flight
