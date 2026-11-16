@@ -252,11 +252,19 @@ test('RIS and resize restore full-region scroll evidence', () => {
 });
 
 
-async function differential(chunks) {
-  const terminal = new globalThis.TabbyXterm.Terminal({ cols: 8, rows: 24, scrollback: 0, allowProposedApi: true });
+// Steps are byte strings fed to both sides, or `{ resize: [cols, rows] }`
+// entries that model a host resize applied to both sides at that point.
+async function differential(chunks, { cols = 8, rows = 24 } = {}) {
+  const terminal = new globalThis.TabbyXterm.Terminal({ cols, rows, scrollback: 0, allowProposedApi: true });
   const reports = [];
-  const observer = createInkCaretObserver({ rows: 24, cols: 8, onChunkWrites: w => reports.push(w) });
+  const observer = createInkCaretObserver({ rows, cols, onChunkWrites: w => reports.push(w) });
   for (const chunk of chunks) {
+    if (chunk && typeof chunk === 'object' && chunk.resize) {
+      const [nextCols, nextRows] = chunk.resize;
+      terminal.resize(nextCols, nextRows);
+      observer.setSize(nextRows, nextCols);
+      continue;
+    }
     observer.push(chunk);
     await new Promise(resolve => terminal.write(chunk, resolve));
   }
@@ -291,5 +299,34 @@ for (const [name, chunks, expectedScroll] of [
     assert.deepEqual(reports.at(-1).cells, actual, 'observer and xterm write X at the same cell');
     assert.equal(reports.at(-1).scroll, expectedScroll);
     assert.equal(state.positionKnown, true, 'CUP restores known coordinates after the buffer/reset transition');
+  });
+}
+
+// xterm reinitializes the scroll region to the full screen on ANY buffer
+// resize, including a column-only one (verified against the vendored
+// terminal: after a [1;23] DECSTBM region and resize(70, 24) the next LF at
+// row 23 moves down to the last row instead of sticking to the old region
+// bottom). The observer must mirror that reset when only the column count
+// changed, or a program that has not re-applied its region after SIGWINCH is
+// modeled one row too high until it does.
+for (const [name, lead] of [
+  ['normal buffer', []],
+  ['alternate buffer', ['\u001b[?1049h']],
+]) {
+  test(`real xterm differential: column-only resize resets the scroll region (${name})`, async t => {
+    const { terminal, reports, state } = await differential([
+      ...lead,
+      '\u001b[1;23r',
+      { resize: [70, 24] }, // host resize: columns only, rows stay 24
+      '\u001b[23;1H',
+      '\n',                 // full region moves to row 24; a stale region sticks on row 23
+      'X',
+    ], { cols: 80, rows: 24 });
+    t.after(() => terminal.dispose());
+    const actual = xLocations(terminal);
+    assert.deepEqual(actual, [[23, 0, 'X', 1]], 'the real terminal reset the region, so the LF moved to the last row');
+    assert.deepEqual(reports.at(-1).cells, actual, 'observer and xterm write X at the same cell');
+    assert.equal(reports.at(-2).scroll, null, 'the LF is not modeled as a region-bottom scroll after the reset');
+    assert.equal(state.positionKnown, true, 'the CUP after the resize restores known coordinates');
   });
 }
