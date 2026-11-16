@@ -724,18 +724,18 @@
       },
       // Keep the scroll/wrap model in sync with the live terminal geometry
       // (resize also bumps the adapter generation, so stale candidates die).
+      // xterm reinitializes BOTH buffers' scroll regions to the full screen on
+      // any resize, including a column-only one, so mirror every real change.
       setSize: function (nextRows, nextCols) {
         if ((Number.isFinite(nextRows) && nextRows >= 2 && nextRows !== rows)
           || (Number.isFinite(nextCols) && nextCols >= 2 && nextCols !== cols)) losePosition('resize');
-        if (Number.isFinite(nextRows) && nextRows >= 2) {
-          const changed = nextRows !== rows;
-          rows = Math.floor(nextRows);
-          if (changed) {
-            scrollTop = 0; scrollBottom = rows - 1;
-            normalScrollTop = 0; normalScrollBottom = rows - 1;
-          }
-        }
+        const prevRows = rows, prevCols = cols;
+        if (Number.isFinite(nextRows) && nextRows >= 2) rows = Math.floor(nextRows);
         if (Number.isFinite(nextCols) && nextCols >= 2) cols = Math.floor(nextCols);
+        if (rows !== prevRows || cols !== prevCols) {
+          scrollTop = 0; scrollBottom = rows - 1;
+          normalScrollTop = 0; normalScrollBottom = rows - 1;
+        }
       },
       state: function () {
         return {
