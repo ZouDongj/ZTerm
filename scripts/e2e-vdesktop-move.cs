@@ -55,6 +55,16 @@ class E2eDesktopObserver {
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr hwnd, uint command);
     [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
+    [DllImport("kernel32.dll")] static extern uint SetThreadExecutionState(uint flags);
+    const uint ES_CONTINUOUS = 0x80000000;
+    const uint ES_SYSTEM_REQUIRED = 0x00000001;
+
+    // A sampling race (foreground changed or lost its identity between the two
+    // reads) must not kill the observer: the sample is skipped and the Node
+    // side enforces the freshness bound. Output stays metadata-only.
+    sealed class TransientRaceException : Exception {
+        public TransientRaceException(string message) : base(message) {}
+    }
 
     static string Quote(string value) {
         return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "\\r").Replace("\n", "\\n") + "\"";
@@ -68,23 +78,36 @@ class E2eDesktopObserver {
         Guid targetId;
         if (destination == null || destination.GetId(out targetId) != 0 || targetId != target) throw new Exception("target desktop identity unavailable");
         IntPtr foreground = GetForegroundWindow();
+        Guid confirmedCurrentId;
+        if (foreground == IntPtr.Zero) {
+            // No foreground window is a legitimate sample: lock screen, UAC
+            // secure desktop, or a window losing activation at the sample
+            // instant. The owned E2E process cannot be foreground then; all
+            // other checks (desktop identity, freshness, native guard) remain.
+            if (manager.GetCurrentDesktop().GetId(out confirmedCurrentId) != 0 || confirmedCurrentId != currentId
+                || GetForegroundWindow() != IntPtr.Zero) throw new TransientRaceException("desktop or foreground changed while observing");
+            ulong absentNow = GetTickCount64();
+            return "{\"ok\":true,\"clockDomain\":\"windows-boot-ms\",\"currentDesktopId\":" + Quote(currentId.ToString("D"))
+                + ",\"targetDesktopId\":" + Quote(targetId.ToString("D"))
+                + ",\"noForeground\":true,\"observedAt\":" + absentNow + "}";
+        }
         uint foregroundPid;
-        if (foreground == IntPtr.Zero || GetWindowThreadProcessId(foreground, out foregroundPid) == 0 || foregroundPid == 0)
-            throw new Exception("foreground identity unavailable");
+        if (GetWindowThreadProcessId(foreground, out foregroundPid) == 0 || foregroundPid == 0)
+            throw new TransientRaceException("foreground identity unavailable");
         var owners = new List<string>();
         var visited = new HashSet<IntPtr>();
         IntPtr owner = foreground;
         for (int i = 0; i < 8 && owner != IntPtr.Zero; i++) {
             if (!visited.Add(owner)) throw new Exception("foreground owner chain is cyclic");
             uint pid;
-            if (GetWindowThreadProcessId(owner, out pid) == 0 || pid == 0) throw new Exception("foreground owner identity unavailable");
+            if (GetWindowThreadProcessId(owner, out pid) == 0 || pid == 0)
+                throw new TransientRaceException("foreground owner identity unavailable");
             owners.Add(pid.ToString());
             owner = GetWindow(owner, 4); // GW_OWNER, read only.
         }
         if (owner != IntPtr.Zero) throw new Exception("foreground owner chain exceeded its bound");
-        Guid confirmedCurrentId;
         if (manager.GetCurrentDesktop().GetId(out confirmedCurrentId) != 0 || confirmedCurrentId != currentId
-            || GetForegroundWindow() != foreground) throw new Exception("desktop or foreground changed while observing");
+            || GetForegroundWindow() != foreground) throw new TransientRaceException("desktop or foreground changed while observing");
         ulong now = GetTickCount64();
         return "{\"ok\":true,\"clockDomain\":\"windows-boot-ms\",\"currentDesktopId\":" + Quote(currentId.ToString("D"))
             + ",\"targetDesktopId\":" + Quote(targetId.ToString("D"))
@@ -115,22 +138,31 @@ class E2eDesktopObserver {
                 if (!int.TryParse(args[2], out parentPid) || parentPid <= 0) throw new Exception("invalid observer parent");
                 parent = Process.GetProcessById(parentPid);
                 var handle = parent.Handle; // Pin this process identity for HasExited.
+                // Keep the machine awake (system required, display NOT required)
+                // for the watched run so a locked/away operator cannot let the
+                // PC idle-sleep mid-verification. Released in the finally block
+                // below and by process death.
+                SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
             }
-            do {
-                if (parent != null && parent.HasExited) break;
-                try {
-                    Console.WriteLine(Snapshot(manager, target));
-                } catch (Exception error) {
-                    if (!watch || error.Message != "foreground identity unavailable") throw;
-                    // Node bounds pre-launch recovery and tears down an owned run immediately.
-                    // Inspect retains its original single-shot failure semantics.
-                    Console.WriteLine("{\"ok\":false,\"transient\":true,\"error\":" + Quote(error.Message) + "}");
-                }
-                Console.Out.Flush();
-                if (!watch) break;
-                Thread.Sleep(100);
-            } while (true);
-            return 0;
+            try {
+                do {
+                    if (parent != null && parent.HasExited) break;
+                    try {
+                        Console.WriteLine(Snapshot(manager, target));
+                    } catch (TransientRaceException transient) {
+                        // Skip the sample; Node enforces the freshness bound and
+                        // still stops the run when no complete sample arrives.
+                        Console.WriteLine("{\"ok\":false,\"transient\":true,\"error\":" + Quote(transient.Message) + "}");
+                        if (!watch) return 3;
+                    }
+                    Console.Out.Flush();
+                    if (!watch) break;
+                    Thread.Sleep(100);
+                } while (true);
+                return 0;
+            } finally {
+                if (watch) SetThreadExecutionState(ES_CONTINUOUS);
+            }
         } catch (Exception error) {
             Console.WriteLine("{\"ok\":false,\"error\":" + Quote(error.Message) + "}");
             return 3;

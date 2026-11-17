@@ -5,6 +5,7 @@ import {
   backgroundDesktopIndex, validateDesktopSnapshot, validateBackgroundContinuity,
   validateFreshDesktopSnapshot, observeDesktopStream, validatePlacedHost, completeBackgroundHandshake,
   validateNativeHostHealth, renewNativeLease, readHostProcessDiagnostic,
+  readDesktopSnapshotWithRetry, DesktopObserverTransientError,
   BACKGROUND_CLOCK_DOMAIN, backgroundNow, createBackgroundLease,
 } from '../scripts/e2e-background-policy.mjs';
 
@@ -256,7 +257,7 @@ test('a ready observer still fails on stale proof, lost ownership continuity, or
   } finally { observation.stop(); }
 });
 
-test('an owned-phase foreground identity transient is typed and immediately fatal', async () => {
+test('an owned-phase sampling race is skipped, not fatal', async () => {
   const observer = observerChild();
   const failures = [];
   const transients = [];
@@ -267,15 +268,68 @@ test('an owned-phase foreground identity transient is typed and immediately fata
     emitSample(observer);
     await observation.ready;
     ownedPid = 20;
-    observer.stdout.emit('data', '{"ok":false,"transient":true,"error":"foreground identity unavailable"}\n');
-    assert.equal(failures.length, 1);
-    assert.equal(failures[0].code, 'ZTERM_E2E_DESKTOP_OBSERVER_TRANSIENT');
-    assert.equal(failures[0].message, 'foreground identity unavailable');
-    assert.equal(transients.length, 0, 'owned runs never enter the pre-launch recovery window');
-    assert.throws(() => observation.assertHealthy(), /foreground identity unavailable/);
+    observer.stdout.emit('data', '{"ok":false,"transient":true,"error":"desktop or foreground changed while observing"}\n');
+    assert.equal(failures.length, 0, 'a sampling race is not fatal');
+    assert.equal(transients.length, 1, 'the race is reported as a transient');
+    assert.doesNotThrow(() => observation.assertHealthy(), 'the previous complete sample stays authoritative');
     emitSample(observer);
-    assert.equal(failures.length, 1, 'a later healthy sample cannot revoke the failure');
+    assert.equal(failures.length, 0);
+    assert.doesNotThrow(() => observation.assertHealthy());
   } finally { observation.stop(); }
+});
+
+test('sustained sampling races still fail through the freshness bound', async () => {
+  let now = 10000;
+  const observer = observerChild();
+  const failures = [];
+  const observation = observeDesktopStream({ observer, baseline: { ...baseline, observedAt: now },
+    now: () => now, startedAt: now, getOwnedPid: () => 20,
+    onFailure: error => failures.push(error) });
+  try {
+    observer.stdout.emit('data', JSON.stringify({ ...baseline, observedAt: now }) + '\n');
+    await observation.ready;
+    now += 1501;
+    observer.stdout.emit('data', '{"ok":false,"transient":true,"error":"foreground owner identity unavailable"}\n');
+    assert.throws(() => observation.assertHealthy(), /Fresh background observer proof/);
+    assert.equal(failures.length, 0, 'the freshness call is what surfaces the stale proof');
+  } finally { observation.stop(); }
+});
+
+test('a missing foreground window is a valid sample for lock screen and secure desktops', () => {
+  const absent = { ...baseline, noForeground: true };
+  assert.equal(validateDesktopSnapshot(absent), absent);
+  assert.doesNotThrow(() => validateBackgroundContinuity(baseline, absent, 20), 'locking the screen is user activity');
+  assert.doesNotThrow(() => validateBackgroundContinuity(absent, baseline, 20), 'unlocking is user activity');
+  assert.throws(() => validateDesktopSnapshot({ ...absent, currentDesktopId: baseline.targetDesktopId }), /requested test desktop is active/);
+  assert.throws(() => validateBackgroundContinuity(baseline, { ...absent, currentDesktopId: '33333333-3333-3333-3333-333333333333' }, 20), /Desktop changed/);
+  // Absence cannot hide a later owned foreground sample: the direct owned-pid
+  // check still applies once a foreground window exists again.
+  assert.throws(() => validateBackgroundContinuity(absent, { ...baseline, foregroundPid: 20, foregroundOwnerPids: [20] }, 20), /acquired foreground/);
+});
+
+test('single-shot desktop inspection retries only bounded sampling races', async () => {
+  let calls = 0;
+  const result = await readDesktopSnapshotWithRetry(async () => {
+    calls += 1;
+    if (calls < 3) throw new DesktopObserverTransientError('desktop or foreground changed while observing');
+    return { ...baseline, observedAt: backgroundNow() };
+  }, { delayMs: 0 });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 3);
+
+  let hardCalls = 0;
+  await assert.rejects(readDesktopSnapshotWithRetry(async () => {
+    hardCalls += 1;
+    throw new Error('inspect failed hard');
+  }, { delayMs: 0 }), /inspect failed hard/);
+  assert.equal(hardCalls, 1, 'non-sampling errors fail immediately');
+
+  let exhaustedCalls = 0;
+  await assert.rejects(readDesktopSnapshotWithRetry(async () => {
+    exhaustedCalls += 1;
+    throw new DesktopObserverTransientError('foreground identity unavailable');
+  }, { attempts: 2, delayMs: 0 }), /foreground identity unavailable/);
+  assert.equal(exhaustedCalls, 2, 'the retry bound is exact');
 });
 
 test('unsafe snapshots and non-target observer errors fail immediately without recovery', async () => {
@@ -286,7 +340,7 @@ test('unsafe snapshots and non-target observer errors fail immediately without r
     ['forged proof', now => JSON.stringify({ ...baseline, observedAt: now, foregroundOwnerPids: [] }), /inspection is incomplete/],
     ['stale proof', now => JSON.stringify({ ...baseline, observedAt: now - 1501 }), /Fresh background observer proof/],
     ['generic error', () => '{"ok":false,"error":"foreground owner identity unavailable"}', /foreground owner identity unavailable/],
-    ['mislabelled transient', () => '{"ok":false,"transient":true,"error":"current desktop identity unavailable"}', /current desktop identity unavailable/],
+    ['non-transient observer error', () => '{"ok":false,"error":"current desktop identity unavailable"}', /current desktop identity unavailable/],
   ];
   for (const [name, line, reason] of cases) {
     const now = 10000;
