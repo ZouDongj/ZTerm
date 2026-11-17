@@ -32,14 +32,24 @@ export function backgroundDesktopIndex(value = '2') {
 export function validateDesktopSnapshot(snapshot) {
   if (!snapshot || snapshot.ok !== true || snapshot.clockDomain !== BACKGROUND_CLOCK_DOMAIN || !GUID.test(snapshot.currentDesktopId)
       || !GUID.test(snapshot.targetDesktopId) || snapshot.currentDesktopId === NIL_GUID
-      || snapshot.targetDesktopId === NIL_GUID || !HWND.test(snapshot.foregroundHwnd)
-      || BigInt(snapshot.foregroundHwnd) === 0n || !Number.isInteger(snapshot.foregroundPid)
-      || snapshot.foregroundPid <= 0 || snapshot.foregroundPid > 0xffffffff
-      || !Array.isArray(snapshot.foregroundOwnerPids) || snapshot.foregroundOwnerPids.length < 1
-      || snapshot.foregroundOwnerPids.length > 8 || snapshot.foregroundOwnerPids[0] !== snapshot.foregroundPid
-      || !snapshot.foregroundOwnerPids.every(pid => Number.isInteger(pid) && pid > 0 && pid <= 0xffffffff)
+      || snapshot.targetDesktopId === NIL_GUID
       || !Number.isSafeInteger(snapshot.observedAt) || snapshot.observedAt <= 0) {
     throw new Error('Desktop/foreground inspection is incomplete; refusing background E2E');
+  }
+  // A missing foreground window is a legitimate sample: lock screen, UAC secure
+  // desktop, or a window losing activation exactly at the sampling instant. The
+  // owned E2E process cannot be foreground in that state, and the native host
+  // guard independently checks its HWND, so only the desktop identity and
+  // freshness limits apply.
+  if (snapshot.noForeground !== true) {
+    if (!HWND.test(snapshot.foregroundHwnd) || BigInt(snapshot.foregroundHwnd) === 0n
+        || !Number.isInteger(snapshot.foregroundPid)
+        || snapshot.foregroundPid <= 0 || snapshot.foregroundPid > 0xffffffff
+        || !Array.isArray(snapshot.foregroundOwnerPids) || snapshot.foregroundOwnerPids.length < 1
+        || snapshot.foregroundOwnerPids.length > 8 || snapshot.foregroundOwnerPids[0] !== snapshot.foregroundPid
+        || !snapshot.foregroundOwnerPids.every(pid => Number.isInteger(pid) && pid > 0 && pid <= 0xffffffff)) {
+      throw new Error('Desktop/foreground inspection is incomplete; refusing background E2E');
+    }
   }
   if (snapshot.currentDesktopId.toLowerCase() === snapshot.targetDesktopId.toLowerCase()) {
     throw new Error('The requested test desktop is active; refusing to launch on the user desktop');
@@ -65,20 +75,51 @@ export function validateBackgroundContinuity(before, after, ownedPid, requireSam
       || after.targetDesktopId.toLowerCase() !== before.targetDesktopId.toLowerCase()) {
     throw new Error('Desktop changed during background E2E; stopping only the owned test instance');
   }
-  const owners = [after.foregroundPid, ...(after.foregroundOwnerPids || [])];
-  if (ownedPid && owners.includes(ownedPid)) {
-    throw new Error('The owned test instance acquired foreground; background isolation failed');
+  const afterNoForeground = after.noForeground === true;
+  if (!afterNoForeground) {
+    const owners = [after.foregroundPid, ...(after.foregroundOwnerPids || [])];
+    if (ownedPid && owners.includes(ownedPid)) {
+      throw new Error('The owned test instance acquired foreground; background isolation failed');
+    }
   }
-  if (requireSameForeground && (before.foregroundHwnd !== after.foregroundHwnd
-      || before.foregroundPid !== after.foregroundPid)) {
+  // Strict foreground equality is only used by tests that deliberately simulate
+  // a quiet operator desktop; the E2E scripts never require it. A lock-screen
+  // sample without any foreground window cannot be compared either way.
+  if (requireSameForeground && !afterNoForeground && before.noForeground !== true
+      && (before.foregroundHwnd !== after.foregroundHwnd
+        || before.foregroundPid !== after.foregroundPid)) {
     throw new Error('Foreground changed during startup; non-interference could not be established');
   }
   return after;
 }
 
+// Single-shot desktop inspections (baseline and the two handshake reads) race
+// the operator's window activity just like the watch stream does. Retry the
+// bounded sampling races; anything else fails immediately. No unbounded loop:
+// three attempts, 100ms apart.
+export async function readDesktopSnapshotWithRetry(readOnce,
+  { attempts = 3, delayMs = 100, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  if (!Number.isInteger(attempts) || attempts < 1) throw new Error('Desktop inspection retry bound is invalid');
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await readOnce();
+    } catch (error) {
+      lastError = error;
+      const transient = error instanceof DesktopObserverTransientError
+        || error?.code === 'ZTERM_E2E_DESKTOP_OBSERVER_TRANSIENT' || error?.transient === true;
+      if (!transient || attempt === attempts - 1) throw error;
+      await sleep(delayMs);
+    }
+  }
+  throw lastError;
+}
+
 // This boundary consumes a read-only child stream; it never starts a host.
 export function observeDesktopStream({ observer, baseline, getOwnedPid = () => null,
-  requireSameForeground = () => false, onTransient = () => {}, onFailure = () => {}, now = backgroundNow, startedAt = now(), startupTimeoutMs = 3000 }) {
+  requireSameForeground = () => false, onTransient = () => {}, onFailure = () => {},
+  onNoForeground = () => {}, onForegroundRestored = () => {},
+  now = backgroundNow, startedAt = now(), startupTimeoutMs = 3000 }) {
   validateFreshDesktopSnapshot(baseline, now());
   if (!Number.isSafeInteger(startedAt) || startedAt < 0 || startedAt > now()) {
     throw new Error('Observer birth boundary is unavailable');
@@ -87,6 +128,9 @@ export function observeDesktopStream({ observer, baseline, getOwnedPid = () => n
   let failure = null;
   let transientFailure = null;
   let hasHealthySample = false;
+  let noForegroundSeen = false;
+  let noForegroundCount = 0;
+  let restoredReported = false;
   let stopped = false;
   let buffer = '';
   let resolveReady, rejectReady;
@@ -117,9 +161,14 @@ export function observeDesktopStream({ observer, baseline, getOwnedPid = () => n
       if (!line) continue;
       try {
         const parsed = JSON.parse(line);
-        if (parsed?.ok === false && parsed.transient === true && parsed.error === FOREGROUND_IDENTITY_TRANSIENT) {
-          const transient = new DesktopObserverTransientError();
-          if (hasHealthySample || getOwnedPid()) { fail(transient); return; }
+        if (parsed?.ok === false && parsed.transient === true) {
+          // Sampling races (foreground changing or losing identity between the
+          // two reads, an owner window closing mid-walk) are skipped rather than
+          // fatal: a locked, busy, or otherwise changing operator desktop is
+          // normal. The 1500ms freshness bound below still stops the run if no
+          // complete sample arrives, and the native host guard keeps checking
+          // the owned HWND independently.
+          const transient = new DesktopObserverTransientError(String(parsed.error || FOREGROUND_IDENTITY_TRANSIENT));
           if (!transientFailure) onTransient(transient);
           transientFailure = transient;
           continue;
@@ -131,6 +180,20 @@ export function observeDesktopStream({ observer, baseline, getOwnedPid = () => n
         }
         const snapshot = validateFreshDesktopSnapshot(parsed, now(), startedAt);
         validateBackgroundContinuity(baseline, snapshot, getOwnedPid(), requireSameForeground());
+        // Operator-visible lock-screen evidence: report the first no-foreground
+        // sample and the eventual return of foreground samples. Diagnostics
+        // only; never gates the run.
+        if (snapshot.noForeground === true) {
+          noForegroundCount += 1;
+          if (!noForegroundSeen) {
+            noForegroundSeen = true;
+            try { onNoForeground({ count: noForegroundCount, observedAt: snapshot.observedAt }); } catch (e) {}
+          }
+          restoredReported = false;
+        } else if (noForegroundSeen && !restoredReported) {
+          restoredReported = true;
+          try { onForegroundRestored({ count: noForegroundCount, observedAt: snapshot.observedAt }); } catch (e) {}
+        }
         latest = snapshot;
         hasHealthySample = true;
         transientFailure = null;
@@ -255,7 +318,13 @@ export async function readHostProcessDiagnostic(execFile, signal) {
 export async function completeBackgroundHandshake({ baseline, expected, readPlacement, inspect, release, readShown }) {
   validateDesktopSnapshot(baseline);
   const placed = validatePlacedHost(await readPlacement(), expected);
-  validateBackgroundContinuity(baseline, validateFreshDesktopSnapshot(await inspect()), expected.pid, true);
+  // The operator's own desktop activity (foreground changes) must never fail
+  // the run: non-interference is proven by the native host guard (disabled,
+  // NOACTIVATE, minimized on the target desktop), the desktop-id continuity
+  // check and the owned-pid foreground/owner-chain checks on every sample.
+  // Strict foreground equality is only useful for tests that deliberately
+  // simulate a quiet operator desktop.
+  validateBackgroundContinuity(baseline, validateFreshDesktopSnapshot(await inspect()), expected.pid, false);
   await release({ token: expected.token, pid: expected.pid, hwnd: placed.hwnd });
   const shown = await readShown();
   if (!shown || shown.clockDomain !== BACKGROUND_CLOCK_DOMAIN || shown.token !== expected.token || shown.pid !== expected.pid
@@ -265,6 +334,6 @@ export async function completeBackgroundHandshake({ baseline, expected, readPlac
       || shown.targetDesktopId?.toLowerCase() !== expected.targetDesktopId.toLowerCase()) {
     throw new Error('Background release did not produce a verified disabled host');
   }
-  validateBackgroundContinuity(baseline, validateFreshDesktopSnapshot(await inspect()), expected.pid, true);
+  validateBackgroundContinuity(baseline, validateFreshDesktopSnapshot(await inspect()), expected.pid, false);
   return shown;
 }

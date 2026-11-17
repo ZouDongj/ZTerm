@@ -25,7 +25,8 @@ import { randomUUID } from 'node:crypto';
 import { createE2eSandbox, restartOwnedApp, killOwnedRuntime, probeDebugPortRange, seedIsolatedConfig } from './e2e-isolation.mjs';
 import { backgroundDesktopIndex, validateFreshDesktopSnapshot, observeDesktopStream, completeBackgroundHandshake,
   validateNativeHostHealth, renewNativeLease, createBackgroundLease, backgroundNow,
-  stopBackgroundRun, readHostProcessDiagnostic, captureProcessExit } from './e2e-background-policy.mjs';
+  stopBackgroundRun, readHostProcessDiagnostic, captureProcessExit,
+  DesktopObserverTransientError, readDesktopSnapshotWithRetry } from './e2e-background-policy.mjs';
 import { connectVerifiedEndpoint } from './e2e-ownership.mjs';
 import { requireBackgroundCapability } from './e2e-background-capability.mjs';
 import { writeBackgroundJson } from './e2e-background-json.mjs';
@@ -153,13 +154,31 @@ function resolveVdHelper() {
   return out;
 }
 
-async function inspectDesktop() {
-  const output = await new Promise((resolveOutput, reject) => {
+function readDesktopSnapshotOnce() {
+  return new Promise((resolveOnce, rejectOnce) => {
     execFile(resolveVdHelper(), ['inspect', String(DESKTOP_INDEX)],
       { encoding: 'utf8', windowsHide: true, timeout: 3000 },
-      (error, stdout) => error ? reject(error) : resolveOutput(stdout));
+      (error, stdout) => {
+        let parsed = null;
+        try { parsed = stdout ? JSON.parse(stdout.trim()) : null; } catch {}
+        if (error) {
+          if (parsed?.ok === false && parsed.transient === true) {
+            rejectOnce(new DesktopObserverTransientError(String(parsed.error || error.message)));
+            return;
+          }
+          rejectOnce(error);
+          return;
+        }
+        if (!parsed) { rejectOnce(new Error('Desktop inspection produced no snapshot')); return; }
+        resolveOnce(parsed);
+      });
   });
-  return validateFreshDesktopSnapshot(JSON.parse(output.trim()));
+}
+
+async function inspectDesktop() {
+  // Baseline and handshake inspections race the operator's window activity the
+  // same way the watch stream does; retry only the bounded sampling races.
+  return validateFreshDesktopSnapshot(await readDesktopSnapshotWithRetry(readDesktopSnapshotOnce));
 }
 
 function stopBackgroundObserver(reason = new Error('Owned background runtime stopped')) {
@@ -228,8 +247,14 @@ async function beginBackgroundObserver(baseline, token) {
   backgroundRun = run;
   run.observation = observeDesktopStream({
     observer, baseline, startedAt, getOwnedPid: () => ownedChild?.pid,
-    requireSameForeground: () => !run.released,
+    // Never require the operator's foreground to stay put: background E2E must
+    // not fail just because the user kept working on their own desktop. The
+    // native host guard (disabled/NOACTIVATE/minimized on the target desktop),
+    // the desktop-id continuity check and the owned-pid foreground/owner-chain
+    // checks below still prove the E2E instance never took the user's desktop.
     onTransient: error => console.error('[e2e] transient desktop observation before host launch: ' + error.message),
+    onNoForeground: info => console.log('[e2e] no-foreground sample accepted (lock screen / secure desktop / activation gap): ' + JSON.stringify(info)),
+    onForegroundRestored: info => console.log('[e2e] foreground samples resumed after no-foreground window: ' + JSON.stringify(info)),
     onFailure: failBackground,
   });
   await run.observation.ready;
