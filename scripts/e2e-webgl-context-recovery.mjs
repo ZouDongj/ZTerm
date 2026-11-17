@@ -69,10 +69,19 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DESKTOP_INDEX = backgroundDesktopIndex(process.env.ZTERM_E2E_DESKTOP ?? '2');
 
 const results = [];
+let skippedGroups = 0;
 function check(name, pass, detail) {
   results.push({ name, pass: pass === true, detail: detail ?? '' });
   console.log(`${pass === true ? '✔' : '✖'} ${name}${detail ? ` — ${detail}` : ''}`);
 }
+// A skipped group is not a pass: report it explicitly so the evidence never
+// claims animation coverage that could not be exercised in this environment.
+function skip(name, reason) {
+  skippedGroups += 1;
+  console.log(`↷ ${name} — SKIPPED: ${reason}`);
+}
+// Internal control flow only: unwinds the Phase E block without failing it.
+class PhaseESkipped extends Error {}
 
 let sandbox = null;
 let ownedChild = null;
@@ -810,6 +819,20 @@ async function main() {
     // --norc, and vim runs -u NONE -i NONE -n.
     const phaseE = { vimRunning: false, bashRunning: false, focusPinned: false, previousStyle: null };
     try {
+      // The animation-classification evidence below only exists when the
+      // renderer is allowed to animate. Windows suppresses client-area
+      // animations in Remote Desktop sessions and when the user turns on the
+      // accessibility reduced-motion setting; the product correctly disables
+      // the smooth cursor then, so this phase cannot run meaningfully. Record
+      // an explicit skip instead of a failure; Phase A–D still cover the WebGL
+      // context-recovery behavior that this script exists to verify.
+      const motion = await cdp.eval(
+        `(() => ({ reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches }))()`).catch(() => null);
+      if (motion?.reducedMotion === true) {
+        skip('E: nvim/WebGL animation evidence (issue #31)',
+          'system reports prefers-reduced-motion: reduce (remote desktop session or accessibility setting); run this phase from a local session with animations enabled');
+        throw new PhaseESkipped();
+      }
       const shells = await cdp.eval(`(async () => (await ipcRenderer.invoke('get-local-shells')) || [])()`);
       const gitBash = shells.find(s => s?.id === 'gitbash' && typeof s.command === 'string');
       if (!gitBash) throw new Error('Phase E found no Git Bash through get-local-shells: ' + JSON.stringify(shells.map(s => s?.id)));
@@ -974,6 +997,8 @@ async function main() {
       check('E: vim and bash exited cleanly and the PowerShell prompt returned',
         vimQuit.done === true && psBack.done === true,
         `vimQuit=${vimQuit.done} lastRows=${JSON.stringify((psBack.value?.rows || []).slice(-2))}`);
+    } catch (error) {
+      if (!(error instanceof PhaseESkipped)) throw error;
     } finally {
       // Guarded cleanup — never throws past the phase. A pending frame
       // capture must not outlive it (a held frame parks the animation), a
@@ -1021,7 +1046,7 @@ async function main() {
 
   if (backgroundFailure) throw backgroundFailure;
   const failed = results.filter((r) => !r.pass);
-  console.log(`\n${results.length - failed.length}/${results.length} 项通过`);
+  console.log(`\n${results.length - failed.length}/${results.length} 项通过${skippedGroups > 0 ? `，${skippedGroups} 组跳过` : ''}`);
   if (failed.length > 0) {
     console.log('失败项:');
     for (const f of failed) console.log(`  - ${f.name}${f.detail ? ` (${f.detail})` : ''}`);
