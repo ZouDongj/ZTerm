@@ -117,7 +117,9 @@ export async function readDesktopSnapshotWithRetry(readOnce,
 
 // This boundary consumes a read-only child stream; it never starts a host.
 export function observeDesktopStream({ observer, baseline, getOwnedPid = () => null,
-  requireSameForeground = () => false, onTransient = () => {}, onFailure = () => {}, now = backgroundNow, startedAt = now(), startupTimeoutMs = 3000 }) {
+  requireSameForeground = () => false, onTransient = () => {}, onFailure = () => {},
+  onNoForeground = () => {}, onForegroundRestored = () => {},
+  now = backgroundNow, startedAt = now(), startupTimeoutMs = 3000 }) {
   validateFreshDesktopSnapshot(baseline, now());
   if (!Number.isSafeInteger(startedAt) || startedAt < 0 || startedAt > now()) {
     throw new Error('Observer birth boundary is unavailable');
@@ -126,6 +128,9 @@ export function observeDesktopStream({ observer, baseline, getOwnedPid = () => n
   let failure = null;
   let transientFailure = null;
   let hasHealthySample = false;
+  let noForegroundSeen = false;
+  let noForegroundCount = 0;
+  let restoredReported = false;
   let stopped = false;
   let buffer = '';
   let resolveReady, rejectReady;
@@ -175,6 +180,20 @@ export function observeDesktopStream({ observer, baseline, getOwnedPid = () => n
         }
         const snapshot = validateFreshDesktopSnapshot(parsed, now(), startedAt);
         validateBackgroundContinuity(baseline, snapshot, getOwnedPid(), requireSameForeground());
+        // Operator-visible lock-screen evidence: report the first no-foreground
+        // sample and the eventual return of foreground samples. Diagnostics
+        // only; never gates the run.
+        if (snapshot.noForeground === true) {
+          noForegroundCount += 1;
+          if (!noForegroundSeen) {
+            noForegroundSeen = true;
+            try { onNoForeground({ count: noForegroundCount, observedAt: snapshot.observedAt }); } catch (e) {}
+          }
+          restoredReported = false;
+        } else if (noForegroundSeen && !restoredReported) {
+          restoredReported = true;
+          try { onForegroundRestored({ count: noForegroundCount, observedAt: snapshot.observedAt }); } catch (e) {}
+        }
         latest = snapshot;
         hasHealthySample = true;
         transientFailure = null;

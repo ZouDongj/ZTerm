@@ -210,6 +210,8 @@ async function beginBackgroundObserver(baseline, token) {
     // the desktop-id continuity check and the owned-pid foreground/owner-chain
     // checks below still prove the E2E instance never took the user's desktop.
     onTransient: error => console.error('[e2e] transient desktop observation before host launch: ' + error.message),
+    onNoForeground: info => console.log('[e2e] no-foreground sample accepted (lock screen / secure desktop / activation gap): ' + JSON.stringify(info)),
+    onForegroundRestored: info => console.log('[e2e] foreground samples resumed after no-foreground window: ' + JSON.stringify(info)),
     onFailure: failBackground,
   });
   await run.observation.ready;

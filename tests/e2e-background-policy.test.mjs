@@ -307,6 +307,25 @@ test('a missing foreground window is a valid sample for lock screen and secure d
   assert.throws(() => validateBackgroundContinuity(absent, { ...baseline, foregroundPid: 20, foregroundOwnerPids: [20] }, 20), /acquired foreground/);
 });
 
+test('no-foreground samples are accepted and reported once each way', async () => {
+  const observer = observerChild();
+  const absent = [];
+  const restored = [];
+  const observation = observeDesktopStream({ observer, baseline: fresh(),
+    onNoForeground: info => absent.push(info), onForegroundRestored: info => restored.push(info) });
+  try {
+    emitSample(observer);
+    await observation.ready;
+    observer.stdout.emit('data', JSON.stringify(fresh({ noForeground: true })) + '\n');
+    assert.equal(absent.length, 1, 'the first lock-screen sample is reported');
+    assert.doesNotThrow(() => observation.assertHealthy(), 'a missing foreground remains a valid sample');
+    observer.stdout.emit('data', JSON.stringify(fresh({ noForeground: true })) + '\n');
+    assert.equal(absent.length, 1, 'continuous absence is reported once');
+    emitSample(observer);
+    assert.equal(restored.length, 1, 'the return of foreground samples is reported');
+  } finally { observation.stop(); }
+});
+
 test('single-shot desktop inspection retries only bounded sampling races', async () => {
   let calls = 0;
   const result = await readDesktopSnapshotWithRetry(async () => {
