@@ -66,7 +66,7 @@ test('placement must prove the exact disabled minimized owned host', () => {
   }
 });
 
-test('release happens only after placement and unchanged desktop/foreground proof', async () => {
+test('release happens only after placement and desktop/owned-foreground proof', async () => {
   const calls = [];
   const shown = { ...placed, phase: 'shown', minimized: false };
   const result = await completeBackgroundHandshake({
@@ -80,18 +80,42 @@ test('release happens only after placement and unchanged desktop/foreground proo
   assert.deepEqual(calls, ['placement', 'inspect', 'release', 'shown', 'inspect']);
 });
 
-test('failed placement or lost foreground evidence never releases the app', async () => {
-  for (const badPlacement of [true, false]) {
-    let released = false;
-    await assert.rejects(completeBackgroundHandshake({
-      baseline, expected,
-      readPlacement: async () => badPlacement ? { ...placed, disabled: false } : placed,
-      inspect: async () => fresh({ foregroundHwnd: '0x9999' }),
-      release: async () => { released = true; },
-      readShown: async () => { throw new Error('unreachable'); },
-    }));
-    assert.equal(released, false);
-  }
+test('failed placement or owned foreground never releases the app', async () => {
+  let released = false;
+  await assert.rejects(completeBackgroundHandshake({
+    baseline, expected,
+    readPlacement: async () => ({ ...placed, disabled: false }),
+    inspect: async () => fresh(),
+    release: async () => { released = true; },
+    readShown: async () => { throw new Error('unreachable'); },
+  }));
+  assert.equal(released, false);
+  released = false;
+  await assert.rejects(completeBackgroundHandshake({
+    baseline, expected,
+    readPlacement: async () => placed,
+    inspect: async () => fresh({ foregroundHwnd: '0x9999', foregroundPid: expected.pid, foregroundOwnerPids: [expected.pid] }),
+    release: async () => { released = true; },
+    readShown: async () => ({ ...placed, phase: 'shown', minimized: false }),
+  }));
+  assert.equal(released, false);
+});
+
+test('the operator changing foreground windows does not block placement release', async () => {
+  let released = false;
+  const shown = { ...placed, phase: 'shown', minimized: false };
+  const result = await completeBackgroundHandshake({
+    baseline, expected,
+    readPlacement: async () => placed,
+    // The operator switched to another window while the harness placed the
+    // E2E host; the owned process is not in that foreground chain, so the
+    // release must still be allowed.
+    inspect: async () => fresh({ foregroundHwnd: '0x9999', foregroundPid: 30, foregroundOwnerPids: [30] }),
+    release: async () => { released = true; },
+    readShown: async () => shown,
+  });
+  assert.equal(result, shown);
+  assert.equal(released, true);
 });
 
 test('nil desktop or ambiguous owner proof cannot release an otherwise placed host', async () => {

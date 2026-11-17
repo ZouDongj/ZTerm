@@ -255,7 +255,13 @@ export async function readHostProcessDiagnostic(execFile, signal) {
 export async function completeBackgroundHandshake({ baseline, expected, readPlacement, inspect, release, readShown }) {
   validateDesktopSnapshot(baseline);
   const placed = validatePlacedHost(await readPlacement(), expected);
-  validateBackgroundContinuity(baseline, validateFreshDesktopSnapshot(await inspect()), expected.pid, true);
+  // The operator's own desktop activity (foreground changes) must never fail
+  // the run: non-interference is proven by the native host guard (disabled,
+  // NOACTIVATE, minimized on the target desktop), the desktop-id continuity
+  // check and the owned-pid foreground/owner-chain checks on every sample.
+  // Strict foreground equality is only useful for tests that deliberately
+  // simulate a quiet operator desktop.
+  validateBackgroundContinuity(baseline, validateFreshDesktopSnapshot(await inspect()), expected.pid, false);
   await release({ token: expected.token, pid: expected.pid, hwnd: placed.hwnd });
   const shown = await readShown();
   if (!shown || shown.clockDomain !== BACKGROUND_CLOCK_DOMAIN || shown.token !== expected.token || shown.pid !== expected.pid
@@ -265,6 +271,6 @@ export async function completeBackgroundHandshake({ baseline, expected, readPlac
       || shown.targetDesktopId?.toLowerCase() !== expected.targetDesktopId.toLowerCase()) {
     throw new Error('Background release did not produce a verified disabled host');
   }
-  validateBackgroundContinuity(baseline, validateFreshDesktopSnapshot(await inspect()), expected.pid, true);
+  validateBackgroundContinuity(baseline, validateFreshDesktopSnapshot(await inspect()), expected.pid, false);
   return shown;
 }

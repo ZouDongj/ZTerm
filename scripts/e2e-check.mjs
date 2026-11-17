@@ -228,7 +228,11 @@ async function beginBackgroundObserver(baseline, token) {
   backgroundRun = run;
   run.observation = observeDesktopStream({
     observer, baseline, startedAt, getOwnedPid: () => ownedChild?.pid,
-    requireSameForeground: () => !run.released,
+    // Never require the operator's foreground to stay put: background E2E must
+    // not fail just because the user kept working on their own desktop. The
+    // native host guard (disabled/NOACTIVATE/minimized on the target desktop),
+    // the desktop-id continuity check and the owned-pid foreground/owner-chain
+    // checks below still prove the E2E instance never took the user's desktop.
     onTransient: error => console.error('[e2e] transient desktop observation before host launch: ' + error.message),
     onFailure: failBackground,
   });
