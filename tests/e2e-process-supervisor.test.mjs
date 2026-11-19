@@ -6,9 +6,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { E2E_TMP_ROOT, registerExitCleanup } from '../scripts/e2e-isolation.mjs';
-import { readOwnProcessStartMs } from '../scripts/e2e-process-supervisor.mjs';
+import { PROCESS_IDENTITY_TIMEOUT_MS, readOwnProcessStartMs } from '../scripts/e2e-process-supervisor.mjs';
 
-const windowsOnly = { skip: process.platform !== 'win32', timeout: 30000 };
+// The identity probe may start PowerShell cold, so its own timeout has to
+// expire before the fixture deadline does; the extra time covers fixture
+// startup and the watchdog compile. Tests pin several processes in sequence
+// and wait for their exit, hence the wider per-test budget.
+const identityWaitMs = PROCESS_IDENTITY_TIMEOUT_MS + 10000;
+const windowsOnly = { skip: process.platform !== 'win32', timeout: 90000 };
 const supervisorUrl = new URL('../scripts/e2e-process-supervisor.mjs', import.meta.url).href;
 const policyUrl = new URL('../scripts/e2e-background-policy.mjs', import.meta.url).href;
 const retryUrl = new URL('../scripts/e2e-desktop-retry.mjs', import.meta.url).href;
@@ -86,7 +91,7 @@ writeFileSync(treeFile + '.retry-result.json', JSON.stringify({ code, oldExitCod
 process.exit(code);
 `);
 
-async function waitFor(predicate, description, timeoutMs = 12000) {
+async function waitFor(predicate, description, timeoutMs = identityWaitMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -113,7 +118,7 @@ function isCurrent({ pid, startedAt }) {
   return readOwnProcessStartMs(pid) === startedAt;
 }
 
-async function waitIdentityGone(identity, timeoutMs = 12000) {
+async function waitIdentityGone(identity, timeoutMs = identityWaitMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try { process.kill(identity.pid, 0); }

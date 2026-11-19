@@ -14,11 +14,16 @@ export function processExitCode(code, signal) {
   return 1;
 }
 
+// A cold PowerShell start on a loaded CI runner can take several seconds. The
+// probe is read-only and the budget stays bounded, so the allowance covers
+// startup without hiding a hung shell.
+export const PROCESS_IDENTITY_TIMEOUT_MS = 15000;
+
 export function readOwnProcessStartMs(pid = process.pid, execFile = execFileSync) {
   if (!Number.isInteger(pid) || pid <= 0) throw new Error('Invalid supervisor parent PID');
   const output = execFile('powershell.exe', ['-NoProfile', '-Command',
     `$p = Get-Process -Id ${pid} -ErrorAction Stop; ([DateTimeOffset]$p.StartTime).ToUnixTimeMilliseconds()`],
-  { encoding: 'utf8', windowsHide: true, timeout: 3000 });
+  { encoding: 'utf8', windowsHide: true, timeout: PROCESS_IDENTITY_TIMEOUT_MS });
   const text = String(output).trim();
   if (!/^\d+$/.test(text)) throw new Error('Supervisor parent creation time is unavailable');
   const value = Number(text);
