@@ -13,7 +13,7 @@
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import * as fs from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL, URL } from 'node:url';
 
 export function loadIsolationModule({ exec, sourcePath } = {}) {
@@ -31,7 +31,7 @@ export function loadIsolationModule({ exec, sourcePath } = {}) {
     copyFileSync: fs.copyFileSync, existsSync: fs.existsSync, mkdirSync: fs.mkdirSync,
     mkdtempSync: fs.mkdtempSync, readdirSync: fs.readdirSync, readFileSync: fs.readFileSync,
     rmSync: fs.rmSync, statSync: fs.statSync, writeFileSync: fs.writeFileSync,
-    dirname, join, resolve,
+    dirname, isAbsolute, join, relative, resolve, sep,
     fileURLToPath,
     URL,
     execFileSync: exec,

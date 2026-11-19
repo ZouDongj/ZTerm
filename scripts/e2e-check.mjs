@@ -22,7 +22,7 @@ import { resolve, dirname, join } from 'node:path';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { createE2eSandbox, restartOwnedApp, killOwnedRuntime, probeDebugPortRange, seedIsolatedConfig } from './e2e-isolation.mjs';
+import { createE2eSandbox, restartOwnedApp, killOwnedRuntime, probeDebugPortRange, seedIsolatedConfig, resolveE2eTmpSubdir } from './e2e-isolation.mjs';
 import { backgroundDesktopIndex, validateFreshDesktopSnapshot, observeDesktopStream, completeBackgroundHandshake,
   validateNativeHostHealth, renewNativeLease, createBackgroundLease, backgroundNow,
   stopBackgroundRun, readHostProcessDiagnostic, captureProcessExit,
@@ -65,6 +65,15 @@ let vdHelperExe = null;
 let backgroundRun = null;
 let backgroundFailure = null;
 let backgroundObserverCleanup = null;
+
+// ZTERM_E2E_SHOTS is review-only output and, like the sandbox itself, must
+// stay inside the repo's artifacts/e2e-tmp root. Resolve it through the shared
+// helper at capture time (relative values resolve against cwd; anything
+// outside the root throws the module's rejection error), matching
+// e2e-webgl-context-recovery.mjs. Unset means screenshots are disabled.
+function shotsDirectory() {
+  return process.env.ZTERM_E2E_SHOTS ? resolveE2eTmpSubdir(process.env.ZTERM_E2E_SHOTS) : '';
+}
 
 // ── Launch the exe (with WebView2 remote debugging) ──
 let DATA_CONFIG = null;
@@ -1489,9 +1498,10 @@ async function main() {
       check('标准 Git Bash：明确提供可记住的本账户授权', gitDialogReady === true && gitReview.rememberPresent === true, JSON.stringify(gitReview));
       check('授权弹窗：按钮风格尺寸一致且默认焦点为取消', gitReview.primary === true && gitReview.outline === true && gitReview.sameHeight === true && gitReview.sameRadius === true && gitReview.sameFont === true && gitReview.safeFocus === true, JSON.stringify(gitReview));
       if (process.env.ZTERM_E2E_SHOTS) {
-        mkdirSync(process.env.ZTERM_E2E_SHOTS, { recursive: true });
+        const shotDir = shotsDirectory();
+        mkdirSync(shotDir, { recursive: true });
         const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
-        if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'execution-standard-git.png'), Buffer.from(shot.data, 'base64'));
+        if (shot?.data) writeFileSync(join(shotDir, 'execution-standard-git.png'), Buffer.from(shot.data, 'base64'));
       }
       const gitCancelled = await cdp.eval(`(async () => {
         document.getElementById('confirm-cancel').click();
@@ -2667,7 +2677,7 @@ async function main() {
       await sleep(300);
       const menuRows = () => `[...document.querySelectorAll('#sftp-body .sftp-item')]`;
       const captureContextShot = async (name) => {
-        const dir = process.env.ZTERM_E2E_SHOTS || '';
+        const dir = shotsDirectory();
         if (!dir) return;
         await cdp.send('Page.enable').catch(() => {});
         const image = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
@@ -3249,7 +3259,7 @@ async function main() {
         textMenuProbe.focusHeld === true,
         JSON.stringify(textMenuProbe));
       {
-        const shotDirEnv = process.env.ZTERM_E2E_SHOTS || '';
+        const shotDirEnv = shotsDirectory();
         if (shotDirEnv) {
           const menuShot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
           if (menuShot?.data) {
@@ -3817,16 +3827,20 @@ async function main() {
     // Fixtures use documentation-only addresses (TEST-NET-1 / 2001:db8 / .example):
     // no real connection is ever opened — SSH dispatch is captured with a
     // createTab stub and the edit overlay is pure UI.
-    // ZTERM_E2E_SHOTS=<dir> additionally captures UI screenshots there.
-    const shotDir = process.env.ZTERM_E2E_SHOTS || '';
+    // ZTERM_E2E_SHOTS=<dir> additionally captures UI screenshots there
+    // (paths are validated to stay inside artifacts/e2e-tmp).
     await cdp.send('Page.enable').catch(() => {});
     async function shot(name) {
-      if (!shotDir) return;
+      // Resolve before the try block: an invalid output path is a
+      // configuration error and must abort the run, not be logged as a
+      // transient capture failure.
+      const dir = shotsDirectory();
+      if (!dir) return;
       try {
         const r = await cdp.send('Page.captureScreenshot', { format: 'png' });
         if (r?.data) {
-          mkdirSync(shotDir, { recursive: true });
-          writeFileSync(join(shotDir, name + '.png'), Buffer.from(r.data, 'base64'));
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(join(dir, name + '.png'), Buffer.from(r.data, 'base64'));
         }
       } catch (e) { console.log(`[e2e] screenshot ${name} failed: ${e.message}`); }
     }
@@ -4849,9 +4863,10 @@ async function main() {
     const cjkHover = await cdp.eval(`window.__linkHover('e2e-link.example:3000')`).catch(error => String(error));
     check('终端链接：中文语境悬停只显示有界地址', !!cjkHover && cjkHover.shown === true && cjkHover.text.includes('https://e2e-link.example:3000/progress/') && !cjkHover.text.includes('用原来的'), JSON.stringify(cjkHover));
     if (process.env.ZTERM_E2E_SHOTS && cjkHover?.shown === true) {
-      mkdirSync(process.env.ZTERM_E2E_SHOTS, { recursive: true });
+      const shotDir = shotsDirectory();
+      mkdirSync(shotDir, { recursive: true });
       const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
-      if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'link-cjk-boundary.png'), Buffer.from(shot.data, 'base64'));
+      if (shot?.data) writeFileSync(join(shotDir, 'link-cjk-boundary.png'), Buffer.from(shot.data, 'base64'));
     }
     const linkNoCtrl = await cdp.eval(`window.__linkClick('e2e-link.example', false)`).catch(() => 'eval-err');
     await sleep(300);
@@ -4867,7 +4882,7 @@ async function main() {
     // status-bar disablement itself is proven by the settings read-back in
     // 0.5, not by this image.
     {
-      const shotDirEnv = process.env.ZTERM_E2E_SHOTS || '';
+      const shotDirEnv = shotsDirectory();
       if (shotDirEnv && hoverOk === true) {
         const hoverShot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
         if (hoverShot?.data) {
@@ -6862,9 +6877,10 @@ async function main() {
       i26StreamDone === true && i26Cold.renders === 0 && i26Cold.sameNode === true && i26Cold.unread === true,
       JSON.stringify({ done: i26StreamDone, cold: i26Cold }));
     if (process.env.ZTERM_E2E_SHOTS) {
-      mkdirSync(process.env.ZTERM_E2E_SHOTS, { recursive: true });
+      const shotDir = shotsDirectory();
+      mkdirSync(shotDir, { recursive: true });
       const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
-      if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'issue26-unread-before-switch.png'), Buffer.from(shot.data, 'base64'));
+      if (shot?.data) writeFileSync(join(shotDir, 'issue26-unread-before-switch.png'), Buffer.from(shot.data, 'base64'));
     }
     // Switching to the tab consumes the marker in place: same node, no full
     // render, idle green restored.
@@ -6884,8 +6900,9 @@ async function main() {
         && JSON.stringify(i26SwitchBg) === JSON.stringify(i26Green) && i26Switch.sameNode === true && i26Switch.renders === 0,
       JSON.stringify(i26Switch));
     if (process.env.ZTERM_E2E_SHOTS) {
+      const shotDir = shotsDirectory();
       const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
-      if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'issue26-unread-after-switch.png'), Buffer.from(shot.data, 'base64'));
+      if (shot?.data) writeFileSync(join(shotDir, 'issue26-unread-after-switch.png'), Buffer.from(shot.data, 'base64'));
     }
     // Further REAL output on the now-active tab must not re-mark. Wait for
     // the shell to sit at its prompt first (run evidence: input sent into
@@ -6974,8 +6991,9 @@ async function main() {
         && i26SpCold.sameNode === true && i26SpCold.renders - i26SplitSent.rendersAtSend === 0,
       JSON.stringify({ sent: i26SplitSent, cls: i26SpMarked, done: i26SpDone, cold: i26SpCold }));
     if (process.env.ZTERM_E2E_SHOTS) {
+      const shotDir = shotsDirectory();
       const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
-      if (shot?.data) writeFileSync(join(process.env.ZTERM_E2E_SHOTS, 'issue26-split-pane-aggregated.png'), Buffer.from(shot.data, 'base64'));
+      if (shot?.data) writeFileSync(join(shotDir, 'issue26-split-pane-aggregated.png'), Buffer.from(shot.data, 'base64'));
     }
     // Tidy: restore the real render (section 14+ depends on it), close this
     // section's tabs so later sections see a clean strip.

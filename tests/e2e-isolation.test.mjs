@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 // Namespace import on purpose: tests assert per-function behavior (and the
 // ABSENCE of the removed blind-termination exports); a named import would
 // fail the whole file at link time instead.
@@ -57,6 +57,25 @@ const WAIT_OPEN_ERROR = waitOk({ outcome: 'open-error', exceptionType: 'Win32Exc
 // Route matcher for the wait query of one pid (script embeds "Get-Process -Id
 // <pid> -ErrorAction Stop"; distinct from the WMI /ProcessId=<pid>/ queries).
 const waitQuery = (pid) => new RegExp(`Get-Process -Id ${pid}\\b`);
+
+// resolveE2eTmpSubdir runs inside the VM harness as well (e2e-webgl-context-
+// recovery uses it before writing ZTERM_E2E_SHOTS). The harness context must
+// therefore provide every node:path function the real module imports, not just
+// the three the sandbox helpers happen to use.
+test('resolveE2eTmpSubdir accepts paths inside artifacts/e2e-tmp and rejects escapes', () => {
+  const api = loadIsolationModule();
+  const inside = join(api.E2E_TMP_ROOT, 'shots');
+  assert.equal(api.resolveE2eTmpSubdir(inside), inside, 'absolute subdirectory passes through');
+  const relativeInside = relative(process.cwd(), inside);
+  assert.equal(api.resolveE2eTmpSubdir(relativeInside), inside, 'relative values resolve against cwd');
+  for (const outside of [
+    dirname(api.E2E_TMP_ROOT),
+    join(api.E2E_TMP_ROOT, '..', 'escape'),
+    `${api.E2E_TMP_ROOT}-sibling`,
+  ]) {
+    assert.throws(() => api.resolveE2eTmpSubdir(outside), /must stay inside artifacts\/e2e-tmp/, outside);
+  }
+});
 
 test('E2E copies only the executable into a fresh profile, leaving source config intact', () => {
   const root = freshScratch('isolation-test-');
