@@ -8447,6 +8447,41 @@ mod tests {
         }
     }
 
+    /// Child stand-in that records `kill`, so the close-plan test can assert
+    /// the shell was killed before the ConPTY handle goes to the blocking pool.
+    #[derive(Debug)]
+    struct RecordingChild {
+        killed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl portable_pty::ChildKiller for RecordingChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(RecordingChild {
+                killed: self.killed.clone(),
+            })
+        }
+    }
+
+    impl portable_pty::Child for RecordingChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
     #[test]
     #[cfg(windows)]
     fn session_resize_target_resizes_without_the_session_map_lock() {
@@ -8628,6 +8663,200 @@ mod tests {
         );
         // Unknown ids remove nothing and run no teardown.
         assert!(take_session_for_close(&map, "missing", |_| {}, drop).is_none());
+    }
+
+    #[test]
+    fn close_preparation_runs_under_the_session_map_guard() {
+        // Review of #55: the user-close reason must be written while the
+        // session is still inside the guard. The prepare hook therefore runs
+        // under the lock, while the handle-closing work runs after it.
+        let map: Arc<Mutex<HashMap<String, u8>>> = Arc::new(Mutex::new(HashMap::new()));
+        map.lock().insert("victim".to_string(), 7);
+        let map_for_prepare = map.clone();
+        let mut prepared = None;
+        let result = take_session_for_close(
+            &map,
+            "victim",
+            |value| {
+                assert!(
+                    map_for_prepare.try_lock().is_none(),
+                    "prepare must run under the session map guard"
+                );
+                prepared = Some(*value);
+            },
+            |value| value,
+        );
+        assert_eq!(prepared, Some(7));
+        assert_eq!(result, Some(7));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn close_plan_kills_local_child_and_returns_the_session_for_blocking_drop() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let (writer_tx, _writer_rx) = mpsc::channel(1);
+        let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let map: SessionMap = Arc::new(Mutex::new(HashMap::new()));
+        map.lock().insert(
+            "local_1".to_string(),
+            SessionType::Local(PtySession {
+                writer_tx,
+                flush_ms: 0,
+                master: Arc::new(Mutex::new(pair.master)),
+                child: Box::new(RecordingChild {
+                    killed: killed.clone(),
+                }),
+            }),
+        );
+
+        let plan = take_session_for_close(&map, "local_1", |_| {}, close_plan_for_session);
+
+        assert!(
+            killed.load(std::sync::atomic::Ordering::SeqCst),
+            "the local child must be killed before the blocking ConPTY drop"
+        );
+        assert!(
+            !map.lock().contains_key("local_1"),
+            "the closed session must be unregistered"
+        );
+        match plan {
+            Some(SessionClosePlan::Local(session)) => drop(session),
+            Some(SessionClosePlan::Ssh { .. }) => panic!("a local session must plan a local close"),
+            None => panic!("the registered session must be removed"),
+        }
+    }
+
+    /// Fake PTY writer whose write blocks until the test releases it.
+    struct BlockingWriter {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl std::io::Write for BlockingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _ = self.entered.send(());
+            let _ = self
+                .release
+                .recv_timeout(std::time::Duration::from_secs(10));
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn local_writer_does_not_park_the_async_worker() {
+        // Issue #55 follow-up: the ConPTY input pipe can block. The writer must
+        // hand each write to the blocking pool; an inline write_all would park
+        // the runtime's only worker, and every other command would queue behind
+        // it. The probe task below can only run while the worker is free.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer = Arc::new(Mutex::new(Some(BlockingWriter {
+            entered: entered_tx,
+            release: release_rx,
+        })));
+        let (tx, rx) = mpsc::channel::<LocalInput>(4);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let writer_task = runtime.spawn(run_local_writer(rx, writer, "local_test".to_string()));
+        tx.try_send(LocalInput {
+            data: b"x".to_vec(),
+            trace: None,
+        })
+        .expect("the writer channel must accept the first chunk");
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the fake write must start");
+
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            let _ = probe_tx.send(());
+        });
+        let worker_free = probe_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok();
+
+        release_tx
+            .send(())
+            .expect("the fake write must still be blocked");
+        drop(tx);
+        let _ = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), writer_task).await
+        });
+        assert!(
+            worker_free,
+            "the async worker stayed parked on a PTY write (spawn_blocking regressed)"
+        );
+    }
+
+    struct RecordingWriter {
+        chunks: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl std::io::Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.chunks.lock().push(buf.to_vec());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn local_writer_preserves_chunk_order() {
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::new(Mutex::new(Some(RecordingWriter {
+            chunks: chunks.clone(),
+        })));
+        let (tx, rx) = mpsc::channel::<LocalInput>(8);
+        let handle = tokio::spawn(run_local_writer(rx, writer, "local_test".to_string()));
+        for payload in [b"a".as_slice(), b"bb".as_slice(), b"ccc".as_slice()] {
+            tx.send(LocalInput {
+                data: payload.to_vec(),
+                trace: None,
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+        handle.await.unwrap();
+        assert_eq!(
+            *chunks.lock(),
+            vec![b"a".to_vec(), b"bb".to_vec(), b"ccc".to_vec()],
+            "chunks must reach the PTY in arrival order"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn local_writer_clears_its_slot_when_the_channel_closes() {
+        let writer = Arc::new(Mutex::new(Some(RecordingWriter {
+            chunks: Arc::new(Mutex::new(Vec::new())),
+        })));
+        let (tx, rx) = mpsc::channel::<LocalInput>(1);
+        let handle = tokio::spawn(run_local_writer(
+            rx,
+            writer.clone(),
+            "local_test".to_string(),
+        ));
+        drop(tx);
+        handle.await.unwrap();
+        assert!(
+            writer.lock().is_none(),
+            "the writer slot must be cleared after the channel closes"
+        );
     }
 
     #[test]
