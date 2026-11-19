@@ -360,12 +360,21 @@ const SHORTCUT_ACTIONS = {
                     panes: panes.slice(0, 8).map(p => globalThis.__glyphDiagnostics?.snapshot(p.term) ?? null),
                     truncatedPanes: panes.length > 8 };
             } catch { glyphs = { unavailable: true }; }
+            // Read-only WebGL lifecycle metadata for the active tab's panes:
+            // renderer type, bounded context-loss recovery counters/timers and
+            // the live-context budget. Metadata only — never terminal text,
+            // keys or session names.
+            let webgl = null;
+            try {
+                webgl = typeof _webglDiagnosticsSnapshot === 'function' ? _webglDiagnosticsSnapshot() : null;
+            } catch { webgl = { unavailable: true }; }
             const report = {
                 at: new Date().toISOString(),
                 interaction: diagnostics ? diagnostics.snapshot() : null,
                 durationMs: +(performance.now() - t0).toFixed(0),
                 display: { dpr: window.devicePixelRatio, w: window.innerWidth, h: window.innerHeight },
                 glyphs,
+                webgl,
                 raf: { measurement: 'callback-gap-ms-not-presented-fps', count: raf.length, p50: q(0.5), p95: q(0.95), max: gaps[gaps.length - 1] || null },
                 stability: {
                     longTasks: longTasks.slice(0, 20),

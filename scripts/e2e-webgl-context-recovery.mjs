@@ -18,9 +18,13 @@
 //      immediately instead of reusing the dead record. Old behavior: the
 //      early-exit reused the dead addon and the loss handler then left the
 //      last visible tab on the DOM renderer with a null adapter.
-//   C. Bounded retry: a second unrecovered loss after the automatic recovery
-//      stays on the DOM renderer (no third context); a user-driven tab
-//      switch re-arms the recovery.
+//   C. Bounded backoff self-heal: a transient GPU outage swallows the first
+//      automatic re-attach (new WebGL2 contexts are refused at the canvas API
+//      boundary, exactly the "WebGL2 not supported" failure path from issue
+//      #44); the bounded retries keep failing while the outage lasts, and once
+//      the GPU is back the next backoff slot heals the ACTIVE terminal in
+//      place — no tab switch, no user action. The Ctrl+Shift+D report is also
+//      verified to carry the read-only webgl segment.
 //   D. Simultaneous loss on two tabs: only the ACTIVE tab auto-recovers in
 //      the background; the hidden tab recovers on activation, keeping the
 //      90ms smooth setting and the live-context budget unchanged.
@@ -717,57 +721,131 @@ async function main() {
       stayB?.adapter === true && stayB?.liveContexts === 1 && stayB?.rendererIsWebgl === true,
       JSON.stringify(stayB));
 
-    // ── Phase C: bounded retry ──
-    // Phase B's recovery went through the user-driven switch path, which
-    // re-arms the single-shot budget: this first kill auto-recovers ONCE
-    // (fresh mark), and the SECOND kill — after an automatic recovery with no
-    // user action in between — must stay on the DOM renderer (bounded).
-    const lossC1 = await loseTabContext(cdp, tabA);
-    if (lossC1.ok !== true) throw new Error('Phase C could not kill the context: ' + JSON.stringify(lossC1));
-    await sleep(3600);
-    let recoveredC = null;
-    for (let i = 0; i < 32; i++) {
-      recoveredC = await probeTab(cdp, tabA).catch(() => null);
-      if (recoveredC?.adapter === true && recoveredC?.liveContexts === 1) break;
+    // ── Phase C: bounded backoff self-heal (no tab switch) ──
+    // Issue #44 needs a transient GPU outage that swallows the first automatic
+    // re-attach. While every new WebGL2 context is refused the bounded retries
+    // keep failing; once the GPU returns, the next backoff slot must heal the
+    // ACTIVE terminal in place — no tab switch, no user action. The outage is
+    // injected at the browser API boundary the vendored addon actually uses
+    // (canvas.getContext('webgl2') returning null makes the real WebglAddon
+    // constructor throw "WebGL2 not supported"); the original function is
+    // restored before healing is observed.
+    const activeBeforeC = await cdp.eval(`TabManager.activeId`);
+    const preC = await probeTab(cdp, tabA);
+    if (preC?.adapter !== true || preC?.liveContexts !== 1 || activeBeforeC !== tabA) {
+      throw new Error('Phase C precondition failed: ' + JSON.stringify({ preC, activeBeforeC }));
+    }
+    const lossC = await loseTabContext(cdp, tabA);
+    if (lossC.ok !== true) throw new Error('Phase C could not kill the context: ' + JSON.stringify(lossC));
+    await cdp.eval(`(() => {
+      window.__e2eGetContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function(type) {
+        if (type === 'webgl' || type === 'webgl2') return null;
+        return window.__e2eGetContext.apply(this, arguments);
+      };
+      return true;
+    })()`);
+    let outagePane = null, progressedPane = null;
+    try {
+      await sleep(3600); // vendor 3s restore window; the immediate retry fails
+      const duringC = await probeTab(cdp, tabA);
+      outagePane = (await cdp.eval(`_webglDiagnosticsSnapshot()`))?.panes?.[0] ?? null;
+      check('C：GPU 故障期间活动 tab 退回 DOM，有界重试已消耗且下一次退避在计时（不切标签）',
+        duringC?.adapter === false && duringC?.liveContexts === 0 &&
+        outagePane?.renderer === 'dom' && outagePane?.lossCount >= 1 &&
+        outagePane?.reattachAttempts >= 1 && outagePane?.reattachLimit === 7 &&
+        outagePane?.nextRetryDelayMs > 0 &&
+        (await cdp.eval(`TabManager.activeId`)) === tabA,
+        `loss=${JSON.stringify(lossC)} during=${JSON.stringify(duringC)} diag=${JSON.stringify(outagePane)}`);
+      // Bounded poll (no fixed sleep): the next backoff slot proves the
+      // timer-driven retry continues with no user action at all.
+      progressedPane = null;
+      for (let i = 0; i < 24; i += 1) {
+        const pane = (await cdp.eval(`_webglDiagnosticsSnapshot()`).catch(() => null))?.panes?.[0] ?? null;
+        if (pane && pane.reattachAttempts > outagePane.reattachAttempts) { progressedPane = pane; break; }
+        await sleep(250);
+      }
+      const stillDom = await probeTab(cdp, tabA);
+      check('C：无用户操作时退避计时器继续尝试（重挂次数递增，仍未新建 live context）',
+        progressedPane !== null &&
+        progressedPane.reattachAttempts > outagePane?.reattachAttempts &&
+        stillDom?.adapter === false && stillDom?.liveContexts === 0,
+        `outage=${JSON.stringify(outagePane)} progressed=${JSON.stringify(progressedPane)}`);
+    } finally {
+      await cdp.eval(`(() => {
+        if (window.__e2eGetContext) {
+          HTMLCanvasElement.prototype.getContext = window.__e2eGetContext;
+          delete window.__e2eGetContext;
+        }
+        return true;
+      })()`).catch(() => null);
+    }
+    // The GPU is back: the next bounded retry must restore WebGL + the smooth
+    // cursor in place.
+    let healedC = null;
+    for (let i = 0; i < 48; i++) {
+      healedC = await probeTab(cdp, tabA).catch(() => null);
+      if (healedC?.adapter === true && healedC?.liveContexts === 1 && healedC?.rendererIsWebgl === true) break;
       await sleep(250);
     }
-    check('C：用户路径重挂后第一次 loss 仍自动恢复一次',
-      recoveredC?.adapter === true && recoveredC?.liveContexts === 1 && recoveredC?.liveMark !== lossC1.mark,
-      `loss=${JSON.stringify(lossC1)} recovered=${JSON.stringify(recoveredC)}`);
+    const healedPaneC = (await cdp.eval(`_webglDiagnosticsSnapshot()`))?.panes?.[0] ?? null;
+    check('C：GPU 恢复后下一次退避重挂在原 tab 自愈（不切标签）',
+      healedC?.adapter === true && healedC?.liveContexts === 1 &&
+      healedC?.rendererIsWebgl === true && healedC?.liveMark !== lossC.mark &&
+      (await cdp.eval(`TabManager.activeId`)) === tabA &&
+      healedPaneC?.renderer === 'webgl' && healedPaneC?.reattachAttempts <= 7,
+      `loss=${JSON.stringify(lossC)} healed=${JSON.stringify(healedC)} diag=${JSON.stringify(healedPaneC)}`);
+    const stayC = await sleep(2000).then(() => probeTab(cdp, tabA)).catch(() => null);
+    check('C：退避自愈后 2 秒仍稳定（不掉回 DOM）',
+      stayC?.adapter === true && stayC?.liveContexts === 1 && stayC?.rendererIsWebgl === true,
+      JSON.stringify(stayC));
 
-    const lossC2 = await loseTabContext(cdp, tabA);
-    if (lossC2.ok !== true) throw new Error('Phase C could not kill the second context: ' + JSON.stringify(lossC2));
-    await sleep(4600); // >3s loss window + settle; NO switching in between
-    const bounded = await probeTab(cdp, tabA).catch(() => null);
-    check('C：自动恢复后的第二次 loss 不再自动建第三个 context（重试有界）',
-      bounded?.adapter === false && bounded?.liveContexts === 0,
-      JSON.stringify(bounded));
-    // A user-driven tab switch re-arms the bounded recovery (manual attach).
-    await cdp.eval(`TabManager.switchTo(${JSON.stringify(tabB)})`);
-    await sleep(400);
-    await cdp.eval(`TabManager.switchTo(${JSON.stringify(tabA)})`);
-    let rearmC = null;
-    for (let i = 0; i < 32; i++) {
-      rearmC = await probeTab(cdp, tabA).catch(() => null);
-      if (rearmC?.adapter === true && rearmC?.liveContexts === 1) break;
-      await sleep(250);
-    }
-    check('C：用户切换 tab 后手动路径重新挂载（重新武装有界恢复）',
-      rearmC?.adapter === true && rearmC?.liveContexts === 1 && rearmC?.liveMark !== lossC2.mark,
-      `loss=${JSON.stringify(lossC2)} after=${JSON.stringify(rearmC)}`);
-    const lossC3 = await loseTabContext(cdp, tabA);
-    if (lossC3.ok !== true) throw new Error('Phase C could not kill the re-armed context');
-    await sleep(3600);
-    const rearmedRecovery = await probeTab(cdp, tabA);
-    check('C：用户重挂后再次丢失仍可自动恢复一次',
-      rearmedRecovery?.adapter === true && rearmedRecovery?.liveContexts === 1 && rearmedRecovery?.liveMark !== lossC3.mark,
-      `loss=${JSON.stringify(lossC3)} after=${JSON.stringify(rearmedRecovery)}`);
+    // The Ctrl+Shift+D report carries the read-only webgl segment. Capture the
+    // clipboard payload through the real perfCapture path (the sandbox never
+    // touches the OS clipboard). Fail closed: when the clipboard shim or the
+    // shortcut action is unavailable, perfCapture must not run at all.
+    const reportTextC = await cdp.eval(`(async () => {
+      window.__e2ePerfReport = null;
+      const target = navigator.clipboard;
+      if (!target) return null;
+      const hadOwn = Object.prototype.hasOwnProperty.call(target, 'writeText');
+      const original = target.writeText;
+      try {
+        Object.defineProperty(target, 'writeText', {
+          configurable: true,
+          value: text => { window.__e2ePerfReport = text; return Promise.resolve(); },
+        });
+      } catch (e) { return null; }
+      try {
+        if (typeof SHORTCUT_ACTIONS !== 'object' || typeof SHORTCUT_ACTIONS.perfCapture !== 'function') return null;
+        SHORTCUT_ACTIONS.perfCapture();
+        await new Promise(resolve => setTimeout(resolve, 4600));
+        return window.__e2ePerfReport;
+      } finally {
+        try {
+          if (hadOwn) Object.defineProperty(target, 'writeText', { configurable: true, value: original });
+          else delete target.writeText;
+        } catch (e) {}
+      }
+    })()`).catch(() => null);
+    let webglReport = null;
+    try { webglReport = reportTextC ? JSON.parse(reportTextC).webgl : null; } catch (e) {}
+    const reportPane = webglReport?.panes?.[0] ?? null;
+    const paneKeys = ['renderer', 'lossCount', 'lastLossAgoMs', 'reattachAttempts', 'reattachLimit',
+      'lastResult', 'lastError', 'lastRetrySource', 'nextRetryDelayMs'];
+    const reportPaneKeys = reportPane ? Object.keys(reportPane) : [];
+    const reportShapeOk = reportPaneKeys.length === paneKeys.length
+      && paneKeys.every(key => reportPaneKeys.includes(key));
+    check('C：Ctrl+Shift+D 报告含只读 webgl 段（renderer/丢失/重挂/预算，仅元数据）',
+      reportPane?.renderer === 'webgl' && reportPane?.lossCount >= 1 &&
+      reportPane?.reattachLimit === 7 && webglReport?.budget === 8 && reportShapeOk,
+      `report=${JSON.stringify(webglReport)}`);
 
     // Re-arm through a real user switch before the simultaneous-loss phase.
     await cdp.eval(`TabManager.switchTo(${JSON.stringify(tabB)}); TabManager.switchTo(${JSON.stringify(tabA)})`);
     const healthyForD = await probeTab(cdp, tabA);
     check('D：健康复用重新武装恢复预算',
-      healthyForD?.adapter === true && healthyForD?.liveContexts === 1 && healthyForD?.liveMark === rearmedRecovery?.liveMark,
+      healthyForD?.adapter === true && healthyForD?.liveContexts === 1 && healthyForD?.liveMark === healedC?.liveMark,
       JSON.stringify(healthyForD));
     if (healthyForD?.adapter !== true || healthyForD?.liveContexts !== 1) throw new Error('Phase D re-arm precondition failed');
 

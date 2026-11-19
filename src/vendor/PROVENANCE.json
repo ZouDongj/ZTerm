@@ -43,6 +43,11 @@
     {
       "file": "addon-webgl.js",
       "description": "Keep canvas dimensions on the integer terminal grid when ResizeObserver reports fractional-DPR-rounded sizes, preventing one-device-pixel clipping of glyphs and cursor regions."
+    },
+    {
+      "file": "addon-webgl.js",
+      "description": "WebglRenderer creates its canvas and verifies the WebGL2 context before allocating render layers, theme/option listeners or the cursor blink manager; the blink manager is registered for disposal, and a failure later in the constructor disposes render layers, removes the canvas, releases the texture atlas cache entry and disposes registered resources before rethrowing.",
+      "notes": "Local hardening for bounded WebGL self-healing (issue #44); not an upstream backport. Constructor failure does not call WEBGL_lose_context, so a context created before a later failure is reclaimed by garbage collection."
     }
   ]
 }

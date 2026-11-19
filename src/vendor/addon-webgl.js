@@ -283,25 +283,43 @@
           p = i(733);
         class C extends c.Disposable {
           constructor(e, t, i, n, d, u, g, v, C) {
-            super(), this._terminal = e, this._characterJoinerService = t, this._charSizeService = i, this._coreBrowserService = n, this._coreService = d, this._decorationService = u, this._optionsService = g, this._themeService = v, this._cursorBlinkStateManager = new c.MutableDisposable(), this._charAtlasDisposable = this.register(new c.MutableDisposable()), this._observerDisposable = this.register(new c.MutableDisposable()), this._model = new f.RenderModel(), this._workCell = new _.CellData(), this._rectangleRenderer = this.register(new c.MutableDisposable()), this._glyphRenderer = this.register(new c.MutableDisposable()), this._onChangeTextureAtlas = this.register(new l.EventEmitter()), this.onChangeTextureAtlas = this._onChangeTextureAtlas.event, this._onAddTextureAtlasCanvas = this.register(new l.EventEmitter()), this.onAddTextureAtlasCanvas = this._onAddTextureAtlasCanvas.event, this._onRemoveTextureAtlasCanvas = this.register(new l.EventEmitter()), this.onRemoveTextureAtlasCanvas = this._onRemoveTextureAtlasCanvas.event, this._onRequestRedraw = this.register(new l.EventEmitter()), this.onRequestRedraw = this._onRequestRedraw.event, this._onContextLoss = this.register(new l.EventEmitter()), this.onContextLoss = this._onContextLoss.event, this.register(this._themeService.onChangeColors(() => this._handleColorChange())), this._cellColorResolver = new r.CellColorResolver(this._terminal, this._optionsService, this._model.selection, this._decorationService, this._coreBrowserService, this._themeService), this._core = this._terminal._core, this._renderLayers = [new p.LinkRenderLayer(this._core.screenElement, 2, this._terminal, this._core.linkifier, this._coreBrowserService, g, this._themeService)], this.dimensions = (0, h.createRenderDimensions)(), this._devicePixelRatio = this._coreBrowserService.dpr, this._updateDimensions(), this._updateCursorBlink(), this.register(g.onOptionChange(() => this._handleOptionsChanged())), this._canvas = this._coreBrowserService.mainDocument.createElement("canvas");
+            // Verify WebGL2 context creation before allocating render layers,
+            // theme/option listeners, or cursor blink timers so a context outage
+            // aborts cleanly without leaking DOM nodes or timers.
+            super();
+            this._terminal = e, this._characterJoinerService = t, this._charSizeService = i, this._coreBrowserService = n, this._coreService = d, this._decorationService = u, this._optionsService = g, this._themeService = v, this._core = this._terminal._core;
+            this._canvas = this._coreBrowserService.mainDocument.createElement("canvas");
             const m = {
               antialias: !1,
               depth: !1,
               preserveDrawingBuffer: C
             };
             if (this._gl = this._canvas.getContext("webgl2", m), !this._gl) throw new Error("WebGL2 not supported " + this._gl);
-            this.register((0, s.addDisposableDomListener)(this._canvas, "webglcontextlost", e => {
-              console.log("webglcontextlost event received"), e.preventDefault(), this._contextRestorationTimeout = setTimeout(() => {
-                this._contextRestorationTimeout = void 0, console.warn("webgl context not restored; firing onContextLoss"), this._onContextLoss.fire(e);
-              }, 3e3);
-            })), this.register((0, s.addDisposableDomListener)(this._canvas, "webglcontextrestored", e => {
-              console.warn("webglcontextrestored event received"), clearTimeout(this._contextRestorationTimeout), this._contextRestorationTimeout = void 0, (0, o.removeTerminalFromCache)(this._terminal), this._initializeWebGLState(), this._requestRedrawViewport();
-            })), this._observerDisposable.value = (0, a.observeDevicePixelDimensions)(this._canvas, this._coreBrowserService.window, (e, t) => this._setCanvasDevicePixelDimensions(e, t)), this.register(this._coreBrowserService.onWindowChange(e => {
-              this._observerDisposable.value = (0, a.observeDevicePixelDimensions)(this._canvas, e, (e, t) => this._setCanvasDevicePixelDimensions(e, t));
-            })), this._core.screenElement.appendChild(this._canvas), [this._rectangleRenderer.value, this._glyphRenderer.value] = this._initializeWebGLState(), this._isAttached = this._coreBrowserService.window.document.body.contains(this._core.screenElement), this.register((0, c.toDisposable)(() => {
-              for (const e of this._renderLayers) e.dispose();
-              this._canvas.parentElement?.removeChild(this._canvas), (0, o.removeTerminalFromCache)(this._terminal);
-            }));
+            try {
+              this._cursorBlinkStateManager = this.register(new c.MutableDisposable()), this._charAtlasDisposable = this.register(new c.MutableDisposable()), this._observerDisposable = this.register(new c.MutableDisposable()), this._model = new f.RenderModel(), this._workCell = new _.CellData(), this._rectangleRenderer = this.register(new c.MutableDisposable()), this._glyphRenderer = this.register(new c.MutableDisposable()), this._onChangeTextureAtlas = this.register(new l.EventEmitter()), this.onChangeTextureAtlas = this._onChangeTextureAtlas.event, this._onAddTextureAtlasCanvas = this.register(new l.EventEmitter()), this.onAddTextureAtlasCanvas = this._onAddTextureAtlasCanvas.event, this._onRemoveTextureAtlasCanvas = this.register(new l.EventEmitter()), this.onRemoveTextureAtlasCanvas = this._onRemoveTextureAtlasCanvas.event, this._onRequestRedraw = this.register(new l.EventEmitter()), this.onRequestRedraw = this._onRequestRedraw.event, this._onContextLoss = this.register(new l.EventEmitter()), this.onContextLoss = this._onContextLoss.event, this.register(this._themeService.onChangeColors(() => this._handleColorChange())), this._cellColorResolver = new r.CellColorResolver(this._terminal, this._optionsService, this._model.selection, this._decorationService, this._coreBrowserService, this._themeService), this._renderLayers = [new p.LinkRenderLayer(this._core.screenElement, 2, this._terminal, this._core.linkifier, this._coreBrowserService, g, this._themeService)], this.dimensions = (0, h.createRenderDimensions)(), this._devicePixelRatio = this._coreBrowserService.dpr, this._updateDimensions(), this._updateCursorBlink(), this.register(g.onOptionChange(() => this._handleOptionsChanged()));
+              this.register((0, s.addDisposableDomListener)(this._canvas, "webglcontextlost", e => {
+                console.log("webglcontextlost event received"), e.preventDefault(), this._contextRestorationTimeout = setTimeout(() => {
+                  this._contextRestorationTimeout = void 0, console.warn("webgl context not restored; firing onContextLoss"), this._onContextLoss.fire(e);
+                }, 3e3);
+              })), this.register((0, s.addDisposableDomListener)(this._canvas, "webglcontextrestored", e => {
+                console.warn("webglcontextrestored event received"), clearTimeout(this._contextRestorationTimeout), this._contextRestorationTimeout = void 0, (0, o.removeTerminalFromCache)(this._terminal), this._initializeWebGLState(), this._requestRedrawViewport();
+              })), this._observerDisposable.value = (0, a.observeDevicePixelDimensions)(this._canvas, this._coreBrowserService.window, (e, t) => this._setCanvasDevicePixelDimensions(e, t)), this.register(this._coreBrowserService.onWindowChange(e => {
+                this._observerDisposable.value = (0, a.observeDevicePixelDimensions)(this._canvas, e, (e, t) => this._setCanvasDevicePixelDimensions(e, t));
+              })), this._core.screenElement.appendChild(this._canvas), [this._rectangleRenderer.value, this._glyphRenderer.value] = this._initializeWebGLState(), this._isAttached = this._coreBrowserService.window.document.body.contains(this._core.screenElement), this.register((0, c.toDisposable)(() => {
+                for (const e of this._renderLayers) e.dispose();
+                this._canvas.parentElement?.removeChild(this._canvas), (0, o.removeTerminalFromCache)(this._terminal);
+              }));
+            } catch (err) {
+              if (this._renderLayers) {
+                for (const layer of this._renderLayers) {
+                  try { layer.dispose(); } catch (_) {}
+                }
+              }
+              try { this._canvas?.parentElement?.removeChild(this._canvas); } catch (_) {}
+              try { (0, o.removeTerminalFromCache)(this._terminal); } catch (_) {}
+              try { this.dispose(); } catch (_) {}
+              throw err;
+            }
           }
           get textureAtlas() {
             return this._charAtlas?.pages[0].canvas;
