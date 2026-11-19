@@ -299,6 +299,20 @@ function armSplashHide() {
         }
     }
     const fontPreload = Promise.all(fontLoads).catch(() => { /* missing fonts fall back silently */ });
+    // Fetch the live Windows animation preference in parallel with font preload
+    // so the very first terminal frame uses the authoritative native gate even
+    // if WebView2 cached prefers-reduced-motion: reduce during a remote session.
+    // Bounded wait guarantees an unavailable IPC never blocks TabManager.init().
+    const reducedMotionReady = (() => {
+        if (typeof ZTermReducedMotion === 'undefined' || !ZTermReducedMotion || typeof ZTermReducedMotion.start !== 'function') {
+            return Promise.resolve();
+        }
+        let timer = null;
+        return Promise.race([
+            Promise.resolve().then(() => ZTermReducedMotion.start()).catch(() => {}),
+            new Promise(resolve => { timer = setTimeout(resolve, 500); }),
+        ]).finally(() => { if (timer !== null) clearTimeout(timer); });
+    })();
     // The data directory is resolved by the main process (release builds default to the account's Local AppData; a user-defined pointer is supported)
     try {
         const info = await ipcRenderer.invoke('get-data-dir-info');
@@ -318,9 +332,9 @@ function armSplashHide() {
         // The splash lives outside .window, so sibling selectors cannot reach it: mirror the anchor onto body (app.css depends on it)
         document.body.classList.add('no-animations');
     }
-    // The font preload must land before the first terminal measures its cells;
-    // everything above this await does not create terminals.
-    await fontPreload;
+    // The font preload and initial native reduced-motion query must land before
+    // the first terminal opens and draws; everything above does not create terminals.
+    await Promise.all([fontPreload, reducedMotionReady]);
     TabManager.init();
     startSplashLoader();
     armSplashHide();

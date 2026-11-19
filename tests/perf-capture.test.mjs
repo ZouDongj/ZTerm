@@ -112,7 +112,10 @@ test('cursor gate, configuredAnimations and pre-sampling gate history are copied
     }) } };
     f.start(); f.advance(4000);
     const report = f.report();
-    assert.deepEqual(report.cursor.gate, { enabled: true, smoothEnabled: true, reducedMotion: false, duration: 90, jumpDistance: 8, motionDuration: 90 });
+    assert.deepEqual(report.cursor.gate, {
+        enabled: true, smoothEnabled: true, reducedMotion: false, duration: 90, jumpDistance: 8, motionDuration: 90,
+        nativeAnimationsEnabled: null, remoteSession: null, pageReducedMotion: null, source: null,
+    });
     assert.equal(report.cursor.configuredAnimations, true);
     // Negative dt is the point: a gate transition BEFORE the sample window is
     // the evidence this report exists for.
@@ -135,7 +138,90 @@ test('cursor gate, configuredAnimations and pre-sampling gate history are copied
     assert.equal(ring.length, 32);
     assert.equal(ring[0].dt, -310, 'the two oldest entries were dropped');
     assert.equal(g.report().cursor.configuredAnimations, null);
-    assert.deepEqual(g.report().cursor.gate, { enabled: null, smoothEnabled: null, reducedMotion: null, duration: null, jumpDistance: null, motionDuration: null });
+    assert.deepEqual(g.report().cursor.gate, {
+        enabled: null, smoothEnabled: null, reducedMotion: null, duration: null, jumpDistance: null, motionDuration: null,
+        nativeAnimationsEnabled: null, remoteSession: null, pageReducedMotion: null, source: null,
+    });
+
+    // When ZTermReducedMotion is present, cursor.gate exposes its whitelisted
+    // native/page diagnostics and rejects arbitrary strings or thrown getters.
+    const rmFixture = fixture();
+    rmFixture.context.ZTermReducedMotion = {
+        snapshot: () => ({
+            nativeAnimationsEnabled: true,
+            remoteSession: false,
+            pageReducedMotion: true,
+            source: 'native',
+            extra: 'private-rm',
+        }),
+    };
+    rmFixture.tab._smoothCursor = { _adapter: { snapshot: () => ({
+        enabled: true, smoothEnabled: true, reducedMotion: false, duration: 90, jumpDistance: 8, motionDuration: 90,
+        counters: { cursorDrawPasses: 1, baseDrawPasses: 2 }, retargets: [], drawPassStatus: 'base-only',
+    }) } };
+    rmFixture.start(); rmFixture.advance(4000);
+    assert.deepEqual(rmFixture.report().cursor.gate, {
+        enabled: true, smoothEnabled: true, reducedMotion: false, duration: 90, jumpDistance: 8, motionDuration: 90,
+        nativeAnimationsEnabled: true, remoteSession: false, pageReducedMotion: true, source: 'native',
+    });
+    assert.doesNotMatch(JSON.stringify(rmFixture.report()), /private-/);
+
+    const badRm = fixture();
+    badRm.context.ZTermReducedMotion = {
+        snapshot: () => ({
+            nativeAnimationsEnabled: 'private-yes',
+            remoteSession: 'private-rdp',
+            pageReducedMotion: 1,
+            source: 'private-source',
+        }),
+    };
+    badRm.tab._smoothCursor = { _adapter: { snapshot: () => ({
+        enabled: true, smoothEnabled: true, reducedMotion: false, duration: 90, jumpDistance: 8, motionDuration: 90,
+        counters: { cursorDrawPasses: 1, baseDrawPasses: 2 }, retargets: [], drawPassStatus: 'base-only',
+    }) } };
+    badRm.start(); badRm.advance(4000);
+    assert.deepEqual(badRm.report().cursor.gate, {
+        enabled: true, smoothEnabled: true, reducedMotion: false, duration: 90, jumpDistance: 8, motionDuration: 90,
+        nativeAnimationsEnabled: null, remoteSession: null, pageReducedMotion: null, source: null,
+    });
+    assert.doesNotMatch(JSON.stringify(badRm.report()), /private-/);
+
+    // A throwing ZTermReducedMotion.snapshot() or throwing property getter on
+    // its return value must not abort perfCapture or leak private error text.
+    const throwSnapshotRm = fixture();
+    throwSnapshotRm.context.ZTermReducedMotion = {
+        snapshot() { throw new Error('private-snapshot-throw'); },
+    };
+    throwSnapshotRm.tab._smoothCursor = { _adapter: { snapshot: () => ({
+        enabled: true, smoothEnabled: true, reducedMotion: false, duration: 90, jumpDistance: 8, motionDuration: 90,
+        counters: { cursorDrawPasses: 1, baseDrawPasses: 2 }, retargets: [], drawPassStatus: 'base-only',
+    }) } };
+    throwSnapshotRm.start(); throwSnapshotRm.advance(4000);
+    assert.deepEqual(throwSnapshotRm.report().cursor.gate, {
+        enabled: true, smoothEnabled: true, reducedMotion: false, duration: 90, jumpDistance: 8, motionDuration: 90,
+        nativeAnimationsEnabled: null, remoteSession: null, pageReducedMotion: null, source: null,
+    });
+    assert.doesNotMatch(JSON.stringify(throwSnapshotRm.report()), /private-/);
+
+    const throwGetterRm = fixture();
+    throwGetterRm.context.ZTermReducedMotion = {
+        snapshot: () => ({
+            nativeAnimationsEnabled: true,
+            get remoteSession() { throw new Error('private-getter-throw'); },
+            pageReducedMotion: false,
+            source: 'native',
+        }),
+    };
+    throwGetterRm.tab._smoothCursor = { _adapter: { snapshot: () => ({
+        enabled: true, smoothEnabled: true, reducedMotion: false, duration: 90, jumpDistance: 8, motionDuration: 90,
+        counters: { cursorDrawPasses: 1, baseDrawPasses: 2 }, retargets: [], drawPassStatus: 'base-only',
+    }) } };
+    throwGetterRm.start(); throwGetterRm.advance(4000);
+    assert.deepEqual(throwGetterRm.report().cursor.gate, {
+        enabled: true, smoothEnabled: true, reducedMotion: false, duration: 90, jumpDistance: 8, motionDuration: 90,
+        nativeAnimationsEnabled: null, remoteSession: null, pageReducedMotion: null, source: null,
+    });
+    assert.doesNotMatch(JSON.stringify(throwGetterRm.report()), /private-/);
 
     // Only a real boolean passes through (false = animations disabled is a
     // legitimate setting); abnormal string/object values never enter the

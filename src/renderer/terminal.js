@@ -157,6 +157,8 @@ function _wireSmoothCursorWebgl(term, webglAddon) {
         // TUIs (ink input boxes redraw ~15KB/keystroke) that stacked dozens
         // of full-screen passes per key and read as severe jank.
         renderScope: 'cursor',
+        reducedMotionQuery: (typeof ZTermReducedMotion !== 'undefined' && ZTermReducedMotion && ZTermReducedMotion.query)
+            ? ZTermReducedMotion.query : undefined,
     });
     try {
         adapter = create();
