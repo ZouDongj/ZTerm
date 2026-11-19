@@ -266,11 +266,12 @@ pub struct SshSession {
     pub handle: Arc<russh::client::Handle<SshHandler>>,
     pub sftp: Option<Arc<russh_sftp::client::SftpSession>>,
     pub sftp_transfer: Option<Arc<russh_sftp::client::SftpSession>>,
-    pub transfer_cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    pub transfer_cancels: TransferCancels,
     pub cwd: Arc<Mutex<Option<String>>>,
-    /// Shared with the SshHandler and the reader task: first writer wins for
-    /// user-initiated closes (ssh_disconnect / tab close pre-fill it), the
-    /// handler's disconnected() callback fills it for everything else.
+    /// Shared with the SshHandler and the reader task: user-initiated closes
+    /// (ssh_disconnect / tab close) pre-fill it, and the handler's
+    /// disconnected() keeps an existing label; otherwise the handler fills in
+    /// the label russh reports.
     pub disconnect_reason: Arc<Mutex<Option<String>>>,
 }
 
@@ -3601,8 +3602,7 @@ pub async fn ssh_connect(
         }
     });
 
-    let cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let cancels: TransferCancels = Arc::new(Mutex::new(HashMap::new()));
 
     // Final check before registering: if cancelled meanwhile (tab close/reconnect), skip registration and events — the connection is dropped silently
     cancelled!(handle);
@@ -3644,6 +3644,18 @@ pub async fn ssh_connect(
 
 // ── Command: ssh_disconnect ──
 
+/// Label a user-initiated close (ssh_disconnect / tab close). The SshHandler's
+/// disconnected() keeps a label that is already present and reports kind
+/// "closed", so the pre-fill must happen before the session becomes unreachable.
+const USER_CLOSE_REASON: &str = "closed by user";
+
+/// Mark `slot` as a user-initiated close. Callers hold the session map guard so
+/// no reader can observe a removed session without a shutdown cause; the slot
+/// itself is a per-session lock, a leaf in the map -> per-session order.
+fn mark_user_close(slot: &Mutex<Option<String>>) {
+    *slot.lock() = Some(USER_CLOSE_REASON.to_string());
+}
+
 /// Take the SSH session for `tab_id` out of the map for an explicit
 /// disconnect. Non-SSH entries sharing the id space (a local PTY) stay
 /// registered: local teardown is pty_destroy's job, and dropping the entry
@@ -3657,10 +3669,10 @@ fn take_ssh_for_disconnect(
 ) -> Option<SshSession> {
     match map.remove(tab_id) {
         Some(SessionType::Ssh(session)) => {
-            // First writer wins: the handler's disconnected() reports
-            // russh's information-free Error::Disconnect, so label the close
+            // disconnected() keeps a label that is already present, and russh's
+            // Error::Disconnect carries no information, so label the close
             // before the session can become unreachable.
-            *session.disconnect_reason.lock() = Some("closed by user".to_string());
+            mark_user_close(&session.disconnect_reason);
             Some(session)
         }
         other => {
@@ -3950,8 +3962,10 @@ fn close_plan_for_session(session: SessionType) -> SessionClosePlan {
 
 /// Remove `tab_id` from the session map, run `prepare` on the removed entry
 /// while the guard is still held, then run `close` only after the guard is
-/// released. `prepare` may take a per-session lock (the map -> session order is
-/// the only nesting in this file); teardown must never run under the map lock:
+/// released. `prepare` may take a per-session lock (map -> per-session lock is
+/// the only nesting taken under the session map); it must be quick and must
+/// never re-enter the map, since parking_lot locks are not reentrant. Teardown
+/// must never run under the map lock:
 /// dropping a local session closes ConPTY, and `ClosePseudoConsole` waits for
 /// conhost to exit (without a bound on Windows builds before 11 24H2), while
 /// every other session's pty_input / pty_resize / pty_create needs the same
@@ -4029,7 +4043,7 @@ pub async fn pty_destroy(
             // Label a user close before the session can leave the map, so the
             // handler's disconnected() cannot win with a generic error.
             if let SessionType::Ssh(session) = session {
-                *session.disconnect_reason.lock() = Some("closed by user".to_string());
+                mark_user_close(&session.disconnect_reason);
             }
         },
         close_plan_for_session,
@@ -8803,10 +8817,16 @@ mod tests {
 
     struct RecordingWriter {
         chunks: Arc<Mutex<Vec<Vec<u8>>>>,
+        /// Per-write delays in milliseconds, consumed in call order.
+        delays_ms: Arc<Mutex<std::collections::VecDeque<u64>>>,
     }
 
     impl std::io::Write for RecordingWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let delay_ms = self.delays_ms.lock().pop_front().unwrap_or(0);
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
             self.chunks.lock().push(buf.to_vec());
             Ok(buf.len())
         }
@@ -8818,8 +8838,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn local_writer_preserves_chunk_order() {
         let chunks = Arc::new(Mutex::new(Vec::new()));
+        // The first write lingers: if the writer ever stops awaiting each
+        // blocking write, the later chunks overtake it and this check fails.
+        let delays_ms = Arc::new(Mutex::new(std::collections::VecDeque::from(vec![50])));
         let writer = Arc::new(Mutex::new(Some(RecordingWriter {
             chunks: chunks.clone(),
+            delays_ms,
         })));
         let (tx, rx) = mpsc::channel::<LocalInput>(8);
         let handle = tokio::spawn(run_local_writer(rx, writer, "local_test".to_string()));
@@ -8844,6 +8868,7 @@ mod tests {
     async fn local_writer_clears_its_slot_when_the_channel_closes() {
         let writer = Arc::new(Mutex::new(Some(RecordingWriter {
             chunks: Arc::new(Mutex::new(Vec::new())),
+            delays_ms: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         })));
         let (tx, rx) = mpsc::channel::<LocalInput>(1);
         let handle = tokio::spawn(run_local_writer(
@@ -8857,6 +8882,13 @@ mod tests {
             writer.lock().is_none(),
             "the writer slot must be cleared after the channel closes"
         );
+    }
+
+    #[test]
+    fn mark_user_close_labels_the_reason_slot() {
+        let slot = Mutex::new(None);
+        mark_user_close(&slot);
+        assert_eq!(slot.lock().as_deref(), Some(USER_CLOSE_REASON));
     }
 
     #[test]
