@@ -22,6 +22,8 @@
 // INSIDE the window (gl.isContextLost() true, onContextLoss not yet fired).
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 import { loadVm, wiredTab } from './helpers/renderer-vm.mjs';
 
 function installWebglFakes(ctx) {
@@ -785,17 +787,21 @@ test('a failed probe restores the automatic schedule after an LRU release', () =
     assert.equal(state.createAttempts, beforeProbe + 1, 'the probe attempted one context');
     assert.equal(rec.retryAttempts, 0, 'the probe does not consume an automatic attempt');
     assert.ok(rec.retryTimer, 'the failed probe re-arms the bounded schedule');
-    // attempts=0 selects the immediate slot, so the re-armed deadline is due
-    // now (a positive-epoch check would be trivially true and prove nothing).
-    assert.ok(rec.nextRetryAt - Date.now() <= 1000, 'the immediate backoff slot is due now');
+    // Re-arming after a failed probe backs off to the 2s slot rather than
+    // double-building at 0ms and immediately overwriting probe diagnostics.
+    const lruDelayMs = rec.nextRetryAt - Date.now();
+    assert.ok(lruDelayMs >= 1500 && lruDelayMs <= 2500,
+        `the 2s backoff slot is selected after failed probe (delay=${lruDelayMs}ms)`);
     assert.equal(pendingSetHas(ctx, tab), true);
     assert.ok(rec.lastRetrySource.startsWith('user:'), 'diagnostics keep the probe source');
     assert.equal(rec.lastRetryResult, 'probe-load-failed');
 
-    // The re-armed schedule advances the automatic episode (attempt 0 is the
-    // immediate slot).
+    // No duplicate build happens on the same tick; the 2s slot advances cleanly.
     ctx.__tq.advance(0);
-    assert.equal(rec.retryAttempts, 1, 'the re-armed automatic attempt ran');
+    assert.equal(state.createAttempts, beforeProbe + 1, 'no 0ms double build after failed probe');
+    assert.ok(rec.lastRetrySource.startsWith('user:'), 'probe source survives tick 0');
+    ctx.__tq.advance(2000);
+    assert.equal(rec.retryAttempts, 1, 'the re-armed automatic attempt ran at 2s');
     assert.ok(rec.retryTimer, 'the next backoff step is armed');
     ctx.__tq.advance(2000);
     assert.equal(rec.retryAttempts, 2);
@@ -860,14 +866,18 @@ test('terminal input restores the automatic schedule after an LRU release', () =
     assert.equal(pendingSetHas(ctx, tab), true, 'the re-armed episode is discoverable');
     assert.ok(rec.lastRetrySource.startsWith('user:terminal-input'), 'the probe source is preserved');
     assert.equal(rec.lastRetryResult, 'probe-load-failed');
-    // attempts=0 selects the immediate slot: the re-armed deadline is due now
-    // (a positive-epoch check would be trivially true).
-    assert.ok(rec.nextRetryAt - Date.now() <= 1000, 'the immediate backoff slot is due now');
+    // Re-arming after a failed probe backs off to the 2s slot rather than
+    // double-building at 0ms and clobbering the user:terminal-input source.
+    const inputDelayMs = rec.nextRetryAt - Date.now();
+    assert.ok(inputDelayMs >= 1500 && inputDelayMs <= 2500,
+        `the 2s backoff slot is selected after failed input probe (delay=${inputDelayMs}ms)`);
 
-    // The re-armed schedule advances: attempt 1 fails, then the GPU returns
-    // and the 2s slot heals the terminal.
+    // Same tick performs zero builds; attempt 1 lands at 2s, then GPU returns and heals at +2s.
     ctx.__tq.advance(0);
-    assert.equal(rec.retryAttempts, 1, 'the re-armed automatic attempt ran');
+    assert.equal(state.createAttempts, beforeProbe + 1, 'no 0ms double build after failed probe');
+    assert.ok(rec.lastRetrySource.startsWith('user:terminal-input'), 'the probe source survives tick 0');
+    ctx.__tq.advance(2000);
+    assert.equal(rec.retryAttempts, 1, 'the re-armed automatic attempt ran at 2s');
     state.outage = 'none';
     ctx.__tq.advance(2000);
     assert.equal(rec.retryAttempts, 2);
@@ -1037,4 +1047,352 @@ test('a context restored inside the vendor window is reused, not replaced', () =
     assert.equal(instances[0].disposed, false);
     assert.equal(tab._smoothCursor, wrapper, 'the live wrapper is re-pointed, not replaced');
     assert.ok(tab._smoothCursor?._adapter);
+});
+
+test('real vendored WebglAddon + AddonManager disposal leaks zero layers, listeners, or blink timers on getContext outage or mid-constructor error', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const addonWebglSrc = readFileSync(new URL('../src/vendor/addon-webgl.js', import.meta.url), 'utf8');
+    const blinkTimeouts = [];
+    const intervals = [];
+    let roObserveCount = 0;
+    let roDisconnectCount = 0;
+    let appendThrows = 0;
+    let nextTimer = 0;
+    const screenChildren = [];
+    const themeListeners = [];
+    const optionListeners = [];
+    const showLinkListeners = [];
+    const hideLinkListeners = [];
+    const makeDisposable = (arr, fn) => {
+        arr.push(fn);
+        return { dispose() { const i = arr.indexOf(fn); if (i >= 0) arr.splice(i, 1); } };
+    };
+
+    let glMode = 'null'; // 'null' | 'throw-mid-init'
+    const fakeDoc = {
+        body: { contains: () => true },
+        createElement(tag) {
+            return {
+                tagName: tag.toUpperCase(),
+                style: {},
+                classList: { _s: new Set(), add(c) { this._s.add(c); }, contains(c) { return this._s.has(c); } },
+                parentElement: null,
+                width: 0,
+                height: 0,
+                addEventListener() {},
+                removeEventListener() {},
+                remove() {
+                    if (this.parentElement) {
+                        const i = this.parentElement.children.indexOf(this);
+                        if (i >= 0) this.parentElement.children.splice(i, 1);
+                        this.parentElement = null;
+                    }
+                },
+                getContext(type) {
+                    if (type === '2d') {
+                        return {
+                            fillStyle: '',
+                            clearRect() {}, fillRect() {}, beginPath() {}, rect() {}, clip() {}, fillText() {},
+                            createLinearGradient: () => ({ addColorStop() {} }),
+                            getImageData: () => ({ data: new Uint8ClampedArray(4) }),
+                        };
+                    }
+                    if ((type === 'webgl2' || type === 'webgl') && glMode === 'throw-mid-init') {
+                        return { getParameter: () => 2048 };
+                    }
+                    return null;
+                },
+            };
+        },
+    };
+    const fakeWin = {
+        document: fakeDoc,
+        devicePixelRatio: 1,
+        ResizeObserver: class {
+            observe() { roObserveCount += 1; }
+            disconnect() { roDisconnectCount += 1; }
+        },
+        addEventListener() {},
+        removeEventListener() {},
+        setInterval(fn, ms) { const id = ++nextTimer; intervals.push({ id, fn, ms, cleared: false }); return id; },
+        clearInterval(id) { const item = intervals.find(x => x.id === id); if (item) item.cleared = true; },
+        setTimeout(fn, ms) { const id = ++nextTimer; blinkTimeouts.push({ id, fn, ms, cleared: false }); return id; },
+        clearTimeout(id) { const item = blinkTimeouts.find(x => x.id === id); if (item) item.cleared = true; },
+        requestAnimationFrame: () => 0,
+        cancelAnimationFrame: () => {},
+    };
+    const sandbox = {
+        self: null,
+        window: fakeWin,
+        document: fakeDoc,
+        navigator: { userAgent: 'Chrome/120', platform: 'Win32' },
+        console: { log() {}, warn() {}, error() {} },
+        setTimeout, clearTimeout,
+        setInterval: fakeWin.setInterval,
+        clearInterval: fakeWin.clearInterval,
+        queueMicrotask,
+        Float32Array, Uint8Array, Int32Array, Uint16Array, Uint32Array,
+    };
+    sandbox.self = sandbox;
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(addonWebglSrc, sandbox, { filename: 'addon-webgl.js' });
+    ctx.WebglAddon = sandbox.TabbyWebgl.WebglAddon;
+
+    const tab = wiredTab(ctx, 't_real_vendor_leak', 'local_real_vendor', 'x');
+    tab.term.options.cursorBlink = true;
+    const screenElement = {
+        style: {},
+        children: screenChildren,
+        appendChild(c) {
+            // In mid-init mode, allow LinkRenderLayer's canvas append, then throw when
+            // WebglRenderer appends its own WebGL canvas after blink/listener setup ran.
+            if (glMode === 'throw-mid-init' && !c.classList.contains('xterm-link-layer')) {
+                appendThrows += 1;
+                throw new Error('simulated mid-constructor canvas append failure');
+            }
+            c.parentElement = this;
+            screenChildren.push(c);
+            return c;
+        },
+        removeChild(c) {
+            const i = screenChildren.indexOf(c);
+            if (i >= 0) screenChildren.splice(i, 1);
+            c.parentElement = null;
+        },
+    };
+    tab.term.element = screenElement;
+    // Mirror real xterm.js AddonManager.loadAddon (src/vendor/xterm.js:6540-6557):
+    // registers the addon metadata and wraps dispose() BEFORE calling addon.activate(term).
+    const addonManager = {
+        _addons: [],
+        loadAddon(term, addon) {
+            const meta = { instance: addon, dispose: addon.dispose, isDisposed: false };
+            this._addons.push(meta);
+            addon.dispose = () => {
+                if (meta.isDisposed) return;
+                const i = this._addons.indexOf(meta);
+                if (i === -1) throw new Error('Could not dispose an addon that has not been loaded');
+                meta.isDisposed = true;
+                meta.dispose.apply(meta.instance);
+                this._addons.splice(i, 1);
+            };
+            addon.activate(term);
+        },
+    };
+    tab.term._addonManager = addonManager;
+    tab.term.loadAddon = (addon) => addonManager.loadAddon(tab.term, addon);
+    tab.term._core = {
+        screenElement,
+        coreService: { isCursorHidden: false, isCursorInitialized: true },
+        optionsService: {
+            rawOptions: { fontSize: 16, fontFamily: 'monospace', cursorBlink: true, lineHeight: 1, letterSpacing: 0 },
+            options: { fontSize: 16, fontFamily: 'monospace', cursorBlink: true, letterSpacing: 0, lineHeight: 1 },
+            onOptionChange: (fn) => makeDisposable(optionListeners, fn),
+            onSpecificOptionChange: () => ({ dispose() {} }),
+        },
+        _themeService: {
+            colors: {
+                background: { css: '#000', rgba: 0x000000ff },
+                foreground: { css: '#fff', rgba: 0xffffffff },
+                cursor: { css: '#fff', rgba: 0xffffffff },
+                ansi: Array.from({ length: 16 }, () => ({ css: '#fff', rgba: 0xffffffff })),
+            },
+            onChangeColors: (fn) => makeDisposable(themeListeners, fn),
+        },
+        _renderService: { setRenderer() {}, handleResize() {}, dimensions: {} },
+        _characterJoinerService: {},
+        _charSizeService: { width: 9, height: 18 },
+        _coreBrowserService: { dpr: 1, isFocused: true, mainDocument: fakeDoc, window: fakeWin, onWindowChange: () => ({ dispose() {} }) },
+        _decorationService: {},
+        _logService: { logLevel: 5 },
+        linkifier: {
+            onShowLinkUnderline: (fn) => makeDisposable(showLinkListeners, fn),
+            onHideLinkUnderline: (fn) => makeDisposable(hideLinkListeners, fn),
+        },
+    };
+
+    ctx.TabManager.activeId = tab.id;
+    // Drain initial attach + all bounded retries during WebGL2 context outage.
+    // Early getContext check must abort before LinkRenderLayer or blink timers allocate.
+    ctx._attachWebglRenderer(tab, tab.term);
+    ctx.__tq.advance(10 * 60 * 1000);
+    assert.equal(blinkTimeouts.length, 0, 'getContext outage must fail before scheduling any blink timers');
+    assert.equal(intervals.length, 0, 'getContext outage must never start blink intervals');
+    assert.equal(addonManager._addons.length, 0, 'getContext outage leaves zero _addonManager entries');
+
+    // Also exercise mid-constructor throw AFTER LinkRenderLayer, ResizeObserver,
+    // and CursorBlinkStateManager start.
+    glMode = 'throw-mid-init';
+    ctx._attachWebglRenderer(tab, tab.term);
+    ctx.__tq.advance(10 * 60 * 1000);
+    assert.ok(appendThrows >= 1, 'mid-init test reached the screenElement.appendChild throw hook');
+    assert.ok(roObserveCount >= 1, 'mid-init test installed ResizeObserver before throwing');
+    assert.equal(roDisconnectCount, roObserveCount, 'every ResizeObserver installed before throw was disconnected');
+
+    for (const t of blinkTimeouts.filter(x => !x.cleared)) t.fn();
+    assert.equal(addonManager._addons.length, 0, 'failed attaches must leave zero entries in _addonManager._addons');
+    assert.equal(screenChildren.filter(c => c.classList.contains('xterm-link-layer')).length, 0, 'zero leaked .xterm-link-layer canvases');
+    assert.equal(themeListeners.length, 0, 'zero leaked theme listeners');
+    assert.equal(optionListeners.length, 0, 'zero leaked option listeners');
+    assert.equal(showLinkListeners.length + hideLinkListeners.length, 0, 'zero leaked linkifier listeners');
+    assert.equal(blinkTimeouts.filter(x => !x.cleared).length, 0, 'zero leaked blink timeouts');
+    assert.equal(intervals.filter(x => !x.cleared).length, 0, 'zero leaked blink intervals');
+});
+
+test('initial attach born-lost (lossCount === 0) starts bounded recovery and heals when GPU returns', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_init_born', 'local_init_born', 'x');
+    state.outage = 'born-lost';
+    attachActive(ctx, tab);
+
+    const rec = recOf(ctx, tab);
+    assert.equal(instances.length, 1);
+    assert.equal(instances[0].disposed, true);
+    assert.equal(rec.lossCount, 1, 'initial born-lost records first loss');
+    assert.equal(rec.retryAttempts, 1, 'initial failed attach counts as first attempt');
+    assert.equal(rec.lastRetryResult, 'context-lost');
+    assert.ok(rec.retryTimer, 'bounded backoff timer is armed');
+    assert.equal(pendingSetHas(ctx, tab), true, 'terminal is discoverable by user probes');
+
+    // Bounded recovery heals automatically when GPU returns without a tab switch.
+    state.outage = 'none';
+    ctx.__tq.advance(2000);
+    assert.equal(instances.length, 2);
+    assert.ok(tab._smoothCursor?._adapter, 'smooth cursor recovers from initial born-lost outage');
+});
+
+test('initial attach load-failed (lossCount === 0) starts bounded recovery and supports user probes after exhaustion', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_init_fail', 'local_init_fail', 'x');
+    state.outage = 'fail-create';
+    attachActive(ctx, tab);
+
+    const rec = recOf(ctx, tab);
+    assert.equal(rec.lossCount, 1);
+    assert.equal(rec.retryAttempts, 1);
+    assert.equal(rec.lastRetryResult, 'load-failed');
+    assert.ok(rec.retryTimer);
+    assert.equal(pendingSetHas(ctx, tab), true);
+
+    // Exhaust the remaining backoff slots, then recover via a user probe.
+    ctx.__tq.advance(10 * 60 * 1000);
+    assert.equal(rec.retryAttempts, 7);
+    assert.equal(rec.retryTimer, null);
+
+    state.outage = 'none';
+    ageUserProbe(ctx, tab, 62000);
+    fireWindow(ctx, 'focus');
+    assert.equal(instances.length, 1);
+    assert.ok(tab._smoothCursor?._adapter, 'user probe heals initial attach failure after GPU returns');
+});
+
+test('diagnostics snapshot reports webgl-lost inside the 3s restore window on real browser renderer shape', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances } = installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_diag_win', 'local_diag_win', 'x');
+    attachActive(ctx, tab);
+    // Simulate real xterm.js WebglRenderer attached on _core._renderService._renderer.value._gl.
+    tab.term._core = { _renderService: { _renderer: { value: { _gl: instances[0]._renderer._gl } } } };
+
+    assert.equal(ctx._webglDiagnosticsSnapshot().panes[0].renderer, 'webgl');
+    instances[0].lost = true; // inside 3s vendor restore window (onContextLoss not fired yet)
+    assert.equal(ctx._webglDiagnosticsSnapshot().panes[0].renderer, 'webgl-lost');
+});
+
+test('user-driven attach clears stale lastRetryResult and lastRetryError across switchback and 3s-window replacement', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tabA = wiredTab(ctx, 't_clear_a', 'local_clear_a', 'x');
+    const tabB = wiredTab(ctx, 't_clear_b', 'local_clear_b', 'y');
+    attachActive(ctx, tabA);
+
+    state.outage = 'fail-create';
+    instances[0].loseContextUnrecovered();
+    ctx.__tq.advance(0); // attempt 1 -> load-failed + WebGL2 error
+    ctx.TabManager.activeId = tabB.id;
+    ctx._detachWebglRenderer(tabA, tabA.term); // deferred-inactive while error lingers
+
+    state.outage = 'none';
+    attachActive(ctx, tabA);
+    const snapA = ctx._webglDiagnosticsSnapshot().panes[0];
+    assert.equal(snapA.renderer, 'webgl');
+    assert.equal(snapA.lastResult, 'attached');
+    assert.equal(snapA.lastError, null);
+
+    // Trigger 3s-window replacement when rec.addon is already marked lost.
+    instances[1].lost = true;
+    attachActive(ctx, tabA);
+    const snapReplace = ctx._webglDiagnosticsSnapshot().panes[0];
+    assert.equal(snapReplace.renderer, 'webgl');
+    assert.equal(snapReplace.lastResult, 'attached');
+    assert.equal(snapReplace.lastError, null);
+});
+
+test('switching away from an exhausted tab removes it from _webglRecoveryPending and re-attaches cleanly on return', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    const { instances, state } = installWebglFakes(ctx);
+    const tabA = wiredTab(ctx, 't_exh_a', 'local_exh_a', 'x');
+    const tabB = wiredTab(ctx, 't_exh_b', 'local_exh_b', 'y');
+    attachActive(ctx, tabA);
+
+    state.outage = 'fail-create';
+    instances[0].loseContextUnrecovered();
+    ctx.__tq.advance(0);
+    ctx.__tq.advance(10 * 60 * 1000);
+    assert.equal(pendingSetHas(ctx, tabA), true);
+
+    ctx.TabManager.activeId = tabB.id;
+    ctx._detachWebglRenderer(tabA, tabA.term);
+    assert.equal(pendingSetHas(ctx, tabA), false, 'hidden exhausted tab leaves pending set');
+    assert.equal(recOf(ctx, tabA).lastRetryResult, 'deferred-inactive');
+    assert.equal(ctx._webglDiagnosticsSnapshot().recoveryPending, 0);
+
+    state.outage = 'none';
+    attachActive(ctx, tabA);
+    assert.ok(tabA._smoothCursor?._adapter, 'tab heals immediately when user switches back');
+    assert.equal(ctx._webglDiagnosticsSnapshot().panes[0].lastResult, 'attached');
+});
+
+test('newly wired active tab and newly split active pane arm bounded recovery when initial attach fails during outage', () => {
+    for (const outage of ['fail-create', 'born-lost']) {
+        const ctx = loadVm({ wireSmoothCursorStub: false });
+        const { state } = installWebglFakes(ctx);
+
+        // Set activeId BEFORE wireTerminal so createTermWrap creates wrap.active and
+        // wireTerminal invokes _attachWebglRenderer directly during wiring.
+        state.outage = outage;
+        ctx.TabManager.activeId = 't_new_active';
+        const tab = wiredTab(ctx, 't_new_active', 'local_new_active', 'x');
+        const tabRec = recOf(ctx, tab);
+        assert.equal(tabRec.lossCount, 1, `${outage}: new active tab records loss`);
+        assert.equal(tabRec.retryAttempts, 1, `${outage}: new active tab arms attempt 1`);
+        assert.notEqual(tabRec.lastRetryResult, 'deferred-inactive',
+            `${outage}: wireTerminal assigns tab.term before _attachWebglRenderer so _resolveTermOwner succeeds`);
+        assert.ok(tabRec.retryTimer, `${outage}: new active tab arms backoff timer`);
+        assert.equal(pendingSetHas(ctx, tab), true, `${outage}: new active tab enters pending set`);
+
+        // Split the active tab and wire a new active pane during the same outage.
+        ctx.TabManager.addPaneRelativeTo(tab, 'b');
+        const panes = ctx.getAllPanes(tab);
+        assert.equal(panes.length, 2);
+        const p2 = panes[1];
+        p2.tabId = 'local_new_pane';
+        ctx.wireTerminalToPane(tab, p2);
+        const paneRec = ctx.__eval('(term) => _webglByTerm.get(term)')(p2.term);
+        assert.equal(paneRec.lossCount, 1, `${outage}: new active split pane records loss`);
+        assert.equal(paneRec.retryAttempts, 1, `${outage}: new active split pane arms attempt 1`);
+        assert.notEqual(paneRec.lastRetryResult, 'deferred-inactive',
+            `${outage}: wireTerminalToPane assigns pane.term before _attachWebglRenderer`);
+        assert.ok(paneRec.retryTimer, `${outage}: new active split pane arms backoff timer`);
+        assert.equal(ctx.__eval('(term) => _webglRecoveryPending.has(term)')(p2.term), true);
+
+        // GPU recovers: both newly created holders self-heal automatically without tab switch.
+        state.outage = 'none';
+        ctx.__tq.advance(2000);
+        assert.ok(panes[0]._smoothCursor?._adapter, `${outage}: primary pane heals automatically`);
+        assert.ok(p2._smoothCursor?._adapter, `${outage}: split pane heals automatically`);
+    }
 });

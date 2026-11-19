@@ -343,6 +343,8 @@ function _resetWebglRecovery(term, rec) {
     _cancelWebglHealthReset(rec);
     rec.retryAttempts = 0;
     rec.lastRetrySource = null;
+    rec.lastRetryResult = null;
+    rec.lastRetryError = null;
     // Start the probe throttle window now: the delayed focus of the terminal
     // being activated must not immediately build a second context after a
     // failed user-driven attach.
@@ -371,7 +373,11 @@ function _scheduleWebglRecovery(term, source) {
         _webglRecoveryPending.add(term);
         return;
     }
-    const delay = WEBGL_RECOVERY_BACKOFF_MS[Math.min(rec.retryAttempts, WEBGL_RECOVERY_BACKOFF_MS.length - 1)];
+    // A failed user probe just attempted a context on this tick; skip the
+    // immediate 0ms slot so re-arming backs off instead of building twice at
+    // 0ms and clobbering the probe's diagnostics source.
+    const slot = source === 'probe-failed' ? Math.max(1, rec.retryAttempts) : rec.retryAttempts;
+    const delay = WEBGL_RECOVERY_BACKOFF_MS[Math.min(slot, WEBGL_RECOVERY_BACKOFF_MS.length - 1)];
     rec.lastRetrySource = source;
     rec.nextRetryAt = Date.now() + delay;
     rec.retryTimer = setTimeout(() => {
@@ -590,8 +596,15 @@ function _webglDiagnosticsSnapshot() {
             if (!term) continue;
             const rec = _webglByTerm.get(term);
             let renderer = 'dom';
-            try { if (term._core?._renderService?._renderer?.value?._gl) renderer = 'webgl'; } catch (e) {}
-            if (renderer === 'dom' && rec && rec.addon) renderer = _webglContextLost(rec.addon) ? 'webgl-lost' : 'webgl';
+            let liveGl = null;
+            try { liveGl = term._core?._renderService?._renderer?.value?._gl || null; } catch (e) {}
+            if (liveGl) {
+                let lost = false;
+                try { lost = liveGl.isContextLost?.() === true; } catch (e) {}
+                renderer = (lost || (rec?.addon && _webglContextLost(rec.addon))) ? 'webgl-lost' : 'webgl';
+            } else if (rec && rec.addon) {
+                renderer = _webglContextLost(rec.addon) ? 'webgl-lost' : 'webgl';
+            }
             snapshot.panes.push({
                 renderer,
                 lossCount: rec ? rec.lossCount : 0,
@@ -629,7 +642,11 @@ function _attachWebglRenderer(holder, term, opts) {
             holder._smoothCursor = rec.wrapper;
             _webglLive.delete(term); _webglLive.add(term); // LRU touch
             // A user-driven activation is trusted to re-arm the bounded budget.
-            if (opts?.lossRecovery !== true) _resetWebglRecovery(term, rec);
+            if (opts?.lossRecovery !== true) {
+                const hadLoss = rec.lossCount > 0;
+                _resetWebglRecovery(term, rec);
+                if (hadLoss) rec.lastRetryResult = rec.wrapper?._adapter ? 'attached' : 'attached-no-adapter';
+            }
             _watchWebglTerminalFocus(term);
             return { ok: true, adapter: !!rec.wrapper?._adapter, reused: true };
         }
@@ -645,22 +662,32 @@ function _attachWebglRenderer(holder, term, opts) {
         addon = new WebglAddon();
         term.loadAddon(addon);
     } catch (e) {
+        // AddonManager.loadAddon pushes before activate(); dispose so failed
+        // retries never leak _addons entries or partial WebglRenderer state.
+        try { addon?.dispose?.(); } catch (_) {}
         console.warn('WebglAddon init failed:', e);
         const error = _webglErrorTag(e);
-        rec.lastRetryResult = 'load-failed';
-        rec.lastRetryError = error;
-        // A user-driven attach after a loss re-arms the episode and continues
-        // its bounded retries: a tab switch during a GPU outage must not strand
-        // the terminal on the DOM renderer. The failed attach itself is the
-        // episode's first attempt, so the next one backs off (2s) instead of
-        // building a second context immediately.
-        if (opts?.lossRecovery !== true && rec.lossCount > 0) {
+        // A user-driven attach failure (including first attach on a tab created
+        // or switched during a GPU outage) starts/re-arms the bounded schedule:
+        // the failed attach counts as the first attempt, so the next backs off
+        // (2s) instead of rebuilding immediately or stranding the terminal on DOM.
+        if (opts?.lossRecovery !== true && typeof WebglAddon === 'function') {
+            if (rec.lossCount === 0) {
+                rec.lossCount = 1;
+                rec.lastLossAt = Date.now();
+            }
             _resetWebglRecovery(term, rec);
             rec.retryAttempts = 1;
+            rec.lastRetryResult = 'load-failed';
+            rec.lastRetryError = error;
             _scheduleWebglRecovery(term, 'attach-failed');
+        } else {
+            rec.lastRetryResult = 'load-failed';
+            rec.lastRetryError = error;
         }
         return { ok: false, reason: 'load-failed', error };
     }
+    const hadLossBeforeAttach = rec.lossCount > 0;
     rec.addon = addon;
     // User-driven attaches start a fresh bounded episode; the recovery's own
     // attach must not (that would make the retry unbounded).
@@ -685,12 +712,19 @@ function _attachWebglRenderer(holder, term, opts) {
     // it, and treat it as a failed attempt so the bounded schedule advances.
     if (_webglContextLost(addon)) {
         _disposeWebglAddon(term, rec);
-        rec.lastRetryResult = 'context-lost';
-        rec.lastRetryError = 'context lost at creation';
-        if (opts?.lossRecovery !== true && rec.lossCount > 0) {
+        if (opts?.lossRecovery !== true) {
+            if (rec.lossCount === 0) {
+                rec.lossCount = 1;
+                rec.lastLossAt = Date.now();
+            }
             _resetWebglRecovery(term, rec);
             rec.retryAttempts = 1;
+            rec.lastRetryResult = 'context-lost';
+            rec.lastRetryError = 'context lost at creation';
             _scheduleWebglRecovery(term, 'attach-failed');
+        } else {
+            rec.lastRetryResult = 'context-lost';
+            rec.lastRetryError = 'context lost at creation';
         }
         return { ok: false, reason: 'context-lost', error: 'context lost at creation' };
     }
@@ -706,6 +740,10 @@ function _attachWebglRenderer(holder, term, opts) {
     try { holder._smoothCursor?.dispose?.() } catch (e) {}
     holder._smoothCursor = _wireSmoothCursorWebgl(term, addon);
     rec.wrapper = holder._smoothCursor;
+    if (opts?.lossRecovery !== true && hadLossBeforeAttach) {
+        rec.lastRetryResult = holder._smoothCursor?._adapter ? 'attached' : 'attached-no-adapter';
+        rec.lastRetryError = null;
+    }
     // Re-sync settings the wrapper would have received while detached (its
     // setOptions also writes term.options, which hot-reload skips for
     // adapter-less holders).
@@ -731,11 +769,15 @@ function _detachWebglRenderer(holder, term) {
     if (!rec) return;
     // Leaving the screen cancels a pending automatic recovery: contexts are
     // only created for visible terminals; the next activation re-arms the
-    // normal user-driven attach path.
+    // normal user-driven attach path. Also drop hidden exhausted terminals from
+    // _webglRecoveryPending so inactive tabs never bloat diagnostics or probes.
     if (rec.retryTimer) {
         _cancelWebglRetry(rec);
         rec.lastRetryResult = 'deferred-inactive';
         _webglRecoveryPending.delete(term);
+    } else if (!rec.addon && _webglRecoveryPending.has(term)) {
+        _webglRecoveryPending.delete(term);
+        rec.lastRetryResult = 'deferred-inactive';
     }
     if (!rec.addon || rec.idleTimer) return;
     rec.idleTimer = setTimeout(() => {
@@ -1278,12 +1320,14 @@ function wireTerminal(tab, tabId) {
         if (_tryWin32CtrlJ(term, e)) return false;
         return _shortcutPassthrough(term, e);
     });
+    // Assign tab.term before _attachWebglRenderer so _resolveTermOwner resolves
+    // this owner immediately if initial attach fails and schedules recovery.
+    tab.term = term;
+    tab.fitAddon = fitAddon;
     // WebGL attaches only while the wrap is visible (context budget — see
     // _attachWebglRenderer); a background tab renders through the DOM
     // renderer until activation.
     if (wrap.classList.contains('active')) _attachWebglRenderer(tab, term);
-    tab.term = term;
-    tab.fitAddon = fitAddon;
 
     function applyFit() {
         if (_spannerDrag || TabManager._maximizing) return;
@@ -1508,12 +1552,14 @@ function wireTerminalToPane(tab, pane) {
         if (_tryWin32CtrlJ(term, e)) return false;
         return _shortcutPassthrough(term, e);
     });
+    // Assign pane.term before _attachWebglRenderer so _resolveTermOwner resolves
+    // this owner immediately if initial attach fails and schedules recovery.
+    pane.term = term;
+    pane.fitAddon = fitAddon;
     // WebGL addon loads after open() — see _attachWebglRenderer for the race
     // details; contexts are budgeted by visibility (only the active tab's
     // panes hold one).
     if (TabManager.activeId === tab.id) _attachWebglRenderer(pane, term);
-    pane.term = term;
-    pane.fitAddon = fitAddon;
 
     function applyFit(retries = 10) {
         // _windowResizing: suppress fit (and the immediate resize report)
