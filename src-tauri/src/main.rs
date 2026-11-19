@@ -5,6 +5,7 @@
 
 mod background_e2e;
 mod execution_trust;
+mod system_animation;
 mod update_http;
 mod zterm;
 
@@ -92,6 +93,7 @@ async fn main() {
             zterm::clipboard_write_text,
             zterm::clipboard_read_text,
             zterm::renderer_ready,
+            system_animation::get_system_animation_preference,
             browser_ui_policy,
         ])
         .setup(|app| {
@@ -161,6 +163,8 @@ async fn main() {
 
             #[cfg(windows)]
             apply_browser_ui_policy(&window);
+
+            system_animation::install(&window, app.handle());
 
             // Window-state restore + show live in the renderer_ready command: the
             // renderer asks the main process to show the window only after it has

@@ -279,10 +279,25 @@ const SHORTCUT_ACTIONS = {
         const gateOf = s => {
             const boolean = v => typeof v === 'boolean' ? v : null;
             const number = v => Number.isFinite(v) ? v : null;
+            let nativeAnimationsEnabled = null, remoteSession = null, pageReducedMotion = null, source = null;
+            try {
+                const rm = (typeof ZTermReducedMotion !== 'undefined' && ZTermReducedMotion && typeof ZTermReducedMotion.snapshot === 'function')
+                    ? ZTermReducedMotion.snapshot() : null;
+                nativeAnimationsEnabled = boolean(rm?.nativeAnimationsEnabled);
+                remoteSession = boolean(rm?.remoteSession);
+                pageReducedMotion = boolean(rm?.pageReducedMotion);
+                source = ['native', 'page-match-media', 'default'].includes(rm?.source) ? rm.source : null;
+            } catch (e) {
+                nativeAnimationsEnabled = remoteSession = pageReducedMotion = source = null;
+            }
             return {
                 enabled: boolean(s?.enabled), smoothEnabled: boolean(s?.smoothEnabled),
                 reducedMotion: boolean(s?.reducedMotion), duration: number(s?.duration),
                 jumpDistance: number(s?.jumpDistance), motionDuration: number(s?.motionDuration),
+                nativeAnimationsEnabled,
+                remoteSession,
+                pageReducedMotion,
+                source,
             };
         };
         const caretMetadata = s => {

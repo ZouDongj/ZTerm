@@ -1013,6 +1013,73 @@ async function main() {
         } catch (e) { console.error('[e2e] Phase E cursor style restore failed: ' + e.message); }
       }
     }
+
+    // ── Phase F: native animation preference overrides frozen page reduced-motion ──
+    // Emulates a WebView2 page stuck on prefers-reduced-motion: reduce (as
+    // happens when ZTerm launches during a remote session and returns to the
+    // local console). Verifies both that main.js startup ALREADY acquired the
+    // authoritative native state (before any manual refresh) AND that an active
+    // cursor draw pass under emulated reduce=true stays at 90ms.
+    try {
+      await cdp.send('Emulation.setEmulatedMedia', {
+        features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+      });
+      const phaseF = await cdp.eval(`(async () => {
+        const beforeRefresh = ZTermReducedMotion.snapshot();
+        const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(tabA)});
+        const adapter = tab?._smoothCursor?._adapter ?? null;
+        const beforePasses = adapter?.snapshot?.()?.counters?.cursorDrawPasses ?? null;
+        const refreshed = await ZTermReducedMotion.refresh();
+        const svc = tab?.term?._core?._coreBrowserService;
+        let pinned = false;
+        if (svc && svc.isFocused !== true) {
+          Object.defineProperty(svc, 'isFocused', { configurable: true, get: () => true });
+          pinned = true;
+        }
+        try {
+          tab?.term?.refresh?.(0, (tab?.term?.rows || 1) - 1);
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          const adapterSnap = adapter?.snapshot?.() ?? null;
+          return {
+            pageMatches: matchMedia('(prefers-reduced-motion: reduce)').matches,
+            beforeRefresh,
+            rm: refreshed,
+            beforePasses,
+            afterPasses: adapterSnap?.counters?.cursorDrawPasses ?? null,
+            adapterReducedMotion: adapterSnap?.reducedMotion ?? null,
+            motionDuration: adapterSnap?.motionDuration ?? null,
+          };
+        } finally {
+          if (pinned) { try { delete svc.isFocused; } catch (e) {} }
+        }
+      })()`);
+      // Host precondition: Phase F asserts the live native value, so it needs a
+      // local console session with Windows "Animation effects" enabled. Report
+      // a violated precondition as its own failing check so it is never
+      // mistaken for a product regression.
+      check('F: host precondition (local console, Windows animation effects on)',
+        phaseF?.rm?.nativeAnimationsEnabled === true && phaseF?.rm?.remoteSession === false,
+        `nativeAnimationsEnabled=${phaseF?.rm?.nativeAnimationsEnabled} remoteSession=${phaseF?.rm?.remoteSession}`);
+      check('F: native SPI_GETCLIENTAREAANIMATION overrides page prefers-reduced-motion: reduce',
+        phaseF?.pageMatches === true
+          && phaseF?.beforeRefresh?.source === 'native'
+          && phaseF?.beforeRefresh?.nativeAnimationsEnabled === true
+          && phaseF?.beforeRefresh?.pageReducedMotion === true
+          && phaseF?.beforeRefresh?.reducedMotion === false
+          && phaseF?.rm?.source === 'native'
+          && phaseF?.rm?.nativeAnimationsEnabled === true
+          && typeof phaseF?.rm?.remoteSession === 'boolean'
+          && phaseF?.rm?.pageReducedMotion === true
+          && phaseF?.rm?.reducedMotion === false
+          && typeof phaseF?.beforePasses === 'number'
+          && typeof phaseF?.afterPasses === 'number'
+          && phaseF.afterPasses > phaseF.beforePasses
+          && phaseF?.adapterReducedMotion === false
+          && phaseF?.motionDuration === 90,
+        JSON.stringify(phaseF));
+    } finally {
+      await cdp.send('Emulation.setEmulatedMedia', { features: [] }).catch(() => null);
+    }
   } finally {
     cdp.close();
     const stopped = await killExisting();
