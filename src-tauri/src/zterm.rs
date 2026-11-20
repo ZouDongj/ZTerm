@@ -4882,18 +4882,56 @@ pub fn save_terminal_settings(args: Vec<Value>) -> Result<Value, String> {
 // ── SSH Profiles ──
 
 #[tauri::command]
-pub fn save_ssh_profiles(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
-    let _config_guard = CONFIG_WRITE_LOCK.lock();
+pub async fn save_ssh_profiles(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
     let profiles = params.get("sshProfiles").cloned().unwrap_or(json!([]));
-    let mut config = load_config();
-    if let Value::Object(ref mut c) = config {
-        c.insert("sshProfiles".into(), profiles);
-    }
-    save_config(&config)?;
+    let dirs = account_dirs()?;
+    save_ssh_profiles_with_dirs(dirs, profiles).await?;
     // The renderer listens for the ssh-profiles-saved event to refresh its UI
     let _ = app.emit("ssh-profiles-saved", json!({}));
     Ok(json!({ "ok": true }))
+}
+
+/// Replace the whole profile list under the config write lock. Async because
+/// sync commands run on the window thread: this path reads and rewrites
+/// config.json.
+async fn save_ssh_profiles_with_dirs(dirs: AccountDirs, profiles: Value) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let _config_guard = CONFIG_WRITE_LOCK.lock();
+        // Resolve the paths under the lock: changing the data directory
+        // rewrites the marker and the anchor, so a path captured earlier could
+        // target a directory that is no longer current.
+        save_ssh_profiles_in(&dirs.config_path(), &dirs.anchor_config_path(), profiles)
+    })
+    .await
+    .map_err(|e| format!("ssh profile save task failed: {e}"))?
+}
+
+/// Path-injectable form of save_ssh_profiles_with_dirs for tests.
+#[cfg(test)]
+async fn save_ssh_profiles_at(
+    primary: PathBuf,
+    anchor: PathBuf,
+    profiles: Value,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let _config_guard = CONFIG_WRITE_LOCK.lock();
+        save_ssh_profiles_in(&primary, &anchor, profiles)
+    })
+    .await
+    .map_err(|e| format!("ssh profile save task failed: {e}"))?
+}
+
+fn save_ssh_profiles_in(
+    primary: &std::path::Path,
+    anchor: &std::path::Path,
+    profiles: Value,
+) -> Result<(), String> {
+    let mut config = load_config_from(primary, anchor);
+    if let Value::Object(ref mut c) = config {
+        c.insert("sshProfiles".into(), profiles);
+    }
+    save_config_to(primary, anchor, &config)
 }
 
 // ── Shortcuts ──
@@ -9241,6 +9279,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn save_ssh_profiles_at_replaces_the_profile_list() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        let dir = config_test_dir("save_ssh_profiles_at");
+        let primary = dir.join("config.json");
+        let anchor = dir.join("anchor.json");
+        save_config_to(
+            &primary,
+            &anchor,
+            &json!({ "sshProfiles": [{ "id": "old" }], "theme": "dark" }),
+        )
+        .unwrap();
+
+        save_ssh_profiles_at(
+            primary.clone(),
+            anchor.clone(),
+            json!([{ "id": "new", "host": "h" }]),
+        )
+        .await
+        .unwrap();
+
+        let stored = load_config_from(&primary, &anchor);
+        assert_eq!(stored["sshProfiles"][0]["id"], "new");
+        assert_eq!(stored["theme"], "dark", "unrelated keys survive");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn save_ssh_profiles_does_not_park_the_async_worker() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        let dir = config_test_dir("save_ssh_profiles_off_worker");
+        let primary = dir.join("config.json");
+        let anchor = dir.join("anchor.json");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = CONFIG_WRITE_LOCK.lock();
+            let _ = ready_tx.send(());
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        });
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the holder must take the lock before the probe runs");
+
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            save_ssh_profiles_at(primary.clone(), anchor.clone(), json!([])),
+        )
+        .await;
+
+        assert!(
+            res.is_err(),
+            "the config write must wait on the blocking pool, not the async worker"
+        );
+        holder.join().unwrap();
+        save_ssh_profiles_at(primary.clone(), anchor.clone(), json!([]))
+            .await
+            .unwrap();
+        let stored = load_config_from(&primary, &anchor);
+        assert!(stored["sshProfiles"].is_array());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[tokio::test]
     async fn known_hosts_trust_at_records_the_fingerprint() {
         let dir = config_test_dir("known_hosts_trust_at");
