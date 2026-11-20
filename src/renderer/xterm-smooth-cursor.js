@@ -575,6 +575,19 @@
       }
     }
 
+    // The IME textarea must follow the trusted software caret even when the
+    // ink app moves only its painted caret (no protocol cursorMove). Reuse the
+    // patched _syncTextArea: it anchors at perceivedCaretCell or falls back to
+    // the stock protocol cursor, and it is cheap (no composition-view rect).
+    function syncIdleTextarea() {
+      if (disposed) return false;
+      const core = terminal._core;
+      if (!core || core._compositionHelper?.isComposing === true) return false;
+      if (typeof core._syncTextArea !== 'function') return false;
+      core._syncTextArea();
+      return true;
+    }
+
     function revokeSoftware(reason) {
       const hadDescriptor = sw.active || sw.pending || sw.published;
       sw.active = false;
@@ -585,6 +598,7 @@
       snapBeforeNextDraw = true;
       instrumentation.softwareCaret = { active: false, reason };
       clearSoftwareVisual();
+      syncIdleTextarea();
       scheduleContinuation();
     }
 
@@ -678,6 +692,7 @@
         // real parse front and break the checkpoint binding.
         if (typeof seq === 'number' && seq > sw.watermark && seq <= sw.enqueued) sw.watermark = seq;
         if (sw.enqueued > sw.watermark) return;
+        let publishedChanged = false;
         if (sw.pending && sw.pending.chunkSeq <= sw.watermark && sw.candidateGeneration === sw.generation) {
           if (!softwareCellMatches(sw.pending)) {
             revokeSoftware('candidate-cell-mismatch');
@@ -685,12 +700,14 @@
           }
           sw.published = sw.pending;
           sw.pending = null;
+          publishedChanged = true;
           if (sw.runStreak >= 2 && !sw.active) {
             sw.active = true;
             snapBeforeNextDraw = true; // source switch never flies from the protocol anchor
             instrumentation.softwareCaret = { active: true, since: clock() };
           }
         }
+        if (sw.active && publishedChanged) syncIdleTextarea();
         if (sw.active) scheduleContinuation();
       },
       invalidate(reason) {

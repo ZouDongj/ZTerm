@@ -13,6 +13,7 @@ const require = createRequire(import.meta.url);
 const { SmoothCursorMotion } = require('../src/renderer/smooth-cursor-overlay.js');
 const { createXtermWebglSmoothCursor } = require('../src/renderer/xterm-smooth-cursor.js');
 const { createInkCaretObserver } = require('../src/renderer/ink-caret-observer.js');
+const imeAnchor = require('../src/renderer/ime-caret-anchor.js');
 require('../src/vendor/xterm.js');
 const { Terminal } = globalThis.TabbyXterm;
 const BundledTerminal = globalThis.TabbyXterm.Terminal;
@@ -388,6 +389,46 @@ test('perceivedCaretCell: null until the adapter owns the caret, then the publis
     'the IME anchor must follow the caret the user sees');
   p.invalidate('scroll');
   assert.equal(f.adapter.perceivedCaretCell(), null, 'invalidation revokes the perceived cell');
+});
+
+test('a published software caret re-anchors the idle textarea without a cursorMove', () => {
+  const f = fixture();
+  const core = f.terminal._core;
+  core.textarea = { style: {} };
+  core._renderService = { dimensions: { css: { cell: { width: 10, height: 20 } } } };
+  let stockSyncs = 0;
+  core._syncTextArea = function () {
+    stockSyncs += 1;
+    this.textarea.style.left = 'stock';
+    this.textarea.style.top = 'stock';
+  };
+  core._compositionHelper = { isComposing: false, updateCompositionElements() {} };
+  assert.equal(imeAnchor.patchTerminal({ _core: core }, {
+    perceivedCaret: () => f.adapter.perceivedCaretCell(),
+  }), true);
+
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4, y: 1 })); p.parsed(1);
+  assert.equal(core.textarea.style.left, undefined, 'one candidate has no trusted anchor yet');
+  assert.equal(stockSyncs, 0);
+
+  p.candidate(f.cand({ chunkSeq: 2, x: 5, y: 1 })); p.parsed(2);
+  assert.equal(core.textarea.style.left, '50px');
+  assert.equal(core.textarea.style.top, '20px');
+  assert.equal(stockSyncs, 0, 'anchored at the trusted software cell, not the stock cursor');
+
+  p.candidate(f.cand({ chunkSeq: 3, x: 7, y: 0 })); p.parsed(3);
+  assert.equal(core.textarea.style.left, '70px');
+  assert.equal(core.textarea.style.top, '0px');
+
+  core._compositionHelper.isComposing = true;
+  p.candidate(f.cand({ chunkSeq: 4, x: 8, y: 2 })); p.parsed(4);
+  assert.equal(core.textarea.style.left, '70px', 'composition keeps its own anchor');
+  core._compositionHelper.isComposing = false;
+
+  p.invalidate('scroll');
+  assert.equal(core.textarea.style.left, 'stock', 'revoke returns to stock protocol anchoring');
+  assert.equal(stockSyncs, 1);
 });
 
 test('watermark gating: a candidate publishes only after its chunk is parsed', () => {
