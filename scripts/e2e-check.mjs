@@ -1365,6 +1365,27 @@ async function main() {
         && imeProbe.idle.height === imeProbe.idle.heightAfter,
       JSON.stringify(imeProbe));
 
+    // DECSCUSR changes the terminal option directly; the WebGL smooth-cursor
+    // adapter must redraw with the app-requested shape, not keep the value it
+    // snapshotted at construction.
+    const decscusrProbe = await cdp.eval(`(async () => {
+      const pane = getAllPanes(TabManager.getActive())[0];
+      const term = pane?.term;
+      const adapter = pane?._smoothCursor?._adapter;
+      if (!term || !adapter?.snapshot) return { ok: false, why: 'no-adapter' };
+      const write = s => new Promise(r => term.write(s, r));
+      const previous = term.options.cursorStyle;
+      await write('\\u001b[3 q');
+      const underline = adapter.snapshot().cursorStyle;
+      await write('\\u001b[5 q');
+      const bar = adapter.snapshot().cursorStyle;
+      await write(previous === 'underline' ? '\\u001b[3 q' : previous === 'block' ? '\\u001b[1 q' : '\\u001b[5 q');
+      return { ok: true, underline, bar, previous };
+    })()`);
+    check('WebGL smooth cursor follows DECSCUSR shape',
+      decscusrProbe.ok === true && decscusrProbe.underline === 'underline' && decscusrProbe.bar === 'bar',
+      JSON.stringify(decscusrProbe));
+
     // 9.8 Terminal search (batch 03): synthetic local content + the REAL
     //     bundled xterm/addon-search through the REAL renderer handlers.
     //     The addon only fires result events when find options carry a

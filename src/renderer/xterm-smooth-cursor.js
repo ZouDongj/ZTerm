@@ -142,6 +142,17 @@
     let smoothEnabled = options?.smooth !== false;
     let cursorStyle = options?.cursorStyle === 'block' ? 'block'
       : options?.cursorStyle === 'underline' ? 'underline' : 'bar';
+    // DECSCUSR updates the terminal option directly (not through this
+    // adapter). Follow it so the drawn caret keeps the app-requested shape.
+    const optionsService = terminal._core?.optionsService || terminal.optionsService;
+    if (typeof optionsService?.onSpecificOptionChange === 'function') {
+      addSubscription(optionsService.onSpecificOptionChange('cursorStyle', value => {
+        if (disposed || value === cursorStyle) return;
+        if (value !== 'bar' && value !== 'block' && value !== 'underline') return;
+        cursorStyle = value;
+        scheduleContinuation();
+      }));
+    }
     let continuationQueued = false;
     // Continuation render scope. 'full' re-renders the whole viewport on
     // every animation frame; 'cursor' re-renders only the rows the caret

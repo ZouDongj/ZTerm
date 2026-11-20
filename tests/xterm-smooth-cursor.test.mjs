@@ -96,13 +96,24 @@ function fixture({ reduced = false, cursorStyle = 'bar', renderScope } = {}) {
     querySelector(selector) { return selector === '.xterm-screen' ? screen : null; },
     querySelectorAll() { return []; },
   };
+  const cursorStyleListeners = new Set();
+  const optionsService = {
+    options: { cursorStyle },
+    onSpecificOptionChange(name, callback) {
+      if (name !== 'cursorStyle') return { dispose() {} };
+      cursorStyleListeners.add(callback);
+      return { dispose() { cursorStyleListeners.delete(callback); } };
+    },
+  };
   const terminal = {
     cols: 10,
     rows: 3,
     options: { cursorWidth: 1, cursorStyle },
+    optionsService,
     buffer: { active },
     element,
     _core: {
+      optionsService,
       _renderService: { _renderer: { value: renderer } },
       buffer: { ydisp: 0, lines: { get() { return { loadCell(col) { currentCol = col; } }; } } },
     },
@@ -142,6 +153,11 @@ function fixture({ reduced = false, cursorStyle = 'bar', renderScope } = {}) {
     glyphCellCalls,
     setTime(value) { time = value; },
     setWidths(entries) { widthByColumn = new Map(entries); },
+    fireCursorStyle(value) {
+      terminal.options.cursorStyle = value;
+      optionsService.options.cursorStyle = value;
+      for (const callback of [...cursorStyleListeners]) callback(value);
+    },
     counts() { return { redraws, stockRecolors }; },
   };
 }
@@ -261,6 +277,29 @@ test('refuses to bind on an unknown cursor style, but binds and slides underline
   f.renderer.renderRows(0, 2);
   assert.equal(f.adapter.snapshot().visual.x, 2.75);
   assert.ok(Math.abs(f.rectangleDraws.at(-1)[0] - 0.275) < 1e-6);
+});
+
+test('follows external cursorStyle option changes (DECSCUSR)', () => {
+  const f = fixture({ cursorStyle: 'bar' });
+  assert.equal(f.adapter.snapshot().cursorStyle, 'bar');
+  f.fireCursorStyle('underline');
+  assert.equal(f.adapter.snapshot().cursorStyle, 'underline');
+  f.fireCursorStyle('block');
+  assert.equal(f.adapter.snapshot().cursorStyle, 'block');
+  f.fireCursorStyle('bar');
+  assert.equal(f.adapter.snapshot().cursorStyle, 'bar');
+});
+
+test('vendored DECSCUSR publishes cursorStyle to optionsService', async t => {
+  require('../src/vendor/xterm.js');
+  const term = new globalThis.TabbyXterm.Terminal({ cols: 80, rows: 24, scrollback: 0, allowProposedApi: true });
+  t.after(() => term.dispose());
+  const seen = [];
+  const subscription = term._core.optionsService.onSpecificOptionChange('cursorStyle', value => seen.push(value));
+  t.after(() => subscription.dispose());
+  await new Promise(resolve => term.write('\u001b[5 q', resolve));
+  assert.equal(term.options.cursorStyle, 'bar');
+  assert.deepEqual(seen, ['bar']);
 });
 
 test('block glyphs stay anchored to their cells while the caret rectangle slides', () => {
