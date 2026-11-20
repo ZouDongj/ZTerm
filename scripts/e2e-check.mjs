@@ -1375,15 +1375,26 @@ async function main() {
       if (!term || !adapter?.snapshot) return { ok: false, why: 'no-adapter' };
       const write = s => new Promise(r => term.write(s, r));
       const previous = term.options.cursorStyle;
+      const previousBlink = term.options.cursorBlink;
+      const user = term._cursorStyleDefaults?.snapshot?.() || null;
       await write('\\u001b[3 q');
       const underline = adapter.snapshot().cursorStyle;
       await write('\\u001b[5 q');
       const bar = adapter.snapshot().cursorStyle;
+      await write('\\u001b[0 q');
+      const defaultStyle = term.options.cursorStyle;
+      const defaultBlink = term.options.cursorBlink;
       await write(previous === 'underline' ? '\\u001b[3 q' : previous === 'block' ? '\\u001b[1 q' : '\\u001b[5 q');
-      return { ok: true, underline, bar, previous };
+      term.options.cursorBlink = previousBlink;
+      const blinkAfter = term.options.cursorBlink;
+      return { ok: true, underline, bar, previous, previousBlink, user, defaultStyle, defaultBlink, blinkAfter };
     })()`);
     check('WebGL smooth cursor follows DECSCUSR shape',
-      decscusrProbe.ok === true && decscusrProbe.underline === 'underline' && decscusrProbe.bar === 'bar',
+      decscusrProbe.ok === true && decscusrProbe.underline === 'underline' && decscusrProbe.bar === 'bar'
+        && decscusrProbe.user !== null
+        && decscusrProbe.defaultStyle === decscusrProbe.user.cursorStyle
+        && decscusrProbe.defaultBlink === decscusrProbe.user.cursorBlink
+        && decscusrProbe.blinkAfter === decscusrProbe.previousBlink,
       JSON.stringify(decscusrProbe));
 
     // 9.8 Terminal search (batch 03): synthetic local content + the REAL

@@ -1265,6 +1265,15 @@ function _tryWin32CtrlJ(term, e) {
 // must not break terminal creation. perceivedCaret is looked up lazily
 // because the smooth-cursor adapter is only created after term.open().
 function _installTerminalBehavior(term, perceivedCaret) {
+    try {
+        const install = window.ZTermCursorStyleDefaults?.installCursorStyleDefaults;
+        if (install) {
+            term._cursorStyleDefaults = install(term, {
+                cursorStyle: term.options.cursorStyle,
+                cursorBlink: term.options.cursorBlink,
+            });
+        }
+    } catch(e) { console.warn('cursor style defaults install failed:', e); }
     try { window.__unicodeWidth?.installOn(term); } catch(e) { console.warn('unicode width install failed:', e); }
     try { window.__imeCaretAnchor?.patchTerminal(term, { perceivedCaret }); } catch(e) { console.warn('IME anchor patch failed:', e); }
 }

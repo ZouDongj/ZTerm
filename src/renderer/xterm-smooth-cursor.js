@@ -1540,9 +1540,10 @@
         diagnostic.held = false;
         diagnostic.remaining = 0;
         renderer.renderRows = originalRenderRows;
-        // terminal.options.cursorStyle is always the user's current style —
-        // written by setCursorStyle or by the caller before retiring the
-        // adapter (context loss) — so disposal must not roll it back.
+        // terminal.options.cursorStyle is the live style — either the user's
+        // default or an app's explicit DECSCUSR — and the caller owns it when
+        // retiring the adapter (context loss), so disposal must not roll it
+        // back.
         for (const subscription of subscriptions.splice(0)) subscription.dispose();
         motion.dispose();
         renderer._requestRedrawViewport();
