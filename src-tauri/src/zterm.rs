@@ -6070,6 +6070,30 @@ pub fn encrypt_password(app: AppHandle, args: Vec<Value>) -> Result<Value, Strin
 /// message also matches /decrypt/i for message-based callers).
 /// Split from the command for unit testing.
 fn credential_from_encrypted(encrypted_pwd: &str, key_path: &str) -> Result<Credential, Value> {
+    // Key authentication owns the credential. A password left over from an
+    // earlier password-auth configuration is irrelevant: decrypting it can
+    // fail (the ciphertext is bound to the Windows user/machine that saved
+    // it) and would block a connect that only needs the key, and keeping it
+    // in the provenance would tie the startup grant to a secret this profile
+    // never uses. The key path (and its base) is the whole identity.
+    if !key_path.is_empty() {
+        let key_base = if PathBuf::from(key_path).is_absolute() {
+            String::new()
+        } else {
+            std::env::current_dir()
+                .map_err(|_| json!({"error":"credential path base is unavailable"}))?
+                .to_string_lossy()
+                .to_string()
+        };
+        return Ok(Credential {
+            password: None,
+            private_key_path: Some(key_path.to_string()),
+            authorization: crate::execution_trust::AuthSource {
+                identity: json!({ "keyPath":key_path, "keyBase":key_base }),
+                rememberable: true,
+            },
+        });
+    }
     let password = if !encrypted_pwd.is_empty() {
         match decrypt_password_value(encrypted_pwd) {
             Some(p) => Some(p),
@@ -6085,25 +6109,18 @@ fn credential_from_encrypted(encrypted_pwd: &str, key_path: &str) -> Result<Cred
     } else {
         None
     };
-    let private_key_path = if !key_path.is_empty() {
-        Some(key_path.to_string())
-    } else {
-        None
-    };
     // Provenance identifies the encrypted source, never the decrypted password.
     // Legacy plaintext-compatible encodings remain usable but cannot create a
-    // reusable startup grant. Key references include their relative-path base.
+    // reusable startup grant.
     let rememberable = encrypted_pwd.is_empty() || encrypted_pwd.starts_with("dpapi:");
     let source = if rememberable {
-        json!({ "encryptedSource":encrypted_pwd, "keyPath":key_path,
-            "keyBase":if key_path.is_empty() || PathBuf::from(key_path).is_absolute() { String::new() }
-                else { std::env::current_dir().map_err(|_| json!({"error":"credential path base is unavailable"}))?.to_string_lossy().to_string() } })
+        json!({ "encryptedSource":encrypted_pwd, "keyPath":key_path, "keyBase":String::new() })
     } else {
         json!({ "ephemeral":crate::execution_trust::nonce().map_err(|_| json!({"error":"credential provenance could not be generated"}))?, "keyPath":key_path })
     };
     Ok(Credential {
         password,
-        private_key_path,
+        private_key_path: None,
         authorization: crate::execution_trust::AuthSource {
             identity: source,
             rememberable,
@@ -12614,6 +12631,49 @@ mod tests {
         let legacy = format!("tauri:{}", base64_encode_bytes("plainpw".as_bytes()));
         let cred = credential_from_encrypted(&legacy, "").expect("legacy plaintext");
         assert_eq!(cred.password.as_deref(), Some("plainpw"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn key_credential_ignores_an_undecryptable_stored_password() {
+        // A DPAPI blob that only decrypts on another Windows user/machine.
+        // Password auth must fail loudly on it; key auth must not even look.
+        let foreign = format!("dpapi:{}", base64_encode_bytes(&[0x5a; 48]));
+        let cred = credential_from_encrypted(&foreign, "C:/keys/id_ed25519")
+            .expect("key authentication must not depend on the stored password");
+        assert!(cred.password.is_none());
+        assert_eq!(cred.private_key_path.as_deref(), Some("C:/keys/id_ed25519"));
+        assert!(cred.authorization.rememberable);
+        assert_eq!(
+            cred.authorization.identity["keyPath"],
+            json!("C:/keys/id_ed25519")
+        );
+        assert!(cred.authorization.identity.get("encryptedSource").is_none());
+        assert!(cred.authorization.identity.get("ephemeral").is_none());
+
+        // Guard: the same value is still a hard failure for password auth.
+        assert!(credential_from_encrypted(&foreign, "").is_err());
+    }
+
+    #[test]
+    fn key_credential_identity_is_stable_and_names_only_the_key() {
+        let legacy_pwd = base64_encode_bytes(b"synthetic-legacy-secret");
+        let first = credential_from_encrypted(&legacy_pwd, "C:/keys/id_ed25519").unwrap();
+        let second = credential_from_encrypted(&legacy_pwd, "C:/keys/id_ed25519").unwrap();
+        // A remembered grant needs a stable fingerprint: the old ephemeral
+        // identity made every key profile with a legacy password unrememberable.
+        assert!(first.authorization.rememberable);
+        assert_eq!(first.authorization.identity, second.authorization.identity);
+        let identity = first.authorization.identity.to_string();
+        assert!(!identity.contains("synthetic-legacy-secret"));
+        assert!(!identity.contains(&legacy_pwd));
+
+        // A relative key path still carries the base it was resolved against.
+        let relative = credential_from_encrypted(&legacy_pwd, "keys/id_ed25519").unwrap();
+        assert_eq!(
+            relative.authorization.identity["keyBase"],
+            json!(std::env::current_dir().unwrap().to_string_lossy())
+        );
     }
 
     #[test]

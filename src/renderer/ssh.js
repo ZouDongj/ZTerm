@@ -1733,6 +1733,11 @@ async function saveSSHEdit() {
         showToast('名称和主机地址不能为空', true);
         return;
     }
+    if (authType === 'key' && !privateKeyPath) {
+        showToast('请选择私钥文件', true);
+        document.getElementById('ssh-edit-keypath').focus();
+        return;
+    }
 
     const doSave = async (encryptedPassword) => {
         try {
@@ -1744,8 +1749,15 @@ async function saveSSHEdit() {
                 const profile = {
                     id: profileId || ('ssh_' + Date.now()),
                     name, group, host, port, username, authType,
-                    encryptedPassword: encryptedPassword !== undefined ? encryptedPassword
-                        : (profileId ? current[idx].encryptedPassword || '' : templatePassword),
+                    // Key authentication never uses a stored password: drop any
+                    // ciphertext left over from an earlier password setup instead
+                    // of keeping (and decrypting) a secret the profile does not use.
+                    // Key authentication never uses a stored password: drop any
+                    // ciphertext left over from an earlier password setup instead
+                    // of keeping (and decrypting) a secret the profile does not use.
+                    encryptedPassword: authType === 'key' ? ''
+                        : (encryptedPassword !== undefined ? encryptedPassword
+                            : (profileId ? current[idx].encryptedPassword || '' : templatePassword)),
                     privateKeyPath: authType === 'key' ? privateKeyPath : '',
                     note, followCwd, clearOnConnect,
                     loginScripts,
