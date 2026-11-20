@@ -112,3 +112,133 @@ test('C3 (control): password auth keeps the ciphertext when no new password is t
     assert.equal(saved[0].sshProfiles[0].encryptedPassword, 'dpapi:stored-ciphertext');
     assert.equal(saved[0].sshProfiles[0].privateKeyPath, '');
 });
+
+test('P2: an inline password saved after switching a key profile survives a background clear', async () => {
+    const ctx = loadSshVm();
+    stubSshDisplay(ctx);
+    const profile = {
+        id: 'p1', name: 'box', host: 'h1', username: 'u1', authType: 'key',
+        encryptedPassword: 'dpapi:legacy-L', privateKeyPath: 'C:/keys/id_ed25519',
+    };
+    ctx.TabManager.sshProfiles = [profile];
+    ctx.openSSHEdit(false, 'p1');
+    assert.equal(runIn(ctx, '_sshOpenedPwd'), 'dpapi:legacy-L',
+        'dialog snapshots the ciphertext it shows as saved');
+
+    // Switch the dropdown to password auth and save a new secret inline.
+    const g = id => ctx.document.getElementById(id);
+    g('ssh-edit-auth').value = '密码';
+    ctx.updateAuthFields();
+    g('ssh-edit-password').value = 'inline-N';
+    const saved = [];
+    ctx.closeOverlay = () => {};
+    ctx.renderSSHManagerInSettings = () => {};
+    ctx.ipcRenderer.invoke = (cmd, payload) => {
+        if (cmd === 'encrypt-password') return Promise.resolve({ encrypted: 'dpapi:inline-N' });
+        if (cmd === 'save-ssh-profiles') { saved.push(payload); return Promise.resolve({ ok: true }); }
+        return new Promise(() => {});
+    };
+    await ctx._savePasswordInline();
+    await flush();
+    assert.equal(ctx.TabManager.sshProfiles[0].encryptedPassword, 'dpapi:inline-N');
+
+    // A key connect that started earlier replies now and clears the profile it
+    // still saw as key auth.
+    ctx.TabManager.sshProfiles[0].encryptedPassword = '';
+
+    await ctx.saveSSHEdit();
+    await flush();
+
+    assert.equal(saved.length, 2, 'inline save then full save');
+    const persisted = saved.at(-1).sshProfiles[0];
+    assert.equal(persisted.authType, 'password');
+    assert.equal(persisted.encryptedPassword, 'dpapi:inline-N',
+        'the secret the user just chose is kept, not the stale legacy one and not empty');
+});
+
+function queueBehindBlocker(ctx, profiles, clearPasswordFor = '') {
+    const saved = [];
+    let release;
+    const gate = new Promise(r => { release = r; });
+    ctx.closeOverlay = () => {};
+    ctx.renderSSHManagerInSettings = () => {};
+    ctx.ipcRenderer.invoke = (cmd, payload) => {
+        if (cmd !== 'save-ssh-profiles') return new Promise(() => {});
+        saved.push(payload);
+        return gate.then(() => ({ ok: true }));
+    };
+    ctx.TabManager.sshProfiles = profiles;
+    // The queue dispatches synchronously when idle, so occupy it before the
+    // save under test: otherwise the callback runs while A is still open and
+    // the test cannot tell a captured snapshot from a global read. A profile
+    // named here loses its ciphertext in the blocker's own write, the same
+    // shape a completed background upgrade leaves in memory.
+    const blocker = ctx._mutateSSHProfiles(cur => cur.map(p => (
+        p.id === clearPasswordFor ? { ...p, encryptedPassword: '' } : { ...p }
+    )));
+    return { saved, release, blocker };
+}
+
+test('P2: a queued save keeps its own dialog snapshot after another profile is opened', async () => {
+    const ctx = loadSshVm();
+    stubSshDisplay(ctx);
+    const a = {
+        id: 'a', name: 'alpha', host: 'ha', username: 'u', authType: 'password',
+        encryptedPassword: 'dpapi:a-ciphertext', privateKeyPath: '',
+    };
+    const b = {
+        id: 'b', name: 'beta', host: 'hb', username: 'u', authType: 'password',
+        encryptedPassword: 'dpapi:b-ciphertext', privateKeyPath: '',
+    };
+    const { saved, release, blocker } = queueBehindBlocker(ctx, [a, b]);
+    ctx.openSSHEdit(false, 'a');
+    await flush();
+    assert.equal(saved.length, 1, 'the blocker owns the queue');
+
+    const pending = ctx.saveSSHEdit();
+    await flush();
+    ctx.closeSSHEdit();
+    ctx.openSSHEdit(false, 'b');
+    release();
+    await blocker;
+    await pending;
+    await flush();
+
+    const savedA = saved.at(-1).sshProfiles.find(p => p.id === 'a');
+    assert.equal(savedA.encryptedPassword, 'dpapi:a-ciphertext',
+        'A keeps its own ciphertext, not B\'s and not an empty password');
+});
+
+test('P2: a queued save restores the ciphertext it opened when memory was cleared', async () => {
+    const ctx = loadSshVm();
+    stubSshDisplay(ctx);
+    const a = {
+        id: 'a', name: 'alpha', host: 'ha', username: 'u', authType: 'password',
+        encryptedPassword: 'dpapi:a-ciphertext', privateKeyPath: '',
+    };
+    const b = {
+        id: 'b', name: 'beta', host: 'hb', username: 'u', authType: 'password',
+        encryptedPassword: '', privateKeyPath: '',
+    };
+    const { saved, release, blocker } = queueBehindBlocker(ctx, [a, b], 'a');
+    ctx.openSSHEdit(false, 'a');
+    await flush();
+    assert.equal(saved.length, 1, 'the blocker owns the queue');
+    assert.equal(saved[0].sshProfiles.find(p => p.id === 'a').encryptedPassword, '',
+        'the blocker write is what clears A, and it lands before the queued save runs');
+
+    // A background migration clears the profile behind this queued save: the
+    // save may no longer rely on the memory it read while the dialog was open.
+    const pending = ctx.saveSSHEdit();
+    await flush();
+    ctx.closeSSHEdit();
+    ctx.openSSHEdit(false, 'b');
+    release();
+    await blocker;
+    await pending;
+    await flush();
+
+    const savedA = saved.at(-1).sshProfiles.find(p => p.id === 'a');
+    assert.equal(savedA.encryptedPassword, 'dpapi:a-ciphertext',
+        'the opened snapshot rescues a cleared profile instead of writing empty');
+});

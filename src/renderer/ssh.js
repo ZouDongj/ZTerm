@@ -779,6 +779,10 @@ let _sshPwdDirty = false;
 // ciphertext stays decryptable for the same user, so a copied connection
 // keeps its credential without the user retyping it. Reset by openSSHEdit.
 let _sshTemplatePwd = '';
+// Ciphertext the profile showed when the edit dialog opened. A background
+// upgrade may clear the stored password while the dialog is open; a later save
+// must keep what the dialog displayed as saved instead of writing ''.
+let _sshOpenedPwd = '';
 
 function _updatePwdBtnVisibility() {
     const inputEl = document.getElementById('ssh-edit-password');
@@ -798,6 +802,7 @@ function _updatePwdBtnVisibility() {
 // profile's (plain edit input, no cancel-back button).
 function _editingProfileHasPassword() {
     if (!_editingSSHId) return false;
+    if (_sshOpenedPwd) return true;
     const p = (TabManager.sshProfiles || []).find(x => x.id === _editingSSHId);
     return !!(p && p.encryptedPassword);
 }
@@ -891,6 +896,10 @@ async function _savePasswordInline() {
             return profiles;
         });
         if (changed && isCurrentEdit()) {
+            // The dialog now owns this ciphertext: a background upgrade can
+            // clear the stored copy, and the next full save must still write
+            // the password the user just chose.
+            _sshOpenedPwd = result.encrypted;
             _sshPwdDirty = false;
             _renderPasswordField('view');
             showToast('密码已保存');
@@ -1257,6 +1266,7 @@ function openSSHEdit(isNew, profileId) {
     _sshEditGeneration++;
     _editingSSHId = isNew ? null : profileId;
     _sshTemplatePwd = '';
+    _sshOpenedPwd = '';
     document.getElementById('ssh-edit-title').textContent = isNew ? '添加 SSH 连接' : '编辑 SSH 连接';
 
     // Remove old custom dropdown wrappers
@@ -1371,6 +1381,9 @@ function openSSHEdit(isNew, profileId) {
     if (!isNew && profileId) {
         const p = (TabManager.sshProfiles || []).find(x => x.id === profileId);
         if (p) {
+            // Snapshot before any render call reads the password state: the
+            // profile may be upgraded in the background while the dialog is open.
+            _sshOpenedPwd = p.encryptedPassword || '';
             document.getElementById('ssh-edit-name').value = p.name || '';
             document.getElementById('ssh-edit-host').value = p.host || '';
             document.getElementById('ssh-edit-port').value = p.port || '22';
@@ -1586,6 +1599,12 @@ function updateAuthFields() {
         const eyeBtn = document.getElementById('ssh-pwd-inline-eye');
         if (eyeBtn) { eyeBtn.classList.remove('active'); eyeBtn.title = '显示密码'; }
     }
+    // Switching back to password auth restores the saved-password row. The
+    // background upgrade may have cleared the profile while this dialog was
+    // open, but the dialog still holds the ciphertext it opened with.
+    if (!isKey && _editingSSHId && !_sshPwdDirty && _editingProfileHasPassword()) {
+        _renderPasswordField('view');
+    }
     _syncSSHAuthTabs();
 }
 
@@ -1712,6 +1731,10 @@ async function saveSSHEdit() {
     const editGeneration = _sshEditGeneration;
     const isCurrentEdit = () => _sshEditGeneration === editGeneration && _editingSSHId === profileId;
     const templatePassword = _sshTemplatePwd || '';
+    // Snapshot the dialog's saved ciphertext before queuing: the callback may
+    // run after the dialog was closed and reopened on another profile, and it
+    // must never read the new dialog's globals.
+    const openedPwd = _sshOpenedPwd;
     const loginScripts = collectLoginScripts();
     const name = document.getElementById('ssh-edit-name').value.trim();
     const host = document.getElementById('ssh-edit-host').value.trim();
@@ -1752,12 +1775,12 @@ async function saveSSHEdit() {
                     // Key authentication never uses a stored password: drop any
                     // ciphertext left over from an earlier password setup instead
                     // of keeping (and decrypting) a secret the profile does not use.
-                    // Key authentication never uses a stored password: drop any
-                    // ciphertext left over from an earlier password setup instead
-                    // of keeping (and decrypting) a secret the profile does not use.
                     encryptedPassword: authType === 'key' ? ''
                         : (encryptedPassword !== undefined ? encryptedPassword
-                            : (profileId ? current[idx].encryptedPassword || '' : templatePassword)),
+                            // Keep the ciphertext the dialog showed as saved
+                            // (or the one an inline save just wrote): a
+                            // background upgrade may have cleared the profile.
+                            : (profileId ? ((current[idx].encryptedPassword || '') || openedPwd) : templatePassword)),
                     privateKeyPath: authType === 'key' ? privateKeyPath : '',
                     note, followCwd, clearOnConnect,
                     loginScripts,

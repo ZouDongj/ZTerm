@@ -624,6 +624,7 @@ function _applySshConnected(attemptId, tabId) {
         // Fallback size settle: the connecting phase already fit and opened the PTY at the right size via pendingSizes,
         // but if the container had zero size during connecting (tab hidden, etc.), settle once more here; after connected the size is registered and usable
         _scheduleSettleResize(tab);
+        _upgradeStoredSshAuth(tab, pane);
         return true;
     }
     // Already applied by the other channel: a TRUE no-op. A duplicate success
@@ -632,6 +633,52 @@ function _applySshConnected(attemptId, tabId) {
     // (connected=false, _sessionFailed=true, terminal text and caret filter
     // untouched), and no second banner/toast fires.
     return true;
+}
+
+// A stored password from an older format still authenticates but cannot back
+// a reusable startup grant; a key profile may still carry a ciphertext it
+// never uses. After a successful connect, ask the backend to rewrite that one
+// profile in place (it only writes while the profile still holds the value
+// this connect used) and patch memory so a later profile save cannot restore
+// the old ciphertext. Failures stay silent: the next connect retries.
+function _sshProfileUsesKeyAuth(profile) {
+    if (!profile) return false;
+    // A non-empty key path is what makes the backend pick publickey auth;
+    // authType alone is not enough because legacy data may say "key" without a
+    // path and still authenticate with its password.
+    return !!profile.privateKeyPath;
+}
+
+function _upgradeStoredSshAuth(tab, pane) {
+    if (!tab) return;
+    const profileId = (pane && pane._sshProfileId) || tab.sshProfileId;
+    if (!profileId) return;
+    const find = () => (TabManager.sshProfiles || []).find(p => p.id === profileId);
+    const profile = find();
+    if (!profile) return;
+    const expected = profile.encryptedPassword || '';
+    if (!expected) return;
+    const wasKey = _sshProfileUsesKeyAuth(profile);
+    if (!wasKey && expected.startsWith('dpapi:')) return;
+    // Snapshot the auth the connect actually used: the edit dialog may switch
+    // this profile to password auth (or another key) while the reply is in
+    // flight, and a late rewrite must not undo that edit.
+    const authType = profile.authType || '';
+    const keyPath = profile.privateKeyPath || '';
+    ipcRenderer.invoke('upgrade-ssh-profile-auth', { profileId, expectedPassword: expected })
+        .then(res => {
+            if (!res || !res.changed || typeof res.encryptedPassword !== 'string') return;
+            const current = find();
+            if (!current) return;
+            if ((current.encryptedPassword || '') !== expected) return;
+            if ((current.authType || '') !== authType) return;
+            if ((current.privateKeyPath || '') !== keyPath) return;
+            // Only a key profile may lose its password; a password profile
+            // keeps the ciphertext it authenticated with.
+            if (res.encryptedPassword === '' && !wasKey) return;
+            current.encryptedPassword = res.encryptedPassword;
+        })
+        .catch(() => {});
 }
 
 // Failure application shared by the ssh-error event and the own invocation

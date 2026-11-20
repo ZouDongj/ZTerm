@@ -1248,11 +1248,26 @@ fn load_config_with(dirs: Result<AccountDirs, String>) -> Value {
     load_config_from(&dirs.config_path(), &dirs.anchor_config_path())
 }
 
+/// A loaded config plus where it came from. The anchor mirror is a recovery
+/// copy: writing it back over the primary would replace newer data with an
+/// older snapshot, so writers that only touch one field must skip that case.
+struct ConfigSnapshot {
+    config: Value,
+    from_anchor: bool,
+}
+
 /// Data-dir config first; when it is missing entirely or cannot be READ (an
 /// IO condition, not corruption), read the anchor's recovery copy back.
 /// A readable primary still wins; save_config uses this same precedence to
 /// decide whether an anchor-only write is authoritative. Split for unit tests.
 fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
+    load_config_from_with_source(path, anchor).config
+}
+
+fn load_config_from_with_source(
+    path: &std::path::Path,
+    anchor: &std::path::Path,
+) -> ConfigSnapshot {
     // True when an existing config file could not be read (IO failure): the
     // defaults below are then not known to be safe to save over it.
     let mut read_failed = false;
@@ -1263,7 +1278,10 @@ fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
                     let (merged, corrupt) = sanitize_config(raw);
                     if !corrupt {
                         CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
-                        return merged;
+                        return ConfigSnapshot {
+                            config: merged,
+                            from_anchor: false,
+                        };
                     }
                 }
                 // Corrupt config: back up the original file and notify the renderer (once only),
@@ -1276,7 +1294,10 @@ fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
                 // an earlier unreadable load instead of refusing saves until
                 // the process restarts.
                 CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
-                return default_config();
+                return ConfigSnapshot {
+                    config: default_config(),
+                    from_anchor: false,
+                };
             }
             Err(e) => {
                 // Read failure is an IO condition (AV exclusive lock, OneDrive
@@ -1304,7 +1325,10 @@ fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
                             m.remove("dataDir");
                         }
                         CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
-                        return merged;
+                        return ConfigSnapshot {
+                            config: merged,
+                            from_anchor: true,
+                        };
                     }
                 }
                 // Corrupt anchor: keep a timestamped copy of the remnants, then
@@ -1338,7 +1362,10 @@ fn load_config_from(path: &std::path::Path, anchor: &std::path::Path) -> Value {
     // corruption already backed up) the state is known — clear any stale
     // suppression so first-run saving keeps working.
     CONFIG_PERSIST_SUPPRESSED.store(read_failed, std::sync::atomic::Ordering::SeqCst);
-    default_config()
+    ConfigSnapshot {
+        config: default_config(),
+        from_anchor: false,
+    }
 }
 
 /// Copy a corrupt config file aside as a timestamped sibling and notify the
@@ -6176,6 +6203,112 @@ pub fn revoke_credential(
     Ok(json!({ "ok": true }))
 }
 
+/// Rewrite one stored credential into the current at-rest format (batch C /
+/// #48). Legacy encodings (bare base64, `tauri:`, Electron OSCrypt) still
+/// authenticate but are not rememberable provenance, so every connect asked
+/// for a startup-grant confirmation again. The renderer passes the exact
+/// ciphertext the successful connect used; the profile is rewritten only while
+/// it still holds that value, which makes repeated and concurrent calls safe
+/// and lets a concurrent edit win. A non-empty key path is what makes the
+/// connection use publickey auth, so a password left beside it is dead weight
+/// and is dropped rather than decrypted.
+///
+/// Split from the command (explicit paths, no lock) for unit testing.
+fn upgrade_ssh_profile_auth_in(
+    primary: &std::path::Path,
+    anchor: &std::path::Path,
+    profile_id: &str,
+    expected: &str,
+) -> Result<Value, String> {
+    if profile_id.is_empty() || expected.is_empty() {
+        return Ok(json!({ "changed": false, "reason": "nothing-to-upgrade" }));
+    }
+    let snapshot = load_config_from_with_source(primary, anchor);
+    if snapshot.from_anchor {
+        // The primary is unreadable right now; rewriting from the recovery copy
+        // would persist an older snapshot over it.
+        return Ok(json!({ "changed": false, "reason": "loaded-from-anchor" }));
+    }
+    let mut config = snapshot.config;
+    let profile = config
+        .get_mut("sshProfiles")
+        .and_then(|v| v.as_array_mut())
+        .and_then(|profiles| {
+            profiles
+                .iter_mut()
+                .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(profile_id))
+        });
+    let profile = match profile {
+        Some(p) => p,
+        None => return Ok(json!({ "changed": false, "reason": "profile-missing" })),
+    };
+    if profile
+        .get("encryptedPassword")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        != expected
+    {
+        return Ok(json!({ "changed": false, "reason": "stale" }));
+    }
+    let key_path = profile
+        .get("privateKeyPath")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    // A non-empty key path is exactly what makes credential_from_encrypted pick
+    // publickey auth; authType alone is not enough because a legacy profile may
+    // still say "key" while authenticating with its password.
+    let next = if !key_path.is_empty() {
+        // Re-checked against the on-disk profile under the write lock: a reply
+        // that arrives after the user switched to password auth must not clear
+        // the ciphertext that auth now depends on.
+        String::new()
+    } else if expected.starts_with("dpapi:") {
+        return Ok(json!({ "changed": false, "reason": "already-current" }));
+    } else {
+        let plaintext = match decrypt_password_value(expected) {
+            Some(p) => p,
+            None => return Ok(json!({ "changed": false, "reason": "decrypt-failed" })),
+        };
+        let sealed = dpapi_encrypt(&plaintext)?;
+        format!("dpapi:{}", base64_encode_bytes(&sealed))
+    };
+    profile["encryptedPassword"] = json!(next);
+    save_config_to(primary, anchor, &config)?;
+    Ok(json!({ "changed": true, "encryptedPassword": next }))
+}
+
+#[tauri::command]
+pub async fn upgrade_ssh_profile_auth(args: Vec<Value>) -> Result<Value, String> {
+    let params = args.into_iter().next().unwrap_or(json!({}));
+    let profile_id = params
+        .get("profileId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let expected = params
+        .get("expectedPassword")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if profile_id.is_empty() || expected.is_empty() {
+        return Ok(json!({ "changed": false, "reason": "nothing-to-upgrade" }));
+    }
+    let dirs = account_dirs()?;
+    // Disk IO and DPAPI off the async workers; the lock must never be held
+    // across an await, so it lives inside the blocking closure.
+    tokio::task::spawn_blocking(move || {
+        let _config_guard = CONFIG_WRITE_LOCK.lock();
+        upgrade_ssh_profile_auth_in(
+            &dirs.config_path(),
+            &dirs.anchor_config_path(),
+            &profile_id,
+            &expected,
+        )
+    })
+    .await
+    .map_err(|e| format!("password upgrade task failed: {e}"))?
+}
+
 // ── SFTP commands ──
 
 /// The panel's directory listing rows (sftp_open / sftp_readdir share the shape).
@@ -7803,6 +7936,7 @@ mod tests {
 
     #[test]
     fn load_config_from_reads_back_anchor_when_data_dir_config_missing() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
         // The data dir staying unwritable must not reset settings to factory:
         // the anchor mirror (written by save_config's fallback) is read back.
         let dir = config_test_dir("anchor-readback");
@@ -7831,6 +7965,7 @@ mod tests {
 
     #[test]
     fn load_config_from_prefers_data_dir_config_over_anchor() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
         let dir = config_test_dir("data-dir-first");
         let data_dir_config = dir.join("data").join("config.json");
         let anchor = dir.join("anchor").join("config.json");
@@ -12674,6 +12809,261 @@ mod tests {
             relative.authorization.identity["keyBase"],
             json!(std::env::current_dir().unwrap().to_string_lossy())
         );
+    }
+
+    fn seed_profile_config(dir: &std::path::Path, profile: Value) -> (PathBuf, PathBuf) {
+        let primary = dir.join("config.json");
+        let anchor = dir.join("anchor.json");
+        std::fs::write(
+            &primary,
+            serde_json::to_string(&json!({ "sshProfiles": [profile] })).unwrap(),
+        )
+        .unwrap();
+        (primary, anchor)
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn upgrade_profile_auth_rewrites_a_legacy_password_to_dpapi() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        let dir = config_test_dir("upgrade-legacy");
+        let legacy = base64_encode_bytes(b"legacy-secret");
+        let (primary, anchor) = seed_profile_config(
+            &dir,
+            json!({ "id": "p1", "encryptedPassword": legacy, "privateKeyPath": "" }),
+        );
+
+        let result = upgrade_ssh_profile_auth_in(&primary, &anchor, "p1", &legacy).unwrap();
+        assert_eq!(result["changed"], json!(true));
+        let stored = result["encryptedPassword"].as_str().unwrap();
+        assert!(
+            stored.starts_with("dpapi:"),
+            "rewritten in the current format"
+        );
+        assert_ne!(stored, legacy);
+        assert_eq!(
+            decrypt_password_value(stored).as_deref(),
+            Some("legacy-secret")
+        );
+
+        // The file itself holds the new value, not only the reply.
+        let config = load_config_from(&primary, &anchor);
+        assert_eq!(config["sshProfiles"][0]["encryptedPassword"], json!(stored));
+
+        // Idempotent: repeating with the superseded value is a stale no-op.
+        let again = upgrade_ssh_profile_auth_in(&primary, &anchor, "p1", &legacy).unwrap();
+        assert_eq!(again["changed"], json!(false));
+        assert_eq!(again["reason"], json!("stale"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upgrade_profile_auth_ignores_a_stale_expectation() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        let dir = config_test_dir("upgrade-stale");
+        let legacy = base64_encode_bytes(b"legacy-secret");
+        let (primary, anchor) = seed_profile_config(
+            &dir,
+            json!({ "id": "p1", "encryptedPassword": legacy, "privateKeyPath": "" }),
+        );
+        let before = std::fs::read_to_string(&primary).unwrap();
+
+        let result =
+            upgrade_ssh_profile_auth_in(&primary, &anchor, "p1", "some-other-ciphertext").unwrap();
+        assert_eq!(result["changed"], json!(false));
+        assert_eq!(result["reason"], json!("stale"));
+        assert_eq!(std::fs::read_to_string(&primary).unwrap(), before);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upgrade_profile_auth_leaves_an_undecryptable_password_alone() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        // An Electron OSCrypt blob from another machine: versioned payloads
+        // never fall back to plaintext, so the migration must not write.
+        let undecryptable = base64_encode_bytes(b"v10\x00\x01not-a-real-gcm-blob");
+        let dir = config_test_dir("upgrade-undecryptable");
+        let (primary, anchor) = seed_profile_config(
+            &dir,
+            json!({ "id": "p1", "encryptedPassword": undecryptable, "privateKeyPath": "" }),
+        );
+        let before = std::fs::read_to_string(&primary).unwrap();
+
+        let result = upgrade_ssh_profile_auth_in(&primary, &anchor, "p1", &undecryptable).unwrap();
+        assert_eq!(result["changed"], json!(false));
+        assert_eq!(result["reason"], json!("decrypt-failed"));
+        assert_eq!(std::fs::read_to_string(&primary).unwrap(), before);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upgrade_profile_auth_clears_a_password_stored_for_key_auth() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        // Key profiles never use the password: clear it without decrypting,
+        // even when the ciphertext would fail decryption on this machine.
+        let undecryptable = base64_encode_bytes(b"v10\x00\x01not-a-real-gcm-blob");
+        let dir = config_test_dir("upgrade-key-clear");
+        let (primary, anchor) = seed_profile_config(
+            &dir,
+            json!({ "id": "p1", "encryptedPassword": undecryptable,
+                "privateKeyPath": "C:/keys/id_ed25519" }),
+        );
+
+        let result = upgrade_ssh_profile_auth_in(&primary, &anchor, "p1", &undecryptable).unwrap();
+        assert_eq!(result["changed"], json!(true));
+        assert_eq!(result["encryptedPassword"], json!(""));
+        let config = load_config_from(&primary, &anchor);
+        assert_eq!(config["sshProfiles"][0]["encryptedPassword"], json!(""));
+        assert_eq!(
+            config["sshProfiles"][0]["privateKeyPath"],
+            json!("C:/keys/id_ed25519")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upgrade_profile_auth_skips_an_anchor_fallback() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        let dir = config_test_dir("upgrade-anchor");
+        // A directory at the primary path makes the read fail without looking
+        // corrupt, so the loader falls back to the anchor recovery copy.
+        let primary = dir.join("config.json");
+        std::fs::create_dir(&primary).unwrap();
+        let anchor = dir.join("anchor.json");
+        let legacy = base64_encode_bytes(b"legacy-secret");
+        std::fs::write(
+            &anchor,
+            serde_json::to_string(&json!({
+                "sshProfiles": [{ "id": "p1", "encryptedPassword": legacy, "privateKeyPath": "" }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&anchor).unwrap();
+
+        let result = upgrade_ssh_profile_auth_in(&primary, &anchor, "p1", &legacy).unwrap();
+        assert_eq!(result["changed"], json!(false));
+        assert_eq!(result["reason"], json!("loaded-from-anchor"));
+        assert_eq!(
+            std::fs::read_to_string(&anchor).unwrap(),
+            before,
+            "the recovery copy must not be rewritten"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upgrade_profile_auth_never_writes_while_config_saves_are_suppressed() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        let dir = config_test_dir("upgrade-suppressed");
+        let legacy = base64_encode_bytes(b"legacy-secret");
+        let (primary, anchor) = seed_profile_config(
+            &dir,
+            json!({ "id": "p1", "encryptedPassword": legacy, "privateKeyPath": "" }),
+        );
+        let before = std::fs::read_to_string(&primary).unwrap();
+
+        // A pending account seed survives the load and refuses the rewrite.
+        CONFIG_SEED_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+        let seeded = upgrade_ssh_profile_auth_in(&primary, &anchor, "p1", &legacy);
+        CONFIG_SEED_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(seeded.is_err(), "a suppressed save must fail loudly");
+        assert_eq!(std::fs::read_to_string(&primary).unwrap(), before);
+
+        // The persistence flag is cleared by a successful load by design, so
+        // it can only be exercised directly against the save path.
+        CONFIG_PERSIST_SUPPRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let direct = save_config_to(&primary, &anchor, &json!({ "sshProfiles": [] }));
+        CONFIG_PERSIST_SUPPRESSED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            direct.is_err(),
+            "suppressed persistence refuses every write"
+        );
+        assert_eq!(std::fs::read_to_string(&primary).unwrap(), before);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upgrade_profile_auth_clears_a_password_beside_a_key_path() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        // Older data can carry both fields. A key path makes the connection use
+        // publickey auth regardless of authType, so the password is dead weight
+        // and is dropped without decrypting it.
+        let undecryptable = base64_encode_bytes(b"v10\x00\x01not-a-real-gcm-blob");
+        let dir = config_test_dir("upgrade-password-key");
+        let (primary, anchor) = seed_profile_config(
+            &dir,
+            json!({ "id": "p1", "authType": "password", "encryptedPassword": undecryptable,
+                "privateKeyPath": "C:/keys/old_id_ed25519" }),
+        );
+
+        let result = upgrade_ssh_profile_auth_in(&primary, &anchor, "p1", &undecryptable).unwrap();
+        assert_eq!(result["changed"], json!(true));
+        assert_eq!(result["encryptedPassword"], json!(""));
+        let config = load_config_from(&primary, &anchor);
+        assert_eq!(config["sshProfiles"][0]["encryptedPassword"], json!(""));
+        assert_eq!(
+            config["sshProfiles"][0]["privateKeyPath"],
+            json!("C:/keys/old_id_ed25519"),
+            "the key path that drives authentication is kept"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn upgrade_profile_auth_migrates_legacy_key_auth_without_a_key_path() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        // A legacy profile may say "key" and still authenticate by password
+        // because it has no key path. It must migrate like any password
+        // profile, not be reported stale forever.
+        let dir = config_test_dir("upgrade-key-without-path");
+        let legacy = base64_encode_bytes(b"legacy-secret");
+        let (primary, anchor) = seed_profile_config(
+            &dir,
+            json!({ "id": "p1", "authType": "key", "encryptedPassword": legacy,
+                "privateKeyPath": "" }),
+        );
+
+        let result = upgrade_ssh_profile_auth_in(&primary, &anchor, "p1", &legacy).unwrap();
+        assert_eq!(result["changed"], json!(true));
+        let stored = result["encryptedPassword"].as_str().unwrap();
+        assert!(stored.starts_with("dpapi:"));
+        assert_eq!(
+            decrypt_password_value(stored).as_deref(),
+            Some("legacy-secret")
+        );
+        let config = load_config_from(&primary, &anchor);
+        assert_eq!(config["sshProfiles"][0]["encryptedPassword"], json!(stored));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upgrade_profile_auth_is_a_noop_when_current_or_missing() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        let dir = config_test_dir("upgrade-noop");
+        let (primary, anchor) = seed_profile_config(
+            &dir,
+            json!({ "id": "p1", "encryptedPassword": "dpapi:stored", "privateKeyPath": "" }),
+        );
+        let before = std::fs::read_to_string(&primary).unwrap();
+
+        let current = upgrade_ssh_profile_auth_in(&primary, &anchor, "p1", "dpapi:stored").unwrap();
+        assert_eq!(current["changed"], json!(false));
+        assert_eq!(current["reason"], json!("already-current"));
+        let missing = upgrade_ssh_profile_auth_in(&primary, &anchor, "p2", "dpapi:other").unwrap();
+        assert_eq!(missing["reason"], json!("profile-missing"));
+        assert_eq!(std::fs::read_to_string(&primary).unwrap(), before);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

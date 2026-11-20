@@ -88,6 +88,7 @@ async fn main() {
             zterm::encrypt_password,
             zterm::register_credential,
             zterm::revoke_credential,
+            zterm::upgrade_ssh_profile_auth,
             zterm::quit_ready,
             zterm::cancel_quit,
             zterm::clipboard_write_text,
