@@ -101,6 +101,22 @@ test('a rejected bridge write falls back to the browser clipboard', async () => 
     assert.deepEqual(writes, ['fallback text'], 'a failed backend write is not silent');
 });
 
+test('cancelPendingWriteText drops a queued selection write before a direct write', () => {
+    const { clipboard, invokes, writes, flushTimers } = makeClipboard({ tauri: true });
+    clipboard.writeText('stale selection');
+    clipboard.cancelPendingWriteText();
+    flushTimers();
+
+    assert.equal(invokes.length, 0, 'the superseded selection is never written');
+    assert.deepEqual(writes, [], 'no browser write either');
+
+    // A later direct write still works normally.
+    clipboard.writeText('new selection');
+    flushTimers();
+    assert.equal(invokes.length, 1);
+    assert.equal(invokes[0].payload.text, 'new selection');
+});
+
 test('non-Tauri writeText keeps using the browser clipboard immediately', () => {
     const { clipboard, invokes, writes, flushTimers } = makeClipboard({ tauri: false });
     clipboard.writeText('browser copy');

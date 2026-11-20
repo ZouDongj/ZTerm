@@ -336,7 +336,15 @@ function _textMenuItems(el) {
     };
     // Clipboard goes through the Rust commands (system clipboard; works
     // outside a user gesture, unlike navigator.clipboard in WebView2).
-    const writeClipboard = (text) => ipcRenderer.invoke('clipboard-write-text', { text });
+    // A menu copy is newer than a queued selection auto-copy, so drop the
+    // pending debounced write before sending this one.
+    const writeClipboard = (text) => {
+        try {
+            const bridge = window.require && window.require('electron').clipboard;
+            if (bridge && typeof bridge.cancelPendingWriteText === 'function') bridge.cancelPendingWriteText();
+        } catch (e) {}
+        return ipcRenderer.invoke('clipboard-write-text', { text });
+    };
     const readClipboard = () => ipcRenderer.invoke('clipboard-read-text');
     const clipFailToast = (what) => {
         console.error('[ZTerm] clipboard ' + what + ' failed');

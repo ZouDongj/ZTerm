@@ -250,3 +250,19 @@ test('showConfirm onDismiss fires once for cancel, backdrop and supersede, never
     cleanup();
     assert.equal(repeated, 1, 'the closed guard makes cleanup idempotent');
 });
+
+// A throwing focus handoff must not strand the work behind the dialog: the
+// dismissal callback (execution-trust or SFTP upload) has to run regardless.
+test('onDismiss still runs when restoring terminal focus throws', () => {
+    const ctx = loadVm();
+    loadUtils(ctx);
+    mountConfirmDom(ctx);
+    vm.runInContext('console.error = function() {};', ctx);
+    vm.runInContext('_refocusActiveTerminal = function() { throw new Error("focus failed"); };', ctx);
+    let dismissed = 0;
+
+    ctx.showConfirm('restore throws', () => {}, '确定', undefined, () => { dismissed++; });
+    ctx.closeAllOverlays();
+
+    assert.equal(dismissed, 1, 'the dismissal still settles pending work');
+});

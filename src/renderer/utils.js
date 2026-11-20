@@ -168,7 +168,9 @@ function showConfirm(msg, onOk, okText, tone, onDismiss) {
         // Restore the default label and tone so delete flows are unaffected.
         okBtn.textContent = '删除';
         okBtn.className = 'btn-danger';
-        _restoreFocusAfterModal();
+        // Focus restoration must never prevent onDismiss from settling a
+        // pending trust or upload promise.
+        try { _restoreFocusAfterModal(); } catch (error) { console.error('[ZTerm] confirm focus restore failed:', error); }
         if (!accepted && typeof onDismiss === 'function') {
             try { onDismiss(); } catch (error) { console.error('[ZTerm] confirm dismiss callback failed:', error); }
         }

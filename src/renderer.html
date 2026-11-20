@@ -1073,6 +1073,15 @@
     // placeholder (empty) for legacy synchronous call sites.
     const electronClipboard = {
       _writeTextState: { timer: null, text: null },
+      // A direct write (OSC 52, context-menu copy) supersedes a queued
+      // selection auto-copy; drop the pending text so it cannot overwrite the
+      // newer clipboard contents when its debounce expires.
+      cancelPendingWriteText: function() {
+        const state = electronClipboard._writeTextState;
+        if (state.timer) clearTimeout(state.timer);
+        state.timer = null;
+        state.text = null;
+      },
       readText: function() { return ''; },
       readTextAsync: function() { return navigator.clipboard.readText(); },
       // ipc-polyfill.js has already installed window.electron before this

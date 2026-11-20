@@ -14,6 +14,8 @@ import { loadVm } from './helpers/renderer-vm.mjs';
 
 const utilsSrc = readFileSync(new URL('../src/renderer/utils.js', import.meta.url), 'utf8');
 const trustSrc = readFileSync(new URL('../src/renderer/execution-trust.js', import.meta.url), 'utf8');
+const shortcutsSrc = readFileSync(new URL('../src/renderer/shortcuts.js', import.meta.url), 'utf8');
+const shortcutUtilsSrc = readFileSync(new URL('../src/renderer/shortcut-utils.js', import.meta.url), 'utf8');
 
 function loadUtils(ctx) {
     ctx.window.addEventListener = () => {};
@@ -68,6 +70,59 @@ function loadTrust(ctx, responses) {
     vm.runInContext(trustSrc, ctx, { filename: 'execution-trust.js' });
     const pulse = () => { for (const fn of Array.from(timers.values())) fn(); };
     return { calls, broker: ctx.window.ZTermExecutionTrust, pulse };
+}
+
+// The real Escape handler and its delayed refocus, with deterministic timers.
+// _refocusActiveTerminal stands in for main.js and records a focus landing the
+// way a real terminal focus would: activeElement moves off the modal controls.
+function loadShortcuts(ctx) {
+    const timers = [];
+    const focusLog = [];
+    let seq = 0;
+    let now = 0;
+    ctx.setTimeout = (fn, ms = 0) => {
+        const id = ++seq;
+        timers.push({ id, fn, at: now + (Number(ms) || 0) });
+        return id;
+    };
+    ctx.clearTimeout = id => {
+        const index = timers.findIndex(timer => timer.id === id);
+        if (index >= 0) timers.splice(index, 1);
+    };
+    ctx._refocusActiveTerminal = () => {
+        focusLog.push(ctx.document.activeElement);
+        ctx.document.activeElement = ctx.document.body;
+    };
+    const listeners = [];
+    const add = ctx.document.addEventListener.bind(ctx.document);
+    ctx.document.addEventListener = (type, fn, capture) => {
+        if (type === 'keydown' && capture) listeners.push(fn);
+        add(type, fn, capture);
+    };
+    vm.runInContext(shortcutUtilsSrc, ctx, { filename: 'shortcut-utils.js' });
+    vm.runInContext(shortcutsSrc, ctx, { filename: 'shortcuts.js' });
+    return {
+        focusLog,
+        clearFocusLog() { focusLog.length = 0; },
+        pressEscape() {
+            const event = {
+                key: 'Escape', isComposing: false, keyCode: 0,
+                target: { tagName: 'TEXTAREA', classList: { contains: () => false } },
+                preventDefault() {}, stopPropagation() {},
+            };
+            for (const fn of listeners) fn(event);
+        },
+        advance(ms) {
+            now += ms;
+            for (;;) {
+                const due = timers.filter(timer => timer.at <= now)
+                    .sort((a, b) => a.at - b.at || a.id - b.id)[0];
+                if (!due) break;
+                timers.splice(timers.indexOf(due), 1);
+                due.fn();
+            }
+        },
+    };
 }
 
 const drain = () => new Promise(resolve => setImmediate(resolve));
@@ -262,4 +317,53 @@ test('closeAllOverlays clears the confirm cleanup pointer for later prompts', as
     await outcome(running);
     await drain();
     assert.equal(count(calls, 'cancel-execution'), 1);
+});
+
+test('Escape on T1 leaves the keyboard with the queued T2 prompt', async () => {
+    const ctx = loadVm();
+    loadUtils(ctx);
+    mountConfirmDom(ctx);
+    ctx.sshAttempts = { ownerWants: () => true, ownerAttempt: () => null };
+    const { calls, broker } = loadTrust(ctx, {
+        prepare: { challengeId: 'challenge-focus', description: 'queued trust dialog', canRemember: false },
+    });
+
+    const first = broker.authorizeSsh({ shell: 'fixture.exe' }, 'attempt-focus-1');
+    first.catch(() => {});
+    await drain();
+    assert.equal(overlay(ctx).classList.contains('open'), true, 'T1 is visible');
+
+    const second = broker.authorizeSsh({ shell: 'fixture.exe' }, 'attempt-focus-2');
+    second.catch(() => {});
+    await drain();
+    assert.equal(overlay(ctx).classList.contains('open'), true, 'T1 still owns the shared dialog');
+
+    const shortcuts = loadShortcuts(ctx);
+    shortcuts.pressEscape();
+    await drain();
+
+    const firstResult = await outcome(first);
+    assert.ok(firstResult.rejected, 'T1 is denied by the first Escape');
+    let secondSettled = false;
+    second.then(() => { secondSettled = true; }, () => { secondSettled = true; });
+    await drain();
+    assert.equal(secondSettled, false, 'T2 stays pending while its dialog is visible');
+    assert.equal(overlay(ctx).classList.contains('open'), true, 'T2 took over the shared dialog');
+    assert.equal(ctx.document.getElementById('confirm-msg').textContent, 'queued trust dialog');
+    assert.equal(ctx.document.activeElement, cancelBtn(ctx), 'T2 owns the keyboard');
+
+    // The synchronous focus restore from T1's cleanup is not the regression:
+    // only the delayed Escape refocus must stay away while T2 is visible.
+    shortcuts.clearFocusLog();
+    shortcuts.advance(50);
+    await drain();
+    assert.equal(shortcuts.focusLog.length, 0, 'the delayed refocus does not steal T2 focus');
+    assert.equal(ctx.document.activeElement, cancelBtn(ctx), 'focus stays on the modal');
+
+    ctx.closeAllOverlays();
+    const secondResult = await outcome(second);
+    await drain();
+    assert.ok(secondResult.rejected);
+    assert.equal(count(calls, 'cancel-execution'), 2, 'each visible dismissal cancels exactly once');
+    assert.equal(count(calls, 'decide-execution'), 0);
 });
