@@ -680,10 +680,10 @@ impl russh::client::Handler for SshHandler {
         use russh::keys::HashAlg;
         let fingerprint = server_public_key.fingerprint(HashAlg::Sha256).to_string();
         let algorithm = server_public_key.algorithm().to_string();
-        match known_hosts_check(&self.host, self.port, &fingerprint) {
+        match known_hosts_check(&self.host, self.port, &fingerprint).await {
             HostKeyStatus::Known => Ok(true),
             HostKeyStatus::Unknown => {
-                known_hosts_trust(&self.host, self.port, &algorithm, &fingerprint);
+                known_hosts_trust(&self.host, self.port, &algorithm, &fingerprint).await;
                 Ok(true)
             }
             HostKeyStatus::Mismatch {
@@ -716,7 +716,8 @@ impl russh::client::Handler for SshHandler {
                 match decision {
                     Ok(decision) => {
                         if decision.accept && decision.trust {
-                            known_hosts_trust(&self.host, self.port, &algorithm, &fingerprint);
+                            known_hosts_trust(&self.host, self.port, &algorithm, &fingerprint)
+                                .await;
                         }
                         Ok(decision.accept)
                     }
@@ -769,10 +770,9 @@ fn known_hosts_path() -> PathBuf {
     PathBuf::from(base).join("ZTerm").join("known_hosts.json")
 }
 
-fn load_known_hosts() -> Value {
-    let path = known_hosts_path();
+fn load_known_hosts_at(path: &std::path::Path) -> Value {
     if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(content) = std::fs::read_to_string(path) {
             if let Ok(v) = serde_json::from_str::<Value>(&content) {
                 return v;
             }
@@ -781,14 +781,13 @@ fn load_known_hosts() -> Value {
     json!({})
 }
 
-fn save_known_hosts(hosts: &Value) {
-    let path = known_hosts_path();
+fn save_known_hosts_at(path: &std::path::Path, hosts: &Value) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     // Atomic write: tmp + rename (parity with known-hosts.js)
     let _ = atomic_write_config(
-        &path,
+        path,
         &serde_json::to_string_pretty(hosts).unwrap_or_default(),
     );
 }
@@ -829,19 +828,65 @@ fn check_known_host_entry(entry: Option<&Value>, fingerprint: &str) -> HostKeySt
     }
 }
 
-fn known_hosts_check(host: &str, port: u16, fingerprint: &str) -> HostKeyStatus {
-    let id = format!("{}:{}", host, port);
-    let hosts = load_known_hosts();
-    check_known_host_entry(hosts.get(&id), fingerprint)
+async fn known_hosts_check(host: &str, port: u16, fingerprint: &str) -> HostKeyStatus {
+    known_hosts_check_at(
+        known_hosts_path(),
+        host.to_string(),
+        port,
+        fingerprint.to_string(),
+    )
+    .await
 }
 
-fn known_hosts_trust(host: &str, port: u16, algorithm: &str, fingerprint: &str) {
-    // Serialize load-modify-save so concurrent trusts cannot overwrite each other's records
-    let _guard = KNOWN_HOSTS_WRITE_LOCK.lock();
+/// Read the known-hosts file on the blocking pool: check_server_key runs on an
+/// async worker and a slow or AV-scanned APPDATA read must not park it. A
+/// failed blocking task degrades to Unknown, matching an unreadable file.
+async fn known_hosts_check_at(
+    path: PathBuf,
+    host: String,
+    port: u16,
+    fingerprint: String,
+) -> HostKeyStatus {
     let id = format!("{}:{}", host, port);
-    let mut hosts = load_known_hosts();
-    hosts[id] = json!({ "algorithm": algorithm, "fingerprint": fingerprint });
-    save_known_hosts(&hosts);
+    tokio::task::spawn_blocking(move || {
+        let hosts = load_known_hosts_at(&path);
+        check_known_host_entry(hosts.get(&id), &fingerprint)
+    })
+    .await
+    .unwrap_or(HostKeyStatus::Unknown)
+}
+
+async fn known_hosts_trust(host: &str, port: u16, algorithm: &str, fingerprint: &str) {
+    known_hosts_trust_at(
+        known_hosts_path(),
+        host.to_string(),
+        port,
+        algorithm.to_string(),
+        fingerprint.to_string(),
+    )
+    .await;
+}
+
+/// Serialize load-modify-save so concurrent trusts cannot overwrite each
+/// other's records, and run it on the blocking pool: both this write and the
+/// check read in check_server_key touch APPDATA from an async task, and a slow
+/// or AV-scanned read must not park a runtime worker (and every other
+/// session's I/O behind it).
+async fn known_hosts_trust_at(
+    path: PathBuf,
+    host: String,
+    port: u16,
+    algorithm: String,
+    fingerprint: String,
+) {
+    let _ = tokio::task::spawn_blocking(move || {
+        let _guard = KNOWN_HOSTS_WRITE_LOCK.lock();
+        let id = format!("{}:{}", host, port);
+        let mut hosts = load_known_hosts_at(&path);
+        hosts[id] = json!({ "algorithm": algorithm, "fingerprint": fingerprint });
+        save_known_hosts_at(&path, &hosts);
+    })
+    .await;
 }
 
 // ── Credential store ──
@@ -9160,6 +9205,107 @@ mod tests {
         assert_eq!(pending_size_for(&pending.lock(), "att_1"), Some((44, 120)));
     }
 
+    #[tokio::test]
+    async fn known_hosts_check_at_reads_a_recorded_entry() {
+        let dir = config_test_dir("known_hosts_check_at");
+        let path = dir.join("known_hosts.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "example.test:2222": { "algorithm": "ssh-ed25519", "fingerprint": "SHA256:zzz" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            known_hosts_check_at(
+                path.clone(),
+                "example.test".to_string(),
+                2222,
+                "SHA256:zzz".to_string()
+            )
+            .await,
+            HostKeyStatus::Known
+        ));
+        assert!(matches!(
+            known_hosts_check_at(
+                path,
+                "example.test".to_string(),
+                2222,
+                "SHA256:other".to_string()
+            )
+            .await,
+            HostKeyStatus::Mismatch { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn known_hosts_trust_at_records_the_fingerprint() {
+        let dir = config_test_dir("known_hosts_trust_at");
+        let path = dir.join("known_hosts.json");
+
+        known_hosts_trust_at(
+            path.clone(),
+            "example.test".to_string(),
+            2222,
+            "ssh-ed25519".to_string(),
+            "SHA256:abc".to_string(),
+        )
+        .await;
+
+        let stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored["example.test:2222"]["algorithm"], "ssh-ed25519");
+        assert_eq!(stored["example.test:2222"]["fingerprint"], "SHA256:abc");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn known_hosts_trust_does_not_park_the_async_worker() {
+        let dir = config_test_dir("known_hosts_off_worker");
+        let path = dir.join("known_hosts.json");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = KNOWN_HOSTS_WRITE_LOCK.lock();
+            let _ = ready_tx.send(());
+            std::thread::sleep(std::time::Duration::from_millis(800));
+        });
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the holder must take the lock before the probe runs");
+
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            known_hosts_trust_at(
+                path.clone(),
+                "blocked.test".to_string(),
+                22,
+                "ssh-ed25519".to_string(),
+                "SHA256:blocked".to_string(),
+            ),
+        )
+        .await;
+
+        assert!(
+            res.is_err(),
+            "the lock wait must happen on the blocking pool, not the async worker"
+        );
+        holder.join().unwrap();
+        // The timed-out call still owns a blocking task; a fresh call after the
+        // holder released serializes behind it and leaves a complete file.
+        known_hosts_trust_at(
+            path.clone(),
+            "blocked.test".to_string(),
+            22,
+            "ssh-ed25519".to_string(),
+            "SHA256:blocked".to_string(),
+        )
+        .await;
+        let stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored["blocked.test:22"]["fingerprint"], "SHA256:blocked");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn take_matching_session_removes_only_the_matching_entry() {
         let mut map: HashMap<String, u8> = HashMap::new();
