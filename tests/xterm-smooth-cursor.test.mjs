@@ -162,6 +162,19 @@ function fixture({ reduced = false, cursorStyle = 'bar', renderScope } = {}) {
   };
 }
 
+test('stale-row cleanup suppresses the native cursor while the custom caret owns it', async () => {
+  const f = fixture({ renderScope: 'cursor' });
+  f.renderer.renderRows(0, 2);
+  f.active.cursorY = 1;
+  f.renderer.renderRows(0, 2);
+  f.setTime(200);
+  f.renderer.renderRows(0, 2);
+
+  assert.deepEqual(f.baseHiddenStates, [true, true, true, true]);
+  assert.equal(f.counts().stockRecolors, 0);
+  assert.equal(f.coreService.isCursorHidden, false);
+});
+
 test('wraps the actual render hook, restores stock visibility, and draws a fractional bar in the same pass', async () => {
   const f = fixture();
   f.renderer.renderRows(0, 2);

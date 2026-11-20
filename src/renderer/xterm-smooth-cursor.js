@@ -742,6 +742,21 @@
       const coreService = renderer._coreService;
       const previousHidden = coreService.isCursorHidden;
       if (ownsCursor) coreService.isCursorHidden = true;
+
+      // Clearing a stale caret row must never let the native cursor paint:
+      // the custom caret still owns it, and stock renderRows would draw the
+      // protocol cursor on the row just vacated (a one-frame native flash).
+      const renderStaleRow = stale => {
+        const hiddenBefore = coreService.isCursorHidden;
+        if (ownsCursor) coreService.isCursorHidden = true;
+        try {
+          originalRenderRows.call(renderer, stale, stale);
+        } catch (error) {
+          /* mid-dispose: nothing to clear */
+        } finally {
+          if (ownsCursor) coreService.isCursorHidden = hiddenBefore;
+        }
+      };
       instrumentation.drawPassStatus = 'base';
       instrumentation.customDrawSource = 'none';
       try {
@@ -827,27 +842,21 @@
         const currentRow = Math.floor(finite(visual?.y, lastDrawnRow));
         for (const stale of [Math.floor(lastDrawnRow), Math.floor(lastDrawnRow) + 1]) {
           if (stale !== currentRow && stale !== currentRow + 1) {
-            try {
-              originalRenderRows.call(renderer, stale, stale);
-            } catch (error) {
-              /* mid-dispose: nothing to clear */
-            }
+            renderStaleRow(stale);
           }
         }
       }
       if (sw.active && cursorBeforeBase.software) {
         const restoreRow = cursorBeforeBase.y;
         if (sw.lastRestoreRow !== null && Math.floor(sw.lastRestoreRow) !== Math.floor(restoreRow)) {
-          try {
-            originalRenderRows.call(renderer, Math.floor(sw.lastRestoreRow), Math.floor(sw.lastRestoreRow));
-          } catch (error) { /* mid-dispose */ }
+          renderStaleRow(Math.floor(sw.lastRestoreRow));
         }
         drawRestoreCell(cursorBeforeBase);
         sw.lastRestoreRow = restoreRow;
       } else if (sw.lastRestoreRow !== null) {
         const stale = Math.floor(sw.lastRestoreRow);
         sw.lastRestoreRow = null;
-        try { originalRenderRows.call(renderer, stale, stale); } catch (error) { /* mid-dispose */ }
+        renderStaleRow(stale);
       }
       drawCursor(cursorBeforeBase, visual);
       lastDrawnRow = Math.floor(finite(visual?.y, 0));
