@@ -1065,26 +1065,40 @@
       renameSync: function() {},
       copyFileSync: function() {},
     };
-    // electron clipboard stub — use browser Clipboard API (Tauri WebView2 supports it)
-    // Note: the WebView2 Clipboard API is fully async; readTextAsync serves the (async) right-click paste,
-    // readText stays a synchronous placeholder (returns empty, for legacy synchronous call sites)
+    // Electron clipboard stub. Plain-text writes use the Tauri backend (Rust
+    // arboard) when it is available; reads and rich-text writes use the browser
+    // Clipboard API.
+    // The WebView2 Clipboard API is fully async: readTextAsync serves the
+    // asynchronous right-click paste, while readText stays a synchronous
+    // placeholder (empty) for legacy synchronous call sites.
     const electronClipboard = {
+      _writeTextState: { timer: null, text: null },
       readText: function() { return ''; },
       readTextAsync: function() { return navigator.clipboard.readText(); },
-      // Under Tauri, writes go through Rust arboard (system clipboard, no WebView2 permission restrictions);
-      // navigator.clipboard.writeText outside a user gesture (e.g. selectionchange auto-copy)
-      // throws NotAllowedError, and the rejected promise needs a catch to avoid an unhandled rejection
+      // ipc-polyfill.js has already installed window.electron before this
+      // stub; only __TAURI__ may be injected later, so test it at call time.
+      // Selection auto-copy runs from selectionchange, outside a user gesture,
+      // where navigator.clipboard rejects but arboard works.
       writeText: function(text) {
-        // Detect Tauri through the runtime bridge itself: __TAURI__ and the
-        // IPC polyfill are installed after this stub is created, so the check
-        // must run at call time. The Rust command uses arboard, which also
-        // works outside a user gesture (selectionchange auto-copy).
         if (window.__TAURI__ && window.__TAURI__.event &&
             window.electron && window.electron.ipcRenderer) {
-          window.electron.ipcRenderer.invoke('clipboard-write-text', { text: text }).catch(() => {});
+          // Coalesce a drag's selection events into one trailing write: every
+          // intermediate selection would otherwise enter the clipboard and the
+          // Win+V history.
+          const state = electronClipboard._writeTextState;
+          state.text = text;
+          clearTimeout(state.timer);
+          state.timer = setTimeout(function() {
+            state.timer = null;
+            const pending = state.text;
+            state.text = null;
+            window.electron.ipcRenderer.invoke('clipboard-write-text', { text: pending }).catch(function() {
+              try { navigator.clipboard.writeText(pending).catch(function() {}); } catch(e) {}
+            });
+          }, 120);
           return;
         }
-        try { navigator.clipboard.writeText(text).catch(() => {}); } catch(e) {}
+        try { navigator.clipboard.writeText(text).catch(function() {}); } catch(e) {}
       },
       write: function(data) {
         try {

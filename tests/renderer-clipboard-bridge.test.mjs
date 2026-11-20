@@ -1,11 +1,13 @@
-// The inline Electron clipboard stub in renderer.html must route writes
-// through the Rust arboard command when running under Tauri. The old branch
-// tested an undefined `isTauri` global (and called a bare `ipcRenderer` that
-// is not a global either), so selection auto-copy silently fell back to
-// navigator.clipboard.writeText, which rejects outside a user gesture.
+// The inline Electron clipboard stub in renderer.html must route plain-text
+// writes through the Rust arboard command when running under Tauri. The old
+// branch tested an undefined `isTauri` global, so selection auto-copy silently
+// fell back to navigator.clipboard.writeText, which rejects outside a user
+// gesture.
 //
-// The stub is extracted from the real renderer.html and evaluated in a VM so
-// the test exercises the shipped object literal, not a copy.
+// The stub receives window.electron from ipc-polyfill.js, which loads before
+// the inline script (renderer.html:1043); only __TAURI__ may be injected
+// later, so the stub checks it at call time. The extracted object literal is
+// evaluated in a VM with fake timers so the trailing debounce is exercised.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -31,15 +33,17 @@ function extractObjectLiteral(source, name) {
 
 const clipboardSrc = extractObjectLiteral(html, 'electronClipboard');
 
-function makeClipboard({ tauri }) {
+function makeClipboard({ tauri, rejectInvoke = false }) {
     const invokes = [];
     const writes = [];
+    const timers = new Map();
+    let nextTimer = 1;
     const window = {
         electron: {
             ipcRenderer: {
                 invoke: (cmd, payload) => {
                     invokes.push({ cmd, payload });
-                    return Promise.resolve();
+                    return rejectInvoke ? Promise.reject(new Error('bridge down')) : Promise.resolve();
                 },
             },
         },
@@ -51,27 +55,56 @@ function makeClipboard({ tauri }) {
         ClipboardItem: class {},
         Blob,
         console,
+        setTimeout: (fn) => { const id = nextTimer++; timers.set(id, fn); return id; },
+        clearTimeout: (id) => { timers.delete(id); },
     };
-    const clipboard = vm.runInNewContext(`(${clipboardSrc})`, sandbox);
-    return { clipboard, invokes, writes };
+    const clipboard = vm.runInNewContext(`const electronClipboard = ${clipboardSrc};\nelectronClipboard;`, sandbox);
+    return {
+        clipboard,
+        invokes,
+        writes,
+        flushTimers: () => {
+            const pending = Array.from(timers.values());
+            timers.clear();
+            for (const fn of pending) fn();
+        },
+    };
 }
+
+const drain = () => new Promise(resolve => setImmediate(resolve));
 
 test('clipboard stub no longer tests the undefined isTauri global', () => {
     assert.ok(!/typeof\s+isTauri/.test(clipboardSrc), 'dead isTauri branch removed');
 });
 
-test('Tauri writeText goes through the Rust clipboard bridge', () => {
-    const { clipboard, invokes, writes } = makeClipboard({ tauri: true });
-    clipboard.writeText('auto-copied selection');
-    assert.equal(invokes.length, 1);
+test('Tauri writeText debounces selection updates into one backend write', () => {
+    const { clipboard, invokes, writes, flushTimers } = makeClipboard({ tauri: true });
+    clipboard.writeText('a');
+    clipboard.writeText('ab');
+    clipboard.writeText('abc');
+    assert.equal(invokes.length, 0, 'no write while a drag is still updating the selection');
+
+    flushTimers();
+    assert.equal(invokes.length, 1, 'one trailing write for the whole drag');
     assert.equal(invokes[0].cmd, 'clipboard-write-text');
-    assert.equal(invokes[0].payload.text, 'auto-copied selection');
-    assert.deepEqual(writes, [], 'navigator.writeText is not used under Tauri');
+    assert.equal(invokes[0].payload.text, 'abc', 'the latest selection wins');
+    assert.deepEqual(writes, [], 'navigator.writeText is not used while the bridge works');
 });
 
-test('non-Tauri writeText keeps using the browser clipboard', () => {
-    const { clipboard, invokes, writes } = makeClipboard({ tauri: false });
+test('a rejected bridge write falls back to the browser clipboard', async () => {
+    const { clipboard, invokes, writes, flushTimers } = makeClipboard({ tauri: true, rejectInvoke: true });
+    clipboard.writeText('fallback text');
+    flushTimers();
+    await drain();
+
+    assert.equal(invokes.length, 1);
+    assert.deepEqual(writes, ['fallback text'], 'a failed backend write is not silent');
+});
+
+test('non-Tauri writeText keeps using the browser clipboard immediately', () => {
+    const { clipboard, invokes, writes, flushTimers } = makeClipboard({ tauri: false });
     clipboard.writeText('browser copy');
     assert.equal(invokes.length, 0, 'no backend command outside Tauri');
     assert.deepEqual(writes, ['browser copy']);
+    assert.equal(flushTimers(), undefined);
 });
