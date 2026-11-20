@@ -1072,15 +1072,16 @@
     // asynchronous right-click paste, while readText stays a synchronous
     // placeholder (empty) for legacy synchronous call sites.
     const electronClipboard = {
-      _writeTextState: { timer: null, text: null },
-      // A direct write (OSC 52, context-menu copy) supersedes a queued
-      // selection auto-copy; drop the pending text so it cannot overwrite the
-      // newer clipboard contents when its debounce expires.
-      cancelPendingWriteText: function() {
-        const state = electronClipboard._writeTextState;
-        if (state.timer) clearTimeout(state.timer);
-        state.timer = null;
-        state.text = null;
+      // Monotonic generation of clipboard writes. A failed bridge write may
+      // only fall back to the browser clipboard while no newer write has been
+      // issued: WebView2 accepts that fallback outside a user gesture, so a
+      // late one would silently restore stale contents.
+      _writeSeq: 0,
+      // A direct bridge write (context-menu copy, OSC 52) bypasses writeText;
+      // advancing the generation keeps an older in-flight failure from
+      // overwriting it through the fallback.
+      noteDirectWrite: function() {
+        electronClipboard._writeSeq++;
       },
       readText: function() { return ''; },
       readTextAsync: function() { return navigator.clipboard.readText(); },
@@ -1091,22 +1092,16 @@
       writeText: function(text) {
         if (window.__TAURI__ && window.__TAURI__.event &&
             window.electron && window.electron.ipcRenderer) {
-          // Coalesce a drag's selection events into one trailing write: every
-          // intermediate selection would otherwise enter the clipboard and the
-          // Win+V history.
-          const state = electronClipboard._writeTextState;
-          state.text = text;
-          clearTimeout(state.timer);
-          state.timer = setTimeout(function() {
-            state.timer = null;
-            const pending = state.text;
-            state.text = null;
-            window.electron.ipcRenderer.invoke('clipboard-write-text', { text: pending }).catch(function() {
-              try { navigator.clipboard.writeText(pending).catch(function() {}); } catch(e) {}
-            });
-          }, 120);
+          const seq = ++electronClipboard._writeSeq;
+          window.electron.ipcRenderer.invoke('clipboard-write-text', { text }).catch(function(err) {
+            console.warn('[ZTerm] clipboard bridge write failed:', err);
+            // A newer write owns the clipboard now; leave its contents alone.
+            if (electronClipboard._writeSeq !== seq) return;
+            try { navigator.clipboard.writeText(text).catch(function() {}); } catch(e) {}
+          });
           return;
         }
+        electronClipboard._writeSeq++;
         try { navigator.clipboard.writeText(text).catch(function() {}); } catch(e) {}
       },
       write: function(data) {
@@ -1115,11 +1110,15 @@
           if (data && data.text != null) items['text/plain'] = new Blob([data.text], { type: 'text/plain' });
           if (data && data.html != null) items['text/html'] = new Blob([data.html], { type: 'text/html' });
           if (items['text/plain'] || items['text/html']) {
+            electronClipboard._writeSeq++;
             navigator.clipboard.write([new ClipboardItem(items)]).catch(() => {});
           }
         } catch(e) {
           // Fallback when ClipboardItem is unavailable (older WebView2): write plain text only
-          if (data && data.text != null) { try { navigator.clipboard.writeText(data.text); } catch(e2) {} }
+          if (data && data.text != null) {
+            electronClipboard._writeSeq++;
+            try { navigator.clipboard.writeText(data.text); } catch(e2) {}
+          }
         }
       },
     };

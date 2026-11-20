@@ -67,6 +67,20 @@ test('a terminal created with OSC 52 disabled supports later enable without dupl
     } finally { f.term.dispose(); }
 });
 
+test('OSC 52 output advances the bridge generation before its direct write', async () => {
+    const f = fixture();
+    try {
+        let noted = 0;
+        // terminal.js resolves the bridge through the page's global require at
+        // write time, so this stub observes the OSC 52 path without touching
+        // the rest of the fixture.
+        f.ctx.require = () => ({ clipboard: { noteDirectWrite: () => { noted++; } } });
+        await write(f.term, '\x1b]52;c;V1JJVEU=\x07');
+        assert.equal(noted, 1, 'the direct write supersedes any in-flight selection write');
+        assert.ok(f.calls.some(x => x.command === 'clipboard-write-text'), 'the text still reaches the bridge');
+    } finally { f.term.dispose(); }
+});
+
 for (const transition of ['disable', 'disable-enable', 'reconnect', 'close', 'failed']) {
     test(`pending OSC 52 read cannot reply after ${transition}`, async () => {
         let finishRead;

@@ -966,10 +966,11 @@ function _createClipboardAddon() {
         writeText: (clipboard, text) => {
             if (clipboard !== 'c' || !allowed()) return Promise.resolve();
             if (isTauri) {
-                // OSC 52 output is newer than any queued selection auto-copy.
+                // OSC 52 output is newer than any in-flight selection write, so
+                // advance the bridge generation before writing directly.
                 const bridgeClipboard = require('electron').clipboard;
-                if (bridgeClipboard && typeof bridgeClipboard.cancelPendingWriteText === 'function') {
-                    bridgeClipboard.cancelPendingWriteText();
+                if (bridgeClipboard && typeof bridgeClipboard.noteDirectWrite === 'function') {
+                    bridgeClipboard.noteDirectWrite();
                 }
                 return ipcRenderer.invoke('clipboard-write-text', { text }).catch(() => {});
             }
