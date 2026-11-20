@@ -1323,28 +1323,31 @@ async function main() {
         // 0x0 idle composition view and rewrites the textarea to 1px.
         const helper = core._compositionHelper;
         const view = core._compositionView;
-        if (helper && view && typeof view.getBoundingClientRect === 'function') {
-          const prevRect = view.getBoundingClientRect;
-          const width = term.textarea.style.width;
-          const height = term.textarea.style.height;
-          let rects = 0;
-          view.getBoundingClientRect = function () {
-            rects += 1;
-            return prevRect.call(this);
-          };
-          try {
-            helper.updateCompositionElements();
-            helper.updateCompositionElements();
-          } finally {
-            view.getBoundingClientRect = prevRect;
+        try {
+          if (helper && view && typeof view.getBoundingClientRect === 'function') {
+            const prevRect = view.getBoundingClientRect;
+            const width = term.textarea.style.width;
+            const height = term.textarea.style.height;
+            let rects = 0;
+            view.getBoundingClientRect = function () {
+              rects += 1;
+              return prevRect.call(this);
+            };
+            try {
+              helper.updateCompositionElements();
+              helper.updateCompositionElements();
+            } finally {
+              view.getBoundingClientRect = prevRect;
+            }
+            idle = { rects, width, height,
+              widthAfter: term.textarea.style.width,
+              heightAfter: term.textarea.style.height,
+              composing: helper.isComposing === true };
           }
-          idle = { rects, width, height,
-            widthAfter: term.textarea.style.width,
-            heightAfter: term.textarea.style.height,
-            composing: helper.isComposing === true };
+        } finally {
+          core.__imeAnchorPerceivedCaret = prevProvider;
+          await write('\\u001b[?25h');
         }
-        core.__imeAnchorPerceivedCaret = prevProvider;
-        await write('\\u001b[?25h');
       }
       return { ok: true, p1, p2, p3, p4, idle,
         e1: px(9, 9), e2: px(39, 19), e3: px(11, 11), e4: px(15, 5),
@@ -1387,16 +1390,18 @@ async function main() {
       await write('\\u001b[0 q');
       const defaultStyle = term.options.cursorStyle;
       const defaultBlink = term.options.cursorBlink;
+      const defaultAdapter = adapter.snapshot().cursorStyle;
       await write(previous === 'underline' ? '\\u001b[3 q' : previous === 'block' ? '\\u001b[1 q' : '\\u001b[5 q');
       term.options.cursorBlink = previousBlink;
       const blinkAfter = term.options.cursorBlink;
-      return { ok: true, underline, bar, previous, previousBlink, user, defaultStyle, defaultBlink, blinkAfter };
+      return { ok: true, underline, bar, previous, previousBlink, user, defaultStyle, defaultBlink, defaultAdapter, blinkAfter };
     })()`);
     check('WebGL smooth cursor follows DECSCUSR shape',
       decscusrProbe.ok === true && decscusrProbe.underline === 'underline' && decscusrProbe.bar === 'bar'
         && decscusrProbe.user !== null
         && decscusrProbe.defaultStyle === decscusrProbe.user.cursorStyle
         && decscusrProbe.defaultBlink === decscusrProbe.user.cursorBlink
+        && decscusrProbe.defaultAdapter === decscusrProbe.user.cursorStyle
         && decscusrProbe.blinkAfter === decscusrProbe.previousBlink,
       JSON.stringify(decscusrProbe));
 

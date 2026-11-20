@@ -223,6 +223,21 @@ test('rebuilt observer inherits the live scroll region and DECOM fail-closed sta
   assert.equal(state.positionReason, 'decom');
 });
 
+test('rebuilt observer inherits the alternate buffer and the saved normal region', async t => {
+  const f = ipcParserFixture(t);
+  await f.write('\x1b[3;8r');       // normal buffer region, rows 3-8
+  await f.write('\x1b[?1049h');     // switch to the alternate buffer
+  await f.write('\x1b[2;10r');      // alternate region, rows 2-10
+  f.owner._inkObserver = null;
+  f.context._inkFeed(f.owner, f.owner, null, '\x1b[0m');
+  const state = f.owner._inkObserver.state();
+  assert.equal(state.regionBuffer, 'alternate');
+  assert.equal(state.scrollTop, 1);
+  assert.equal(state.scrollBottom, 9);
+  assert.equal(state.normalScrollTop, 2);
+  assert.equal(state.normalScrollBottom, 7);
+});
+
 test('real parser scroll during the final write acknowledges parsing without applying a stale checkpoint', async t => {
   const f = ipcParserFixture(t, { cols: 10, rows: 3 });
   let scrolls = 0;

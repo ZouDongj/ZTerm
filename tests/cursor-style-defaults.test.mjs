@@ -88,6 +88,47 @@ test('an explicit shape after a reset in the same chunk stays authoritative', as
     assert.equal(f.term.options.cursorBlink, true);
 });
 
+test('DECSCUSR sub-parameters use the primary shape parameter', async t => {
+    const f = fixture({ cursorStyle: 'bar', cursorBlink: false });
+    t.after(() => f.term.dispose());
+
+    await write(f.term, '\x1b[3:1 q');
+    assert.equal(f.term.options.cursorStyle, 'underline');
+    assert.equal(f.term.options.cursorBlink, true);
+});
+
+test('unknown DECSCUSR parameters pass through without changing the cursor', async t => {
+    const f = fixture({ cursorStyle: 'bar', cursorBlink: false });
+    t.after(() => f.term.dispose());
+
+    await write(f.term, '\x1b[3 q');
+    await write(f.term, '\x1b[7 q');
+    assert.equal(f.term.options.cursorStyle, 'underline');
+    assert.equal(f.term.options.cursorBlink, true);
+});
+
+test('a later write wins over a deferred RIS restore', async t => {
+    const f = fixture({ cursorStyle: 'bar', cursorBlink: false });
+    t.after(() => f.term.dispose());
+
+    await write(f.term, '\x1bc');
+    await write(f.term, '\x1b[5 q');
+    await settle();
+    assert.equal(f.term.options.cursorStyle, 'bar');
+    assert.equal(f.term.options.cursorBlink, true);
+});
+
+test('dispose unregisters the default-restoring handlers', async t => {
+    const f = fixture({ cursorStyle: 'underline', cursorBlink: true });
+    t.after(() => f.term.dispose());
+
+    f.defaults.dispose();
+    await write(f.term, '\x1b[0 q');
+    assert.equal(f.term.options.cursorStyle, 'block',
+        'after dispose the vendored DECSCUSR 0 fallback applies');
+    assert.equal(f.term.options.cursorBlink, true);
+});
+
 test('settings updates replace the remembered defaults and win immediately', async t => {
     const f = fixture({ cursorStyle: 'bar', cursorBlink: false });
     t.after(() => f.term.dispose());

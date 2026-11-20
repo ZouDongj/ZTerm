@@ -1040,6 +1040,10 @@
         return { drawable: false };
       }
       if (sw.enqueued > sw.watermark) {
+        // The uncommitted chunk's base display is native-owned. Clear the
+        // stale software overlay without suppressing the protocol cursor:
+        // currentlyOwnsCursor() sees the suspension and returns false here,
+        // so this branch is only a visual cleanup, not a takeover.
         clearSoftwareVisual();
         // The base renderer alone owns the uncommitted display. In
         // particular, a visible protocol cursor must not become a second

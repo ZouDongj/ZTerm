@@ -782,6 +782,7 @@
           pendingCandidate: !!(unit && unit.caret && !unit.ambiguous),
           positionKnown, positionReason, checkpointReason, recoveries,
           originMode, scrollTop, scrollBottom, regionBuffer,
+          normalScrollTop, normalScrollBottom,
         };
       },
     };
