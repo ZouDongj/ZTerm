@@ -634,8 +634,13 @@
       const core = terminal._core;
       if (!core || core._compositionHelper?.isComposing === true) return false;
       if (typeof core._syncTextArea !== 'function') return false;
-      core._syncTextArea();
-      return true;
+      try {
+        core._syncTextArea();
+        return true;
+      } catch (error) {
+        /* mid-dispose: the textarea is already gone */
+        return false;
+      }
     }
 
     function revokeSoftware(reason) {

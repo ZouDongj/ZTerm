@@ -445,6 +445,18 @@ test('a published software caret re-anchors the idle textarea without a cursorMo
   assert.equal(stockSyncs, 1);
 });
 
+test('idle textarea sync failures do not escape the data path', () => {
+  const f = fixture();
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f);
+
+  f.terminal._core._syncTextArea = () => { throw new Error('disposed'); };
+  assert.doesNotThrow(() => p.invalidate('scroll'),
+    'a torn-down textarea must not break observer invalidation');
+});
+
 test('clearSoftwareVisual suppresses the native cursor whenever the adapter owns it', () => {
   const f = fixture();
   f.coreService.isCursorHidden = false;
