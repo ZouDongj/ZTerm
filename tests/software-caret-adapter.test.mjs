@@ -512,6 +512,33 @@ test('an unfocused non-drawable adapter does not force-hide the native cursor', 
     'an unfocused terminal leaves the native cursor state to the base renderer');
 });
 
+test('clearSoftwareVisual mirrors the protocol cursor ownership matrix', () => {
+  const variants = [
+    ['blink off', f => { f.renderer._cursorBlinkStateManager = { value: { isCursorVisible: false } }; }, false],
+    ['disabled', f => { f.adapter.setEnabled(false); }, false],
+    ['unfocused', f => { f.coreBrowserService.isFocused = false; }, false],
+    ['out of range', f => { f.terminal.buffer.active.cursorY = 3; }, false],
+    ['uninitialized', f => { f.coreService.isCursorInitialized = false; }, false],
+    ['visible and focused', () => {}, true],
+  ];
+
+  for (const [name, arrange, expected] of variants) {
+    const f = fixture();
+    f.coreService.isCursorHidden = false;
+    const p = f.adapter.softwareCaretPort;
+    p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+    p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+    render(f);
+    arrange(f);
+
+    f.baseHiddenStates.length = 0;
+    p.invalidate('matrix');
+    assert.ok(f.baseHiddenStates.length > 0, `${name}: revoking repaints the stale row`);
+    assert.ok(f.baseHiddenStates.every(hidden => hidden === expected),
+      `${name}: stale-row hidden state ${JSON.stringify(f.baseHiddenStates)} must be ${expected}`);
+  }
+});
+
 test('snapshot exposes a DECOM observer invalidation reason', () => {
   const f = fixture();
   const p = f.adapter.softwareCaretPort;

@@ -562,38 +562,36 @@
       lastRestoreRow: null,
     };
 
-    // Draw-time ownership without mutating any cursor state. This mirrors the
-    // predicate the base pass uses (enabled && readCursor().drawable), including
-    // the blink phase, the unparsed-chunk suspension, software-source validity
-    // and the protocol source after a revoke. readCursor itself may revoke or
-    // clear, so callers that only need the decision cannot call it.
-    function cursorDrawable() {
-      if (renderer._cursorBlinkStateManager?.value?.isCursorVisible === false) return false;
-      if (sw.enqueued > sw.watermark) return false;
-      if (!sw.active && sw.runStreak === 1 && sw.published?.confirmedVisibleSync === true
-        && sw.candidateGeneration === sw.generation && softwareCellMatches(sw.published)) {
-        const active = terminal.buffer.active;
-        const viewportY = finite(active.viewportY, terminal._core?.buffer?.ydisp);
-        const protocolX = Math.max(0, Math.min(terminal.cols - 1, active.cursorX));
-        const protocolY = active.baseY + active.cursorY - viewportY;
-        if (protocolX === sw.published.x && protocolY === sw.published.y) return false;
-      }
-      if (sw.active && sw.published) {
-        const active = terminal.buffer.active;
-        const y = sw.published.y;
-        const inRange = y >= 0 && y < terminal.rows && sw.published.x >= 0 && sw.published.x < terminal.cols;
-        const bufferOk = sw.bufferType === null || sw.bufferType === active.type;
-        if (inRange && bufferOk && softwareCellMatches(sw.published)) {
-          return renderer._coreBrowserService.isFocused === true;
-        }
-      }
+    // Protocol-cursor decision shared by readCursor and the ownership mirror.
+    // Pure: callers that only need the decision must not revoke or clear.
+    function protocolCursorDrawable() {
       const active = terminal.buffer.active;
       const viewportY = finite(active.viewportY, terminal._core?.buffer?.ydisp);
       const y = active.baseY + active.cursorY - viewportY;
       const initialized = renderer._coreService.isCursorInitialized !== false;
       const hidden = renderer._coreService.isCursorHidden === true;
       const focused = renderer._coreBrowserService.isFocused === true;
-      return initialized && !hidden && focused && y >= 0 && y < terminal.rows;
+      return {
+        initialized,
+        hidden,
+        focused,
+        y,
+        drawable: initialized && !hidden && focused && y >= 0 && y < terminal.rows,
+      };
+    }
+
+    // Draw-time ownership without mutating any cursor state. This mirrors the
+    // predicate the base pass uses (enabled && readCursor().drawable), but
+    // only the reachable protocol path: clearSoftwareVisual runs after revoke
+    // cleared the software source, or while an unparsed chunk suspends drawing.
+    // The software branches therefore never apply here; including them would
+    // make the mirror approximate a decision it cannot reach. readCursor
+    // itself may revoke or clear, so callers that only need the decision
+    // cannot call it.
+    function cursorDrawable() {
+      if (renderer._cursorBlinkStateManager?.value?.isCursorVisible === false) return false;
+      if (sw.enqueued > sw.watermark) return false;
+      return protocolCursorDrawable().drawable;
     }
 
     function currentlyOwnsCursor() {
@@ -1094,8 +1092,7 @@
       }
       const active = terminal.buffer.active;
       const absoluteY = active.baseY + active.cursorY;
-      const viewportY = finite(active.viewportY, terminal._core?.buffer?.ydisp);
-      const y = absoluteY - viewportY;
+      const protocol = protocolCursorDrawable();
       let x = Math.max(0, Math.min(terminal.cols - 1, active.cursorX));
       const publicLine = active.getLine?.(absoluteY);
       let publicCell = publicLine?.getCell?.(x);
@@ -1104,18 +1101,15 @@
         publicCell = publicLine.getCell(x);
       }
       const width = Math.max(1, finite(publicCell?.getWidth?.(), 1));
-      const initialized = renderer._coreService.isCursorInitialized !== false;
-      const hidden = renderer._coreService.isCursorHidden === true;
-      const focused = renderer._coreBrowserService.isFocused === true;
       return {
         x,
-        y,
+        y: protocol.y,
         absoluteY,
         width,
-        initialized,
-        hidden,
-        focused,
-        drawable: initialized && !hidden && focused && y >= 0 && y < terminal.rows,
+        initialized: protocol.initialized,
+        hidden: protocol.hidden,
+        focused: protocol.focused,
+        drawable: protocol.drawable,
       };
     }
 
