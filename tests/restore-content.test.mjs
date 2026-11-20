@@ -64,7 +64,8 @@ test('normalize: legacy line array joins exactly like the old replay', () => {
 test('replay: non-empty content ends with the exact state-reset epilogue', () => {
     const payload = replayPayload('some output\r\n');
     assert.equal(payload, 'some output\r\n' + REPLAY_EPILOGUE);
-    assert.ok(payload.endsWith('\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x0f\x1b[0m\x1b[?25h\r\n'));
+    assert.ok(payload.endsWith('\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l'
+        + '\x1b7\x1b[r\x1b8\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b[0m\x1b[?25h\r\n'));
 });
 
 test('replay: empty content replays nothing (no lone epilogue)', () => {
@@ -73,12 +74,23 @@ test('replay: empty content replays nothing (no lone epilogue)', () => {
     assert.equal(replayPayload(null), '');
 });
 
-test('replay: content ending with cursor-hide is followed by cursor-show', () => {
-    const payload = replayPayload('prompt> \x1b[?25l');
-    const hide = payload.indexOf('\x1b[?25l');
-    const show = payload.indexOf('\x1b[?25h');
-    assert.ok(hide >= 0);
-    assert.ok(show > hide);
+test('replay: resets DECSTBM and the G0-G3 designations without moving the prompt', async t => {
+    require('../src/vendor/xterm.js');
+    const term = new globalThis.TabbyXterm.Terminal({
+        cols: 80, rows: 24, scrollback: 0, allowProposedApi: true,
+    });
+    t.after(() => term.dispose());
+    const payload = replayPayload('\x1b[2;4r\x1b[3;5H\x1b(0\x1b)0\x1b*0\x1b+0');
+    await new Promise(resolve => term.write(payload, resolve));
+    const core = term._core;
+    const buffer = core._bufferService.buffer;
+    assert.equal(buffer.scrollTop, 0, 'DECSTBM is reset to the full screen');
+    assert.equal(buffer.scrollBottom, 23, 'DECSTBM is reset to the full screen');
+    assert.equal(term.buffer.active.cursorY, 3, 'the reset must not home the live prompt');
+    assert.equal(core._charsetService.charset, undefined, 'the active G0 charset is ASCII again');
+    assert.equal(core._charsetService._charsets[1], undefined, 'a G1 designation at the tail is reset');
+    assert.equal(core._charsetService._charsets[2], undefined, 'a G2 designation at the tail is reset');
+    assert.equal(core._charsetService._charsets[3], undefined, 'a G3 designation at the tail is reset');
 });
 
 // ── truncateAtLastAltBalance: alternate-screen safety ──
