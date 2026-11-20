@@ -33,7 +33,7 @@ function pressEnter(input) {
 
 function captureConfirms(vm) {
     const confirms = [];
-    vm.ctx.showConfirm = (msg, onOk, okText) => confirms.push({ msg, onOk, okText });
+    vm.ctx.showConfirm = (msg, onOk, okText, tone, onDismiss) => confirms.push({ msg, onOk, okText, tone, onDismiss });
     return confirms;
 }
 
@@ -221,22 +221,24 @@ test('T14: uploading same-name files asks once and holds the batch until confirm
     await up;
 });
 
-test('T14: dismissing the overwrite confirmation drops the batch', async () => {
+test('T14: dismissing the overwrite confirmation drops the batch and settles it', async () => {
     const vm = await loadSftpVm();
     await openOn(vm, 'sessA', '/srv/app', [F('a.txt')]);
     const confirms = captureConfirms(vm);
 
-    const up = vm.SFTP.upload(); // deliberately never awaited to completion (cancel leaves it pending)
+    const up = vm.SFTP.upload();
     await vm.drain();
     vm.settle(vm.pending('show-open-dialog')[0], { canceled: false, filePaths: ['D:/local/a.txt'] });
     await vm.drain();
     assert.equal(confirms.length, 1, 'confirmation requested');
-    // Cancel path: onOk never runs (showConfirm's cancel/backdrop/Escape
-    // semantics) — the batch must not upload anything.
+    assert.equal(typeof confirms[0].onDismiss, 'function', 'cancel/backdrop/Escape settle the batch');
+    confirms[0].onDismiss();
     await vm.drain();
+    // The caller must complete instead of staying suspended on a promise
+    // that no dismissal ever settles.
+    await up;
     assert.equal(vm.of('sftp-upload').length, 0, 'cancelled confirmation uploads nothing');
     assert.equal(vm.TransferManager._transfers.length, 0, 'no transfer entries created');
-    void up;
 });
 
 test('T14: an upload without remote name collisions never asks (control)', async () => {

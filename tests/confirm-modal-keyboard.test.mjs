@@ -215,3 +215,32 @@ test('showConfirm tone styles the allow button once and cleanup restores the sha
     cancelBtn(ctx).dispatch('click');
     assert.equal(ok.className, 'btn-danger');
 });
+
+// Pending work behind a confirmation (the SFTP overwrite batch) needs a
+// dismissal signal distinct from OK: every non-OK close settles it false.
+test('showConfirm onDismiss fires once for cancel, backdrop and supersede, never for OK', () => {
+    const ctx = loadVm();
+    loadUtils(ctx);
+    mountConfirmDom(ctx);
+    const backdrop = () => ctx.document.getElementById('overlay-confirm').querySelector('.overlay-backdrop');
+    let dismissed = 0;
+
+    ctx.showConfirm('取消路径', () => {}, '覆盖', undefined, () => { dismissed++; });
+    cancelBtn(ctx).dispatch('click');
+    assert.equal(dismissed, 1, 'cancel button dismisses');
+    cancelBtn(ctx).dispatch('click');
+    assert.equal(dismissed, 1, 'cleanup is idempotent after the listeners are gone');
+
+    ctx.showConfirm('确认路径', () => {}, '覆盖', undefined, () => { dismissed++; });
+    okBtn(ctx).dispatch('click');
+    assert.equal(dismissed, 1, 'OK accepts instead of dismissing');
+
+    ctx.showConfirm('背景点击', () => {}, '覆盖', undefined, () => { dismissed++; });
+    backdrop().dispatch('click');
+    assert.equal(dismissed, 2, 'backdrop dismissal counts');
+
+    let superseded = 0;
+    ctx.showConfirm('被替换', () => {}, '覆盖', undefined, () => { superseded++; });
+    ctx.showConfirm('新对话框', () => {});
+    assert.equal(superseded, 1, 'a superseding dialog dismisses the previous one');
+});

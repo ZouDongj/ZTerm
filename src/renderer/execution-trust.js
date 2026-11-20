@@ -54,11 +54,16 @@ const ZTermExecutionTrust = (() => {
         const ask = () => new Promise(resolve => {
             let settled = false;
             let cleanup = null;
+            let unregisterDismiss = null;
             let rememberInput = null;
             let rememberLabel = null;
             const finish = approved => {
                 if (settled) return;
                 settled = true;
+                if (unregisterDismiss) {
+                    unregisterDismiss();
+                    unregisterDismiss = null;
+                }
                 clearInterval(timer);
                 entry.dismiss = null;
                 const decision = approved ? { allow: true, remember: rememberInput?.checked === true } : null;
@@ -77,7 +82,7 @@ const ZTermExecutionTrust = (() => {
                 // replacing an unrelated delete or host-key decision.
                 if ((typeof _activeConfirmCleanup !== 'undefined' && _activeConfirmCleanup) ||
                     (typeof _activeHostkeyCleanup !== 'undefined' && _activeHostkeyCleanup)) return;
-                cleanup = showConfirm(response.description, () => finish(true), '仅本次允许', 'primary');
+                cleanup = showConfirm(response.description, () => finish(true), '仅本次允许', 'primary', () => finish(false));
                 const message = document.getElementById('confirm-msg');
                 message.classList.add('execution-review');
                 if (response.canRemember) {
@@ -94,6 +99,12 @@ const ZTermExecutionTrust = (() => {
             };
             const timer = setInterval(tick, 100);
             entry.dismiss = () => finish(false);
+            // Escape/closeAllOverlays hides the shared dialog without going
+            // through its buttons; register the same denial the cancel button
+            // produces so the caller and the backend never wait forever.
+            if (typeof registerOverlayDismiss === 'function') {
+                unregisterDismiss = registerOverlayDismiss(entry.dismiss);
+            }
             tick();
         });
         const asking = dialogQueue.then(ask, ask);
@@ -144,7 +155,10 @@ const ZTermExecutionTrust = (() => {
             return await invoke({ ...authorized.payload, executionOwner: owner, executionTicket: authorized.executionTicket });
         } catch (error) {
             if (localOwner(requestId) && localClaims.get(requestId) === owner) {
-                await cancel(owner, true);
+                // authorize() already cancels when it rejects; only a failure
+                // after a successful authorization (for example pty-create)
+                // still owns a pending entry that needs the same cleanup.
+                if (pending.has(owner)) await cancel(owner, true);
                 showToast('终端启动未完成：' + String(error?.message || error), true);
             }
         } finally { pending.delete(owner); }

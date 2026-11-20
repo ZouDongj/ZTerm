@@ -23,6 +23,24 @@ function showToast(msg, isError) {
 }
 
 // ── Overlay helpers ──
+// Overlays that own a pending promise or owe the backend a reply register a
+// cleanup here, so every "close everything" path (Escape, opening another
+// modal) settles them instead of leaving the caller suspended. Handlers must
+// be idempotent; the returned function unregisters the handler.
+const _overlayDismissHandlers = new Set();
+
+function registerOverlayDismiss(handler) {
+    if (typeof handler !== 'function') return () => {};
+    _overlayDismissHandlers.add(handler);
+    return () => { _overlayDismissHandlers.delete(handler); };
+}
+
+function _runOverlayDismissHandlers() {
+    for (const handler of Array.from(_overlayDismissHandlers)) {
+        try { handler(); } catch (error) { console.error('[ZTerm] overlay dismiss cleanup failed:', error); }
+    }
+}
+
 function closeAllOverlays() {
     // The hostkey dialog owes the backend a decision on EVERY dismissal
     // (check_server_key awaits it; a dialog that just loses .open hangs the
@@ -30,6 +48,10 @@ function closeAllOverlays() {
     // Escape must run it. The plain confirm dialog needs no such signal — its
     // stale listeners are unbound lazily when the next dialog opens.
     if (typeof _activeHostkeyCleanup === 'function' && _activeHostkeyCleanup) _activeHostkeyCleanup();
+    // Pending work behind an overlay (e.g. an execution-trust challenge or an
+    // upload overwrite choice) settles through its own dismiss handler before
+    // the overlay disappears, so no caller is left waiting forever.
+    _runOverlayDismissHandlers();
     document.querySelectorAll('.overlay.open').forEach(o => o.classList.remove('open'));
     // Non-.overlay layers (color picker, tab context menu) belong to the same
     // teardown: a new modal must never open underneath a lingering layer.
@@ -135,7 +157,10 @@ function _restoreFocusAfterModal() {
     if (typeof _refocusActiveTerminal === 'function') _refocusActiveTerminal();
 }
 
-function showConfirm(msg, onOk, okText, tone) {
+// `onDismiss` (optional) runs when the dialog closes by any path other than
+// OK: cancel button, backdrop, or a superseding dialog/overlay. Callers that
+// await a choice use it to settle instead of leaving a forever-pending promise.
+function showConfirm(msg, onOk, okText, tone, onDismiss) {
     if (_activeConfirmCleanup) _activeConfirmCleanup();
     // The hostkey dialog shares this DOM but keeps its own cleanup registry;
     // unbind it too or a following OK click would fire its stale callbacks
@@ -148,7 +173,11 @@ function showConfirm(msg, onOk, okText, tone) {
     okBtn.textContent = okText || '删除';
     okBtn.className = tone === 'primary' ? 'btn-primary' : 'btn-danger';
 
+    let closed = false;
+    let accepted = false;
     const cleanup = () => {
+        if (closed) return;
+        closed = true;
         _activeConfirmCleanup = null;
         overlay.classList.remove('open');
         cancelBtn.removeEventListener('click', onCancel);
@@ -158,9 +187,10 @@ function showConfirm(msg, onOk, okText, tone) {
         okBtn.textContent = '删除';
         okBtn.className = 'btn-danger';
         _restoreFocusAfterModal();
+        if (!accepted && typeof onDismiss === 'function') onDismiss();
     };
     const onCancel = () => cleanup();
-    const onOkClick = () => { cleanup(); onOk(); };
+    const onOkClick = () => { accepted = true; cleanup(); onOk(); };
 
     cancelBtn.addEventListener('click', onCancel);
     okBtn.addEventListener('click', onOkClick);
