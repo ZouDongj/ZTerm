@@ -293,6 +293,7 @@ function fixture({ reduced = true } = {}) {
   const glyphDraws = [];
   const glyphCellCalls = [];
   const baseRenders = [];
+  const baseHiddenStates = [];
   const rectangle = {
     _gl: gl,
     _verticesCursor: { attributes: new Float32Array(32), count: 0 },
@@ -326,7 +327,7 @@ function fixture({ reduced = true } = {}) {
     _workCell: cell,
     _devicePixelRatio: 1,
     dimensions: { device: { cell: { width: 10, height: 20 }, canvas: { width: 100, height: 60 } } },
-    renderRows(start, end) { baseRenders.push([start, end]); },
+    renderRows(start, end) { baseRenders.push([start, end]); baseHiddenStates.push(coreService.isCursorHidden); },
     _requestRedrawViewport() {},
   };
   const active = {
@@ -353,7 +354,7 @@ function fixture({ reduced = true } = {}) {
     now: () => time, root: { performance: { now: () => time }, queueMicrotask },
   });
   return {
-    adapter, terminal, renderer, cellState, rectangleDraws, glyphDraws, glyphCellCalls, baseRenders,
+    adapter, terminal, renderer, cellState, rectangleDraws, glyphDraws, glyphCellCalls, baseRenders, baseHiddenStates,
     coreService, coreBrowserService,
     cand: (over) => ({ x: 4, y: 1, char: 'd', width: 1, style: 'truecolor', fg: '40;44;52', bg: '220;223;228', unitSeq: 1, chunkSeq: 1, ...over }),
     setTime(t) { time = t; },
@@ -429,6 +430,30 @@ test('a published software caret re-anchors the idle textarea without a cursorMo
   p.invalidate('scroll');
   assert.equal(core.textarea.style.left, 'stock', 'revoke returns to stock protocol anchoring');
   assert.equal(stockSyncs, 1);
+});
+
+test('clearSoftwareVisual suppresses the native cursor only while the adapter owns it', () => {
+  const f = fixture();
+  f.coreService.isCursorHidden = false;
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f);
+  assert.equal(f.adapter.instrumentation.softwareCaret.active, true);
+
+  f.baseHiddenStates.length = 0;
+  p.candidate(f.cand({ chunkSeq: 3, x: 6 })); p.enqueued(3);
+  assert.ok(f.baseHiddenStates.length > 0, 'suspending a parsed chunk repaints the stale caret row');
+  assert.ok(f.baseHiddenStates.every(Boolean),
+    'the native cursor stays suppressed while the adapter still owns the caret');
+
+  p.parsed(3);
+  render(f);
+  f.baseHiddenStates.length = 0;
+  p.invalidate('scroll');
+  assert.ok(f.baseHiddenStates.length > 0, 'revoking repaints the stale caret row');
+  assert.ok(f.baseHiddenStates.every(hidden => hidden === false),
+    'after revoke the native cursor state is left to the base renderer');
 });
 
 test('watermark gating: a candidate publishes only after its chunk is parsed', () => {

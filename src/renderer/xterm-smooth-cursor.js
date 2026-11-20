@@ -562,16 +562,27 @@
       lastRestoreRow: null,
     };
 
-    function clearSoftwareVisual() {
+    function clearSoftwareVisual(ownsCursor) {
       if (sw.lastRestoreRow === null) return;
       const staleRows = new Set([sw.lastRestoreRow, lastDrawnRow]);
       sw.lastRestoreRow = null;
       lastDrawnRow = null;
       instrumentation.customDrawSource = 'none';
-      for (const stale of staleRows) {
-        if (stale !== null) {
-          try { originalRenderRows.call(renderer, stale, stale); } catch (error) { /* mid-dispose */ }
+      // While the adapter still owns the caret, a base-row repaint would draw
+      // the protocol cursor underneath the software caret. Revoke has already
+      // released ownership, so the base renderer's native-cursor state is
+      // correct there.
+      const coreService = renderer._coreService;
+      const hiddenBefore = coreService?.isCursorHidden;
+      if (ownsCursor && coreService) coreService.isCursorHidden = true;
+      try {
+        for (const stale of staleRows) {
+          if (stale !== null) {
+            try { originalRenderRows.call(renderer, stale, stale); } catch (error) { /* mid-dispose */ }
+          }
         }
+      } finally {
+        if (ownsCursor && coreService) coreService.isCursorHidden = hiddenBefore;
       }
     }
 
@@ -597,7 +608,7 @@
       if (!hadDescriptor) return;
       snapBeforeNextDraw = true;
       instrumentation.softwareCaret = { active: false, reason };
-      clearSoftwareVisual();
+      clearSoftwareVisual(false);
       syncIdleTextarea();
       scheduleContinuation();
     }
@@ -650,7 +661,7 @@
       enqueued(seq) {
         if (disposed || !Number.isFinite(seq)) return;
         sw.enqueued = Math.max(sw.enqueued, seq);
-        if (sw.enqueued > sw.watermark) clearSoftwareVisual();
+        if (sw.enqueued > sw.watermark) clearSoftwareVisual(sw.active);
       },
       // Completed unit without a candidate: NEUTRAL unless it wrote to the
       // candidate cell (contradiction → revoke + reset trust). Interleaved
@@ -985,7 +996,7 @@
         return { drawable: false };
       }
       if (sw.enqueued > sw.watermark) {
-        clearSoftwareVisual();
+        clearSoftwareVisual(sw.active);
         // The base renderer alone owns the uncommitted display. In
         // particular, a visible protocol cursor must not become a second
         // animated source while a software descriptor is suspended.
