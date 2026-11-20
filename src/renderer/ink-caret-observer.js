@@ -515,8 +515,23 @@
         if (unitMode === 'frame' && unit && unit.caret) finishUnit(seq);
         return;
       }
-      if (fin === 'A') { row = Math.max(1, row - n); clampMove(); if (barePositionStep === 2) barePositionStep = 3; return; }
-      if (fin === 'B') { row += n; clampMove(); return; }
+      if (fin === 'A') {
+        const y = row - 1;
+        row = y >= scrollTop
+          ? Math.max(scrollTop + 1, row - n)
+          : Math.max(1, row - n);
+        clampMove();
+        if (barePositionStep === 2) barePositionStep = 3;
+        return;
+      }
+      if (fin === 'B') {
+        const y = row - 1;
+        row = y <= scrollBottom
+          ? Math.min(scrollBottom + 1, row + n)
+          : Math.min(rows, row + n);
+        clampMove();
+        return;
+      }
       if (fin === 'C') { col += n; clampMove(); if (barePositionStep === 1) barePositionStep = 2; return; }
       if (fin === 'D') { col = Math.max(1, col - n); clampMove(); return; }
       if (fin === 'G') { col = params === '' ? 1 : (parseInt(params, 10) || 1); clampMove(); return; }

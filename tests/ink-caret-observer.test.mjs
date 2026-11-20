@@ -252,6 +252,36 @@ test('RIS and resize restore full-region scroll evidence', () => {
 });
 
 
+for (const [name, chunks, expectedRow] of [
+  ['CUU stops at the scroll-region top', ['\u001b[5;22r\u001b[20;1H\u001b[30A', 'X'], 4],
+  ['CUU at the region top does not escape', ['\u001b[5;22r\u001b[5;1H\u001b[1A', 'X'], 4],
+  ['CUD stops at the scroll-region bottom', ['\u001b[5;22r\u001b[22;1H\u001b[1B', 'X'], 21],
+  ['CUD from above the region stops at its bottom', ['\u001b[5;22r\u001b[3;1H\u001b[30B', 'X'], 21],
+  ['CUU from below the region stops at its top', ['\u001b[5;22r\u001b[24;1H\u001b[30A', 'X'], 4],
+]) {
+  test(`real xterm differential: ${name}`, async t => {
+    const { terminal, reports, state } = await differential(chunks, { cols: 8, rows: 24 });
+    t.after(() => terminal.dispose());
+    const actual = xLocations(terminal);
+    assert.deepEqual(actual, [[expectedRow, 0, 'X', 1]], 'the real xterm fixture writes X at the clamped row');
+    assert.deepEqual(reports.at(-1).cells, actual, 'observer and xterm clamp CUU/CUD identically');
+    assert.equal(reports.at(-1).complete, true);
+    assert.equal(state.positionKnown, true);
+  });
+}
+
+test('real xterm differential: CUU/CUD region clamp in the alternate buffer', async t => {
+  const { terminal, reports, state } = await differential([
+    '\u001b[?1049h', '\u001b[5;22r',
+    '\u001b[20;1H\u001b[30AX',
+    '\u001b[22;1H\u001b[1BY',
+  ], { cols: 8, rows: 24 });
+  t.after(() => terminal.dispose());
+  assert.deepEqual(reports.at(-2).cells.at(-1), [4, 0, 'X', 1], 'CUU is clamped in the alternate buffer too');
+  assert.deepEqual(reports.at(-1).cells.at(-1), [21, 0, 'Y', 1], 'CUD is clamped in the alternate buffer too');
+  assert.equal(state.positionKnown, true);
+});
+
 // Steps are byte strings fed to both sides, or `{ resize: [cols, rows] }`
 // entries that model a host resize applied to both sides at that point.
 async function differential(chunks, { cols = 8, rows = 24 } = {}) {
