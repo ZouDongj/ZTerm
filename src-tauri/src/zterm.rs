@@ -2599,25 +2599,63 @@ fn passwd_login_shell(passwd: &str, username: &str) -> Option<String> {
     passwd_entry_fields(passwd, username).and_then(|f| f.last().map(|s| s.trim().to_string()))
 }
 
-/// Write file via SFTP, creating it if missing (sftp.write() requires existing file)
-async fn sftp_write_file(
+/// Directory permissions for the generated wrapper: only the SSH user may
+/// list or traverse it. Other users on a multi-user host must not read the
+/// wrapper (it reveals the user's startup files) nor replace it.
+fn cwd_wrapper_dir_attributes() -> russh_sftp::protocol::FileAttributes {
+    russh_sftp::protocol::FileAttributes {
+        permissions: Some(0o700),
+        ..russh_sftp::protocol::FileAttributes::empty()
+    }
+}
+
+/// File permissions for the generated wrapper: owner read/write only. The
+/// EXCLUDE create flag (see cwd_wrapper_write_flags) makes the mode apply
+/// atomically instead of following a pre-existing entry.
+///
+/// Start from `empty()`: it has every attribute unset, so the request carries
+/// only the permissions flag. `Default` is the SFTP reply placeholder with
+/// size/uid/gid/atime/mtime all set to zero, and OpenSSH's setstat rejects a
+/// directory truncate or an uid/gid change from a non-root user.
+fn cwd_wrapper_file_attributes() -> russh_sftp::protocol::FileAttributes {
+    russh_sftp::protocol::FileAttributes {
+        permissions: Some(0o600),
+        ..russh_sftp::protocol::FileAttributes::empty()
+    }
+}
+
+fn cwd_wrapper_write_flags() -> russh_sftp::protocol::OpenFlags {
+    russh_sftp::protocol::OpenFlags::WRITE
+        | russh_sftp::protocol::OpenFlags::CREATE
+        | russh_sftp::protocol::OpenFlags::EXCLUDE
+}
+
+/// Write one wrapper file into the fresh private directory. EXCLUDE refuses to
+/// follow or replace an existing path: a collision means the unguessable
+/// directory was raced, and the caller removes the whole directory.
+async fn sftp_write_private_file(
     sftp: &russh_sftp::client::SftpSession,
     path: &str,
     data: &[u8],
 ) -> Result<(), String> {
-    use russh_sftp::protocol::OpenFlags;
     use tokio::io::AsyncWriteExt;
     let mut file = sftp
-        .open_with_flags(
+        .open_with_flags_and_attributes(
             path,
-            OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
+            cwd_wrapper_write_flags(),
+            cwd_wrapper_file_attributes(),
         )
         .await
         .map_err(|e| format!("open {}: {e}", path))?;
     file.write_all(data)
         .await
         .map_err(|e| format!("write {}: {e}", path))?;
-    let _ = file.sync_all().await;
+    // write_all only queues the packet; shutdown drains the write acks and
+    // closes the handle. The exec request travels on another channel, so the
+    // rc file must be acknowledged by the server before the shell can start.
+    file.shutdown()
+        .await
+        .map_err(|e| format!("close {}: {e}", path))?;
     Ok(())
 }
 
@@ -2631,9 +2669,15 @@ async fn detect_shell(sftp: &russh_sftp::client::SftpSession, username: &str) ->
 /// Returns (file list [(remote path, content)], exec command); None for non-bash/zsh shells.
 /// The _zt_cwd printf escapes each literal % in $PWD to %25 so the reader's
 /// %XX decoding stays lossless for directories like /data/v2%20final.
+///
+/// Both shells keep their files in one fresh private directory
+/// (`/tmp/.zterm-<stamp>`), created by the caller with 0700: /tmp is
+/// world-writable, so a predictable or directly-created rc path could be
+/// symlinked or replaced by another local user.
 fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>, String)> {
+    let dir = format!("/tmp/.zterm-{}", stamp);
     if shell.ends_with("/bash") {
-        let rc_path = format!("/tmp/.zterm-rc-{}", stamp);
+        let rc_path = format!("{}/rc", dir);
         // bash --rcfile starts a NON-login interactive shell: it reads neither
         // /etc/profile (RHEL/CentOS keep their PATH setup in /etc/profile.d/*.sh,
         // sourced from there) nor ~/.bashrc. Source /etc/profile first, then the
@@ -2646,15 +2690,15 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
              _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"${{PWD//\\%/%25}}\"; }}\n\
              PROMPT_COMMAND=\"_zt_cwd;${{PROMPT_COMMAND}}\"\n\
              export COLORTERM=truecolor\n\
-             rm -f {}\n",
-            rc_path
+             rm -f {}\n\
+             rmdir {} 2>/dev/null\n",
+            rc_path, dir
         );
         Some((
             vec![(rc_path.clone(), rc.into_bytes())],
             format!("exec bash --rcfile {} -i", rc_path),
         ))
     } else if shell.ends_with("/zsh") {
-        let dir = format!("/tmp/.zterm-zdot-{}", stamp);
         // ZDOTDIR redirects EVERY zsh startup file, so the wrapper set must
         // forward all four in read order — .zshenv (always read first: nvm/
         // pyenv/cargo/homebrew PATH setup commonly lives there) and .zlogin
@@ -2708,6 +2752,7 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
 /// variant maps to the one-line reason carried by the
 /// sftp-cwd-follow-unavailable event. A confirmed wrapper rejection permits
 /// plain-shell fallback; an unknown startup outcome instead ends the attempt.
+#[derive(Debug)]
 enum CwdFollowUnavailable {
     /// No SFTP channel survived establishment — nothing to upload through.
     NoSftpChannel,
@@ -2743,37 +2788,214 @@ impl CwdFollowUnavailable {
 /// Prepare followCwd RC wrapper via SFTP. Ok(exec) is the command that starts
 /// the wrapped shell (bash/zsh); the Err cause feeds the follow-unavailable
 /// report — the caller degrades to a plain shell, never fails the connection.
+/// Filled once the remote directory exists, so the caller can remove it even
+/// when the prepare future is cancelled before it returns.
+type WrapperSlot = Arc<Mutex<Option<(String, Vec<String>)>>>;
+
 async fn prepare_cwd_wrapper(
-    sftp: &russh_sftp::client::SftpSession,
+    sftp: Arc<russh_sftp::client::SftpSession>,
     username: &str,
-) -> Result<String, CwdFollowUnavailable> {
-    let shell = detect_shell(sftp, username)
+    slot: WrapperSlot,
+) -> Result<CwdWrapper, CwdFollowUnavailable> {
+    let shell = detect_shell(&sftp, username)
         .await
         .ok_or(CwdFollowUnavailable::ShellUndetected)?;
-    let stamp = format!("{}-{}", std::process::id(), rand_suffix());
+    // 256-bit random name instead of pid+clock: /tmp is world-writable, so a
+    // predictable path lets another local user pre-create a symlink or a
+    // directory with their own rc files (code execution as this user).
+    let stamp =
+        crate::execution_trust::nonce().map_err(|_| CwdFollowUnavailable::WrapperUploadFailed)?;
     let (files, exec) = cwd_wrapper_files(&shell, &stamp)
         .ok_or_else(|| CwdFollowUnavailable::ShellUnsupported(shell.clone()))?;
+    let dir = files
+        .first()
+        .and_then(|(path, _)| path.rsplit_once('/').map(|(parent, _)| parent.to_string()))
+        .ok_or(CwdFollowUnavailable::WrapperUploadFailed)?;
+    let file_paths: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
+    // The guard covers cancellation and timeout: dropping this future before
+    // the function returns leaves the directory behind with nothing that would
+    // ever remove it. It is disarmed once the caller owns the paths.
+    let mut cleanup = CwdWrapperCleanup {
+        sftp: Arc::clone(&sftp),
+        dir: dir.clone(),
+        files: file_paths.clone(),
+        active: false,
+    };
+    // create_dir fails when the path exists, so a collision (or a planted
+    // entry) aborts instead of reusing it.
+    if sftp.create_dir(&dir).await.is_err() {
+        return Err(CwdFollowUnavailable::WrapperUploadFailed);
+    }
+    cleanup.active = true;
+    // Publish the paths outside this future: a cancel right after the mkdir
+    // reply drops the guard and this future together, and the caller can only
+    // await a bounded cleanup for paths it can still see.
+    *slot.lock() = Some((dir.clone(), file_paths.clone()));
+    // create_dir used the server umask: 0755 with the common 022, but 0775 or
+    // 0777 with 002/000, so another local user could drop an entry during the
+    // one round trip before the mode below takes effect. `ls /tmp` can reveal
+    // the name, so secrecy is not a defense; the protection is the short
+    // window plus EXCLUDE on every wrapper file, which refuses to reuse or
+    // follow an entry planted at a wrapper path.
+    if sftp
+        .set_metadata(&dir, cwd_wrapper_dir_attributes())
+        .await
+        .is_err()
+    {
+        let _ = sftp.remove_dir(&dir).await;
+        cleanup.active = false;
+        return Err(CwdFollowUnavailable::WrapperUploadFailed);
+    }
+    // A read_dir sweep would need opendir + readdir + close (three round
+    // trips), so the residual window stays: with umask 002/000 the directory
+    // is briefly group- or world-writable, and a local user who learned the
+    // random name could plant an entry. Deploying into a private parent is the
+    // only way to remove the window entirely without extra round trips.
     for (path, content) in &files {
-        // zsh needs its directory created first
-        if let Some(dir) = path.rsplit_once('/').map(|(d, _)| d) {
-            if dir != "/tmp" {
-                let _ = sftp.create_dir(dir).await;
+        if sftp_write_private_file(&sftp, path, content).await.is_err() {
+            // Fail closed: leave no partial wrapper behind, then degrade to a
+            // plain shell on the same connection.
+            for created in &file_paths {
+                let _ = sftp.remove_file(created).await;
             }
-        }
-        if sftp_write_file(sftp, path, content).await.is_err() {
+            let _ = sftp.remove_dir(&dir).await;
+            cleanup.active = false;
             return Err(CwdFollowUnavailable::WrapperUploadFailed);
         }
     }
-    Ok(exec)
+    // Stays armed: the caller disarms it once the remote shell is running and
+    // owns deletion through its rc file.
+    Ok(CwdWrapper { exec, cleanup })
 }
 
-fn rand_suffix() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    format!("{:08x}", nanos)
+/// A deployed wrapper plus the guard that removes it until the remote shell
+/// takes ownership.
+#[derive(Debug)]
+struct CwdWrapper {
+    exec: String,
+    cleanup: CwdWrapperCleanup,
+}
+
+impl CwdWrapper {
+    /// The shell accepted the exec and its rc files delete themselves.
+    fn disarm(&mut self) {
+        self.cleanup.active = false;
+    }
+
+    /// Stop guarding and hand the paths to an explicit cleanup.
+    fn take_cleanup(&mut self) -> (Arc<russh_sftp::client::SftpSession>, String, Vec<String>) {
+        self.cleanup.active = false;
+        (
+            Arc::clone(&self.cleanup.sftp),
+            std::mem::take(&mut self.cleanup.dir),
+            std::mem::take(&mut self.cleanup.files),
+        )
+    }
+}
+
+/// Removes an abandoned wrapper when prep is cancelled, the future is dropped,
+/// or the shell never starts. Cleanup is best effort: the SFTP channel may
+/// already be unusable, and it must never delay the fallback to a plain shell.
+///
+/// Two cases stay uncovered by design: a cancel before the server's mkdir reply
+/// can leave a directory this process never learned about, and a shell killed
+/// between the exec reply and sourcing its rc leaves residue the shell owns.
+struct CwdWrapperCleanup {
+    sftp: Arc<russh_sftp::client::SftpSession>,
+    dir: String,
+    files: Vec<String>,
+    active: bool,
+}
+
+impl std::fmt::Debug for CwdWrapperCleanup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CwdWrapperCleanup")
+            .field("dir", &self.dir)
+            .field("files", &self.files)
+            .field("active", &self.active)
+            .finish()
+    }
+}
+
+impl Drop for CwdWrapperCleanup {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        spawn_cwd_wrapper_cleanup(
+            Arc::clone(&self.sftp),
+            std::mem::take(&mut self.dir),
+            std::mem::take(&mut self.files),
+        );
+    }
+}
+
+/// Detached cleanup after a confirmed exec rejection. The fallback shell keeps
+/// running, so remote file removal must not gate it.
+fn discard_cwd_wrapper(wrapper: &mut Option<CwdWrapper>) {
+    if let Some(mut deployed) = wrapper.take() {
+        let (sftp, dir, files) = deployed.take_cleanup();
+        spawn_cwd_wrapper_cleanup(sftp, dir, files);
+    }
+}
+
+/// Bounded cleanup before the session is closed (shell start failed, so the rc
+/// never sources and the wrapper would otherwise stay on the host).
+async fn discard_cwd_wrapper_awaited(wrapper: &mut Option<CwdWrapper>) {
+    if let Some(mut deployed) = wrapper.take() {
+        let (sftp, dir, files) = deployed.take_cleanup();
+        cleanup_cwd_wrapper(sftp, dir, files).await;
+    }
+}
+
+/// Settle the deployed wrapper once the shell-start outcome is known.
+///
+/// A running shell owns its rc files (the rc deletes them), a rejected exec is
+/// discarded while the fallback shell keeps running, and a failed start is
+/// cleaned up before the session closes. A confirmed rejection with a failed
+/// start takes the awaited path, because no shell survives to wait on it.
+async fn settle_cwd_wrapper(wrapper: &mut Option<CwdWrapper>, rejected: bool, started: bool) {
+    if !started {
+        discard_cwd_wrapper_awaited(wrapper).await;
+    } else if rejected {
+        discard_cwd_wrapper(wrapper);
+    } else if let Some(mut deployed) = wrapper.take() {
+        deployed.disarm();
+    }
+}
+
+/// Remove a wrapper the shell never took ownership of. Callers either await it
+/// (bounded) before closing the SFTP channel or let it run detached.
+async fn cleanup_cwd_wrapper(
+    sftp: Arc<russh_sftp::client::SftpSession>,
+    dir: String,
+    files: Vec<String>,
+) {
+    let _ = tokio::time::timeout(SSH_SHELL_CLEANUP_TIMEOUT, async move {
+        // Remove the files concurrently, then the directory: two round trips
+        // instead of one per file.
+        let mut removals = tokio::task::JoinSet::new();
+        for path in files {
+            let sftp = Arc::clone(&sftp);
+            removals.spawn(async move {
+                let _ = sftp.remove_file(path).await;
+            });
+        }
+        while removals.join_next().await.is_some() {}
+        let _ = sftp.remove_dir(dir).await;
+    })
+    .await;
+}
+
+/// Start a detached cleanup when a runtime is available. Without one (process
+/// teardown) the paths are skipped silently.
+fn spawn_cwd_wrapper_cleanup(
+    sftp: Arc<russh_sftp::client::SftpSession>,
+    dir: String,
+    files: Vec<String>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let runtime = tokio::runtime::Handle::try_current().ok()?;
+    Some(runtime.spawn(cleanup_cwd_wrapper(sftp, dir, files)))
 }
 
 struct ShellStartup {
@@ -3341,12 +3563,20 @@ pub async fn ssh_connect(
     // does not itself break the terminal. Unknown startup outcomes end the
     // attempt instead of risking a second shell or replayed login commands.
     let mut exec_cmd = None;
+    // Kept until the shell startup outcome is known. Dropping the whole
+    // connection future before that point (cancelled connect, app exit) drops
+    // this guard too, and the guard removes the uploaded files on its way out.
+    let mut wrapper: Option<CwdWrapper> = None;
+    // Owned by this scope, not by the cancellable prepare future: a cancel
+    // drops that future, and this slot is then all that still names the
+    // remote directory.
+    let wrapper_slot: WrapperSlot = Arc::new(Mutex::new(None));
     if follow_cwd {
         // A missing SFTP channel is itself an unavailable cause: route it
         // through the same Done arm instead of duplicating the emit.
         let prep = if let Some(ref s) = sftp {
             establish_cancellable(
-                prepare_cwd_wrapper(s, &username),
+                prepare_cwd_wrapper(Arc::clone(s), &username, Arc::clone(&wrapper_slot)),
                 &cancel_flag,
                 // Sub-deadline, not the whole budget: a tarpitted prep must
                 // leave room for the shell start — an already-exhausted budget
@@ -3363,7 +3593,10 @@ pub async fn ssh_connect(
         };
         match prep {
             EstablishOutcome::Done(result) => match result {
-                Ok(exec) => exec_cmd = Some(exec),
+                Ok(deployed) => {
+                    exec_cmd = Some(deployed.exec.clone());
+                    wrapper = Some(deployed);
+                }
                 Err(cause) => {
                     // fish is exempt from the report: it reports the cwd
                     // natively via OSC 1337 at every prompt and cwd parsing
@@ -3392,6 +3625,14 @@ pub async fn ssh_connect(
                 );
             }
             EstablishOutcome::Cancelled => {
+                // The upload future is gone, so only the slot can name what it
+                // created. Bounded and awaited before the session closes.
+                if let Some(ref s) = sftp {
+                    let pending = wrapper_slot.lock().take();
+                    if let Some((dir, files)) = pending {
+                        cleanup_cwd_wrapper(Arc::clone(s), dir, files).await;
+                    }
+                }
                 let _ = handle
                     .disconnect(russh::Disconnect::ByApplication, "ZTerm cancelled", "")
                     .await;
@@ -3400,6 +3641,8 @@ pub async fn ssh_connect(
                 );
             }
         }
+        // The wrapper guard owns these paths from here on.
+        *wrapper_slot.lock() = None;
     }
 
     let wrapper_rejected = std::sync::atomic::AtomicBool::new(false);
@@ -3424,8 +3667,20 @@ pub async fn ssh_connect(
         );
     }
     let shell_start = match shell_start_result {
-        Ok(started) => started,
+        Ok(started) => {
+            // The login shell is running. Its rc file deletes the wrapper, so
+            // a clean start only disarms the guard; a confirmed rejection while
+            // the fallback keeps running is discarded without blocking it.
+            settle_cwd_wrapper(&mut wrapper, confirmed_wrapper_rejection, true).await;
+            started
+        }
         Err(error) => {
+            // No confirmed shell start: the wrapper was never sourced. Settle
+            // awaits the bounded cleanup before the disconnect, while the SFTP
+            // channel can still remove the files. A confirmed rejection takes
+            // the same awaited path here because no shell survives to wait on a
+            // detached removal.
+            settle_cwd_wrapper(&mut wrapper, confirmed_wrapper_rejection, false).await;
             let _ = tokio::time::timeout(
                 SSH_SHELL_CLEANUP_TIMEOUT,
                 handle.disconnect(
@@ -9088,6 +9343,25 @@ mod tests {
         removes: Arc<Mutex<Vec<String>>>,
         opens: Arc<Mutex<Vec<String>>>,
         mkdirs: Arc<Mutex<Vec<String>>>,
+        setstats: Arc<Mutex<Vec<(String, SftpSetstat)>>>,
+        fail_all_setstats: Arc<Mutex<bool>>,
+        open_suffixes: Arc<Mutex<Vec<String>>>,
+        // Holds an OPEN request before the file is created, so a test can drop
+        // the client future with no server-side handle pinning the file.
+        block_suffixes: Arc<Mutex<Vec<String>>>,
+        open_blocked: Arc<tokio::sync::Notify>,
+        open_block_reached: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    /// Which attribute groups a SETSTAT carried. OpenSSH's sftp-server rejects
+    /// a truncate of a directory and an uid/gid change from a non-root user, so
+    /// the wrapper must send permissions only.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct SftpSetstat {
+        size: bool,
+        uid: bool,
+        gid: bool,
+        permissions: Option<u32>,
     }
 
     impl SftpFailures {
@@ -9103,8 +9377,41 @@ mod tests {
             self.opens.lock().push(filename.to_string());
         }
 
+        fn fail_every_setstat(&self) {
+            *self.fail_all_setstats.lock() = true;
+        }
+
+        fn fail_opens_with_suffix(&self, suffix: &str) {
+            self.open_suffixes.lock().push(suffix.to_string());
+        }
+
         fn blocks_open(&self, filename: &str) -> bool {
             self.opens.lock().iter().any(|p| p == filename)
+                || self
+                    .open_suffixes
+                    .lock()
+                    .iter()
+                    .any(|suffix| filename.ends_with(suffix))
+        }
+
+        fn block_before_open_with_suffix(&self, suffix: &str) {
+            self.block_suffixes.lock().push(suffix.to_string());
+        }
+
+        fn blocks_before_open(&self, filename: &str) -> bool {
+            self.block_suffixes
+                .lock()
+                .iter()
+                .any(|suffix| filename.ends_with(suffix))
+        }
+
+        fn open_block_reached(&self) -> bool {
+            self.open_block_reached
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn release_blocked_open(&self) {
+            self.open_blocked.notify_one();
         }
 
         fn blocks_rename(&self, oldpath: &str) -> bool {
@@ -9115,12 +9422,25 @@ mod tests {
             self.removes.lock().iter().any(|p| p == filename)
         }
 
+        fn blocks_setstat(&self, path: &str) -> bool {
+            let _ = path;
+            *self.fail_all_setstats.lock()
+        }
+
         fn record_mkdir(&self, path: &str) {
             self.mkdirs.lock().push(path.to_string());
         }
 
         fn mkdir_calls(&self) -> Vec<String> {
             self.mkdirs.lock().clone()
+        }
+
+        fn record_setstat(&self, path: &str, attrs: SftpSetstat) {
+            self.setstats.lock().push((path.to_string(), attrs));
+        }
+
+        fn setstat_calls(&self) -> Vec<(String, SftpSetstat)> {
+            self.setstats.lock().clone()
         }
     }
 
@@ -9142,7 +9462,9 @@ mod tests {
         }
 
         fn path(&self, p: &str) -> PathBuf {
-            self.root.join(p)
+            // Remote paths are absolute ("/tmp/..."); a leading slash must not
+            // replace the sandbox root on Windows.
+            self.root.join(p.trim_start_matches('/'))
         }
     }
 
@@ -9169,6 +9491,16 @@ mod tests {
             pflags: russh_sftp::protocol::OpenFlags,
             _attrs: russh_sftp::protocol::FileAttributes,
         ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
+            if self.failures.blocks_before_open(&filename) {
+                // The request never reaches the filesystem: a dropped client
+                // future then leaves no open handle behind, and cleanup can
+                // delete the directory on Windows.
+                self.failures
+                    .open_block_reached
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                self.failures.open_blocked.notified().await;
+                return Err(russh_sftp::protocol::StatusCode::Failure);
+            }
             let file = std::fs::OpenOptions::from(pflags)
                 .open(self.path(&filename))
                 .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
@@ -9193,6 +9525,50 @@ mod tests {
                 .remove(&handle)
                 .ok_or(russh_sftp::protocol::StatusCode::Failure)?;
             Ok(sftp_ok_status(id))
+        }
+
+        async fn fstat(
+            &mut self,
+            id: u32,
+            handle: String,
+        ) -> Result<russh_sftp::protocol::Attrs, Self::Error> {
+            let file = self
+                .handles
+                .get(&handle)
+                .ok_or(russh_sftp::protocol::StatusCode::Failure)?;
+            let meta = file
+                .metadata()
+                .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
+            Ok(russh_sftp::protocol::Attrs {
+                id,
+                attrs: russh_sftp::protocol::FileAttributes::from(&meta),
+            })
+        }
+
+        async fn read(
+            &mut self,
+            id: u32,
+            handle: String,
+            offset: u64,
+            len: u32,
+        ) -> Result<russh_sftp::protocol::Data, Self::Error> {
+            use std::io::{Read, Seek, SeekFrom};
+            let file = self
+                .handles
+                .get_mut(&handle)
+                .ok_or(russh_sftp::protocol::StatusCode::Failure)?;
+            let mut buffer = vec![0u8; len as usize];
+            let read = file
+                .seek(SeekFrom::Start(offset))
+                .and_then(|_| file.read(&mut buffer))
+                .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
+            if read == 0 {
+                return Err(russh_sftp::protocol::StatusCode::Eof);
+            }
+            // read() may return fewer bytes than requested; the packet carries
+            // only the bytes actually read.
+            buffer.truncate(read);
+            Ok(russh_sftp::protocol::Data { id, data: buffer })
         }
 
         async fn write(
@@ -9261,6 +9637,38 @@ mod tests {
             self.failures.record_mkdir(&path);
             std::fs::create_dir(self.path(&path))
                 .map_err(|_| russh_sftp::protocol::StatusCode::Failure)?;
+            Ok(sftp_ok_status(id))
+        }
+
+        async fn setstat(
+            &mut self,
+            id: u32,
+            path: String,
+            attrs: russh_sftp::protocol::FileAttributes,
+        ) -> Result<russh_sftp::protocol::Status, Self::Error> {
+            // OpenSSH sftp-server: process_setstat truncates a regular file,
+            // chowns, then chmods. A directory truncate and an uid/gid change
+            // from a non-root user both fail, and the failure is sticky.
+            self.failures.record_setstat(
+                &path,
+                SftpSetstat {
+                    size: attrs.size.is_some(),
+                    uid: attrs.uid.is_some(),
+                    gid: attrs.gid.is_some(),
+                    permissions: attrs.permissions,
+                },
+            );
+            if self.failures.blocks_setstat(&path) {
+                return Err(russh_sftp::protocol::StatusCode::Failure);
+            }
+            let meta = std::fs::symlink_metadata(self.path(&path))
+                .map_err(|_| russh_sftp::protocol::StatusCode::NoSuchFile)?;
+            if meta.is_dir() && attrs.size.is_some() {
+                return Err(russh_sftp::protocol::StatusCode::Failure);
+            }
+            if attrs.uid.is_some() || attrs.gid.is_some() {
+                return Err(russh_sftp::protocol::StatusCode::PermissionDenied);
+            }
             Ok(sftp_ok_status(id))
         }
 
@@ -9361,6 +9769,8 @@ mod tests {
         mode: ShellServerMode,
         events: Arc<Mutex<Vec<&'static str>>>,
         channels: HashMap<russh::ChannelId, russh::Channel<russh::server::Msg>>,
+        // Some(root) serves the SFTP subsystem for wrapper-deployment tests.
+        root: Option<PathBuf>,
     }
 
     impl russh::server::Handler for ShellTestServer {
@@ -9439,6 +9849,34 @@ mod tests {
             Ok(())
         }
 
+        async fn subsystem_request(
+            &mut self,
+            channel_id: russh::ChannelId,
+            name: &str,
+            session: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            if name == "sftp" {
+                if let Some(root) = self.root.clone() {
+                    match self.channels.remove(&channel_id) {
+                        Some(ch) => {
+                            tokio::spawn(async move {
+                                let _ = russh_sftp::server::run(
+                                    ch.into_stream(),
+                                    TestSftpHandler::new(root, SftpFailures::default()),
+                                )
+                                .await;
+                            });
+                            let _ = session.channel_success(channel_id);
+                        }
+                        None => session.channel_failure(channel_id)?,
+                    }
+                    return Ok(());
+                }
+            }
+            let _ = session.channel_failure(channel_id);
+            Ok(())
+        }
+
         async fn channel_close(
             &mut self,
             channel: russh::ChannelId,
@@ -9463,6 +9901,10 @@ mod tests {
     }
 
     async fn shell_fixture(mode: ShellServerMode) -> ShellFixture {
+        shell_fixture_with_sftp(mode, None).await
+    }
+
+    async fn shell_fixture_with_sftp(mode: ShellServerMode, root: Option<PathBuf>) -> ShellFixture {
         let host_key =
             russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)
                 .unwrap();
@@ -9476,6 +9918,7 @@ mod tests {
             mode,
             events: events.clone(),
             channels: HashMap::new(),
+            root,
         };
         let (client_side, server_side) = tokio::io::duplex(64 * 1024);
         let server = tokio::spawn(async move {
@@ -9573,6 +10016,176 @@ mod tests {
         assert_eq!(*fixture.events.lock(), ["exec", "shell"]);
         channel.close().await.unwrap();
         shell_event(&fixture, "closed").await;
+    }
+
+    #[tokio::test]
+    async fn confirmed_rejection_removes_the_deployed_wrapper() {
+        let root = wrapper_test_root("shell-reject-wrapper");
+        let fixture =
+            shell_fixture_with_sftp(ShellServerMode::RejectExec, Some(root.clone())).await;
+        // Open SFTP the way the production connect does, then deploy a real
+        // wrapper through it.
+        let sftp_channel = fixture.handle.channel_open_session().await.unwrap();
+        sftp_channel.request_subsystem(true, "sftp").await.unwrap();
+        let sftp = Arc::new(
+            russh_sftp::client::SftpSession::new(sftp_channel.into_stream())
+                .await
+                .unwrap(),
+        );
+        let deployed = prepare_cwd_wrapper(Arc::clone(&sftp), "tester", fresh_wrapper_slot())
+            .await
+            .expect("wrapper deployment");
+        let wrapper_dir = deployed.cleanup.dir.clone();
+        assert!(root_path(&root, &wrapper_dir).exists());
+
+        let mut channel = fixture.handle.channel_open_session().await.unwrap();
+        channel
+            .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
+            .await
+            .unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let rejected = std::sync::atomic::AtomicBool::new(false);
+        let started = start_ssh_shell_tracking_rejection(
+            &mut channel,
+            Some(&deployed.exec),
+            &cancel,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            &rejected,
+        )
+        .await
+        .expect("the fallback plain shell starts");
+        assert!(
+            started.wrapper_rejected || rejected.load(std::sync::atomic::Ordering::SeqCst),
+            "the fixture must report the exec rejection"
+        );
+
+        // The connection path calls this exact helper after a rejection.
+        let mut wrapper = Some(deployed);
+        discard_cwd_wrapper(&mut wrapper);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while root_path(&root, &wrapper_dir).exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a rejected wrapper must not stay on the host");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn shell_start_failure_removes_the_wrapper_before_the_session_closes() {
+        let root = wrapper_test_root("shell-failure-wrapper");
+        let fixture = shell_fixture_with_sftp(ShellServerMode::Stall, Some(root.clone())).await;
+        let sftp_channel = fixture.handle.channel_open_session().await.unwrap();
+        sftp_channel.request_subsystem(true, "sftp").await.unwrap();
+        let sftp = Arc::new(
+            russh_sftp::client::SftpSession::new(sftp_channel.into_stream())
+                .await
+                .unwrap(),
+        );
+        let deployed = prepare_cwd_wrapper(Arc::clone(&sftp), "tester", fresh_wrapper_slot())
+            .await
+            .expect("wrapper deployment");
+        let wrapper_dir = deployed.cleanup.dir.clone();
+        assert!(root_path(&root, &wrapper_dir).exists());
+
+        let mut channel = fixture.handle.channel_open_session().await.unwrap();
+        channel
+            .request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
+            .await
+            .unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let rejected = std::sync::atomic::AtomicBool::new(false);
+        let started = start_ssh_shell_tracking_rejection(
+            &mut channel,
+            Some(&deployed.exec),
+            &cancel,
+            tokio::time::Instant::now() + std::time::Duration::from_millis(200),
+            &rejected,
+        )
+        .await;
+        assert!(started.is_err(), "the stalled fixture must time out");
+
+        // The connection path awaits this exact helper before disconnecting.
+        let mut wrapper = Some(deployed);
+        discard_cwd_wrapper_awaited(&mut wrapper).await;
+        assert!(
+            !root_path(&root, &wrapper_dir).exists(),
+            "a wrapper whose shell never started must not stay on the host"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn settled_start_keeps_the_wrapper_until_the_login_shell_removes_it() {
+        let root = wrapper_test_root("wrapper-settle-start");
+        let (sftp, _failures) = test_sftp_session(root.clone()).await;
+        let mut wrapper = Some(
+            prepare_cwd_wrapper(Arc::new(sftp), "tester", fresh_wrapper_slot())
+                .await
+                .expect("wrapper deployment"),
+        );
+        let wrapper_dir = wrapper.as_ref().unwrap().cleanup.dir.clone();
+
+        settle_cwd_wrapper(&mut wrapper, false, true).await;
+        assert!(wrapper.is_none(), "a started shell owns the wrapper");
+        // The caller drops its state after settlement. The guard must be
+        // disarmed, or that drop would delete the rc the running shell needs.
+        drop(wrapper);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            root_path(&root, &wrapper_dir).exists(),
+            "only the rc cleanup may remove a started shell's wrapper"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn settled_failure_removes_the_wrapper_before_returning() {
+        let root = wrapper_test_root("wrapper-settle-failure");
+        let (sftp, _failures) = test_sftp_session(root.clone()).await;
+        let mut wrapper = Some(
+            prepare_cwd_wrapper(Arc::new(sftp), "tester", fresh_wrapper_slot())
+                .await
+                .expect("wrapper deployment"),
+        );
+        let wrapper_dir = wrapper.as_ref().unwrap().cleanup.dir.clone();
+
+        settle_cwd_wrapper(&mut wrapper, false, false).await;
+        assert!(wrapper.is_none());
+        assert!(
+            !root_path(&root, &wrapper_dir).exists(),
+            "the awaited cleanup must finish before the session closes"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn settled_rejection_removes_the_wrapper_while_the_fallback_runs() {
+        let root = wrapper_test_root("wrapper-settle-rejected");
+        let (sftp, _failures) = test_sftp_session(root.clone()).await;
+        let mut wrapper = Some(
+            prepare_cwd_wrapper(Arc::new(sftp), "tester", fresh_wrapper_slot())
+                .await
+                .expect("wrapper deployment"),
+        );
+        let wrapper_dir = wrapper.as_ref().unwrap().cleanup.dir.clone();
+
+        settle_cwd_wrapper(&mut wrapper, true, true).await;
+        assert!(wrapper.is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while root_path(&root, &wrapper_dir).exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a rejected wrapper must not stay on the host");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]
@@ -11768,7 +12381,9 @@ mod tests {
         let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
         let text = String::from_utf8_lossy(&zshrc.1);
         assert!(
-            text.contains("[ -n \"$HISTFILE\" ] && [ \"${HISTFILE#/tmp/.zterm-zdot-t123/}\" != \"$HISTFILE\" ]"),
+            text.contains(
+                "[ -n \"$HISTFILE\" ] && [ \"${HISTFILE#/tmp/.zterm-t123/}\" != \"$HISTFILE\" ]"
+            ),
             "redirection must fire only for an HISTFILE inside the temp dir: {text}"
         );
         assert!(
@@ -11846,14 +12461,270 @@ mod tests {
         assert!(text.contains("rm -f "), "cleanup must remove files: {text}");
         for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
             assert!(
-                text.contains(&format!("/tmp/.zterm-zdot-t123/{name}")),
+                text.contains(&format!("/tmp/.zterm-t123/{name}")),
                 "must remove {name} by exact path: {text}"
             );
         }
         assert!(
-            text.contains("rmdir /tmp/.zterm-zdot-t123"),
+            text.contains("rmdir /tmp/.zterm-t123"),
             "dir removal must require the dir to be empty: {text}"
         );
+    }
+
+    #[test]
+    fn wrapper_files_live_in_one_private_directory() {
+        // Both shells keep every file in one unguessable directory: removing a
+        // predictable /tmp path and creating it again would let another local
+        // user pre-create a symlink or their own rc file.
+        let stamp = "a".repeat(64);
+        let dir = format!("/tmp/.zterm-{stamp}");
+
+        let (files, exec) = cwd_wrapper_files("/bin/bash", &stamp).expect("bash wrapper");
+        assert_eq!(files.len(), 1);
+        let rc_path = format!("{dir}/rc");
+        assert_eq!(files[0].0, rc_path);
+        assert_eq!(exec, format!("exec bash --rcfile {rc_path} -i"));
+        let rc = String::from_utf8_lossy(&files[0].1);
+        assert!(
+            rc.contains(&format!("rm -f {rc_path}\n")),
+            "rc cleanup: {rc}"
+        );
+        assert!(
+            rc.contains(&format!("rmdir {dir} 2>/dev/null")),
+            "bash cleanup must drop the private dir: {rc}"
+        );
+
+        let (files, _) = cwd_wrapper_files("/bin/zsh", &stamp).expect("zsh wrapper");
+        assert_eq!(files.len(), 4);
+        for (path, _) in &files {
+            assert_eq!(
+                path.rsplit_once('/').map(|(parent, _)| parent),
+                Some(dir.as_str()),
+                "{path} must sit directly in {dir}"
+            );
+        }
+        let zlogin = files.iter().find(|(p, _)| p.ends_with("/.zlogin")).unwrap();
+        assert!(String::from_utf8_lossy(&zlogin.1).contains(&format!("rmdir {dir}")));
+    }
+
+    #[test]
+    fn wrapper_permissions_refuse_shared_access() {
+        use russh_sftp::protocol::OpenFlags;
+        assert_eq!(cwd_wrapper_dir_attributes().permissions, Some(0o700));
+        assert_eq!(cwd_wrapper_file_attributes().permissions, Some(0o600));
+        let flags = cwd_wrapper_write_flags();
+        assert!(flags.contains(OpenFlags::WRITE));
+        assert!(flags.contains(OpenFlags::CREATE));
+        assert!(
+            flags.contains(OpenFlags::EXCLUDE),
+            "must refuse to reuse a planted path"
+        );
+        assert!(
+            !flags.contains(OpenFlags::TRUNCATE),
+            "truncate would follow a planted symlink"
+        );
+    }
+
+    #[test]
+    fn wrapper_attributes_carry_permissions_only() {
+        // The SFTP Default impl is the reply placeholder: size/uid/gid/atime/
+        // mtime all set to zero. Sending those makes OpenSSH truncate the
+        // directory and re-own it, which fails for a non-root user, so the
+        // wrapper deployment must send the permissions field alone.
+        for attrs in [cwd_wrapper_dir_attributes(), cwd_wrapper_file_attributes()] {
+            assert!(
+                attrs.size.is_none(),
+                "size makes setstat truncate a directory"
+            );
+            assert!(attrs.uid.is_none(), "uid makes setstat fail for non-root");
+            assert!(attrs.gid.is_none(), "gid makes setstat fail for non-root");
+            assert!(attrs.user.is_none());
+            assert!(attrs.group.is_none());
+            assert!(attrs.atime.is_none());
+            assert!(attrs.mtime.is_none());
+        }
+    }
+
+    fn wrapper_test_root(name: &str) -> PathBuf {
+        let root = config_test_dir(name);
+        std::fs::create_dir_all(root.join("tmp")).unwrap();
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::write(
+            root.join("etc").join("passwd"),
+            "tester:x:1000:1000::/home/tester:/bin/bash\n",
+        )
+        .unwrap();
+        root
+    }
+
+    fn root_path(root: &std::path::Path, remote: &str) -> PathBuf {
+        root.join(remote.trim_start_matches('/'))
+    }
+
+    fn fresh_wrapper_slot() -> WrapperSlot {
+        Arc::new(Mutex::new(None))
+    }
+
+    #[tokio::test]
+    async fn prepare_cwd_wrapper_uploads_a_private_bash_wrapper() {
+        let root = wrapper_test_root("wrapper-prep-ok");
+        let (sftp, failures) = test_sftp_session(root.clone()).await;
+
+        let mut deployed = prepare_cwd_wrapper(Arc::new(sftp), "tester", fresh_wrapper_slot())
+            .await
+            .expect("wrapper deployment");
+        let mkdirs = failures.mkdir_calls();
+        assert_eq!(mkdirs.len(), 1);
+        assert_eq!(mkdirs[0], deployed.cleanup.dir);
+        assert!(deployed.cleanup.dir.starts_with("/tmp/.zterm-"));
+        assert_eq!(
+            deployed.cleanup.files,
+            vec![format!("{}/rc", deployed.cleanup.dir)]
+        );
+        assert_eq!(
+            deployed.exec,
+            format!("exec bash --rcfile {}/rc -i", deployed.cleanup.dir)
+        );
+
+        let on_disk =
+            std::fs::read_to_string(root_path(&root, &deployed.cleanup.files[0])).unwrap();
+        assert!(
+            on_disk.contains("_zt_cwd"),
+            "wrapper content ({} bytes): {:?}",
+            on_disk.len(),
+            &on_disk[..on_disk.len().min(120)]
+        );
+
+        let stat = failures.setstat_calls();
+        assert_eq!(stat.len(), 1, "one setstat for the directory");
+        assert_eq!(stat[0].0, deployed.cleanup.dir);
+        assert_eq!(
+            stat[0].1,
+            SftpSetstat {
+                size: false,
+                uid: false,
+                gid: false,
+                permissions: Some(0o700),
+            }
+        );
+
+        deployed.disarm();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn prepare_cwd_wrapper_degrades_when_mkdir_fails() {
+        let root = wrapper_test_root("wrapper-prep-exists");
+        // A regular file where /tmp should be makes mkdir fail, and the
+        // pre-existing entry must survive untouched.
+        std::fs::remove_dir(root.join("tmp")).unwrap();
+        std::fs::write(root.join("tmp"), b"occupied").unwrap();
+        let (sftp, _failures) = test_sftp_session(root.clone()).await;
+
+        let error = prepare_cwd_wrapper(Arc::new(sftp), "tester", fresh_wrapper_slot())
+            .await
+            .expect_err("occupied path must abort deployment");
+        assert!(matches!(error, CwdFollowUnavailable::WrapperUploadFailed));
+        assert_eq!(std::fs::read(root.join("tmp")).unwrap(), b"occupied");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn prepare_cwd_wrapper_removes_the_directory_when_setstat_is_rejected() {
+        let root = wrapper_test_root("wrapper-prep-setstat");
+        let (sftp, failures) = test_sftp_session(root.clone()).await;
+        failures.fail_every_setstat();
+
+        let error = prepare_cwd_wrapper(Arc::new(sftp), "tester", fresh_wrapper_slot())
+            .await
+            .expect_err("rejected setstat must abort deployment");
+        assert!(matches!(error, CwdFollowUnavailable::WrapperUploadFailed));
+        let mkdirs = failures.mkdir_calls();
+        assert_eq!(mkdirs.len(), 1);
+        assert!(
+            !root_path(&root, &mkdirs[0]).exists(),
+            "the private directory must not be left behind"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn prepare_cwd_wrapper_removes_partial_uploads() {
+        let root = wrapper_test_root("wrapper-prep-partial");
+        std::fs::write(
+            root.join("etc").join("passwd"),
+            "tester:x:1000:1000::/home/tester:/bin/zsh\n",
+        )
+        .unwrap();
+        let (sftp, failures) = test_sftp_session(root.clone()).await;
+        // .zshenv and .zprofile are uploaded before this one fails.
+        failures.fail_opens_with_suffix("/.zshrc");
+
+        let error = prepare_cwd_wrapper(Arc::new(sftp), "tester", fresh_wrapper_slot())
+            .await
+            .expect_err("failed upload must abort deployment");
+        assert!(matches!(error, CwdFollowUnavailable::WrapperUploadFailed));
+        let mkdirs = failures.mkdir_calls();
+        assert_eq!(mkdirs.len(), 1);
+        assert!(
+            !root_path(&root, &mkdirs[0]).exists(),
+            "a partially uploaded wrapper must be removed"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn prepare_cwd_wrapper_cleans_up_when_the_future_is_dropped_mid_upload() {
+        let root = wrapper_test_root("wrapper-prep-dropped");
+        std::fs::write(
+            root.join("etc").join("passwd"),
+            "tester:x:1000:1000::/home/tester:/bin/zsh\n",
+        )
+        .unwrap();
+        let (sftp, failures) = test_sftp_session(root.clone()).await;
+        // .zshenv and .zprofile upload first; block the third file before the
+        // server creates it, so no open handle pins it on Windows.
+        failures.block_before_open_with_suffix("/.zshrc");
+
+        let task = tokio::spawn(prepare_cwd_wrapper(
+            Arc::new(sftp),
+            "tester",
+            fresh_wrapper_slot(),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !failures.open_block_reached() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("upload reached the blocked file");
+
+        // Dropping the connection future (app exit, cancelled connect) drops
+        // the guard with it; the uploaded files and the directory must go away
+        // without the caller doing anything.
+        task.abort();
+        let _ = task.await;
+        failures.release_blocked_open();
+
+        let tmp = root.join("tmp");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let clean = std::fs::read_dir(&tmp)
+                    .map(|mut entries| entries.next().is_none())
+                    .unwrap_or(true);
+                if clean {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the abandoned wrapper directory must be removed");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
