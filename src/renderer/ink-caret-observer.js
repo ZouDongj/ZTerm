@@ -106,16 +106,25 @@
     // by the live terminal size at wiring time (ipc.js).
     let rows = Math.max(2, Math.floor(options?.rows) || 24);
     let cols = Math.max(2, Math.floor(options?.cols) || 80);
-    let scrollTop = 0, scrollBottom = rows - 1;
-    let normalScrollTop = 0, normalScrollBottom = rows - 1;
-    let regionBuffer = 'normal';
-    let originMode = false;
+    // A rebuilt observer must inherit the live buffer's scroll region and
+    // origin mode; otherwise its first relative move is measured against a
+    // full-screen region that the terminal no longer has.
+    const seededTop = Number.isFinite(options?.scrollTop) ? Math.floor(options.scrollTop) : 0;
+    const seededBottom = Number.isFinite(options?.scrollBottom) ? Math.floor(options.scrollBottom) : rows - 1;
+    let scrollTop = Math.min(rows - 1, Math.max(0, seededTop));
+    let scrollBottom = Math.min(rows - 1, Math.max(scrollTop, seededBottom));
+    const seededNormalTop = Number.isFinite(options?.normalScrollTop) ? Math.floor(options.normalScrollTop) : 0;
+    const seededNormalBottom = Number.isFinite(options?.normalScrollBottom) ? Math.floor(options.normalScrollBottom) : rows - 1;
+    let normalScrollTop = Math.min(rows - 1, Math.max(0, seededNormalTop));
+    let normalScrollBottom = Math.min(rows - 1, Math.max(normalScrollTop, seededNormalBottom));
+    let regionBuffer = options?.bufferType === 'alternate' ? 'alternate' : 'normal';
+    let originMode = options?.originMode === true;
     // Cursor model inside the current unit (1-based row/col like CUP).
     let row = Math.min(rows, Math.max(1, Math.floor(options?.row) || 1));
     let col = Math.min(cols, Math.max(1, Math.floor(options?.col) || 1));
     let pendingWrap = options?.pendingWrap === true;
-    let positionKnown = true;
-    let positionReason = null;
+    let positionKnown = options?.positionKnown === false ? false : !originMode;
+    let positionReason = positionKnown ? null : (options?.positionReason || (originMode ? 'decom' : null));
     let checkpointReason = null;
     let recoveries = 0;
     // The captured bare repaint returns from a lower parked row with
@@ -771,6 +780,7 @@
           unitSeq, chunkSeq, inSync, frameUnits,
           pendingCandidate: !!(unit && unit.caret && !unit.ambiguous),
           positionKnown, positionReason, checkpointReason, recoveries,
+          originMode, scrollTop, scrollBottom, regionBuffer,
         };
       },
     };

@@ -210,6 +210,19 @@ for (const stale of ['observer', 'term', 'adapter', 'session', 'generation']) {
   });
 }
 
+test('rebuilt observer inherits the live scroll region and DECOM fail-closed state', async t => {
+  const f = ipcParserFixture(t);
+  await f.write('\x1b[2;10r\x1b[?6h');
+  f.owner._inkObserver = null;
+  f.context._inkFeed(f.owner, f.owner, null, '\x1b[0m');
+  const state = f.owner._inkObserver.state();
+  assert.equal(state.originMode, true);
+  assert.equal(state.scrollTop, 1);
+  assert.equal(state.scrollBottom, 9);
+  assert.equal(state.positionKnown, false);
+  assert.equal(state.positionReason, 'decom');
+});
+
 test('real parser scroll during the final write acknowledges parsing without applying a stale checkpoint', async t => {
   const f = ipcParserFixture(t, { cols: 10, rows: 3 });
   let scrolls = 0;
