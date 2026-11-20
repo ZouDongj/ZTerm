@@ -1057,23 +1057,21 @@ const SFTP = {
 
     // Overwrite confirmation for an upload batch that would replace remote
     // files (reuses the shared #overlay-confirm via showConfirm). Resolves
-    // true only on the dialog's OK; cancel, backdrop and Escape via
-    // closeAllOverlays settle it false so the awaiting batch is dropped and
-    // its async caller completes instead of staying suspended forever.
+    // true only on the dialog's OK; cancel, backdrop and Escape (through
+    // closeAllOverlays) run onDismiss and settle it false, so the awaiting
+    // batch is dropped and its async caller completes instead of staying
+    // suspended forever.
     _confirmUploadOverwrite(count) {
         return new Promise(resolve => {
             let settled = false;
-            let unregister = null;
             const settle = value => {
                 if (settled) return;
                 settled = true;
-                if (unregister) unregister();
                 resolve(value);
             };
-            const cleanup = showConfirm(
+            showConfirm(
                 `远程目录已有 ${count} 个同名文件，继续上传将覆盖远端文件。是否继续？`,
                 () => settle(true), '覆盖', undefined, () => settle(false));
-            if (typeof registerOverlayDismiss === 'function') unregister = registerOverlayDismiss(cleanup);
         });
     },
 

@@ -243,4 +243,10 @@ test('showConfirm onDismiss fires once for cancel, backdrop and supersede, never
     ctx.showConfirm('被替换', () => {}, '覆盖', undefined, () => { superseded++; });
     ctx.showConfirm('新对话框', () => {});
     assert.equal(superseded, 1, 'a superseding dialog dismisses the previous one');
+
+    let repeated = 0;
+    const cleanup = ctx.showConfirm('repeat cleanup', () => {}, '覆盖', undefined, () => { repeated++; });
+    cleanup();
+    cleanup();
+    assert.equal(repeated, 1, 'the closed guard makes cleanup idempotent');
 });

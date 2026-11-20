@@ -23,35 +23,16 @@ function showToast(msg, isError) {
 }
 
 // ── Overlay helpers ──
-// Overlays that own a pending promise or owe the backend a reply register a
-// cleanup here, so every "close everything" path (Escape, opening another
-// modal) settles them instead of leaving the caller suspended. Handlers must
-// be idempotent; the returned function unregisters the handler.
-const _overlayDismissHandlers = new Set();
-
-function registerOverlayDismiss(handler) {
-    if (typeof handler !== 'function') return () => {};
-    _overlayDismissHandlers.add(handler);
-    return () => { _overlayDismissHandlers.delete(handler); };
-}
-
-function _runOverlayDismissHandlers() {
-    for (const handler of Array.from(_overlayDismissHandlers)) {
-        try { handler(); } catch (error) { console.error('[ZTerm] overlay dismiss cleanup failed:', error); }
-    }
-}
-
 function closeAllOverlays() {
-    // The hostkey dialog owes the backend a decision on EVERY dismissal
+    // Both shared dialogs own work that must not outlive the overlay. The
+    // hostkey dialog owes the backend a decision on EVERY dismissal
     // (check_server_key awaits it; a dialog that just loses .open hangs the
-    // connection attempt forever): its cleanup sends an idempotent reject, so
-    // Escape must run it. The plain confirm dialog needs no such signal — its
-    // stale listeners are unbound lazily when the next dialog opens.
+    // connection attempt forever). The confirm dialog settles its onDismiss
+    // callback for a visible execution-trust or upload-overwrite prompt, and
+    // clears its pointer so a queued trust request is not blocked by a stale
+    // cleanup. Both cleanups are idempotent.
     if (typeof _activeHostkeyCleanup === 'function' && _activeHostkeyCleanup) _activeHostkeyCleanup();
-    // Pending work behind an overlay (e.g. an execution-trust challenge or an
-    // upload overwrite choice) settles through its own dismiss handler before
-    // the overlay disappears, so no caller is left waiting forever.
-    _runOverlayDismissHandlers();
+    if (_activeConfirmCleanup) _activeConfirmCleanup();
     document.querySelectorAll('.overlay.open').forEach(o => o.classList.remove('open'));
     // Non-.overlay layers (color picker, tab context menu) belong to the same
     // teardown: a new modal must never open underneath a lingering layer.
@@ -133,9 +114,10 @@ function escAttr(s) { return escHtml(s).replace(/"/g,'&quot;').replace(/'/g,'&#3
 // Prevents user-controlled data from closing the quote and injecting arbitrary JS (XSS)
 function escJsString(s) { return (s || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n').replace(/\r/g,'\\r'); }
 
-// Cleanup of the currently active confirm dialog: Escape (closeAllOverlays) only removes the
-// .open class without running cleanup, so stale listeners would stack onto the next dialog
-// (deleting the wrong data). Unbind the old one before opening a new dialog.
+// Cleanup of the currently active confirm dialog. closeAllOverlays runs it
+// together with the hostkey cleanup, so Escape settles pending work instead
+// of only removing the .open class. Opening a new dialog also runs it, which
+// unbinds stale listeners before the shared DOM is reused.
 let _activeConfirmCleanup = null;
 
 // Modal keyboard ownership: while the shared confirm dialog is open its
@@ -187,7 +169,9 @@ function showConfirm(msg, onOk, okText, tone, onDismiss) {
         okBtn.textContent = '删除';
         okBtn.className = 'btn-danger';
         _restoreFocusAfterModal();
-        if (!accepted && typeof onDismiss === 'function') onDismiss();
+        if (!accepted && typeof onDismiss === 'function') {
+            try { onDismiss(); } catch (error) { console.error('[ZTerm] confirm dismiss callback failed:', error); }
+        }
     };
     const onCancel = () => cleanup();
     const onOkClick = () => { accepted = true; cleanup(); onOk(); };

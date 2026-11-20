@@ -54,16 +54,11 @@ const ZTermExecutionTrust = (() => {
         const ask = () => new Promise(resolve => {
             let settled = false;
             let cleanup = null;
-            let unregisterDismiss = null;
             let rememberInput = null;
             let rememberLabel = null;
             const finish = approved => {
                 if (settled) return;
                 settled = true;
-                if (unregisterDismiss) {
-                    unregisterDismiss();
-                    unregisterDismiss = null;
-                }
                 clearInterval(timer);
                 entry.dismiss = null;
                 const decision = approved ? { allow: true, remember: rememberInput?.checked === true } : null;
@@ -99,12 +94,10 @@ const ZTermExecutionTrust = (() => {
             };
             const timer = setInterval(tick, 100);
             entry.dismiss = () => finish(false);
-            // Escape/closeAllOverlays hides the shared dialog without going
-            // through its buttons; register the same denial the cancel button
-            // produces so the caller and the backend never wait forever.
-            if (typeof registerOverlayDismiss === 'function') {
-                unregisterDismiss = registerOverlayDismiss(entry.dismiss);
-            }
+            // The dialog is shown only from tick(), after every unrelated
+            // confirm/hostkey dialog has closed. Its onDismiss settles Escape
+            // and backdrop clicks like the cancel button; entry.dismiss still
+            // covers cancel()/owner shutdown while the request is queued.
             tick();
         });
         const asking = dialogQueue.then(ask, ask);

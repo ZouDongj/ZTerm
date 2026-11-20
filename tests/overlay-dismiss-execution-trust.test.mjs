@@ -1,8 +1,8 @@
-// Overlay dismissal must settle pending execution-trust consent: Escape /
-// closeAllOverlays traditionally only removed the .open class, leaving the
-// confirm promise (and the backend's prepare-execution challenge) pending
-// forever. The overlay dismiss registry drains on every "close everything"
-// path and settles the dialog exactly once as a denial.
+// Overlay dismissal must settle pending execution-trust consent exactly once
+// without denying a request whose dialog is still queued behind another
+// modal. closeAllOverlays runs the visible confirm cleanup and the hostkey
+// cleanup; both are idempotent, and showConfirm's onDismiss settles a visible
+// trust prompt while a queued one stays pending until tick() shows it.
 //
 // Uses the shared renderer VM plus the REAL utils.js and execution-trust.js:
 // showConfirm, closeAllOverlays and the trust broker all run unmodified.
@@ -60,11 +60,14 @@ function loadTrust(ctx, responses) {
         calls.push({ cmd, payload });
         if (cmd === 'prepare-execution') return Promise.resolve(responses.prepare);
         if (cmd === 'decide-execution') return Promise.resolve({ ticket: 'ticket-1' });
-        if (cmd === 'pty-create') return Promise.resolve({});
-        return Promise.resolve({});
+        if (cmd === 'pty-create' || cmd === 'cancel-execution') return Promise.resolve({});
+        // Any other call (notably ssh-connect) stays suspended: a real SSH
+        // attempt must not settle just because the test replaced the bridge.
+        return new Promise(() => {});
     };
     vm.runInContext(trustSrc, ctx, { filename: 'execution-trust.js' });
-    return { calls, broker: ctx.window.ZTermExecutionTrust };
+    const pulse = () => { for (const fn of Array.from(timers.values())) fn(); };
+    return { calls, broker: ctx.window.ZTermExecutionTrust, pulse };
 }
 
 const drain = () => new Promise(resolve => setImmediate(resolve));
@@ -76,6 +79,21 @@ const outcome = promise => Promise.race([
 const overlay = ctx => ctx.document.getElementById('overlay-confirm');
 const cancelBtn = ctx => ctx.document.getElementById('confirm-cancel');
 const count = (calls, cmd) => calls.filter(call => call.cmd === cmd).length;
+const confirmCleanupRef = ctx => vm.runInContext('_activeConfirmCleanup', ctx);
+
+// A REAL pending SSH attempt for the hostkey dialog (same shape as
+// tests/ssh-hostkey-decision.test.mjs).
+function pendingSshTab(ctx, id) {
+    const tab = { id, name: id, type: 'ssh', host: 'h', user: 'u', connected: false, tabId: null, term: null, fitAddon: null };
+    ctx.TabManager.tabs.push(tab);
+    ctx._sshConnectWithCredentials(tab, null);
+    return tab;
+}
+
+const emitMismatch = (ctx, tabId, attemptId) =>
+    ctx.__emit('ssh-hostkey-mismatch', { tabId, attemptId, host: 'h', oldAlgorithm: 'ssh-ed25519', oldFingerprint: 'OLD', newAlgorithm: 'ssh-ed25519', newFingerprint: 'NEW' });
+const sshDecisions = (ctx, tabId) =>
+    ctx.__sends.filter(s => s.cmd === 'ssh-hostkey-decision' && s.payload && s.payload.tabId === tabId);
 
 test('Escape denies a pending SSH execution-trust prompt exactly once', async () => {
     const ctx = loadVm();
@@ -134,4 +152,114 @@ test('Escape settles a pending local start without launching the command', async
     assert.equal(count(calls, 'decide-execution'), 0, 'a dismissed prompt is never allowed');
     assert.equal(count(calls, 'cancel-execution'), 1, 'the backend is told to cancel exactly once');
     assert.equal(calls.find(call => call.cmd === 'cancel-execution').payload.requestId, 'local-owner');
+});
+
+test('a trust request queued behind a plain confirm survives the first closeAllOverlays', async () => {
+    const ctx = loadVm();
+    loadUtils(ctx);
+    mountConfirmDom(ctx);
+    ctx.sshAttempts = { ownerWants: () => true, ownerAttempt: () => null };
+    const { calls, broker, pulse } = loadTrust(ctx, {
+        prepare: { challengeId: 'challenge-q1', description: 'queued trust prompt', canRemember: false },
+    });
+    ctx.showConfirm('blocking delete', () => {});
+    assert.equal(confirmCleanupRef(ctx) !== null, true, 'plain confirm owns the shared dialog');
+
+    const running = broker.authorizeSsh({ shell: 'fixture.exe' }, 'attempt-q1');
+    running.catch(() => {});
+    await drain();
+    assert.equal(count(calls, 'cancel-execution'), 0, 'queued request is not denied');
+
+    ctx.closeAllOverlays();
+    await drain();
+    let settled = false;
+    running.then(() => { settled = true; }, () => { settled = true; });
+    await drain();
+    assert.equal(settled, false, 'the user never saw this prompt, so it stays pending');
+    assert.equal(count(calls, 'cancel-execution'), 0, 'no backend cancellation for a hidden prompt');
+
+    pulse();
+    await drain();
+    assert.equal(overlay(ctx).classList.contains('open'), true, 'the queued trust prompt appears');
+    assert.equal(ctx.document.getElementById('confirm-msg').textContent, 'queued trust prompt');
+
+    ctx.closeAllOverlays();
+    const result = await outcome(running);
+    await drain();
+    assert.ok(result.rejected, 'the second Escape denies the visible prompt');
+    assert.equal(count(calls, 'cancel-execution'), 1, 'exactly one cancellation after the prompt was shown');
+    assert.equal(count(calls, 'decide-execution'), 0, 'a dismissed prompt is never allowed');
+});
+
+test('a trust request queued behind a hostkey dialog survives the hostkey rejection', async () => {
+    const ctx = loadVm();
+    loadUtils(ctx);
+    mountConfirmDom(ctx);
+    const tab = pendingSshTab(ctx, 't_queue');
+    emitMismatch(ctx, 'ssh_queue', tab._pendingAttempt);
+    assert.equal(overlay(ctx).classList.contains('open'), true, 'hostkey dialog is showing');
+
+    // Keep the real attempt registry (the connect chain still needs armSlot)
+    // and only make the trust request's owner look alive.
+    const attempts = ctx.sshAttempts;
+    const ownerWants = attempts.ownerWants;
+    attempts.ownerWants = token => token === 'attempt-q2' || ownerWants(token);
+    attempts.ownerAttempt = () => null;
+    const { calls, broker, pulse } = loadTrust(ctx, {
+        prepare: { challengeId: 'challenge-q2', description: 'queued after hostkey', canRemember: false },
+    });
+    const running = broker.authorizeSsh({ shell: 'fixture.exe' }, 'attempt-q2');
+    running.catch(() => {});
+    await drain();
+    assert.equal(count(calls, 'cancel-execution'), 0, 'queued request is not denied');
+
+    ctx.closeAllOverlays();
+    await drain();
+    const decisions = sshDecisions(ctx, 'ssh_queue');
+    assert.equal(decisions.length, 1, 'the visible hostkey dialog is rejected once');
+    assert.equal(decisions[0].payload.accept, false);
+    let settled = false;
+    running.then(() => { settled = true; }, () => { settled = true; });
+    await drain();
+    assert.equal(settled, false, 'the hidden trust prompt stays pending');
+    assert.equal(count(calls, 'cancel-execution'), 0, 'no backend cancellation for a hidden prompt');
+
+    pulse();
+    await drain();
+    assert.equal(overlay(ctx).classList.contains('open'), true, 'the trust prompt appears after the hostkey dialog');
+    assert.equal(ctx.document.getElementById('confirm-msg').textContent, 'queued after hostkey');
+
+    ctx.closeAllOverlays();
+    const result = await outcome(running);
+    await drain();
+    assert.ok(result.rejected);
+    assert.equal(count(calls, 'cancel-execution'), 1, 'the second Escape cancels the visible trust prompt');
+    assert.equal(count(calls, 'decide-execution'), 0);
+});
+
+test('closeAllOverlays clears the confirm cleanup pointer for later prompts', async () => {
+    const ctx = loadVm();
+    loadUtils(ctx);
+    mountConfirmDom(ctx);
+    ctx.showConfirm('plain delete', () => {});
+    assert.equal(confirmCleanupRef(ctx) !== null, true);
+
+    ctx.closeAllOverlays();
+    assert.equal(confirmCleanupRef(ctx), null, 'Escape clears the stale cleanup');
+
+    ctx.sshAttempts = { ownerWants: () => true, ownerAttempt: () => null };
+    const { calls, broker } = loadTrust(ctx, {
+        prepare: { challengeId: 'challenge-late', description: 'later prompt', canRemember: false },
+    });
+    const running = broker.authorizeSsh({ shell: 'fixture.exe' }, 'attempt-late');
+    running.catch(() => {});
+    await drain();
+    assert.equal(overlay(ctx).classList.contains('open'), true, 'a later trust prompt is not blocked');
+    assert.equal(ctx.document.getElementById('confirm-msg').textContent, 'later prompt');
+    assert.equal(count(calls, 'cancel-execution'), 0);
+
+    ctx.closeAllOverlays();
+    await outcome(running);
+    await drain();
+    assert.equal(count(calls, 'cancel-execution'), 1);
 });
