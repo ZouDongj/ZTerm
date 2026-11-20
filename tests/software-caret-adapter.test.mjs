@@ -456,6 +456,15 @@ test('clearSoftwareVisual suppresses the native cursor only while the adapter ow
     'after revoke the native cursor state is left to the base renderer');
 });
 
+test('snapshot exposes a DECOM observer invalidation reason', () => {
+  const f = fixture();
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  p.invalidate('observer:decom');
+  assert.equal(f.adapter.snapshot().caretOwnership.reason, 'invalidate:observer:decom');
+});
+
 test('watermark gating: a candidate publishes only after its chunk is parsed', () => {
   const f = fixture();
   const p = f.adapter.softwareCaretPort;

@@ -1539,6 +1539,7 @@
               'cell-overwritten', 'candidate-cell-mismatch', 'out-of-range', 'buffer-switch',
               'invalidate:scroll', 'invalidate:resize', 'invalidate:session-reset',
               'invalidate:observer:resize', 'invalidate:observer:unmodeled-coordinate-change',
+              'invalidate:observer:decom', 'decom',
             ].includes(instrumentation.softwareCaret?.reason) ? instrumentation.softwareCaret.reason : null,
           },
           scheduler: instrumentation.scheduler,

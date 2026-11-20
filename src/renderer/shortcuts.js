@@ -307,6 +307,7 @@ const SHORTCUT_ACTIONS = {
                 'cell-overwritten', 'candidate-cell-mismatch', 'out-of-range', 'buffer-switch',
                 'invalidate:scroll', 'invalidate:resize', 'invalidate:session-reset',
                 'invalidate:observer:resize', 'invalidate:observer:unmodeled-coordinate-change',
+                'invalidate:observer:decom', 'decom',
                 'unmodeled-coordinate-change', 'resize', 'stale-watermark', 'open-lexical-unit',
                 'unsupported-parser-state', 'non-default-style', 'invalid-geometry',
             ].includes(value) ? value : null;
