@@ -36,7 +36,7 @@ jobs:
   # but WebView2 never initializes). Run locally with `npm run e2e`.
 
   frontend:
-    name: Frontend syntax check
+    name: Frontend tests
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,22 +44,10 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
-      - name: Syntax check renderer scripts
-        run: |
-          node --check src/ipc-polyfill.js
-          node --check src/renderer/main.js
-          node --check src/renderer/tabs.js
-          node --check src/renderer/terminal.js
-          node --check src/renderer/ssh.js
-          node --check src/renderer/sftp.js
-          node --check src/renderer/ipc.js
-          node --check src/renderer/settings.js
-          node --check src/renderer/utils.js
-          node --check src/renderer/state.js
-          node --check src/renderer/shortcuts.js
-          node --check src/renderer/split.js
-          node --check src/renderer/quick-commands.js
-          node --check src/renderer/command-palette.js
-          node --check src/renderer/highlight.js
+      # The tests import Node builtins only, so this job skips npm ci. The
+      # run also includes tests/syntax-check.test.mjs, which auto-discovers
+      # renderer scripts and scripts/*.mjs instead of a hard-coded list.
+      - name: Unit tests
+        run: npm run test:frontend
