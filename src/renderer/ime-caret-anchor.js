@@ -108,6 +108,8 @@
         if (helper.__imeAnchorPatched) return true;
         const update = helper.updateCompositionElements.bind(helper);
         helper.updateCompositionElements = function (dontRecurse) {
+            // Match stock CompositionHelper: idle renders return before any layout.
+            if (!helper._isComposing) return;
             const cell = coreService.isCursorHidden ? readPerceivedCaret(core) : null;
             if (!cell) { update(dontRecurse); return; }
             anchorCompositionAt(core, cell);
@@ -132,6 +134,8 @@
         if (!core.__imeAnchorSyncPatched) {
             const sync = core._syncTextArea.bind(core);
             core._syncTextArea = function () {
+                // Match stock _syncTextArea: no textarea writes during composition.
+                if (core._compositionHelper?.isComposing) return;
                 const cell = coreService.isCursorHidden ? readPerceivedCaret(core) : null;
                 if (!cell) { sync(); return; }
                 anchorTextareaAt(core, cell);

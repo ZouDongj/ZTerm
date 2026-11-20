@@ -1313,14 +1313,37 @@ async function main() {
       // textarea must anchor at the software cursor cell, not the protocol park position.
       const prevProvider = core?.__imeAnchorPerceivedCaret;
       let p4 = null;
+      let idle = null;
       if (core && cell) {
         core.__imeAnchorPerceivedCaret = () => ({ x: 15, y: 5, width: 1 });
         await write('\\u001b[?25l\\u001b[22;30H');
         p4 = pos();
+        // Idle render: stock updateCompositionElements returns before layout
+        // while not composing. Without that guard every onRender re-reads a
+        // 0x0 idle composition view and rewrites the textarea to 1px.
+        const helper = core._compositionHelper;
+        const view = core._compositionView;
+        if (helper && view && typeof view.getBoundingClientRect === 'function') {
+          const prevRect = view.getBoundingClientRect;
+          const width = term.textarea.style.width;
+          const height = term.textarea.style.height;
+          let rects = 0;
+          view.getBoundingClientRect = function () {
+            rects += 1;
+            return prevRect.call(this);
+          };
+          helper.updateCompositionElements();
+          helper.updateCompositionElements();
+          view.getBoundingClientRect = prevRect;
+          idle = { rects, width, height,
+            widthAfter: term.textarea.style.width,
+            heightAfter: term.textarea.style.height,
+            composing: helper._isComposing === true };
+        }
         core.__imeAnchorPerceivedCaret = prevProvider;
         await write('\\u001b[?25h');
       }
-      return { ok: true, p1, p2, p3, p4,
+      return { ok: true, p1, p2, p3, p4, idle,
         e1: px(9, 9), e2: px(39, 19), e3: px(11, 11), e4: px(15, 5),
         hiddenKnown: typeof core?.coreService?.isCursorHidden === 'boolean' };
     })()`);
@@ -1335,7 +1358,11 @@ async function main() {
         && nearPx(imeProbe.p1.left, imeProbe.e1.left) && nearPx(imeProbe.p1.top, imeProbe.e1.top)
         && nearPx(imeProbe.p2.left, imeProbe.e2.left) && nearPx(imeProbe.p2.top, imeProbe.e2.top)
         && nearPx(imeProbe.p3.left, imeProbe.e3.left) && nearPx(imeProbe.p3.top, imeProbe.e3.top)
-        && imeProbe.p4 !== null && nearPx(imeProbe.p4.left, imeProbe.e4.left) && nearPx(imeProbe.p4.top, imeProbe.e4.top),
+        && imeProbe.p4 !== null && nearPx(imeProbe.p4.left, imeProbe.e4.left) && nearPx(imeProbe.p4.top, imeProbe.e4.top)
+        && imeProbe.idle !== null && imeProbe.idle.composing === false
+        && imeProbe.idle.rects === 0
+        && imeProbe.idle.width === imeProbe.idle.widthAfter
+        && imeProbe.idle.height === imeProbe.idle.heightAfter,
       JSON.stringify(imeProbe));
 
     // 9.8 Terminal search (batch 03): synthetic local content + the REAL
