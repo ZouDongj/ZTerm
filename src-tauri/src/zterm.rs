@@ -266,11 +266,12 @@ pub struct SshSession {
     pub handle: Arc<russh::client::Handle<SshHandler>>,
     pub sftp: Option<Arc<russh_sftp::client::SftpSession>>,
     pub sftp_transfer: Option<Arc<russh_sftp::client::SftpSession>>,
-    pub transfer_cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    pub transfer_cancels: TransferCancels,
     pub cwd: Arc<Mutex<Option<String>>>,
-    /// Shared with the SshHandler and the reader task: first writer wins for
-    /// user-initiated closes (ssh_disconnect / tab close pre-fill it), the
-    /// handler's disconnected() callback fills it for everything else.
+    /// Shared with the SshHandler and the reader task: user-initiated closes
+    /// (ssh_disconnect / tab close) pre-fill it, and the handler's
+    /// disconnected() keeps an existing label; otherwise the handler fills in
+    /// the label russh reports.
     pub disconnect_reason: Arc<Mutex<Option<String>>>,
 }
 
@@ -1762,6 +1763,38 @@ fn sanitize_colorfgbg(v: &str) -> Option<&str> {
     }
 }
 
+/// Drain local input messages and write them to the PTY master in arrival
+/// order. Each write runs on the blocking pool: the ConPTY input pipe is a
+/// Win32 handle whose write can wait while conhost drains, and parking an
+/// async worker there stalls unrelated commands (one worker per core, see
+/// issue #55). Awaiting each write keeps per-session ordering and the
+/// channel's backpressure intact. The writer slot is cleared when the channel
+/// closes so a later teardown cannot race a half-closed writer.
+async fn run_local_writer<W: std::io::Write + Send + 'static>(
+    mut writer_rx: mpsc::Receiver<LocalInput>,
+    writer: Arc<Mutex<Option<W>>>,
+    tab_id: String,
+) {
+    while let Some(input) = writer_rx.recv().await {
+        let bytes = input.data.len();
+        let trace = input.trace;
+        native_trace::input_stage(&tab_id, "write-begin", bytes, trace, None);
+        let data = input.data;
+        let writer_for_write = writer.clone();
+        let ok = tokio::task::spawn_blocking(move || {
+            let mut guard = writer_for_write.lock();
+            match guard.as_mut() {
+                Some(w) => std::io::Write::write_all(w, &data).is_ok(),
+                None => false,
+            }
+        })
+        .await
+        .unwrap_or(false);
+        native_trace::input_stage(&tab_id, "write-end", bytes, trace, Some(ok));
+    }
+    *writer.lock() = None;
+}
+
 #[tauri::command]
 pub async fn pty_create(
     app: AppHandle,
@@ -1890,12 +1923,12 @@ pub async fn pty_create(
         .map(|v| v.trim() == "loose")
         .unwrap_or(false);
     let flush_ms = pty_flush_interval_ms(loose);
-    let (writer_tx, mut writer_rx) = mpsc::channel::<LocalInput>(64);
+    let (writer_tx, writer_rx) = mpsc::channel::<LocalInput>(64);
 
     // Announce the session BEFORE starting the output threads: the first
     // output burst carries the ConPTY DA1 handshake, and a chunk that beats
     // pty-created to the renderer would have no owner and be silently dropped.
-    {
+    let replaced = {
         let mut map = state.lock();
         map.insert(
             tab_id.clone(),
@@ -1905,40 +1938,20 @@ pub async fn pty_create(
                 master: Arc::new(Mutex::new(pair.master)),
                 child,
             }),
-        );
-    }
+        )
+    };
+    // Local backend ids come from a process-wide counter, so this insert cannot
+    // replace a live session. Bind the return value and drop it outside the
+    // guard anyway: teardown must never run under the shared lock.
+    debug_assert!(replaced.is_none(), "local session ids are unique");
+    drop(replaced);
     let _ = app.emit(
         "pty-created",
         json!({ "tabId": tab_id, "requestId": request_id, "executionOwner":execution_owner }),
     );
 
     let writer = Arc::new(Mutex::new(Some(writer)));
-    let writer_for_task = writer.clone();
-    let writer_tab_id = tab_id.clone();
-    tokio::spawn(async move {
-        while let Some(input) = writer_rx.recv().await {
-            use std::io::Write;
-            native_trace::input_stage(
-                &writer_tab_id,
-                "write-begin",
-                input.data.len(),
-                input.trace,
-                None,
-            );
-            let mut ok = false;
-            if let Some(ref mut w) = *writer_for_task.lock() {
-                ok = w.write_all(&input.data).is_ok();
-            }
-            native_trace::input_stage(
-                &writer_tab_id,
-                "write-end",
-                input.data.len(),
-                input.trace,
-                Some(ok),
-            );
-        }
-        *writer_for_task.lock() = None;
-    });
+    tokio::spawn(run_local_writer(writer_rx, writer, tab_id.clone()));
 
     let app2 = app.clone();
     let tid = tab_id.clone();
@@ -3589,8 +3602,7 @@ pub async fn ssh_connect(
         }
     });
 
-    let cancels: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let cancels: TransferCancels = Arc::new(Mutex::new(HashMap::new()));
 
     // Final check before registering: if cancelled meanwhile (tab close/reconnect), skip registration and events — the connection is dropped silently
     cancelled!(handle);
@@ -3599,8 +3611,11 @@ pub async fn ssh_connect(
     // its own token and must keep its cancel handle.
     complete_pending(&mut *pending_state.lock(), &attempt_id, &tab_id);
 
-    // Store session
-    {
+    // Store session. Session ids are minted uniquely per attempt (SSH_COUNTER),
+    // so this insert should never replace a live entry; bind the return value
+    // and drop it after the guard defensively, because teardown must never run
+    // under the shared lock every session's input waits on.
+    let replaced = {
         let mut map = state.lock();
         map.insert(
             tab_id.clone(),
@@ -3614,8 +3629,10 @@ pub async fn ssh_connect(
                 cwd,
                 disconnect_reason,
             }),
-        );
-    }
+        )
+    };
+    debug_assert!(replaced.is_none(), "ssh session ids are unique per attempt");
+    drop(replaced);
 
     let _ = app.emit(
         "ssh-connected",
@@ -3627,17 +3644,37 @@ pub async fn ssh_connect(
 
 // ── Command: ssh_disconnect ──
 
+/// Label a user-initiated close (ssh_disconnect / tab close). The SshHandler's
+/// disconnected() keeps a label that is already present and reports kind
+/// "closed", so the pre-fill must happen before the session becomes unreachable.
+const USER_CLOSE_REASON: &str = "closed by user";
+
+/// Mark `slot` as a user-initiated close. Callers hold the session map guard so
+/// no reader can observe a removed session without a shutdown cause; the slot
+/// itself is a per-session lock, a leaf in the map -> per-session order.
+fn mark_user_close(slot: &Mutex<Option<String>>) {
+    *slot.lock() = Some(USER_CLOSE_REASON.to_string());
+}
+
 /// Take the SSH session for `tab_id` out of the map for an explicit
 /// disconnect. Non-SSH entries sharing the id space (a local PTY) stay
 /// registered: local teardown is pty_destroy's job, and dropping the entry
-/// here would orphan the child process. Split from ssh_disconnect's IPC
-/// layer for unit testing.
+/// here would orphan the child process. The user-close reason is pre-filled
+/// while the guard is still held, so nothing can observe the session as gone
+/// without its shutdown cause; the caller drops/awaits it only after the guard
+/// is released. Split from ssh_disconnect's IPC layer for unit testing.
 fn take_ssh_for_disconnect(
     map: &mut HashMap<String, SessionType>,
     tab_id: &str,
 ) -> Option<SshSession> {
     match map.remove(tab_id) {
-        Some(SessionType::Ssh(session)) => Some(session),
+        Some(SessionType::Ssh(session)) => {
+            // disconnected() keeps a label that is already present, and russh's
+            // Error::Disconnect carries no information, so label the close
+            // before the session can become unreachable.
+            mark_user_close(&session.disconnect_reason);
+            Some(session)
+        }
         other => {
             // Put a non-SSH entry back under the same lock: to everyone else
             // it was never gone.
@@ -3699,17 +3736,20 @@ pub async fn ssh_disconnect(
             trust: false,
         });
     }
-    // Release the map lock right after taking the handle, then await the disconnect (no lock held across await)
-    let close_handle = {
+    // Take the session out under the lock, then tear it down after the guard is
+    // gone: dropping it stops the writer task and must never run while every
+    // other session's input waits on this map.
+    let removed = {
         let mut map = state.lock();
-        take_ssh_for_disconnect(&mut map, &tab_id).map(|session| {
-            // Pre-fill the reason slot so the handler's disconnected()
-            // labels this as a user-initiated close instead of reporting
-            // russh's information-free Error::Disconnect.
-            *session.disconnect_reason.lock() = Some("closed by user".to_string());
-            (session.handle.clone(), session.transfer_cancels.clone())
-        })
+        take_ssh_for_disconnect(&mut map, &tab_id)
     };
+    let close_handle = removed.map(|session| {
+        let close_handle = (session.handle.clone(), session.transfer_cancels.clone());
+        // Dropping the session drops the writer_tx, which stops the writer task.
+        // The reader task will detect EOF and emit ssh-disconnected.
+        drop(session);
+        close_handle
+    });
     if let Some((h, cancels)) = close_handle {
         // Cancel in-flight SFTP transfers first so their tasks drop temp
         // files and release the handle before the channel goes away; the
@@ -3720,8 +3760,6 @@ pub async fn ssh_disconnect(
             .disconnect(russh::Disconnect::ByApplication, "ZTerm closed", "")
             .await
             .ok();
-        // Dropping the session drops the writer_tx, which stops the writer task.
-        // The reader task will detect EOF and emit ssh-disconnected.
         let _ = app.emit("ssh-disconnected", json!({ "tabId": tab_id }));
     }
     Ok(json!({ "ok": true }))
@@ -3891,6 +3929,64 @@ pub async fn pty_resize(
     Ok(())
 }
 
+/// What a removed session still needs after the map lock is released.
+enum SessionClosePlan {
+    Local(PtySession),
+    Ssh {
+        handle: Arc<russh::client::Handle<SshHandler>>,
+        cancels: TransferCancels,
+    },
+}
+
+/// Turn a session that is already out of the map into the work to run after the
+/// lock is released. The local child kill is a quick TerminateProcess; the
+/// blocking part is the ConPTY handle drop inside the returned plan, which the
+/// caller performs on the blocking pool. The SSH branch stops the session's
+/// writer task by dropping it; the caller awaits cancel/disconnect/emit.
+fn close_plan_for_session(session: SessionType) -> SessionClosePlan {
+    match session {
+        SessionType::Local(mut session) => {
+            let _ = session.child.kill();
+            SessionClosePlan::Local(session)
+        }
+        SessionType::Ssh(session) => {
+            let handle = session.handle.clone();
+            let cancels = session.transfer_cancels.clone();
+            // Dropping the session drops the writer_tx, which stops the writer
+            // task; the reader task detects EOF and emits ssh-disconnected.
+            drop(session);
+            SessionClosePlan::Ssh { handle, cancels }
+        }
+    }
+}
+
+/// Remove `tab_id` from the session map, run `prepare` on the removed entry
+/// while the guard is still held, then run `close` only after the guard is
+/// released. `prepare` may take a per-session lock (map -> per-session lock is
+/// the only nesting taken under the session map); it must be quick and must
+/// never re-enter the map, since parking_lot locks are not reentrant. Teardown
+/// must never run under the map lock:
+/// dropping a local session closes ConPTY, and `ClosePseudoConsole` waits for
+/// conhost to exit (without a bound on Windows builds before 11 24H2), while
+/// every other session's pty_input / pty_resize / pty_create needs the same
+/// lock — one slow close would freeze input in all tabs (issue #55). Generic so
+/// the lock discipline can be unit-tested with a fake session whose drop
+/// blocks.
+fn take_session_for_close<V, T>(
+    map: &Arc<Mutex<HashMap<String, V>>>,
+    tab_id: &str,
+    prepare: impl FnOnce(&V),
+    close: impl FnOnce(V) -> T,
+) -> Option<T> {
+    let mut guard = map.lock();
+    let removed = guard.remove(tab_id)?;
+    prepare(&removed);
+    // Release the guard before teardown, even when the removed value's Drop is
+    // what blocks.
+    drop(guard);
+    Some(close(removed))
+}
+
 #[tauri::command]
 pub async fn pty_destroy(
     app: AppHandle,
@@ -3937,36 +4033,40 @@ pub async fn pty_destroy(
             trust: false,
         });
     }
-    // Release the map lock right after taking the session, then await the disconnect (no lock held across await)
-    let close_handle = {
-        let mut map = state.lock();
-        match map.remove(&tab_id) {
-            Some(session) => match session {
-                SessionType::Local(mut s) => {
-                    let _ = s.child.kill();
-                    None
-                }
-                SessionType::Ssh(s) => {
-                    // Same pre-fill as ssh_disconnect: user-initiated close.
-                    *s.disconnect_reason.lock() = Some("closed by user".to_string());
-                    Some((s.handle.clone(), s.transfer_cancels.clone()))
-                }
-            },
-            None => None,
+    // Take the session out under the lock, then close it after the guard is
+    // gone: ClosePseudoConsole (Local) and the russh disconnect (Ssh) can block
+    // or await, and must not stall every other session's input (issue #55).
+    let close_plan = take_session_for_close(
+        &state,
+        &tab_id,
+        |session| {
+            // Label a user close before the session can leave the map, so the
+            // handler's disconnected() cannot win with a generic error.
+            if let SessionType::Ssh(session) = session {
+                mark_user_close(&session.disconnect_reason);
+            }
+        },
+        close_plan_for_session,
+    );
+    match close_plan {
+        Some(SessionClosePlan::Local(session)) => {
+            // The blocking part of a local tab close is the ConPTY handle drop:
+            // ClosePseudoConsole waits for conhost to exit. Run it on the
+            // blocking pool so it never occupies an async worker.
+            let _ = tokio::task::spawn_blocking(move || drop(session)).await;
         }
-    };
-    if let Some((h, cancels)) = close_handle {
-        // Cancel in-flight SFTP transfers first so their tasks drop temp
-        // files before the session is disconnected underneath them.
-        cancel_sftp_transfers(&cancels).await;
-        // Disconnect explicitly so the remote session ends at once (Drop refcounting alone is not enough)
-        let _ = h
-            .disconnect(russh::Disconnect::ByApplication, "ZTerm closed", "")
-            .await
-            .ok();
-        // Drop session → drop writer_tx → writer task exits
-        // Reader task will detect EOF and emit ssh-disconnected
-        let _ = app.emit("ssh-disconnected", json!({ "tabId": tab_id }));
+        Some(SessionClosePlan::Ssh { handle, cancels }) => {
+            // Cancel in-flight SFTP transfers first so their tasks drop temp
+            // files before the session is disconnected underneath them.
+            cancel_sftp_transfers(&cancels).await;
+            // Disconnect explicitly so the remote session ends at once (Drop refcounting alone is not enough)
+            let _ = handle
+                .disconnect(russh::Disconnect::ByApplication, "ZTerm closed", "")
+                .await
+                .ok();
+            let _ = app.emit("ssh-disconnected", json!({ "tabId": tab_id }));
+        }
+        None => {}
     }
     Ok(json!({ "tabId": tab_id }))
 }
@@ -8361,6 +8461,41 @@ mod tests {
         }
     }
 
+    /// Child stand-in that records `kill`, so the close-plan test can assert
+    /// the shell was killed before the ConPTY handle goes to the blocking pool.
+    #[derive(Debug)]
+    struct RecordingChild {
+        killed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl portable_pty::ChildKiller for RecordingChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(RecordingChild {
+                killed: self.killed.clone(),
+            })
+        }
+    }
+
+    impl portable_pty::Child for RecordingChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(Some(portable_pty::ExitStatus::with_exit_code(0)))
+        }
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
     #[test]
     #[cfg(windows)]
     fn session_resize_target_resizes_without_the_session_map_lock() {
@@ -8449,6 +8584,311 @@ mod tests {
         // Unknown ids take nothing and register nothing.
         assert!(take_ssh_for_disconnect(&mut map, "missing").is_none());
         assert!(!map.contains_key("missing"));
+    }
+
+    /// Fake session whose Drop blocks until the test releases it, standing in
+    /// for a local PTY whose ConPTY close waits for conhost.
+    struct BlockingSession {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for BlockingSession {
+        fn drop(&mut self) {
+            let _ = self.entered.send(());
+            let _ = self.release.recv_timeout(std::time::Duration::from_secs(5));
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn session_teardown_runs_outside_the_session_map_lock() {
+        // Issue #55: pty_destroy dropped the session inside the session-map
+        // guard. A local ConPTY close can block indefinitely, and pty_input on
+        // every other tab needs that same lock, so one slow close froze input
+        // in all tabs. The close must run only after the guard is released.
+        let map: Arc<Mutex<HashMap<String, BlockingSession>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let mut guard = map.lock();
+            guard.insert(
+                "victim".to_string(),
+                BlockingSession {
+                    entered: entered_tx,
+                    release: release_rx,
+                    dropped: dropped.clone(),
+                },
+            );
+            // A second session must stay reachable while victim's close blocks.
+            let (idle_tx, _idle_rx) = std::sync::mpsc::channel();
+            let (_dead_tx, dead_rx) = std::sync::mpsc::channel::<()>();
+            guard.insert(
+                "neighbor".to_string(),
+                BlockingSession {
+                    entered: idle_tx,
+                    release: dead_rx,
+                    dropped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                },
+            );
+        }
+
+        let worker_map = map.clone();
+        let worker = std::thread::spawn(move || {
+            let _ = take_session_for_close(&worker_map, "victim", |_| {}, drop);
+        });
+
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the fake session close must start");
+        // While the close is blocked, the map must already be free: this is
+        // the lookup pty_input / pty_resize / pty_create perform.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            if let Some(guard) = map.try_lock() {
+                assert!(
+                    !guard.contains_key("victim"),
+                    "the closing session must already be unregistered"
+                );
+                assert!(
+                    guard.contains_key("neighbor"),
+                    "another session must stay reachable during a close"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the session map stayed locked while a session was closing (issue #55 regressed)"
+            );
+            std::thread::yield_now();
+        }
+
+        release_tx
+            .send(())
+            .expect("the close must still be running");
+        worker.join().expect("the close thread must finish");
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the fake session must have been dropped"
+        );
+        // Unknown ids remove nothing and run no teardown.
+        assert!(take_session_for_close(&map, "missing", |_| {}, drop).is_none());
+    }
+
+    #[test]
+    fn close_preparation_runs_under_the_session_map_guard() {
+        // Review of #55: the user-close reason must be written while the
+        // session is still inside the guard. The prepare hook therefore runs
+        // under the lock, while the handle-closing work runs after it.
+        let map: Arc<Mutex<HashMap<String, u8>>> = Arc::new(Mutex::new(HashMap::new()));
+        map.lock().insert("victim".to_string(), 7);
+        let map_for_prepare = map.clone();
+        let mut prepared = None;
+        let result = take_session_for_close(
+            &map,
+            "victim",
+            |value| {
+                assert!(
+                    map_for_prepare.try_lock().is_none(),
+                    "prepare must run under the session map guard"
+                );
+                prepared = Some(*value);
+            },
+            |value| value,
+        );
+        assert_eq!(prepared, Some(7));
+        assert_eq!(result, Some(7));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn close_plan_kills_local_child_and_returns_the_session_for_blocking_drop() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let (writer_tx, _writer_rx) = mpsc::channel(1);
+        let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let map: SessionMap = Arc::new(Mutex::new(HashMap::new()));
+        map.lock().insert(
+            "local_1".to_string(),
+            SessionType::Local(PtySession {
+                writer_tx,
+                flush_ms: 0,
+                master: Arc::new(Mutex::new(pair.master)),
+                child: Box::new(RecordingChild {
+                    killed: killed.clone(),
+                }),
+            }),
+        );
+
+        let plan = take_session_for_close(&map, "local_1", |_| {}, close_plan_for_session);
+
+        assert!(
+            killed.load(std::sync::atomic::Ordering::SeqCst),
+            "the local child must be killed before the blocking ConPTY drop"
+        );
+        assert!(
+            !map.lock().contains_key("local_1"),
+            "the closed session must be unregistered"
+        );
+        match plan {
+            Some(SessionClosePlan::Local(session)) => drop(session),
+            Some(SessionClosePlan::Ssh { .. }) => panic!("a local session must plan a local close"),
+            None => panic!("the registered session must be removed"),
+        }
+    }
+
+    /// Fake PTY writer whose write blocks until the test releases it.
+    struct BlockingWriter {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl std::io::Write for BlockingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _ = self.entered.send(());
+            let _ = self
+                .release
+                .recv_timeout(std::time::Duration::from_secs(10));
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn local_writer_does_not_park_the_async_worker() {
+        // Issue #55 follow-up: the ConPTY input pipe can block. The writer must
+        // hand each write to the blocking pool; an inline write_all would park
+        // the runtime's only worker, and every other command would queue behind
+        // it. The probe task below can only run while the worker is free.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer = Arc::new(Mutex::new(Some(BlockingWriter {
+            entered: entered_tx,
+            release: release_rx,
+        })));
+        let (tx, rx) = mpsc::channel::<LocalInput>(4);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let writer_task = runtime.spawn(run_local_writer(rx, writer, "local_test".to_string()));
+        tx.try_send(LocalInput {
+            data: b"x".to_vec(),
+            trace: None,
+        })
+        .expect("the writer channel must accept the first chunk");
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the fake write must start");
+
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            let _ = probe_tx.send(());
+        });
+        let worker_free = probe_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok();
+
+        release_tx
+            .send(())
+            .expect("the fake write must still be blocked");
+        drop(tx);
+        let _ = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), writer_task).await
+        });
+        assert!(
+            worker_free,
+            "the async worker stayed parked on a PTY write (spawn_blocking regressed)"
+        );
+    }
+
+    struct RecordingWriter {
+        chunks: Arc<Mutex<Vec<Vec<u8>>>>,
+        /// Per-write delays in milliseconds, consumed in call order.
+        delays_ms: Arc<Mutex<std::collections::VecDeque<u64>>>,
+    }
+
+    impl std::io::Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let delay_ms = self.delays_ms.lock().pop_front().unwrap_or(0);
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+            self.chunks.lock().push(buf.to_vec());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn local_writer_preserves_chunk_order() {
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        // The first write lingers: if the writer ever stops awaiting each
+        // blocking write, the later chunks overtake it and this check fails.
+        let delays_ms = Arc::new(Mutex::new(std::collections::VecDeque::from(vec![50])));
+        let writer = Arc::new(Mutex::new(Some(RecordingWriter {
+            chunks: chunks.clone(),
+            delays_ms,
+        })));
+        let (tx, rx) = mpsc::channel::<LocalInput>(8);
+        let handle = tokio::spawn(run_local_writer(rx, writer, "local_test".to_string()));
+        for payload in [b"a".as_slice(), b"bb".as_slice(), b"ccc".as_slice()] {
+            tx.send(LocalInput {
+                data: payload.to_vec(),
+                trace: None,
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+        handle.await.unwrap();
+        assert_eq!(
+            *chunks.lock(),
+            vec![b"a".to_vec(), b"bb".to_vec(), b"ccc".to_vec()],
+            "chunks must reach the PTY in arrival order"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn local_writer_clears_its_slot_when_the_channel_closes() {
+        let writer = Arc::new(Mutex::new(Some(RecordingWriter {
+            chunks: Arc::new(Mutex::new(Vec::new())),
+            delays_ms: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        })));
+        let (tx, rx) = mpsc::channel::<LocalInput>(1);
+        let handle = tokio::spawn(run_local_writer(
+            rx,
+            writer.clone(),
+            "local_test".to_string(),
+        ));
+        drop(tx);
+        handle.await.unwrap();
+        assert!(
+            writer.lock().is_none(),
+            "the writer slot must be cleared after the channel closes"
+        );
+    }
+
+    #[test]
+    fn mark_user_close_labels_the_reason_slot() {
+        let slot = Mutex::new(None);
+        mark_user_close(&slot);
+        assert_eq!(slot.lock().as_deref(), Some(USER_CLOSE_REASON));
     }
 
     #[test]
