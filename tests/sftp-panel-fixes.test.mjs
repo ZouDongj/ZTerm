@@ -566,3 +566,27 @@ test('4a: a successful backend channel rebuild surfaces a toast', async () => {
     assert.ok(vm.toasts.some(t => t.msg === 'SFTP 通道已断开，已自动重建'),
         `rebuild toast shown: ${JSON.stringify(vm.toasts.map(t => t.msg))}`);
 });
+test('T40: sessionDied marks the bound session dead without a reason event', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', [F('a.txt')]);
+
+    vm.SFTP.sessionDied('sessA');
+    await vm.drain();
+
+    assert.equal(vm.SFTP._sessionDead, true, 'panel marked dead by the session death');
+    assert.equal(vm.SFTP._files.length, 0, 'dead listing cleared');
+    assert.ok(vm.els.body.innerHTML.includes('会话已断开'), 'dead message shown');
+    assert.equal(vm.pending('sftp-readdir').length, 0, 'no navigation issued for a dead session');
+});
+
+test('T40: sessionDied of a sibling session leaves the bound listing intact', async () => {
+    const vm = await loadSftpVm();
+    await openOn(vm, 'sessA', '/srv/app', [F('a.txt')]);
+
+    vm.SFTP.sessionDied('sessB');
+    await vm.drain();
+
+    assert.equal(vm.SFTP._sessionDead, false, 'the live binding is untouched');
+    assert.equal(vm.SFTP._files.length, 1, 'listing intact');
+    assert.equal(vm.SFTP._tabId, 'sessA', 'binding unchanged');
+});

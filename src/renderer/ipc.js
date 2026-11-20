@@ -940,6 +940,10 @@ ipcRenderer.on('ssh-disconnected', (event, { tabId, reason, path }) => {
     if (TabManager._consumeClosed(tabId)) {
         return;
     }
+    // The backend session is gone for good. A dock bound to it must stop
+    // showing its listing before the user acts; the reason event cannot be
+    // relied on (user closes carry none, and it races this event).
+    if (typeof SFTP !== 'undefined' && SFTP.sessionDied) SFTP.sessionDied(tabId);
     const line = '\r\n\x1b[33m[SSH Disconnected]\x1b[0m' + (reason ? ` \x1b[2m${reason}\x1b[0m` : '') + '\r\n';
     // Session-level event (no attempt payload): backend-id routing only.
     const hit = _findSessionOwner(tabId, null);

@@ -482,6 +482,21 @@ const SFTP = {
         }
     },
 
+    // The SSH session itself died (not a pane close): the dock keeps its
+    // open state for the tab, but a panel bound to this session must stop
+    // presenting a live listing. The ssh-disconnect-reason event is optional
+    // (a user-initiated close carries none), so the ssh-disconnected handler
+    // calls this unconditionally; the memory reset is shared with the pane-
+    // close path via forgetSession.
+    sessionDied(sessionId) {
+        if (!sessionId) return;
+        const bound = this._tabId === sessionId;
+        this.forgetSession(sessionId);
+        if (!bound) return;
+        this._markSessionDead();
+        this._syncToggleBtn();
+    },
+
     async navigate(path, opts) {
         if (!this._tabId) return;
         // A dead binding can only fail: keep the explicit dead state on
