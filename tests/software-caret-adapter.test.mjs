@@ -445,7 +445,7 @@ test('a published software caret re-anchors the idle textarea without a cursorMo
   assert.equal(stockSyncs, 1);
 });
 
-test('clearSoftwareVisual suppresses the native cursor only while the adapter owns it', () => {
+test('clearSoftwareVisual suppresses the native cursor whenever the adapter owns it', () => {
   const f = fixture();
   f.coreService.isCursorHidden = false;
   const p = f.adapter.softwareCaretPort;
@@ -457,16 +457,32 @@ test('clearSoftwareVisual suppresses the native cursor only while the adapter ow
   f.baseHiddenStates.length = 0;
   p.candidate(f.cand({ chunkSeq: 3, x: 6 })); p.enqueued(3);
   assert.ok(f.baseHiddenStates.length > 0, 'suspending a parsed chunk repaints the stale caret row');
-  assert.ok(f.baseHiddenStates.every(Boolean),
-    'the native cursor stays suppressed while the adapter still owns the caret');
+  assert.ok(f.baseHiddenStates.every(hidden => hidden === false),
+    'an unparsed suspension leaves the base display to the native cursor');
 
   p.parsed(3);
   render(f);
   f.baseHiddenStates.length = 0;
   p.invalidate('scroll');
   assert.ok(f.baseHiddenStates.length > 0, 'revoking repaints the stale caret row');
+  assert.ok(f.baseHiddenStates.every(Boolean),
+    'after revoke the visible protocol cursor is still owned by the adapter');
+});
+
+test('an unfocused non-drawable adapter does not force-hide the native cursor', () => {
+  const f = fixture();
+  f.coreService.isCursorHidden = false;
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f);
+  f.coreBrowserService.isFocused = false;
+
+  f.baseHiddenStates.length = 0;
+  p.invalidate('blur');
+  assert.ok(f.baseHiddenStates.length > 0, 'revoking still repaints the stale caret row');
   assert.ok(f.baseHiddenStates.every(hidden => hidden === false),
-    'after revoke the native cursor state is left to the base renderer');
+    'an unfocused terminal leaves the native cursor state to the base renderer');
 });
 
 test('snapshot exposes a DECOM observer invalidation reason', () => {
