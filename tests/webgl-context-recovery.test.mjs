@@ -61,7 +61,11 @@ function installWebglFakes(ctx) {
         }
         return {
             disposed: false,
-            setSmooth() {}, setCursorStyle() {}, noteInput() {},
+            cursorStyle: opts?.cursorStyle || 'bar',
+            setSmooth() {},
+            setCursorStyle(value) { this.cursorStyle = value; },
+            snapshot() { return { cursorStyle: this.cursorStyle }; },
+            noteInput() {},
             dispose() { this.disposed = true; },
         };
     };
@@ -136,6 +140,29 @@ test('unrecovered context loss on the active tab auto-reattaches a fresh context
     assert.equal(rec.lossCount, 1);
     assert.equal(rec.retryAttempts, 1, 'the automatic recovery consumed one attempt');
     assert.ok(rec.healthTimer, 'a recovered context must survive a health window before re-arming');
+});
+
+test('reattaching WebGL keeps the app-owned DECSCUSR shape and blink', () => {
+    const ctx = loadVm({ wireSmoothCursorStub: false });
+    installWebglFakes(ctx);
+    const tab = wiredTab(ctx, 't_cursor_style', 'local_cursor_style', 'x');
+    ctx._settingsConfig.cursor = 'bar';
+    ctx._settingsConfig.cursorBlink = false;
+    attachActive(ctx, tab);
+
+    // Simulate DECSCUSR 3 (underline, blinking) after the initial attach,
+    // then release the context as the idle timer does and attach a new one.
+    tab.term.options.cursorStyle = 'underline';
+    tab.term.options.cursorBlink = true;
+    ctx._releaseWebglForTerm(tab.term);
+    attachActive(ctx, tab);
+
+    assert.equal(tab.term.options.cursorStyle, 'underline',
+        'reattach must not overwrite an app-owned DECSCUSR shape');
+    assert.equal(tab.term.options.cursorBlink, true,
+        'reattach must not overwrite an app-owned DECSCUSR blink state');
+    assert.equal(tab._smoothCursor?._adapter?.snapshot?.().cursorStyle, 'underline',
+        'the replacement adapter must draw the live terminal shape');
 });
 
 test('context loss on a hidden tab falls back to DOM rendering without creating a context', () => {

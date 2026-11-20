@@ -746,16 +746,12 @@ function _attachWebglRenderer(holder, term, opts) {
         rec.lastRetryResult = holder._smoothCursor?._adapter ? 'attached' : 'attached-no-adapter';
         rec.lastRetryError = null;
     }
-    // Re-sync settings the wrapper would have received while detached (its
-    // setOptions also writes term.options, which hot-reload skips for
-    // adapter-less holders).
+    // Only animations need re-syncing. Cursor style and blink are read from
+    // the live term.options, so an app-owned DECSCUSR survives re-attach;
+    // settings.js already writes those options for every tab and pane term.
     if (holder._smoothCursor) {
         try {
-            holder._smoothCursor.setOptions({
-                animations: _settingsConfig.animations,
-                cursorBlink: _settingsConfig.cursorBlink === true,
-                cursorStyle: _settingsConfig.cursor || 'bar',
-            });
+            holder._smoothCursor.setOptions({ animations: _settingsConfig.animations });
         } catch (e) {}
     }
     // Repaint through the new renderer in this frame — both renderers draw
