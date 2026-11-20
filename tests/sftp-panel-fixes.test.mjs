@@ -7,9 +7,13 @@
 // timer firing). No real SSH, files, dialogs or clipboard.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import nodeVm from 'node:vm';
 import { loadSftpVm } from './helpers/sftp-vm.mjs';
+import { loadVm } from './helpers/renderer-vm.mjs';
 
 const F = (name) => ({ name, isDir: false, size: 1, mtime: 0 });
+const utilsSrc = readFileSync(new URL('../src/renderer/utils.js', import.meta.url), 'utf8');
 
 async function openOn(vm, tabId, path, files) {
     const p = vm.SFTP.open(tabId);
@@ -33,8 +37,43 @@ function pressEnter(input) {
 
 function captureConfirms(vm) {
     const confirms = [];
-    vm.ctx.showConfirm = (msg, onOk, okText) => confirms.push({ msg, onOk, okText });
+    vm.ctx.showConfirm = (msg, onOk, okText, tone, onDismiss) => confirms.push({ msg, onOk, okText, tone, onDismiss });
     return confirms;
+}
+
+// A second VM with the REAL utils.js showConfirm/closeAllOverlays, bridged
+// into the SFTP VM. The SFTP panel does not load utils.js itself, so this is
+// the only way to drive a real Escape/closeAllOverlays through the shared
+// confirm dialog while the product's _confirmUploadOverwrite is running.
+function loadConfirmHost() {
+    const host = loadVm();
+    host.window.addEventListener = () => {};
+    host.require = (name) => {
+        if (name === 'electron') return { ipcRenderer: host.ipcRenderer, webUtils: {} };
+        if (name === '@xterm/xterm') return { Terminal: host.Terminal };
+        if (name === '@xterm/addon-fit') return { FitAddon: host.FitAddon };
+        if (name === '@xterm/addon-webgl') return { WebglAddon: host.WebglAddon };
+        if (name === '@xterm/addon-search') return { SearchAddon: host.SearchAddon };
+        if (name === '@xterm/addon-clipboard') return { ClipboardAddon: host.ClipboardAddon };
+        if (name === '@xterm/addon-web-links') return { WebLinksAddon: class {} };
+        return {};
+    };
+    nodeVm.runInContext(utilsSrc, host, { filename: 'utils.js' });
+
+    const mk = (id, cls) => {
+        const el = host.document.createElement('div');
+        if (id) el.setAttribute('id', id);
+        if (cls) el.className = cls;
+        return el;
+    };
+    host.__body.appendChild(mk('toast'));
+    const overlay = mk('overlay-confirm', 'overlay');
+    overlay.appendChild(mk(null, 'overlay-backdrop'));
+    overlay.appendChild(mk('confirm-msg'));
+    overlay.appendChild(mk('confirm-cancel'));
+    overlay.appendChild(mk('confirm-ok'));
+    host.__body.appendChild(overlay);
+    return { host, overlay };
 }
 
 // ── T12: mkdir inline edit protection + commit snapshot ─────────────────────
@@ -221,22 +260,32 @@ test('T14: uploading same-name files asks once and holds the batch until confirm
     await up;
 });
 
-test('T14: dismissing the overwrite confirmation drops the batch', async () => {
+test('T14: closeAllOverlays dismisses the overwrite confirmation and settles the batch', async () => {
     const vm = await loadSftpVm();
     await openOn(vm, 'sessA', '/srv/app', [F('a.txt')]);
-    const confirms = captureConfirms(vm);
+    const { host, overlay } = loadConfirmHost();
+    vm.ctx.showConfirm = host.showConfirm;
+    vm.ctx.closeAllOverlays = host.closeAllOverlays;
 
-    const up = vm.SFTP.upload(); // deliberately never awaited to completion (cancel leaves it pending)
+    const up = vm.SFTP.upload();
     await vm.drain();
     vm.settle(vm.pending('show-open-dialog')[0], { canceled: false, filePaths: ['D:/local/a.txt'] });
     await vm.drain();
-    assert.equal(confirms.length, 1, 'confirmation requested');
-    // Cancel path: onOk never runs (showConfirm's cancel/backdrop/Escape
-    // semantics) — the batch must not upload anything.
+    assert.equal(overlay.classList.contains('open'), true, 'confirmation requested');
+
+    vm.ctx.closeAllOverlays();
     await vm.drain();
+    // The caller must complete instead of staying suspended on a promise
+    // that no dismissal ever settles; bound the wait so a regression fails
+    // instead of hanging the test run.
+    const outcome = await Promise.race([
+        up.then(() => 'settled'),
+        new Promise(resolve => setTimeout(() => resolve('pending'), 250)),
+    ]);
+    assert.equal(outcome, 'settled', 'the dismissed upload promise must not stay pending');
+    assert.equal(overlay.classList.contains('open'), false, 'Escape closes the dialog');
     assert.equal(vm.of('sftp-upload').length, 0, 'cancelled confirmation uploads nothing');
     assert.equal(vm.TransferManager._transfers.length, 0, 'no transfer entries created');
-    void up;
 });
 
 test('T14: an upload without remote name collisions never asks (control)', async () => {

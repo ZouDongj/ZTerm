@@ -1019,8 +1019,14 @@ document.addEventListener('keydown', e => {
         if (document.querySelector('.overlay.open')) {
             closeAllOverlays();
             // Split-aware refocus: a split tab has tab.term === null, so the
-            // focused pane must be resolved (at fire time, like closeSearch).
-            setTimeout(() => _refocusActiveTerminal(), 50);
+            // focused pane must be resolved at fire time. A queued dialog can
+            // take the shared overlay in the same task (execution-trust opens
+            // the next prompt as soon as the visible one settles); it owns the
+            // keyboard, so never steal focus back to the terminal.
+            setTimeout(() => {
+                if (document.querySelector('.overlay.open')) return;
+                _refocusActiveTerminal();
+            }, 50);
             e.preventDefault(); e.stopPropagation();
             return;
         }

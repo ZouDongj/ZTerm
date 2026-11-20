@@ -189,6 +189,26 @@ test('cut and copy go through the clipboard IPC and edit through input events', 
     assert.ok(inputEvents >= 1, 'the edit fired an input event the app can observe');
 });
 
+test('copy drops a pending debounced selection write before writing directly', async () => {
+    const vm = await loadMenuVm();
+    const input = makeInput(vm.ctx, { value: 'hello world' });
+    input.selectionStart = 0; input.selectionEnd = 5;
+    vm.ctx.document.activeElement = input;
+    let cancelled = 0;
+    vm.ctx.window.require = (name) => name === 'electron'
+        ? { clipboard: { cancelPendingWriteText: () => { cancelled++; } } }
+        : {};
+
+    fireDocContextMenu(vm.ctx, input);
+    clickItem(vm, '复制');
+    await vm.drain();
+
+    assert.equal(cancelled, 1, 'the menu copy cancels the pending selection write first');
+    const call = vm.pending('clipboard-write-text')[0];
+    assert.ok(call, 'copy still uses the clipboard IPC command');
+    assert.equal(call.args.text, 'hello');
+});
+
 test('paste reads the clipboard through IPC, revalidates the control, and inserts at the caret', async () => {
     const vm = await loadMenuVm();
     const input = makeInput(vm.ctx, { value: 'ab' });

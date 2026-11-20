@@ -77,7 +77,7 @@ const ZTermExecutionTrust = (() => {
                 // replacing an unrelated delete or host-key decision.
                 if ((typeof _activeConfirmCleanup !== 'undefined' && _activeConfirmCleanup) ||
                     (typeof _activeHostkeyCleanup !== 'undefined' && _activeHostkeyCleanup)) return;
-                cleanup = showConfirm(response.description, () => finish(true), '仅本次允许', 'primary');
+                cleanup = showConfirm(response.description, () => finish(true), '仅本次允许', 'primary', () => finish(false));
                 const message = document.getElementById('confirm-msg');
                 message.classList.add('execution-review');
                 if (response.canRemember) {
@@ -94,6 +94,10 @@ const ZTermExecutionTrust = (() => {
             };
             const timer = setInterval(tick, 100);
             entry.dismiss = () => finish(false);
+            // The dialog is shown only from tick(), after every unrelated
+            // confirm/hostkey dialog has closed. Its onDismiss settles Escape
+            // and backdrop clicks like the cancel button; entry.dismiss still
+            // covers cancel()/owner shutdown while the request is queued.
             tick();
         });
         const asking = dialogQueue.then(ask, ask);
@@ -144,7 +148,10 @@ const ZTermExecutionTrust = (() => {
             return await invoke({ ...authorized.payload, executionOwner: owner, executionTicket: authorized.executionTicket });
         } catch (error) {
             if (localOwner(requestId) && localClaims.get(requestId) === owner) {
-                await cancel(owner, true);
+                // authorize() already cancels when it rejects; only a failure
+                // after a successful authorization (for example pty-create)
+                // still owns a pending entry that needs the same cleanup.
+                if (pending.has(owner)) await cancel(owner, true);
                 showToast('终端启动未完成：' + String(error?.message || error), true);
             }
         } finally { pending.delete(owner); }

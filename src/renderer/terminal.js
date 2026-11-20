@@ -965,7 +965,14 @@ function _createClipboardAddon() {
         },
         writeText: (clipboard, text) => {
             if (clipboard !== 'c' || !allowed()) return Promise.resolve();
-            if (isTauri) return ipcRenderer.invoke('clipboard-write-text', { text }).catch(() => {});
+            if (isTauri) {
+                // OSC 52 output is newer than any queued selection auto-copy.
+                const bridgeClipboard = require('electron').clipboard;
+                if (bridgeClipboard && typeof bridgeClipboard.cancelPendingWriteText === 'function') {
+                    bridgeClipboard.cancelPendingWriteText();
+                }
+                return ipcRenderer.invoke('clipboard-write-text', { text }).catch(() => {});
+            }
             require('electron').clipboard.writeText(text);
             return Promise.resolve();
         },

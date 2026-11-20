@@ -24,12 +24,15 @@ function showToast(msg, isError) {
 
 // ── Overlay helpers ──
 function closeAllOverlays() {
-    // The hostkey dialog owes the backend a decision on EVERY dismissal
+    // Both shared dialogs own work that must not outlive the overlay. The
+    // hostkey dialog owes the backend a decision on EVERY dismissal
     // (check_server_key awaits it; a dialog that just loses .open hangs the
-    // connection attempt forever): its cleanup sends an idempotent reject, so
-    // Escape must run it. The plain confirm dialog needs no such signal — its
-    // stale listeners are unbound lazily when the next dialog opens.
+    // connection attempt forever). The confirm dialog settles its onDismiss
+    // callback for a visible execution-trust or upload-overwrite prompt, and
+    // clears its pointer so a queued trust request is not blocked by a stale
+    // cleanup. Both cleanups are idempotent.
     if (typeof _activeHostkeyCleanup === 'function' && _activeHostkeyCleanup) _activeHostkeyCleanup();
+    if (_activeConfirmCleanup) _activeConfirmCleanup();
     document.querySelectorAll('.overlay.open').forEach(o => o.classList.remove('open'));
     // Non-.overlay layers (color picker, tab context menu) belong to the same
     // teardown: a new modal must never open underneath a lingering layer.
@@ -111,9 +114,10 @@ function escAttr(s) { return escHtml(s).replace(/"/g,'&quot;').replace(/'/g,'&#3
 // Prevents user-controlled data from closing the quote and injecting arbitrary JS (XSS)
 function escJsString(s) { return (s || '').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n').replace(/\r/g,'\\r'); }
 
-// Cleanup of the currently active confirm dialog: Escape (closeAllOverlays) only removes the
-// .open class without running cleanup, so stale listeners would stack onto the next dialog
-// (deleting the wrong data). Unbind the old one before opening a new dialog.
+// Cleanup of the currently active confirm dialog. closeAllOverlays runs it
+// together with the hostkey cleanup, so Escape settles pending work instead
+// of only removing the .open class. Opening a new dialog also runs it, which
+// unbinds stale listeners before the shared DOM is reused.
 let _activeConfirmCleanup = null;
 
 // Modal keyboard ownership: while the shared confirm dialog is open its
@@ -135,7 +139,10 @@ function _restoreFocusAfterModal() {
     if (typeof _refocusActiveTerminal === 'function') _refocusActiveTerminal();
 }
 
-function showConfirm(msg, onOk, okText, tone) {
+// `onDismiss` (optional) runs when the dialog closes by any path other than
+// OK: cancel button, backdrop, or a superseding dialog/overlay. Callers that
+// await a choice use it to settle instead of leaving a forever-pending promise.
+function showConfirm(msg, onOk, okText, tone, onDismiss) {
     if (_activeConfirmCleanup) _activeConfirmCleanup();
     // The hostkey dialog shares this DOM but keeps its own cleanup registry;
     // unbind it too or a following OK click would fire its stale callbacks
@@ -148,7 +155,11 @@ function showConfirm(msg, onOk, okText, tone) {
     okBtn.textContent = okText || '删除';
     okBtn.className = tone === 'primary' ? 'btn-primary' : 'btn-danger';
 
+    let closed = false;
+    let accepted = false;
     const cleanup = () => {
+        if (closed) return;
+        closed = true;
         _activeConfirmCleanup = null;
         overlay.classList.remove('open');
         cancelBtn.removeEventListener('click', onCancel);
@@ -157,10 +168,15 @@ function showConfirm(msg, onOk, okText, tone) {
         // Restore the default label and tone so delete flows are unaffected.
         okBtn.textContent = '删除';
         okBtn.className = 'btn-danger';
-        _restoreFocusAfterModal();
+        // Focus restoration must never prevent onDismiss from settling a
+        // pending trust or upload promise.
+        try { _restoreFocusAfterModal(); } catch (error) { console.error('[ZTerm] confirm focus restore failed:', error); }
+        if (!accepted && typeof onDismiss === 'function') {
+            try { onDismiss(); } catch (error) { console.error('[ZTerm] confirm dismiss callback failed:', error); }
+        }
     };
     const onCancel = () => cleanup();
-    const onOkClick = () => { cleanup(); onOk(); };
+    const onOkClick = () => { accepted = true; cleanup(); onOk(); };
 
     cancelBtn.addEventListener('click', onCancel);
     okBtn.addEventListener('click', onOkClick);
