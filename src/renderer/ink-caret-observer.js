@@ -373,10 +373,16 @@
         // reset coordinates).
         row = 1; col = 1;
         clampMove();
-        positionKnown = true;
-        positionReason = null;
-        checkpointReason = null;
-        barePositionStep = 0;
+        if (originMode) {
+          // Vendored DECOM relative moves add the region offset inconsistently;
+          // a frame HOME cannot certify a coordinate while origin mode is on.
+          losePosition('decom');
+        } else {
+          positionKnown = true;
+          positionReason = null;
+          checkpointReason = null;
+          barePositionStep = 0;
+        }
         beginUnit('frame');
         return;
       }
@@ -498,6 +504,13 @@
         row = (originMode ? scrollTop : 0) + (parts[0] === '' ? 1 : (parseInt(parts[0], 10) || 1));
         col = parts[1] === '' ? 1 : (parseInt(parts[1], 10) || 1);
         clampMove();
+        if (originMode) {
+          // Fail closed under DECOM: the vendored terminal double-adds the
+          // region offset for relative moves, so an absolute park cannot
+          // certify this observer's row model.
+          losePosition('decom');
+          return;
+        }
         positionKnown = true;
         positionReason = null;
         checkpointReason = null;
@@ -719,6 +732,7 @@
         // A parsed checkpoint repairs only future gestures. Never certify a
         // candidate whose prefix was observed with an unknown origin.
         if (positionKnown) return false;
+        if (originMode) { checkpointReason = 'decom'; return false; }
         checkpointReason = null;
         if (!point || point.seq !== chunkSeq) { checkpointReason = 'stale-watermark'; return false; }
         if (buffer || unit || inSync || bareRev.on) { checkpointReason = 'open-lexical-unit'; return false; }

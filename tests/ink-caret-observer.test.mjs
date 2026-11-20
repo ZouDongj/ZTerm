@@ -282,6 +282,59 @@ test('real xterm differential: CUU/CUD region clamp in the alternate buffer', as
   assert.equal(state.positionKnown, true);
 });
 
+test('real xterm differential: DECOM keeps VPA coordinates unknown', async t => {
+  const { terminal, reports, state } = await differential([
+    '\u001b[2;10r\u001b[?6h\u001b[3;1H\u001b[5dX',
+  ], { cols: 8, rows: 24 });
+  t.after(() => terminal.dispose());
+  assert.deepEqual(xLocations(terminal), [[5, 0, 'X', 1]], 'the real terminal lands on the DECOM-adjusted row');
+  assert.deepEqual(reports.at(-1).cells, [], 'observer refuses to report a coordinate it cannot certify');
+  assert.equal(reports.at(-1).complete, false);
+  assert.equal(state.positionKnown, false, 'DECOM stays fail-closed even after an absolute park');
+});
+
+test('real xterm differential: DECOM keeps CHA coordinates unknown', async t => {
+  const { terminal, reports, state } = await differential([
+    '\u001b[2;10r\u001b[?6h\u001b[3;1H\u001b[1GX',
+  ], { cols: 8, rows: 24 });
+  t.after(() => terminal.dispose());
+  assert.deepEqual(xLocations(terminal), [[4, 0, 'X', 1]], 'the real terminal applies the DECOM offset again');
+  assert.deepEqual(reports.at(-1).cells, []);
+  assert.equal(reports.at(-1).complete, false);
+  assert.equal(state.positionKnown, false, 'relative column moves cannot re-certify under DECOM');
+});
+
+test('real xterm differential: DECOM reset restores certification', async t => {
+  const { terminal, reports, state } = await differential([
+    '\u001b[2;10r\u001b[?6h\u001b[3;1H',
+    '\u001b[?6l\u001b[3;1HX',
+  ], { cols: 8, rows: 24 });
+  t.after(() => terminal.dispose());
+  assert.deepEqual(xLocations(terminal), [[2, 0, 'X', 1]]);
+  assert.deepEqual(reports.at(-1).cells, [[2, 0, 'X', 1]]);
+  assert.equal(reports.at(-1).complete, true);
+  assert.equal(state.positionKnown, true, '?6l leaves DECOM; the next absolute park is trustworthy again');
+});
+
+test('DECOM keeps the frame-form HOME coordinate unknown', () => {
+  const o = createInkCaretObserver({});
+  // Region + DECOM, then the SGR0 / OSC8-end / HOME prefix that starts a
+  // frame unit. Stock xterm moves HOME to the region top under DECOM; the
+  // observer must not certify its unscoped row 1.
+  o.push('\u001b[2;10r\u001b[?6h\u001b[0m\u001b]8;;\u0007\u001b[H');
+  assert.equal(o.state().positionKnown, false);
+  assert.equal(o.state().positionReason, 'decom');
+});
+
+test('DECOM refuses a parser checkpoint', () => {
+  const o = createInkCaretObserver({});
+  const { chunkSeq } = o.push('\u001b[?6h');
+  const repaired = o.checkpoint({ seq: chunkSeq, safe: true, x: 1, y: 1, rows: 24, cols: 80 });
+  assert.equal(repaired, false, 'a DECOM session degrades to the unknown path');
+  assert.equal(o.state().positionKnown, false);
+  assert.equal(o.state().checkpointReason, 'decom');
+});
+
 // Steps are byte strings fed to both sides, or `{ resize: [cols, rows] }`
 // entries that model a host resize applied to both sides at that point.
 async function differential(chunks, { cols = 8, rows = 24 } = {}) {
