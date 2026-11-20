@@ -97,14 +97,14 @@ test('DECSCUSR sub-parameters use the primary shape parameter', async t => {
     assert.equal(f.term.options.cursorBlink, true);
 });
 
-test('unknown DECSCUSR parameters pass through without changing the cursor', async t => {
+test('values above 6 fall through to the vendored handler', async t => {
     const f = fixture({ cursorStyle: 'bar', cursorBlink: false });
     t.after(() => f.term.dispose());
 
     await write(f.term, '\x1b[3 q');
-    await write(f.term, '\x1b[7 q');
+    await write(f.term, '\x1b[8 q');
     assert.equal(f.term.options.cursorStyle, 'underline');
-    assert.equal(f.term.options.cursorBlink, true);
+    assert.equal(f.term.options.cursorBlink, false);
 });
 
 test('a later write wins over a deferred RIS restore', async t => {
