@@ -539,6 +539,40 @@ test('clearSoftwareVisual mirrors the protocol cursor ownership matrix', () => {
   }
 });
 
+test('a failed ownership probe is treated as not owning', () => {
+  const f = fixture();
+  f.coreService.isCursorHidden = false;
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f);
+  Object.defineProperty(f.coreBrowserService, 'isFocused', {
+    configurable: true,
+    get() { throw new Error('torn down'); },
+  });
+
+  f.baseHiddenStates.length = 0;
+  assert.doesNotThrow(() => p.invalidate('torn-down'),
+    'a teardown race must not break observer invalidation');
+  assert.ok(f.baseHiddenStates.length > 0, 'the stale row is still repainted');
+  assert.ok(f.baseHiddenStates.every(hidden => hidden === false),
+    'a failed probe leaves the native cursor state alone');
+});
+
+test('invalidate after dispose does not advance the adapter generation', () => {
+  const f = fixture();
+  f.coreService.isCursorHidden = false;
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  const generation = f.adapter.snapshot().caretOwnership.generation;
+
+  f.adapter.dispose();
+  p.invalidate('late');
+  assert.equal(f.adapter.snapshot().caretOwnership.generation, generation,
+    'a retired adapter must ignore later observer invalidations');
+});
+
 test('snapshot exposes a DECOM observer invalidation reason', () => {
   const f = fixture();
   const p = f.adapter.softwareCaretPort;

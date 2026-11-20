@@ -607,10 +607,16 @@
       // A base-row repaint must not draw the protocol cursor underneath the
       // caret this adapter is about to draw. Ownership is evaluated at the
       // call site: revoke may already have released the software source but
-      // still own the protocol cursor.
-      const ownsCursor = currentlyOwnsCursor();
+      // still own the protocol cursor. A teardown race must leave the native
+      // cursor state alone rather than break the observer's data path.
       const coreService = renderer._coreService;
       const hiddenBefore = coreService?.isCursorHidden;
+      let ownsCursor = false;
+      try {
+        ownsCursor = currentlyOwnsCursor();
+      } catch (error) {
+        /* mid-dispose: an ownership probe failure is not ownership */
+      }
       if (ownsCursor && coreService) coreService.isCursorHidden = true;
       try {
         for (const stale of staleRows) {
@@ -764,6 +770,7 @@
         if (sw.active) scheduleContinuation();
       },
       invalidate(reason) {
+        if (disposed) return;
         sw.generation += 1;
         // Coordinate space changed: write evidence from before the boundary
         // would classify against cells that no longer mean the same thing.
