@@ -109,7 +109,7 @@
         const update = helper.updateCompositionElements.bind(helper);
         helper.updateCompositionElements = function (dontRecurse) {
             // Match stock CompositionHelper: idle renders return before any layout.
-            if (!helper._isComposing) return;
+            if (!helper.isComposing) return;
             const cell = coreService.isCursorHidden ? readPerceivedCaret(core) : null;
             if (!cell) { update(dontRecurse); return; }
             anchorCompositionAt(core, cell);

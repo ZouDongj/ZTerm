@@ -1332,13 +1332,16 @@ async function main() {
             rects += 1;
             return prevRect.call(this);
           };
-          helper.updateCompositionElements();
-          helper.updateCompositionElements();
-          view.getBoundingClientRect = prevRect;
+          try {
+            helper.updateCompositionElements();
+            helper.updateCompositionElements();
+          } finally {
+            view.getBoundingClientRect = prevRect;
+          }
           idle = { rects, width, height,
             widthAfter: term.textarea.style.width,
             heightAfter: term.textarea.style.height,
-            composing: helper._isComposing === true };
+            composing: helper.isComposing === true };
         }
         core.__imeAnchorPerceivedCaret = prevProvider;
         await write('\\u001b[?25h');
