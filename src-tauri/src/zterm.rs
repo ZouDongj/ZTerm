@@ -1922,16 +1922,24 @@ async fn run_local_writer<W: std::io::Write + Send + 'static>(
         native_trace::input_stage(&tab_id, "write-begin", bytes, trace, None);
         let data = input.data;
         let writer_for_write = writer.clone();
-        let ok = tokio::task::spawn_blocking(move || {
+        let outcome = tokio::task::spawn_blocking(move || {
             let mut guard = writer_for_write.lock();
             match guard.as_mut() {
-                Some(w) => std::io::Write::write_all(w, &data).is_ok(),
-                None => false,
+                Some(w) => std::io::Write::write_all(w, &data).map_err(|e| e.kind()),
+                None => Err(std::io::ErrorKind::BrokenPipe),
             }
         })
         .await
-        .unwrap_or(false);
-        native_trace::input_stage(&tab_id, "write-end", bytes, trace, Some(ok));
+        .unwrap_or(Err(std::io::ErrorKind::Other));
+        native_trace::input_stage(&tab_id, "write-end", bytes, trace, Some(outcome.is_ok()));
+        // The child exited and its ConPTY end is gone: no later write can
+        // succeed, and keeping the loop alive only parks a task per keystroke.
+        if matches!(
+            outcome,
+            Err(std::io::ErrorKind::BrokenPipe) | Err(std::io::ErrorKind::NotConnected)
+        ) {
+            break;
+        }
     }
     *writer.lock() = None;
 }
@@ -1950,7 +1958,7 @@ pub async fn pty_create(
             return Err(error);
         }
     };
-    let params = &execution.payload;
+    let params = execution.payload.clone();
     let execution_owner = requested
         .get("executionOwner")
         .and_then(Value::as_str)
@@ -1958,7 +1966,8 @@ pub async fn pty_create(
     let shell = params
         .get("shell")
         .and_then(|v| v.as_str())
-        .unwrap_or("powershell.exe");
+        .unwrap_or("powershell.exe")
+        .to_string();
     let shell_args: Vec<String> = params
         .get("args")
         .and_then(|v| v.as_array())
@@ -1977,7 +1986,8 @@ pub async fn pty_create(
     let colorfgbg = params
         .get("colorFgbg")
         .and_then(|v| v.as_str())
-        .and_then(sanitize_colorfgbg);
+        .and_then(sanitize_colorfgbg)
+        .map(str::to_string);
     let request_id = params
         .get("requestId")
         .and_then(|v| v.as_str())
@@ -2004,36 +2014,37 @@ pub async fn pty_create(
         );
     };
 
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| {
-            let msg = format!("openpty failed: {e}");
-            emit_spawn_error(&app, &request_id, &msg);
-            msg
-        })?;
+    // ConPTY creation and the process spawn are blocking calls (openpty can
+    // take tens of milliseconds under load, and CreateProcess waits on the
+    // child's loader). Run the pair on the blocking pool so the window thread
+    // and async workers stay free (same class as issue #55). Ordering is
+    // unchanged: the PTY is created, the shell spawned, then the session is
+    // registered with the master/child produced here.
+    let spawn = tokio::task::spawn_blocking(move || {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| format!("openpty failed: {e}"))?;
 
-    let mut cmd = CommandBuilder::new(shell);
-    for arg in &shell_args {
-        cmd.arg(arg);
-    }
-    if let Some(ref cwd) = cwd {
-        cmd.cwd(cwd);
-    }
-    if let Some(v) = colorfgbg {
-        cmd.env("COLORFGBG", v);
-    }
-    // The renderer (xterm.js) draws 24-bit color; advertise it so truecolor-
-    // aware TUI apps (which key on COLORTERM) enable their direct-color paths.
-    cmd.env("COLORTERM", "truecolor");
+        let mut cmd = CommandBuilder::new(shell);
+        for arg in &shell_args {
+            cmd.arg(arg);
+        }
+        if let Some(ref cwd) = cwd {
+            cmd.cwd(cwd);
+        }
+        if let Some(v) = colorfgbg {
+            cmd.env("COLORFGBG", v);
+        }
+        // The renderer (xterm.js) draws 24-bit color; advertise it so truecolor-
+        // aware TUI apps (which key on COLORTERM) enable their direct-color paths.
+        cmd.env("COLORTERM", "truecolor");
 
-    let child = execution
-        .start(|| {
+        let child = execution.start(|| {
             pair.slave.spawn_command(cmd).map_err(|e| {
                 // os error 267 ("The directory name is invalid") is the common
                 // case: the profile's startup directory no longer exists. Name
@@ -2044,11 +2055,17 @@ pub async fn pty_create(
                 };
                 msg
             })
-        })
-        .map_err(|msg| {
-            emit_spawn_error(&app, &request_id, &msg);
-            msg
         })?;
+        Ok::<_, String>((pair, child))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("pty spawn task failed: {e}")));
+
+    let (pair, child) = spawn.map_err(|msg| {
+        emit_spawn_error(&app, &request_id, &msg);
+        msg
+    })?;
+
     let mut reader = pair.master.try_clone_reader().map_err(|e| {
         let msg = format!("reader failed: {e}");
         emit_spawn_error(&app, &request_id, &msg);
@@ -9243,6 +9260,44 @@ mod tests {
         assert_eq!(pending_size_for(&pending.lock(), "att_1"), Some((44, 120)));
     }
 
+    struct BrokenPipeWriter;
+
+    impl std::io::Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the child closed its end",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn local_writer_stops_when_the_child_pipe_is_gone() {
+        let (tx, rx) = mpsc::channel(4);
+        let writer = Arc::new(Mutex::new(Some(BrokenPipeWriter)));
+        let task = tokio::spawn(run_local_writer(
+            rx,
+            Arc::clone(&writer),
+            "t_local".to_string(),
+        ));
+        tx.send(LocalInput {
+            data: b"x".to_vec(),
+            trace: None,
+        })
+        .await
+        .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("a broken pipe must end the writer loop")
+            .unwrap();
+        assert!(writer.lock().is_none(), "the writer slot is cleared");
+        drop(tx);
+    }
     #[tokio::test]
     async fn known_hosts_check_at_reads_a_recorded_entry() {
         let dir = config_test_dir("known_hosts_check_at");
