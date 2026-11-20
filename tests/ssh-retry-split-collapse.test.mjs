@@ -49,7 +49,7 @@ function sshSplitTab(ctx) {
 function failP2(ctx, tab, p2) {
     ctx.__emit('ssh-error', { tabId: 'ssh_B', rendererId: p2.requestId, error: 'os error 10061 connection refused' });
     assert.equal(p2.tabId, null, 'retry branch dropped the dead backend id');
-    assert.equal(tab._sshRetried, 1, 'retry budget spent');
+    assert.equal(p2._sshRetried, 1, 'retry budget spent by the failing pane');
 }
 
 test('split collapse inside the backoff still retries — against the adopted tab', async () => {
@@ -149,4 +149,104 @@ test('pane close initiated late in the backoff suppresses the retry', async () =
     await flush();
     assert.equal(connects(invokes).length, 0, 'no backend spawned for a dying pane');
     assert.ok(tab.term === p1.term, 'the collapse adopted the healthy sibling');
+});
+test('a sibling pane failure neither cancels nor spends the other pane retry', async () => {
+    const ctx = loadVm();
+    const invokes = patchInvoke(ctx);
+    const { tab, p1, p2 } = sshSplitTab(ctx);
+    failP2(ctx, tab, p2);
+    const p2Token = p2._sshRetryToken;
+
+    ctx.__emit('ssh-error', { tabId: 'ssh_A', rendererId: p1.requestId, error: 'os error 10061 connection refused' });
+    assert.equal(p1._sshRetried, 1, 'the sibling spent its own budget');
+    assert.equal(p2._sshRetried, 1, 'and did not spend the first pane budget');
+    assert.equal(p2._sshRetryToken, p2Token, 'the first pane pending retry keeps its token');
+    assert.equal(tab._sshRetried, undefined, 'a split keeps no tab-level budget');
+
+    ctx.__tq.advance(2500);
+    await flush();
+    const cs = connects(invokes);
+    assert.equal(cs.length, 1, 'the earlier retry fired (the second waits in the connect queue)');
+    assert.equal(cs[0].payload.profile.host, 'h2', 'the first pane session retried; it was not superseded');
+});
+
+test('a sibling pane success does not re-arm the failing pane budget', async () => {
+    const ctx = loadVm();
+    patchInvoke(ctx);
+    const { tab, p1, p2 } = sshSplitTab(ctx);
+    failP2(ctx, tab, p2); // p2 spent one retry and dropped its backend id
+
+    ctx.__emit('ssh-connected', { tabId: 'ssh_A', rendererId: p1.requestId });
+    assert.equal(p2._sshRetried, 1, 'the failed pane still owns one spent retry');
+
+    p2.tabId = 'ssh_B2'; // backend id of the retried generation
+    ctx.__emit('ssh-error', { tabId: 'ssh_B2', rendererId: p2.requestId, error: 'os error 10061 connection refused' });
+    assert.equal(p2._sshRetried, 2, 'the second failure continues this pane budget');
+});
+test('a pane reconnect re-arms only that pane budget', async () => {
+    const ctx = loadVm();
+    patchInvoke(ctx);
+    const { tab, p2 } = sshSplitTab(ctx);
+    failP2(ctx, tab, p2);
+    p2.tabId = 'ssh_B2';
+    ctx.__emit('ssh-connected', { tabId: 'ssh_B2', rendererId: p2.requestId });
+    assert.equal(p2._sshRetried, 0, 'the pane that reconnected owns the reset budget');
+});
+test('reconnecting a split tab does not bump the tab retry token', async () => {
+    const ctx = loadVm();
+    patchInvoke(ctx);
+    const { tab, p1 } = sshSplitTab(ctx);
+    const before = tab._sshRetryToken || 0;
+    p1.focused = true;
+    ctx.TabManager.reconnectTab(tab.id); // split: delegates to the focused pane
+    assert.equal(tab._sshRetryToken || 0, before,
+        'a split reconnect supersedes only the pane it targets');
+});
+
+test('splitting the tab during a tab-level backoff cancels the retry', async () => {
+    const ctx = loadVm();
+    patchInvoke(ctx);
+    const tab = { id: 't_split_retry', name: 'sr', type: 'ssh', host: 'h1', user: 'u1', connected: false, tabId: null, term: null, fitAddon: null };
+    ctx.TabManager.tabs.push(tab);
+
+    ctx.TabManager.reconnectTab(tab.id);
+    ctx.__tq.advance(500); // pre-attempt window
+    await flush();
+    const att1 = tab._pendingAttempt;
+    assert.ok(att1, 'first attempt in flight');
+
+    ctx.__emit('ssh-error', { tabId: null, attemptId: att1, error: 'connection reset by peer' });
+    assert.equal(tab._sshRetried, 1, 'tab-level retry budget spent');
+
+    // Observe the scheduled retry without depending on the serial connect
+    // queue, whose first slot never settles under this fake.
+    let retried = 0;
+    ctx._sshConnectWithCredentials = () => { retried += 1; };
+
+    // The user splits before the backoff elapses: the tab no longer owns the
+    // terminal the retry would connect.
+    tab.splitRoot = { type: 'v', children: [] };
+    ctx.__tq.advance(2500);
+    await flush();
+    assert.equal(retried, 0, 'a tab retry superseded by a split must not start a second backend');
+});
+
+test('a tab-level retry still fires while the tab stays unsplit', async () => {
+    const ctx = loadVm();
+    patchInvoke(ctx);
+    const tab = { id: 't_keep_retry', name: 'kr', type: 'ssh', host: 'h1', user: 'u1', connected: false, tabId: null, term: null, fitAddon: null };
+    ctx.TabManager.tabs.push(tab);
+
+    ctx.TabManager.reconnectTab(tab.id);
+    ctx.__tq.advance(500);
+    await flush();
+    const att1 = tab._pendingAttempt;
+    ctx.__emit('ssh-error', { tabId: null, attemptId: att1, error: 'connection reset by peer' });
+
+    let retried = 0;
+    ctx._sshConnectWithCredentials = () => { retried += 1; };
+
+    ctx.__tq.advance(2500);
+    await flush();
+    assert.equal(retried, 1, 'the unsplit tab retries normally');
 });

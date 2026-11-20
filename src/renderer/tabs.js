@@ -1427,9 +1427,6 @@ const TabManager = {
     reconnectTab(id) {
         const tab = this.tabs.find(t => t.id === id);
         if (!tab || tab.type !== 'ssh') return;
-        // Supersede any pending ssh-error retry timer for this tab (both
-        // would enqueue a connect; the loser's session gets orphaned).
-        tab._sshRetryToken = (tab._sshRetryToken || 0) + 1;
 
         if (tab.splitRoot) {
             // Only an SSH pane can be reconnected: a mixed split (a local pane
@@ -1440,6 +1437,12 @@ const TabManager = {
             if (focused && focused.type === 'ssh') this._reconnectPane(tab.id, focused.id);
             return;
         }
+
+        // Supersede any pending ssh-error retry timer owned by THIS tab (a
+        // non-split session). A split delegates to _reconnectPane, where the
+        // retry budget belongs to the pane — bumping the tab token here would
+        // cancel a sibling pane's unrelated retry.
+        tab._sshRetryToken = (tab._sshRetryToken || 0) + 1;
 
         // In-flight reconnect dedupe (pre-attempt window): between initiation
         // and the 500ms fire there is no attempt identity yet to cancel, so a
@@ -1523,8 +1526,6 @@ const TabManager = {
     _reconnectPane(tabId, paneId) {
         const tab = this.tabs.find(t => t.id === tabId);
         if (!tab) return;
-        // Same supersede as reconnectTab: cancel a pending retry for this pane.
-        tab._sshRetryToken = (tab._sshRetryToken || 0) + 1;
         const pane = findPane(tab, paneId);
         if (!pane) return;
         // Type guard (mirrors the pane header's reconnect button): only SSH
@@ -1536,6 +1537,9 @@ const TabManager = {
         // second trigger inside the pre-attempt window has no attempt
         // identity to supersede — merging keeps one connect per pane.
         if (pane._reconnectPending) return;
+        // Cancel only THIS pane's pending automatic retry (both would enqueue
+        // a connect; the loser's session gets orphaned).
+        pane._sshRetryToken = (pane._sshRetryToken || 0) + 1;
         pane._reconnectPending = true;
         pane._sshConnecting = true;
         pane._sshErrored = false;

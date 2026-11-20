@@ -16,6 +16,9 @@
 //   _sessionFailed             → pane._sessionFailed (known-failed liveness marker)
 //   _sshConnecting/_sshErrored → pane flags (busy ring / error dot follow the session)
 //
+//   _sshRetried/_sshRetryToken - handshake retry budget/token (a pending
+//                                 retry must survive the collapse)
+//
 // NOT handled here (each caller owns them): term/fitAddon, tabId,
 // _ptyRequestId, _smoothCursor, name, _toolName, onData disposal/rebind, DOM
 // mounts and resize observers.
@@ -60,6 +63,12 @@ function adoptPaneFieldsIntoTab(tab, pane) {
     // session too, so a collapse does not leave the tab strip stale.
     tab._sshConnecting = pane._sshConnecting === true;
     tab._sshErrored = pane._sshErrored === true;
+    // A handshake retry budget already spent on this session stays spent, and
+    // a timer scheduled under its token must stay valid: adopting the pane
+    // without these fields would restart the 3-attempt budget (or orphan the
+    // pending timer) at the exact moment the session moved onto the tab.
+    tab._sshRetried = pane._sshRetried || 0;
+    tab._sshRetryToken = pane._sshRetryToken || 0;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
