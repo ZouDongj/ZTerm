@@ -118,6 +118,21 @@ test('a later write wins over a deferred RIS restore', async t => {
     assert.equal(f.term.options.cursorBlink, true);
 });
 
+test('a partial registration failure disposes the handlers already installed', () => {
+    const disposed = [];
+    let registrations = 0;
+    const register = () => {
+        registrations += 1;
+        const id = registrations;
+        if (id === 2) throw new Error('registration failed');
+        return { dispose() { disposed.push(id); } };
+    };
+    const parser = { registerCsiHandler: register, registerEscHandler: register };
+    const term = { parser, options: { cursorStyle: 'bar', cursorBlink: false } };
+    assert.throws(() => installCursorStyleDefaults(term, {}), /registration failed/);
+    assert.deepEqual(disposed, [1], 'the installed DECSCUSR handler must be disposed');
+});
+
 test('dispose unregisters the default-restoring handlers', async t => {
     const f = fixture({ cursorStyle: 'underline', cursorBlink: true });
     t.after(() => f.term.dispose());

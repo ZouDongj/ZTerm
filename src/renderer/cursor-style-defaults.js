@@ -51,32 +51,43 @@
             });
         }
 
-        disposables.push(parser.registerCsiHandler({ intermediates: ' ', final: 'q' }, params => {
-            const value = params?.[0] ?? 0;
-            if (value === 0) {
+        // All-or-nothing: a later registration failure must not leave the
+        // earlier handlers active on a terminal that reports no installation.
+        const registered = [];
+        try {
+            registered.push(parser.registerCsiHandler({ intermediates: ' ', final: 'q' }, params => {
+                const value = params?.[0] ?? 0;
+                if (value === 0) {
+                    serial += 1;
+                    applyUser();
+                    return true;
+                }
+                const style = SHAPE[value];
+                if (!style) return false;
                 serial += 1;
-                applyUser();
+                applyShape(style, BLINKING[value]);
                 return true;
-            }
-            const style = SHAPE[value];
-            if (!style) return false;
-            serial += 1;
-            applyShape(style, BLINKING[value]);
-            return true;
-        }));
+            }));
 
-        // RIS and DECSTR must still run xterm's reset (return false), then the
-        // user defaults replace whatever the reset leaves behind.
-        disposables.push(parser.registerEscHandler({ final: 'c' }, () => {
-            serial += 1;
-            scheduleUserRestore();
-            return false;
-        }));
-        disposables.push(parser.registerCsiHandler({ intermediates: '!', final: 'p' }, () => {
-            serial += 1;
-            scheduleUserRestore();
-            return false;
-        }));
+            // RIS and DECSTR must still run xterm's reset (return false), then
+            // the user defaults replace whatever the reset leaves behind.
+            registered.push(parser.registerEscHandler({ final: 'c' }, () => {
+                serial += 1;
+                scheduleUserRestore();
+                return false;
+            }));
+            registered.push(parser.registerCsiHandler({ intermediates: '!', final: 'p' }, () => {
+                serial += 1;
+                scheduleUserRestore();
+                return false;
+            }));
+        } catch (error) {
+            for (const disposable of registered) {
+                try { disposable?.dispose?.(); } catch (cleanupError) { /* terminal disposal */ }
+            }
+            throw error;
+        }
+        disposables.push(...registered);
 
         return {
             setUserOptions(next) {
