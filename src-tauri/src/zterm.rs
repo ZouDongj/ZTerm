@@ -3883,6 +3883,8 @@ pub async fn ssh_connect(
     let cwd_reader = Arc::clone(&cwd);
     let reason_reader = Arc::clone(&disconnect_reason);
     let announced_reader = Arc::clone(&disconnected_announced);
+    let state_reader = state.inner().clone();
+    let handle_reader = Arc::clone(&handle);
     let (reader_start_tx, reader_start_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
         // Registration and ssh-connected must precede buffered output or a
@@ -4008,6 +4010,15 @@ pub async fn ssh_connect(
                     }
                 }
             }
+        }
+        // The session is over: drop its map entry so input for a dead tab is
+        // rejected instead of queued into a closed channel, and so a tab the
+        // user never closes cannot pin the session (and its SFTP handles)
+        // forever.
+        let finished = reap_reader_session(&state_reader, &tid, &handle_reader);
+        if let Some(SessionType::Ssh(session)) = finished {
+            cancel_sftp_transfers(&session.transfer_cancels).await;
+            drop(session);
         }
     });
 
@@ -4411,6 +4422,37 @@ fn take_session_for_close<V, T>(
     // what blocks.
     drop(guard);
     Some(close(removed))
+}
+
+/// Remove `tab_id` from the session map when `matches` accepts the entry. The
+/// caller drops the returned session only after releasing the map guard:
+/// dropping stops the writer task and may close the connection.
+/// Remove the map entry this reader served, if it is still the same SSH
+/// session. Identity (not the tab id alone) decides: a successor attempt may
+/// already have registered under the same tab id, and a local session must
+/// never be reaped by a dead SSH reader.
+fn reap_reader_session(
+    state: &SessionMap,
+    tab_id: &str,
+    handle: &Arc<russh::client::Handle<SshHandler>>,
+) -> Option<SessionType> {
+    let mut map = state.lock();
+    take_matching_session(
+        &mut map,
+        tab_id,
+        |session| matches!(session, SessionType::Ssh(s) if Arc::ptr_eq(&s.handle, handle)),
+    )
+}
+
+fn take_matching_session<V, F>(map: &mut HashMap<String, V>, tab_id: &str, matches: F) -> Option<V>
+where
+    F: FnOnce(&V) -> bool,
+{
+    if map.get(tab_id).is_some_and(matches) {
+        map.remove(tab_id)
+    } else {
+        None
+    }
 }
 
 #[tauri::command]
@@ -9118,6 +9160,16 @@ mod tests {
         assert_eq!(pending_size_for(&pending.lock(), "att_1"), Some((44, 120)));
     }
 
+    #[test]
+    fn take_matching_session_removes_only_the_matching_entry() {
+        let mut map: HashMap<String, u8> = HashMap::new();
+        map.insert("t".to_string(), 1);
+        assert!(take_matching_session(&mut map, "t", |v| *v == 2).is_none());
+        assert_eq!(map.get("t"), Some(&1), "a non-matching entry stays");
+        assert_eq!(take_matching_session(&mut map, "t", |v| *v == 1), Some(1));
+        assert!(map.get("t").is_none(), "the matching entry is reaped");
+        assert!(take_matching_session(&mut map, "missing", |_| true).is_none());
+    }
     #[test]
     fn take_ssh_for_disconnect_leaves_local_sessions_registered() {
         // ssh-1 backstop: an ssh_disconnect carrying a local PTY id must not
