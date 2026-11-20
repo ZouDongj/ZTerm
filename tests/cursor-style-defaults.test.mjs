@@ -107,12 +107,11 @@ test('values above 6 fall through to the vendored handler', async t => {
     assert.equal(f.term.options.cursorBlink, false);
 });
 
-test('a later write wins over a deferred RIS restore', async t => {
+test('a later chunk wins over a deferred RIS restore', async t => {
     const f = fixture({ cursorStyle: 'bar', cursorBlink: false });
     t.after(() => f.term.dispose());
 
-    await write(f.term, '\x1bc');
-    await write(f.term, '\x1b[5 q');
+    await Promise.all([write(f.term, '\x1bc'), write(f.term, '\x1b[5 q')]);
     await settle();
     assert.equal(f.term.options.cursorStyle, 'bar');
     assert.equal(f.term.options.cursorBlink, true);
