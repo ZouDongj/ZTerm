@@ -1075,8 +1075,13 @@
       // navigator.clipboard.writeText outside a user gesture (e.g. selectionchange auto-copy)
       // throws NotAllowedError, and the rejected promise needs a catch to avoid an unhandled rejection
       writeText: function(text) {
-        if (typeof isTauri !== 'undefined' && isTauri) {
-          ipcRenderer.invoke('clipboard-write-text', { text: text }).catch(() => {});
+        // Detect Tauri through the runtime bridge itself: __TAURI__ and the
+        // IPC polyfill are installed after this stub is created, so the check
+        // must run at call time. The Rust command uses arboard, which also
+        // works outside a user gesture (selectionchange auto-copy).
+        if (window.__TAURI__ && window.__TAURI__.event &&
+            window.electron && window.electron.ipcRenderer) {
+          window.electron.ipcRenderer.invoke('clipboard-write-text', { text: text }).catch(() => {});
           return;
         }
         try { navigator.clipboard.writeText(text).catch(() => {}); } catch(e) {}
