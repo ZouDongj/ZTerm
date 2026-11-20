@@ -516,7 +516,8 @@
         if (originMode) {
           // Fail closed under DECOM: the vendored terminal double-adds the
           // region offset for relative moves, so an absolute park cannot
-          // certify this observer's row model.
+          // certify this observer's row model. Ending the frame here would
+          // certify a coordinate we do not trust.
           losePosition('decom');
           return;
         }
