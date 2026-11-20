@@ -258,6 +258,8 @@ for (const [name, chunks, expectedRow] of [
   ['CUD stops at the scroll-region bottom', ['\u001b[5;22r\u001b[22;1H\u001b[1B', 'X'], 21],
   ['CUD from above the region stops at its bottom', ['\u001b[5;22r\u001b[3;1H\u001b[30B', 'X'], 21],
   ['CUU from below the region stops at its top', ['\u001b[5;22r\u001b[24;1H\u001b[30A', 'X'], 4],
+  ['CUU from above the region clamps to the screen top', ['\u001b[5;22r\u001b[3;1H\u001b[30A', 'X'], 0],
+  ['CUD from below the region clamps to the screen bottom', ['\u001b[5;22r\u001b[24;1H\u001b[5B', 'X'], 23],
 ]) {
   test(`real xterm differential: ${name}`, async t => {
     const { terminal, reports, state } = await differential(chunks, { cols: 8, rows: 24 });
@@ -277,8 +279,10 @@ test('real xterm differential: CUU/CUD region clamp in the alternate buffer', as
     '\u001b[22;1H\u001b[1BY',
   ], { cols: 8, rows: 24 });
   t.after(() => terminal.dispose());
-  assert.deepEqual(reports.at(-2).cells.at(-1), [4, 0, 'X', 1], 'CUU is clamped in the alternate buffer too');
-  assert.deepEqual(reports.at(-1).cells.at(-1), [21, 0, 'Y', 1], 'CUD is clamped in the alternate buffer too');
+  const actual = xLocations(terminal, 'XY');
+  assert.deepEqual(actual, [[4, 0, 'X', 1], [21, 0, 'Y', 1]], 'the real alternate buffer holds both clamped cells');
+  assert.deepEqual(reports.at(-2).cells, [actual[0]], 'CUU is clamped in the alternate buffer too');
+  assert.deepEqual(reports.at(-1).cells, [actual[1]], 'CUD is clamped in the alternate buffer too');
   assert.equal(state.positionKnown, true);
 });
 
@@ -354,11 +358,12 @@ async function differential(chunks, { cols = 8, rows = 24 } = {}) {
   return { terminal, reports, state: observer.state() };
 }
 
-function xLocations(terminal) {
+function xLocations(terminal, wanted = 'X') {
   const cells = [];
   for (let row = 0; row < terminal.rows; row++) {
     const cell = terminal.buffer.active.getLine(row)?.getCell(0);
-    if (cell?.getChars() === 'X') cells.push([row, 0, 'X', 1]);
+    const chars = cell?.getChars();
+    if (chars && wanted.includes(chars)) cells.push([row, 0, chars, 1]);
   }
   return cells;
 }
