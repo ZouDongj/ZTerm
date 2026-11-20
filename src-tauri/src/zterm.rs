@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -273,6 +274,10 @@ pub struct SshSession {
     /// disconnected() keeps an existing label; otherwise the handler fills in
     /// the label russh reports.
     pub disconnect_reason: Arc<Mutex<Option<String>>>,
+    /// One ssh-disconnected per session lifetime: the reader task and the
+    /// command paths race, and losing the race must not print a second
+    /// "[SSH Disconnected]" line or a second reason.
+    pub disconnected_announced: Arc<AtomicBool>,
 }
 
 pub enum SessionType {
@@ -499,22 +504,85 @@ pub fn classify_disconnect(
     }
 }
 
-/// Emit the reader-side ssh-disconnected event, attaching the session-level
-/// disconnect reason when the handler callback already recorded one (the
-/// reader usually wins the race on channel EOF, so a late reason arrives via
-/// the separate ssh-disconnect-reason event instead).
-fn emit_ssh_disconnected(
-    app: &AppHandle,
+/// Claim the single ssh-disconnected announcement of a session. Returns true
+/// for the one caller that may emit, false for everyone after it.
+fn claim_disconnect_announcement(announced: &AtomicBool) -> bool {
+    !announced.swap(true, std::sync::atomic::Ordering::AcqRel)
+}
+
+/// Pick the kind/text to report for a session-level disconnect. `existing` is
+/// the reason slot at the time of the callback: a user close pre-filled it,
+/// and another path may have classified the end first, in which case its text
+/// is kept. Pure so the "keep the real reason" rule is testable.
+fn disconnect_report(
+    existing: Option<String>,
+    reason: &russh::client::DisconnectReason<russh::Error>,
+) -> (&'static str, String) {
+    match existing {
+        Some(text) => (recorded_reason_kind(&text), text),
+        None => classify_disconnect(reason),
+    }
+}
+
+/// Recover the UI kind from a reason text another path recorded first. The
+/// text was produced by classify_disconnect (or the user-close label), so the
+/// kind must be derived from it rather than from the reason this caller sees:
+/// a keepalive text paired with a "closed" kind would make the UI lie.
+fn recorded_reason_kind(text: &str) -> &'static str {
+    if text == USER_CLOSE_REASON {
+        "closed"
+    } else if text == "session closed" {
+        // classify_disconnect maps russh Error::Disconnect to this text.
+        "closed"
+    } else if text == "server stopped replying (keepalive timeout)" {
+        "keepalive"
+    } else if text.starts_with("server sent disconnect: ") {
+        "server"
+    } else {
+        "error"
+    }
+}
+
+/// Build the single ssh-disconnected payload of a session, or None when a
+/// previous caller already claimed the announcement. Pure so the once-per-
+/// session rule and the reason attachment are testable without an AppHandle.
+fn disconnect_event_payload(
     tab_id: &str,
-    renderer_id: &str,
-    path: &str,
+    renderer_id: Option<&str>,
+    path: Option<&str>,
     reason: &Arc<Mutex<Option<String>>>,
-) {
-    let mut payload = json!({ "tabId": tab_id, "rendererId": renderer_id, "path": path });
+    announced: &AtomicBool,
+) -> Option<Value> {
+    if !claim_disconnect_announcement(announced) {
+        return None;
+    }
+    let mut payload = json!({ "tabId": tab_id });
+    if let Some(rid) = renderer_id {
+        payload["rendererId"] = json!(rid);
+    }
+    if let Some(p) = path {
+        payload["path"] = json!(p);
+    }
     if let Some(r) = reason.lock().clone() {
         payload["reason"] = json!(r);
     }
-    let _ = app.emit("ssh-disconnected", payload);
+    Some(payload)
+}
+
+/// Emit ssh-disconnected at most once per session, attaching the session-level
+/// disconnect reason when one is recorded. The reader task passes the renderer
+/// id and the reader path; the command paths only know the tab id.
+fn emit_ssh_disconnected(
+    app: &AppHandle,
+    tab_id: &str,
+    renderer_id: Option<&str>,
+    path: Option<&str>,
+    reason: &Arc<Mutex<Option<String>>>,
+    announced: &AtomicBool,
+) {
+    if let Some(payload) = disconnect_event_payload(tab_id, renderer_id, path, reason, announced) {
+        let _ = app.emit("ssh-disconnected", payload);
+    }
 }
 
 /// SSH client config. SSH-level keepalive every 30s: keeps middlebox (NAT /
@@ -666,14 +734,15 @@ impl russh::client::Handler for SshHandler {
         // User-initiated closes (ssh_disconnect / tab close) pre-fill the
         // slot; the Error::Disconnect russh reports for those carries no
         // information, so keep the explicit label and report kind "closed".
-        let user_initiated = self.disconnect_reason.lock().is_some();
-        let (kind, text) = if user_initiated {
-            ("closed", "closed by user".to_string())
-        } else {
-            let (k, t) = classify_disconnect(&reason);
-            *self.disconnect_reason.lock() = Some(t.clone());
-            (k, t)
-        };
+        // One lock, then work on the clone: a check-then-lock pair could see
+        // a label written in between and report the wrong cause.
+        let mut slot = self.disconnect_reason.lock();
+        let existing = slot.clone();
+        let (kind, text) = disconnect_report(existing.clone(), &reason);
+        if existing.is_none() {
+            *slot = Some(text.clone());
+        }
+        drop(slot);
         let at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -3381,6 +3450,9 @@ pub async fn ssh_connect(
     // it loses the race, ssh_disconnect/tab-close pre-fill it for
     // user-initiated closes.
     let disconnect_reason = Arc::new(Mutex::new(None::<String>));
+    // Shared with the handler and the reader: whichever path observes the end
+    // of the session first emits ssh-disconnected, the others stay silent.
+    let disconnected_announced = Arc::new(AtomicBool::new(false));
     // The handler sets this while a host-key-mismatch dialog awaits the user:
     // the connect deadline pauses for it (thinking time is not a tarpit).
     let user_waiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3810,6 +3882,7 @@ pub async fn ssh_connect(
     let cwd = Arc::new(Mutex::new(None::<String>));
     let cwd_reader = Arc::clone(&cwd);
     let reason_reader = Arc::clone(&disconnect_reason);
+    let announced_reader = Arc::clone(&disconnected_announced);
     let (reader_start_tx, reader_start_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
         // Registration and ssh-connected must precede buffered output or a
@@ -3917,11 +3990,11 @@ pub async fn ssh_connect(
                             } else {
                                 "channel-closed"
                             };
-                            emit_ssh_disconnected(&app2, &tid, &rid, path, &reason_reader);
+                            emit_ssh_disconnected(&app2, &tid, Some(&rid), Some(path), &reason_reader, &announced_reader);
                             break;
                         }
                         None => {
-                            emit_ssh_disconnected(&app2, &tid, &rid, "session-ended", &reason_reader);
+                            emit_ssh_disconnected(&app2, &tid, Some(&rid), Some("session-ended"), &reason_reader, &announced_reader);
                             break;
                         }
                         _ => {}
@@ -3964,6 +4037,7 @@ pub async fn ssh_connect(
                 transfer_cancels: cancels.clone(),
                 cwd,
                 disconnect_reason,
+                disconnected_announced,
             }),
         )
     };
@@ -4080,13 +4154,19 @@ pub async fn ssh_disconnect(
         take_ssh_for_disconnect(&mut map, &tab_id)
     };
     let close_handle = removed.map(|session| {
-        let close_handle = (session.handle.clone(), session.transfer_cancels.clone());
+        let close_handle = (
+            session.handle.clone(),
+            session.transfer_cancels.clone(),
+            Arc::clone(&session.disconnect_reason),
+            Arc::clone(&session.disconnected_announced),
+        );
         // Dropping the session drops the writer_tx, which stops the writer task.
-        // The reader task will detect EOF and emit ssh-disconnected.
+        // The reader task may observe EOF first; the announcement flag makes
+        // this path and the reader emit exactly one ssh-disconnected together.
         drop(session);
         close_handle
     });
-    if let Some((h, cancels)) = close_handle {
+    if let Some((h, cancels, reason, announced)) = close_handle {
         // Cancel in-flight SFTP transfers first so their tasks drop temp
         // files and release the handle before the channel goes away; the
         // helper waits briefly for the registry to drain.
@@ -4096,7 +4176,7 @@ pub async fn ssh_disconnect(
             .disconnect(russh::Disconnect::ByApplication, "ZTerm closed", "")
             .await
             .ok();
-        let _ = app.emit("ssh-disconnected", json!({ "tabId": tab_id }));
+        emit_ssh_disconnected(&app, &tab_id, None, None, &reason, &announced);
     }
     Ok(json!({ "ok": true }))
 }
@@ -4271,6 +4351,8 @@ enum SessionClosePlan {
     Ssh {
         handle: Arc<russh::client::Handle<SshHandler>>,
         cancels: TransferCancels,
+        reason: Arc<Mutex<Option<String>>>,
+        announced: Arc<AtomicBool>,
     },
 }
 
@@ -4288,10 +4370,18 @@ fn close_plan_for_session(session: SessionType) -> SessionClosePlan {
         SessionType::Ssh(session) => {
             let handle = session.handle.clone();
             let cancels = session.transfer_cancels.clone();
+            let reason = Arc::clone(&session.disconnect_reason);
+            let announced = Arc::clone(&session.disconnected_announced);
             // Dropping the session drops the writer_tx, which stops the writer
-            // task; the reader task detects EOF and emits ssh-disconnected.
+            // task; the reader task may see EOF first, and the shared
+            // announcement flag keeps the two emitters to a single event.
             drop(session);
-            SessionClosePlan::Ssh { handle, cancels }
+            SessionClosePlan::Ssh {
+                handle,
+                cancels,
+                reason,
+                announced,
+            }
         }
     }
 }
@@ -4391,7 +4481,12 @@ pub async fn pty_destroy(
             // blocking pool so it never occupies an async worker.
             let _ = tokio::task::spawn_blocking(move || drop(session)).await;
         }
-        Some(SessionClosePlan::Ssh { handle, cancels }) => {
+        Some(SessionClosePlan::Ssh {
+            handle,
+            cancels,
+            reason,
+            announced,
+        }) => {
             // Cancel in-flight SFTP transfers first so their tasks drop temp
             // files before the session is disconnected underneath them.
             cancel_sftp_transfers(&cancels).await;
@@ -4400,7 +4495,7 @@ pub async fn pty_destroy(
                 .disconnect(russh::Disconnect::ByApplication, "ZTerm closed", "")
                 .await
                 .ok();
-            let _ = app.emit("ssh-disconnected", json!({ "tabId": tab_id }));
+            emit_ssh_disconnected(&app, &tab_id, None, None, &reason, &announced);
         }
         None => {}
     }
@@ -13209,6 +13304,112 @@ mod tests {
         assert_eq!(c.keepalive_max, 3);
     }
 
+    #[test]
+    fn disconnect_announcement_is_claimed_once() {
+        let announced = AtomicBool::new(false);
+        assert!(
+            claim_disconnect_announcement(&announced),
+            "the first observer emits"
+        );
+        assert!(
+            !claim_disconnect_announcement(&announced),
+            "later observers stay silent"
+        );
+    }
+
+    #[test]
+    fn disconnect_report_keeps_the_reason_recorded_first() {
+        use russh::client::DisconnectReason as R;
+        let keepalive = R::Error(russh::Error::KeepaliveTimeout);
+        let (k, t) = disconnect_report(None, &keepalive);
+        assert_eq!(k, "keepalive");
+        assert!(t.contains("keepalive"), "text names the cause: {t}");
+
+        let (k, t) = disconnect_report(Some(USER_CLOSE_REASON.to_string()), &keepalive);
+        assert_eq!((k, t.as_str()), ("closed", USER_CLOSE_REASON));
+
+        // A reason another path recorded first must survive a later generic
+        // callback. The kind is derived from that text, not from the reason
+        // this callback happens to see, so kind and text cannot disagree.
+        let (k, t) = disconnect_report(Some("server said bye".to_string()), &keepalive);
+        assert_eq!(k, "error", "an unknown recorded text is a generic error");
+        assert_eq!(t, "server said bye");
+
+        let (k, _) = disconnect_report(
+            Some("server stopped replying (keepalive timeout)".to_string()),
+            &R::Error(russh::Error::Disconnect),
+        );
+        assert_eq!(k, "keepalive", "the recorded text decides the kind");
+
+        let recorded_server = classify_disconnect(&R::ReceivedDisconnect(
+            russh::client::RemoteDisconnectInfo {
+                reason_code: russh::Disconnect::ByApplication,
+                message: "maintenance".to_string(),
+                lang_tag: String::new(),
+            },
+        ))
+        .1;
+        let (k, t) = disconnect_report(Some(recorded_server.clone()), &keepalive);
+        assert_eq!(k, "server");
+        assert_eq!(t, recorded_server);
+    }
+
+    #[test]
+    fn disconnect_payload_is_produced_once_per_session() {
+        let reason = Arc::new(Mutex::new(Some(USER_CLOSE_REASON.to_string())));
+        let announced = AtomicBool::new(false);
+        let first = disconnect_event_payload(
+            "ssh_1",
+            Some("r1"),
+            Some("channel-eof"),
+            &reason,
+            &announced,
+        )
+        .expect("the first caller emits");
+        assert_eq!(first["tabId"], "ssh_1");
+        assert_eq!(first["rendererId"], "r1");
+        assert_eq!(first["path"], "channel-eof");
+        assert_eq!(first["reason"], USER_CLOSE_REASON);
+        assert!(
+            disconnect_event_payload("ssh_1", None, None, &reason, &announced).is_none(),
+            "a second emitter of the same session must stay silent"
+        );
+    }
+
+    #[test]
+    fn disconnect_payload_carries_the_recorded_reason_text() {
+        use russh::client::DisconnectReason as R;
+        let keepalive = Arc::new(Mutex::new(Some(
+            "server stopped replying (keepalive timeout)".to_string(),
+        )));
+        let payload =
+            disconnect_event_payload("ssh_2", None, None, &keepalive, &AtomicBool::new(false))
+                .unwrap();
+        assert_eq!(
+            payload["reason"],
+            "server stopped replying (keepalive timeout)"
+        );
+
+        let server_text = classify_disconnect(&R::ReceivedDisconnect(
+            russh::client::RemoteDisconnectInfo {
+                reason_code: russh::Disconnect::ByApplication,
+                message: "going down".to_string(),
+                lang_tag: String::new(),
+            },
+        ))
+        .1;
+        let server = Arc::new(Mutex::new(Some(server_text.clone())));
+        let payload = disconnect_event_payload(
+            "ssh_3",
+            None,
+            Some("session-ended"),
+            &server,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(payload["reason"], server_text);
+        assert_eq!(payload["path"], "session-ended");
+    }
     #[test]
     fn classify_disconnect_kinds() {
         use russh::client::DisconnectReason as R;
