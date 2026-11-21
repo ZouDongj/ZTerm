@@ -13539,6 +13539,25 @@ mod tests {
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), r"\installer.nsh")).unwrap()
     }
 
+    fn installer_nsi_text() -> String {
+        std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            r"\nsis\installer.nsi"
+        ))
+        .unwrap()
+    }
+
+    fn installer_uninstall_app_data_block(text: &str) -> &str {
+        let start = text
+            .find("; Delete app data if the checkbox is selected")
+            .expect("uninstall app-data block present");
+        let end = text[start..]
+            .find("\n  ${EndIf}")
+            .map(|offset| start + offset + "\n  ${EndIf}".len())
+            .expect("uninstall app-data block terminated");
+        &text[start..end]
+    }
+
     fn installer_postinstall_macro(text: &str) -> &str {
         let start = text
             .find("!macro NSIS_HOOK_POSTINSTALL")
@@ -13651,6 +13670,51 @@ mod tests {
             postinstall.find("icacls").is_some_and(|at| at > gate),
             "ACL commands run only for per-machine installs"
         );
+    }
+
+    #[test]
+    fn uninstaller_app_data_option_targets_the_real_account_dirs() {
+        let text = installer_nsi_text();
+        let block = installer_uninstall_app_data_block(&text);
+        let gate = block
+            .find("$DeleteAppDataCheckboxState = 1")
+            .expect("checkbox gate");
+        let update_gate = block.find("$UpdateMode <> 1").expect("update gate");
+        let context = block
+            .find("SetShellVarContext current")
+            .expect("current-account context");
+        let appdata = block
+            .find(r#"RmDir /r "$APPDATA\ZTerm""#)
+            .expect("roaming ZTerm data delete");
+        let local = block
+            .find(r#"RmDir /r "$LOCALAPPDATA\ZTerm""#)
+            .expect("local ZTerm data delete");
+        assert!(gate < update_gate && update_gate < context && context < appdata);
+        assert!(appdata < local, "both account data trees are removed");
+        // The bundle identifier cache is still cleared, and a custom dataDir
+        // pointer is never parsed or followed by the uninstaller.
+        assert!(block.contains(r#"RmDir /r "$APPDATA\${BUNDLEID}""#));
+        assert!(block.contains(r#"RmDir /r "$LOCALAPPDATA\${BUNDLEID}""#));
+        assert!(!text.contains("dataDir"), "custom dataDir must stay untouched");
+        // Safe default: the checkbox starts cleared.
+        assert!(text.contains("${BM_SETCHECK} ${BST_UNCHECKED}"));
+    }
+
+    #[test]
+    fn uninstaller_app_data_label_names_the_scope_and_exclusion() {
+        let chinese = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            r"\installer-languages\SimpChinese.nsh"
+        ))
+        .unwrap();
+        let english = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            r"\installer-languages\English.nsh"
+        ))
+        .unwrap();
+        assert!(chinese.contains("删除当前账户的应用数据（自定义数据目录除外）"));
+        assert!(english.contains("current account"));
+        assert!(english.contains("custom data directory"));
     }
 
     #[test]
