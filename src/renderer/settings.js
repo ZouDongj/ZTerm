@@ -493,6 +493,7 @@ function loadSettingsIntoForm() {
     }
     setToggle('toggle-animations', config.animations !== false);
     setToggle('toggle-statusdot', config.showStatusDot !== false);
+    setToggle('toggle-adaptive-tab-width', config.adaptiveTabWidth === true);
     setToggle('toggle-pane-ring', config.paneRing === true);
     setToggle('toggle-panel-edge', config.panelEdge !== false);
     setToggle('toggle-sftp-material', config.sftpMaterial === true);
@@ -952,13 +953,14 @@ function saveAppearance() {
     updateAccentDot();
     const animations = getToggle('toggle-animations');
     const showStatusDot = getToggle('toggle-statusdot');
+    const adaptiveTabWidth = getToggle('toggle-adaptive-tab-width');
     const paneRing = getToggle('toggle-pane-ring');
     const panelEdge = getToggle('toggle-panel-edge');
     const sftpMaterial = getToggle('toggle-sftp-material');
     const terminalScheme = document.getElementById('set-terminal-scheme')?.value || 'onedark';
     const minimumContrastRatio = parseFloat(document.getElementById('set-contrast')?.value) || 1;
 
-    const config = { fontFamily, uiFont, uiFallbackFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, paneRing, panelEdge, sftpMaterial, terminalScheme, minimumContrastRatio, theme: 'dark' };
+    const config = { fontFamily, uiFont, uiFallbackFont, fontSize, lineHeight, fontWeight, fontWeightBold, accentColor, fallbackFont, animations, showStatusDot, adaptiveTabWidth, paneRing, panelEdge, sftpMaterial, terminalScheme, minimumContrastRatio, theme: 'dark' };
     _settingsConfig = { ..._settingsConfig, ...config };
     const saving = persistSettings();
     applyUiFont();
@@ -969,8 +971,13 @@ function saveAppearance() {
     if (winEl) winEl.classList.toggle('no-animations', animations === false);
     if (typeof applyChromeFlags === 'function') applyChromeFlags();
 
-    // Apply status dot setting
+    // Apply status dot and adaptive tab width settings; clear cached tab
+    // widths so tabs immediately re-measure under the updated CSS/chrome rules.
+    if (Array.isArray(TabManager.tabs)) {
+        TabManager.tabs.forEach(t => { delete t._desiredW; });
+    }
     TabManager.render();
+    if (typeof TabManager._relayout === 'function') TabManager._relayout(true);
 
     // Apply terminal color scheme (all terminals + container background)
     applyTerminalScheme();
@@ -1107,6 +1114,7 @@ function persistSettings() {
         theme: 'dark',
         animations: config.animations,
         showStatusDot: config.showStatusDot,
+        adaptiveTabWidth: config.adaptiveTabWidth,
         showStatusbar: config.showStatusbar,
         paneRing: config.paneRing,
         panelEdge: config.panelEdge,
@@ -1163,7 +1171,7 @@ async function loadSettings() {
             return;
         }
     } catch(e) { console.error('[loadSettings]', e); }
-    _settingsConfig = { cursor: 'bar', scrollback: 10000, bell: 'off', cursorBlink: true, autoCopy: true, rightClickPaste: true, fontFamily: '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace', fontSize: 16, lineHeight: 1.125, fontWeight: '400', fontWeightBold: '600', accentColor: '#61afef', theme: 'dark', animations: true, showStatusDot: true, paneRing: false, panelEdge: true, sftpMaterial: false, restoreLocalContent: false, smartCopy: true, osc52: true, richTextCopy: false };
+    _settingsConfig = { cursor: 'bar', scrollback: 10000, bell: 'off', cursorBlink: true, autoCopy: true, rightClickPaste: true, fontFamily: '"JetBrainsMonoNL NF", "HarmonyOS Sans SC", monospace', fontSize: 16, lineHeight: 1.125, fontWeight: '400', fontWeightBold: '600', accentColor: '#61afef', theme: 'dark', animations: true, showStatusDot: true, adaptiveTabWidth: false, paneRing: false, panelEdge: true, sftpMaterial: false, restoreLocalContent: false, smartCopy: true, osc52: true, richTextCopy: false };
     if (typeof _syncOsc52Permission === 'function') _syncOsc52Permission();
     if (typeof applyChromeFlags === 'function') applyChromeFlags();
     applyStatusbarVisibility();

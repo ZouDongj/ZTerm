@@ -141,11 +141,15 @@ body.no-animations .startup-splash .cell{transition:none}
    last tab); sharing/overflow pin an equal JS-computed inline width.
    Pinning (not flex shares) is required by the close-deferral contract — a
    pure flex share would re-widen siblings the instant one closes, moving
-   them under the pointer. Widths change instantly, never through a
-   transition (layout-animation stalls the WebView2 pump — see .tab-exit). */
+   them under the pointer. In adaptive mode (#tabbar.tabbar-adaptive), tabs
+   always keep their natural content width clamped to [72px, 240px] even in
+   overflow, scrolling via the arrows/wheel instead of pinning equal widths.
+   Widths change instantly, never through a transition (layout-animation
+   stalls the WebView2 pump — see .tab-exit). */
 .tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;border-radius:12px;transition:background 0.12s,color 0.12s;white-space:nowrap;height:28px;min-width:110px;max-width:240px;-webkit-app-region:no-drag;user-select:none}/* min-width mirrors TAB_CONTENT_MIN, max-width mirrors TAB_MAX_WIDTH in tabstrip-layout.js — the sparse flip is decided from these measured content widths */
 #tabbar.tabbar-sharing .tab,#tabbar.tabbar-overflow .tab{flex:0 0 auto;min-width:0;max-width:none}
 #tabbar.tabbar-overflow .tab{width:100px}/* mirrors TAB_MIN_WIDTH in tabstrip-layout.js; inline pinning alone would arrive too late — render() restores scrollLeft before _relayout pins widths, so the width must come from CSS at append time */
+#tabbar.tabbar-adaptive .tab,#tabbar.tabbar-adaptive.tabbar-overflow .tab{flex:0 0 auto;width:auto;min-width:72px;max-width:240px}/* mirrors TAB_ADAPTIVE_MIN and TAB_MAX_WIDTH in tabstrip-layout.js; keeps short titles compact and prevents equal-width pinning in adaptive overflow */
 /* Semantic action buttons inside tabs: UA reset + stable hit regions.
    Every action lives in a permanently-reserved slot; hover/focus
    toggles ONLY painted visibility (opacity + pointer-events), never the

@@ -419,10 +419,44 @@ const TabManager = {
     _pointerInStrip: false,
     _deferStripRelayout: false,
     _lastStripPlan: null,
+    _lastAdaptiveTabWidth: null,
     _stripObserver: null,
     // Tab id currently widened by hover (sharing/overflow only); the active
     // tab is always the first expansion priority, this is the second.
     _hoverExpandId: null,
+
+    _isAdaptiveTabWidth() {
+        return !!(typeof _settingsConfig !== 'undefined' && _settingsConfig && _settingsConfig.adaptiveTabWidth === true);
+    },
+
+    // Measure each tab's natural content width with sharing/overflow state
+    // classes and any inline width pin lifted (keeping tabbar-adaptive intact
+    // so CSS enforces the active mode's min-width floor). Renaming and closing
+    // tabs have unstable widths and keep their cached measurements.
+    _remeasureStripTabs(bar, vp, renameKeep) {
+        if (!bar || !vp) return;
+        bar.classList.remove('tabbar-sharing', 'tabbar-overflow');
+        const byId = new Map(this.tabs.map(t => [t.id, t]));
+        const renamingId = this._renamingTabId;
+        vp.querySelectorAll('.tab').forEach(el => {
+            const tabId = el.getAttribute('data-tab');
+            const t = byId.get(tabId);
+            if (!t || el === renameKeep || this._closingTabs.has(t.id)) return;
+            if (renamingId && t.id === renamingId && el.querySelector && el.querySelector('.tab-rename-input')) return;
+            // Read the NATURAL content width: with the state classes lifted
+            // the tab is a default flex item (shrink 1), so a viewport too
+            // narrow for the content total would squeeze it and floor the
+            // measurement at min-width — poisoning _desiredW exactly in the
+            // crowded states whose expansion targets read it. Freeze the
+            // flex and clear any inline width pin for the measurement (same
+            // task as the re-pin in _relayout, so nothing paints mid-state).
+            el.style.width = '';
+            el.style.flex = '0 0 auto';
+            const w = el.offsetWidth;
+            el.style.flex = '';
+            if (Number.isFinite(w) && w > 0) t._desiredW = w;
+        });
+    },
 
     // Build (idempotently) the strip chrome: ‹ viewport › before the
     // add/menu buttons. Also repairs bare stub DOMs (tests) that pre-populate
@@ -585,6 +619,16 @@ const TabManager = {
         const bar = document.getElementById('tabbar');
         const vp = document.getElementById('tab-viewport');
         if (!bar || !vp) return;
+        const adaptive = this._isAdaptiveTabWidth();
+        const modeChanged = this._lastAdaptiveTabWidth !== null && this._lastAdaptiveTabWidth !== adaptive;
+        bar.classList.toggle('tabbar-adaptive', adaptive);
+        if (modeChanged) {
+            this._hoverExpandId = null;
+            this.tabs.forEach(t => { delete t._desiredW; });
+            this._remeasureStripTabs(bar, vp, null);
+            force = true;
+        }
+        this._lastAdaptiveTabWidth = adaptive;
         let plan = this._lastStripPlan;
         const deferred = this._deferStripRelayout && this._pointerInStrip && plan;
         if (force || !deferred) {
@@ -613,18 +657,20 @@ const TabManager = {
             const avail = (bar.clientWidth || 0) - TAB_STRIP_RIGHT_RESERVE - chrome - 2 * siblings;
             // Decision basis: the per-tab CONTENT widths measured at render
             // time (cached on the tab object; unmeasured tabs fall back to
-            // the content floor so a never-painted tab still reserves a
-            // sane slot).
+            // the active mode's content floor so a never-painted tab still
+            // reserves a sane slot).
+            const contentFloor = adaptive ? TAB_ADAPTIVE_MIN : TAB_CONTENT_MIN;
             const tabEls = [...vp.querySelectorAll('.tab')];
             const desired = tabEls.map(el => {
                 const t = this.tabs.find(x => x.id === el.getAttribute('data-tab'));
                 const w = t && t._desiredW;
-                return (Number.isFinite(w) && w > 0) ? w : Math.max(TAB_CONTENT_MIN, el.offsetWidth || 0);
+                return (Number.isFinite(w) && w > 0) ? w : Math.max(contentFloor, el.offsetWidth || 0);
             });
-            plan = computeTabStripPlan(desired, avail, 2, TAB_MIN_WIDTH);
+            plan = computeTabStripPlan(desired, avail, 2, TAB_MIN_WIDTH, { adaptive });
             // Priority expansion is part of the plan so a deferred re-apply
             // keeps the exact same pixel widths while the pointer is over
-            // the strip.
+            // the strip. In adaptive mode plan.tabWidth is always null, so
+            // _expandedStripWidths cleanly returns null.
             plan.widths = this._expandedStripWidths(plan, avail, tabEls);
             this._lastStripPlan = plan;
         }
@@ -634,6 +680,7 @@ const TabManager = {
             const w = plan.widths ? plan.widths.get(el.getAttribute('data-tab')) : null;
             el.style.width = w != null ? w + 'px' : (plan.tabWidth == null ? '' : plan.tabWidth + 'px');
         });
+        if (plan.state !== 'overflow' && vp.scrollLeft) vp.scrollLeft = 0;
         this._updateScrollArrows();
     },
 
@@ -1775,32 +1822,29 @@ const TabManager = {
             vp.appendChild(div);
         });
         this.updateActiveClass();
+        // Sync the adaptive-width class BEFORE measuring so CSS applies the
+        // active mode's min-width floor (72px adaptive vs 110px default). If
+        // the mode flipped, drop stale cached widths and force a relayout.
+        const adaptive = this._isAdaptiveTabWidth();
+        const modeChanged = this._lastAdaptiveTabWidth !== null && this._lastAdaptiveTabWidth !== adaptive;
+        if (modeChanged) {
+            this._hoverExpandId = null;
+            this.tabs.forEach(t => { delete t._desiredW; });
+            this._lastAdaptiveTabWidth = adaptive;
+        }
+        bar.classList.toggle('tabbar-adaptive', adaptive);
         // Measure each tab's content-driven width with the state classes
         // lifted (they would otherwise pin the width and poison the
-        // measurement): _relayout decides the sparse->sharing flip from the
-        // per-tab content total. The kept rename node and mid-exit tabs have
-        // unstable widths — keep their cached value instead. Removal and
-        // re-pinning (in _relayout below) happen in the same task, so no
-        // frame is ever painted with the classes off.
-        bar.classList.remove('tabbar-sharing', 'tabbar-overflow');
-        const byId = new Map(this.tabs.map(t => [t.id, t]));
-        vp.querySelectorAll('.tab').forEach(el => {
-            const t = byId.get(el.getAttribute('data-tab'));
-            if (!t || el === renameKeep || this._closingTabs.has(t.id)) return;
-            // Read the NATURAL content width: with the state classes lifted
-            // the tab is a default flex item (shrink 1), so a viewport too
-            // narrow for the content total would squeeze it and floor the
-            // measurement at min-width — poisoning _desiredW exactly in the
-            // crowded states whose expansion targets read it. Freeze the
-            // flex for the measurement (same task as the re-pin below, so
-            // nothing paints mid-state).
-            el.style.flex = '0 0 auto';
-            const w = el.offsetWidth;
-            el.style.flex = '';
-            if (Number.isFinite(w) && w > 0) t._desiredW = w;
-        });
-        vp.scrollLeft = prevScroll;
-        this._relayout(false);
+        // measurement): _relayout decides the sparse->sharing/overflow flip
+        // from the per-tab content total. Removal and re-pinning (in _relayout
+        // below) happen in the same task, so no frame paints mid-state.
+        this._remeasureStripTabs(bar, vp, renameKeep);
+        this._relayout(modeChanged);
+        // Restore scroll offset AFTER _relayout restores tabbar-overflow and
+        // final tab widths so the viewport width/scrollWidth match the live
+        // state and do not prematurely clamp a right-edge scroll position.
+        vp.scrollLeft = (this._lastStripPlan && this._lastStripPlan.state === 'overflow') ? prevScroll : 0;
+        this._updateScrollArrows();
         this._reholdStripSlides(vp, prevRects);
         this._reholdStripButtonSlides(vp, prevRects);
         this._applyStripFlip(vp, prevRects);
