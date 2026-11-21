@@ -235,6 +235,7 @@ test('DECOM home and relative CUP produce partial-region LF/RI evidence', () => 
   assert.equal(ri.reports[0].text, true);
   assert.equal(ri.reports[0].complete, false);
   assert.equal(ri.state.positionKnown, false, 'DECOM/DECSTBM keep caret recovery conservative');
+  assert.equal(observeChunks(['\u001b[?6h']).state.positionReason, 'decom');
   const outside = observeChunks(['\u001b[2;4r\u001b[?6l\u001b[1;1H\u001bM']);
   assert.equal(outside.reports[0].scroll, null);
   assert.equal(outside.reports[0].text, false);

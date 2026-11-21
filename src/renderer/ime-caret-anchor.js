@@ -104,7 +104,10 @@
 
     function patchCompositionHelper(core, coreService) {
         const helper = core._compositionHelper;
-        if (!helper || typeof helper.updateCompositionElements !== 'function') return false;
+        if (!helper || typeof helper.updateCompositionElements !== 'function'
+            || typeof helper.isComposing !== 'boolean') {
+            return false;
+        }
         if (helper.__imeAnchorPatched) return true;
         const update = helper.updateCompositionElements.bind(helper);
         helper.updateCompositionElements = function (dontRecurse) {

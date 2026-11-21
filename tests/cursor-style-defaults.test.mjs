@@ -61,19 +61,17 @@ test('DECSCUSR 0 and an omitted parameter restore the user values', async t => {
     assert.equal(f.term.options.cursorBlink, false);
 });
 
-test('RIS and DECSTR restore user values after the vendored reset', async t => {
+test('RIS and DECSTR restore user values synchronously before the write callback', async t => {
     const f = fixture({ cursorStyle: 'bar', cursorBlink: false });
     t.after(() => f.term.dispose());
 
     await write(f.term, '\x1b[3 q');
     await write(f.term, '\x1bc');
-    await settle();
     assert.equal(f.term.options.cursorStyle, 'bar');
     assert.equal(f.term.options.cursorBlink, false);
 
     await write(f.term, '\x1b[3 q');
     await write(f.term, '\x1b[!p');
-    await settle();
     assert.equal(f.term.options.cursorStyle, 'bar');
     assert.equal(f.term.options.cursorBlink, false);
 });
@@ -83,9 +81,70 @@ test('an explicit shape after a reset in the same chunk stays authoritative', as
     t.after(() => f.term.dispose());
 
     await write(f.term, '\x1bc\x1b[3 q');
-    await settle();
     assert.equal(f.term.options.cursorStyle, 'underline');
     assert.equal(f.term.options.cursorBlink, true);
+});
+
+test('same-chunk CSI ?12h/l, DECRQSS, and DECSCUSR > 6 after RIS/DECSTR stay intact', async t => {
+    const f = fixture({ cursorStyle: 'bar', cursorBlink: false });
+    t.after(() => f.term.dispose());
+
+    // tput reset + tput cvvis: ?12h enables blink right after RIS.
+    await write(f.term, '\x1bc\x1b[?12h');
+    await settle();
+    assert.equal(f.term.options.cursorStyle, 'bar');
+    assert.equal(f.term.options.cursorBlink, true);
+
+    // DECSTR followed by ?12l disables blink when user default blinks.
+    f.defaults.setUserOptions({ cursorStyle: 'underline', cursorBlink: true });
+    await write(f.term, '\x1b[!p\x1b[?12l');
+    await settle();
+    assert.equal(f.term.options.cursorStyle, 'underline');
+    assert.equal(f.term.options.cursorBlink, false);
+
+    // DECRQSS in the same chunk observes the restored defaults immediately.
+    f.defaults.setUserOptions({ cursorStyle: 'bar', cursorBlink: false });
+    const replies = [];
+    const sub = f.term.onData(data => replies.push(data));
+    t.after(() => sub.dispose());
+    await write(f.term, '\x1b[1 q');
+    await write(f.term, '\x1bc\x1bP$q q\x1b\\');
+    assert.equal(replies.join(''), '\x1bP1$r6 q\x1b\\');
+
+    // DECSCUSR > 6 fallthrough after RIS keeps xterm's result.
+    await write(f.term, '\x1bc\x1b[7 q');
+    await settle();
+    assert.equal(f.term.options.cursorBlink, true);
+});
+
+test('dispose inside a RIS write callback leaves subsequent mutations untouched', async t => {
+    const f = fixture({ cursorStyle: 'bar', cursorBlink: false });
+    t.after(() => f.term.dispose());
+
+    await write(f.term, '\x1b[3 q');
+    await new Promise(resolve => {
+        f.term.write('\x1bc', () => {
+            assert.equal(f.term.options.cursorStyle, 'bar');
+            f.defaults.dispose();
+            f.term.options.cursorStyle = 'block';
+            f.term.options.cursorBlink = true;
+            f.defaults.setUserOptions({ cursorStyle: 'underline', cursorBlink: false });
+            resolve();
+        });
+    });
+    await settle();
+    assert.equal(f.term.options.cursorStyle, 'block');
+    assert.equal(f.term.options.cursorBlink, true);
+});
+
+test('missing registerEscHandler refuses installation cleanly', () => {
+    let csiCalls = 0;
+    const term = {
+        parser: { registerCsiHandler() { csiCalls += 1; return { dispose() {} }; } },
+        options: { cursorStyle: 'bar', cursorBlink: false },
+    };
+    assert.equal(installCursorStyleDefaults(term, {}), null);
+    assert.equal(csiCalls, 0);
 });
 
 test('DECSCUSR sub-parameters use the primary shape parameter', async t => {

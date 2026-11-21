@@ -92,12 +92,14 @@ function truncateAtLastAltBalance(text) {
 // sequence below is verified safe on the vendored xterm build when already in
 // the reset state (no-ops). DECRST 1049 is deliberately absent (see
 // truncateAtLastAltBalance). ?2026l is unimplemented in this build (parsed,
-// ignored) and kept for future vendor refreshes. DECSTBM is wrapped in
-// save/restore because a bare CSI r homes the cursor on this build.
+// ignored) and kept for future vendor refreshes. Resetting charsets and SGR
+// before ESC 7 / CSI r / ESC 8 ensures DECSC snapshots clean default state,
+// while DECSTBM stays wrapped in save/restore because bare CSI r homes the
+// cursor on this build.
 const REPLAY_EPILOGUE = '\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l'
+    + '\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b[0m'
     + '\x1b7\x1b[r\x1b8'
-    + '\x1b(B\x1b)B\x1b*B\x1b+B\x0f'
-    + '\x1b[0m\x1b[?25h\r\n';
+    + '\x1b[?25h\r\n';
 
 // Saved output is an untrusted protocol stream, not a display snapshot.
 // Reconstruct only text and rendering controls: SGR, cursor/erase/scroll/tab

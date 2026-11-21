@@ -479,12 +479,17 @@
               scrollTop = normalScrollTop; scrollBottom = normalScrollBottom;
             }
           }
-          if (modes.some(p => /^(?:\?)?6$/.test(p))) {
+          const hasDecom = modes.some(p => /^(?:\?)?6$/.test(p));
+          if (hasDecom) {
             originMode = fin === 'h';
             row = originMode ? scrollTop + 1 : 1; col = 1;
             pendingWrap = false;
           }
-          if (modes.some(p => /^(?:\?)?(?:6|7|47|1047|1048|1049)$/.test(p))) losePosition();
+          if (hasDecom && originMode) {
+            losePosition('decom');
+          } else if (modes.some(p => /^(?:\?)?(?:6|7|47|1047|1048|1049)$/.test(p))) {
+            losePosition();
+          }
           return;
         }
         losePosition();

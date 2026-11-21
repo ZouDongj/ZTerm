@@ -208,5 +208,13 @@ test('changed xterm internals: loud false, no throw', () => {
     assert.equal(api.patchTerminal(null, { warn }), false);
     assert.equal(api.patchTerminal({ _core: {} }, { warn }), false);
     assert.equal(api.patchTerminal({ _core: { coreService: { isCursorHidden: true }, _compositionHelper: {} } }, { warn }), false);
-    assert.equal(warnings.length, 3);
+    // Missing boolean isComposing on CompositionHelper must also fail loudly.
+    assert.equal(api.patchTerminal({
+        _core: {
+            _syncTextArea() {},
+            coreService: { isCursorHidden: false },
+            _compositionHelper: { updateCompositionElements() {} },
+        },
+    }, { warn }), false);
+    assert.equal(warnings.length, 4);
 });

@@ -1383,22 +1383,31 @@ async function main() {
       const previous = term.options.cursorStyle;
       const previousBlink = term.options.cursorBlink;
       const user = term._cursorStyleDefaults?.snapshot?.() || null;
-      await write('\\u001b[3 q');
-      const underline = adapter.snapshot().cursorStyle;
-      await write('\\u001b[5 q');
-      const bar = adapter.snapshot().cursorStyle;
-      await write('\\u001b[0 q');
-      const defaultStyle = term.options.cursorStyle;
-      const defaultBlink = term.options.cursorBlink;
-      const defaultAdapter = adapter.snapshot().cursorStyle;
-      await write(previous === 'underline' ? '\\u001b[3 q' : previous === 'block' ? '\\u001b[1 q' : '\\u001b[5 q');
-      term.options.cursorBlink = previousBlink;
+      let underline, bar, oppositeBlink, defaultStyle, defaultBlink, defaultAdapter;
+      try {
+        await write('\\u001b[3 q');
+        underline = adapter.snapshot().cursorStyle;
+        await write('\\u001b[5 q');
+        bar = adapter.snapshot().cursorStyle;
+        // Pick a DECSCUSR shape whose blink opposes the user's configured
+        // blink so CSI 0 SP q proves both shape and blink restoration.
+        await write(user?.cursorBlink ? '\\u001b[4 q' : '\\u001b[3 q');
+        oppositeBlink = term.options.cursorBlink;
+        await write('\\u001b[0 q');
+        defaultStyle = term.options.cursorStyle;
+        defaultBlink = term.options.cursorBlink;
+        defaultAdapter = adapter.snapshot().cursorStyle;
+      } finally {
+        await write(previous === 'underline' ? '\\u001b[3 q' : previous === 'block' ? '\\u001b[1 q' : '\\u001b[5 q');
+        term.options.cursorBlink = previousBlink;
+      }
       const blinkAfter = term.options.cursorBlink;
-      return { ok: true, underline, bar, previous, previousBlink, user, defaultStyle, defaultBlink, defaultAdapter, blinkAfter };
+      return { ok: true, underline, bar, oppositeBlink, previous, previousBlink, user, defaultStyle, defaultBlink, defaultAdapter, blinkAfter };
     })()`);
     check('WebGL smooth cursor follows DECSCUSR shape',
       decscusrProbe.ok === true && decscusrProbe.underline === 'underline' && decscusrProbe.bar === 'bar'
         && decscusrProbe.user !== null
+        && decscusrProbe.oppositeBlink === !decscusrProbe.user.cursorBlink
         && decscusrProbe.defaultStyle === decscusrProbe.user.cursorStyle
         && decscusrProbe.defaultBlink === decscusrProbe.user.cursorBlink
         && decscusrProbe.defaultAdapter === decscusrProbe.user.cursorStyle
