@@ -96,3 +96,17 @@ test('missing tab or pane is a no-op', () => {
     assert.equal(tab.host, 'h');
     assert.equal(tab.type, 'ssh');
 });
+
+test('a pending handshake retry budget follows the adopted pane onto the tab', () => {
+    const tab = { id: 't_retry', _sshRetried: 0, _sshRetryToken: 4 };
+    adoptPaneFieldsIntoTab(tab, sshPane({ _sshRetried: 2, _sshRetryToken: 9 }));
+    assert.equal(tab._sshRetried, 2, 'the spent budget stays spent after the collapse');
+    assert.equal(tab._sshRetryToken, 9, 'the pending retry timer keeps its token');
+});
+
+test('adopting a local pane resets the ssh retry budget', () => {
+    const tab = { id: 't_local_retry', _sshRetried: 3, _sshRetryToken: 7 };
+    adoptPaneFieldsIntoTab(tab, localPane());
+    assert.equal(tab._sshRetried, 0);
+    assert.equal(tab._sshRetryToken, 0);
+});
