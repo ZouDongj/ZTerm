@@ -1,9 +1,10 @@
 ; ZTerm copy of the tauri-bundler NSIS language file (English).
 ; Source: tauri-bundler 2.9.4 languages/English.nsh, embedded in
-; @tauri-apps/cli 2.11.4. Only dontUninstall and
-; olderOrUnknownVersionInstalled are reworded to present installing
-; over an existing version as an in-place upgrade that keeps user
-; data (issue #20). Re-sync with upstream when upgrading the CLI.
+; @tauri-apps/cli 2.11.4. dontUninstall and olderOrUnknownVersionInstalled
+; are reworded to present installing over an existing version as an in-place
+; upgrade that keeps user data (issue #20), and deleteAppData clarifies
+; current-account scope (excluding custom data directories). Re-sync with
+; upstream when upgrading the CLI.
 ; Length budget: the reinstall page shows these in a fixed 24u label
 ; (installer.nsi NSD_CreateLabel 0 0 100% 24u) — keep the text at or
 ; under the upstream length or the last line clips.
@@ -33,4 +34,4 @@ LangString webview2DownloadSuccess ${LANG_ENGLISH} "WebView2 bootstrapper downlo
 LangString webview2Downloading ${LANG_ENGLISH} "Downloading WebView2 bootstrapper..."
 LangString webview2InstallError ${LANG_ENGLISH} "Error: Installing WebView2 failed with exit code $1"
 LangString webview2InstallSuccess ${LANG_ENGLISH} "WebView2 installed successfully"
-LangString deleteAppData ${LANG_ENGLISH} "Delete the application data"
+LangString deleteAppData ${LANG_ENGLISH} "Delete current account app data (custom data directory excluded)"

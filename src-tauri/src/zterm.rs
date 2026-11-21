@@ -11,6 +11,13 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::update_release::{
+    is_stable_tag, is_valid_tag, rate_limit_error, resolve_latest_tag, resolve_release_asset,
+    version_newer_checked, ReleaseHttp, SetupAsset, WinHttpRelease,
+};
+#[cfg(test)]
+use crate::update_release::{select_setup_asset, version_newer};
+
 #[path = "native_trace.rs"]
 mod native_trace;
 
@@ -4856,105 +4863,79 @@ pub fn get_about_info(args: Vec<Value>) -> Value {
 
 // ── Update check (GitHub Releases, check-only) ──
 
-const RELEASES_LATEST_URL: &str = "https://api.github.com/repos/ZouDongj/ZTerm/releases/latest";
-
-/// True when `latest` is a strictly newer version than `current`.
-/// Both may carry a leading 'v' and a pre-release/build suffix; only the
-/// numeric dotted core is compared (1.0.5-beta.1 counts as 1.0.5).
-pub fn version_newer(current: &str, latest: &str) -> bool {
-    fn core(v: &str) -> Vec<u64> {
-        v.trim()
-            .trim_start_matches(['v', 'V'])
-            .split(['-', '+'])
-            .next()
-            .unwrap_or("")
-            .split('.')
-            .map(|p| p.parse::<u64>().unwrap_or(0))
-            .collect()
-    }
-    let (a, b) = (core(current), core(latest));
-    for i in 0..a.len().max(b.len()) {
-        let x = a.get(i).copied().unwrap_or(0);
-        let y = b.get(i).copied().unwrap_or(0);
-        if y != x {
-            return y > x;
-        }
-    }
-    false
-}
-
 #[tauri::command]
 pub async fn check_update(args: Vec<Value>) -> Result<Value, String> {
     let _ = args;
     tokio::task::spawn_blocking(|| {
         let proxy = update_proxy_choice().map_err(|e| format!("update: {e}"))?;
-        let resp = crate::update_http::http_get(
-            RELEASES_LATEST_URL,
-            &[
-                ("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION"))),
-                ("Accept", "application/vnd.github+json"),
-            ],
-            &proxy,
-            crate::update_http::Preset::Check,
-        )
-        .map_err(|e| update_http_fail("update check failed", e))?;
-        if resp.status == 404 {
-            // The repo has no published release yet — a state, not a failure.
-            return Ok(json!({
-                "current": env!("CARGO_PKG_VERSION"),
-                "latest": Value::Null,
-                "none": true,
-            }));
-        }
-        if resp.status != 200 {
-            return Err(format!(
-                "update check failed [http]: status {}",
-                resp.status
-            ));
-        }
-        let body: Value = serde_json::from_slice(&resp.body)
-            .map_err(|e| format!("update check: bad response json: {e}"))?;
-        let tag = body
-            .get("tag_name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if tag.is_empty() {
-            return Err("update check: response missing tag_name".to_string());
-        }
-        let url = body
-            .get("html_url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("https://github.com/ZouDongj/ZTerm/releases")
-            .to_string();
-        let latest = tag.trim_start_matches(['v', 'V']).to_string();
-        let newer = version_newer(env!("CARGO_PKG_VERSION"), &latest);
-        // Installer reuse across restarts: when a verified setup exe for this
-        // release is already in the download dir, report ready so the UI can
-        // jump straight to "restart & install". A release without a usable
-        // x64 asset still reports newer (manual download page remains).
-        let info = if newer {
-            newer_asset_info(&body)
-        } else {
-            NewerAssetInfo::default()
-        };
-        // Seed the state machine from the on-disk installer, otherwise
-        // apply_update (which requires the Ready phase) would refuse the very
-        // installer this ready flag advertises — the card would deadlock.
-        seed_ready_from_check(&tag, &info);
-        Ok(json!({
-            "current": env!("CARGO_PKG_VERSION"),
-            "latest": latest,
-            "tag": tag,
-            "url": url,
-            "newer": newer,
-            "asset_name": info.name,
-            "asset_size": info.size,
-            "ready": info.ready,
-        }))
+        let http = WinHttpRelease { proxy };
+        check_update_with(&http, env!("CARGO_PKG_VERSION"))
     })
     .await
     .map_err(|e| format!("update check task: {e}"))?
+}
+
+fn check_update_with(http: &dyn ReleaseHttp, current: &str) -> Result<Value, String> {
+    let Some(tag) = resolve_latest_tag(http)? else {
+        // The repo has no published stable release yet — a state, not a failure.
+        return Ok(json!({
+            "current": current,
+            "latest": Value::Null,
+            "none": true,
+        }));
+    };
+    if !is_stable_tag(&tag) {
+        return Err(format!(
+            "update check failed: release '{tag}' is a pre-release; stable channel only"
+        ));
+    }
+    let latest = tag.trim_start_matches(['v', 'V']).to_string();
+    let newer = version_newer_checked(current, &tag)?;
+    // Installer reuse across restarts: when a verified setup exe for this
+    // release is already in the download dir, report ready so the UI can jump
+    // straight to "restart & install". A release without a usable x64 asset
+    // still reports newer (the manual release page remains reachable), while an
+    // explicit stable-channel rejection fails closed.
+    let mut rate_limited = false;
+    let mut asset_error: Option<String> = None;
+    let info = if newer {
+        let resolution = resolve_release_asset(http, &tag);
+        if resolution.rejected {
+            let reason = resolution.error.unwrap_or_else(|| {
+                "release is a pre-release or draft; stable channel only".to_string()
+            });
+            return Err(format!("update check failed: {reason}"));
+        }
+        rate_limited = resolution.limited.is_some();
+        match resolution.asset {
+            Some(asset) => asset_info(asset),
+            None => {
+                if !rate_limited {
+                    asset_error = resolution.error;
+                }
+                NewerAssetInfo::default()
+            }
+        }
+    } else {
+        NewerAssetInfo::default()
+    };
+    // Seed the state machine from the on-disk installer, otherwise
+    // apply_update (which requires the Ready phase) would refuse the very
+    // installer this ready flag advertises — the card would deadlock.
+    seed_ready_from_check(&tag, &info);
+    Ok(json!({
+        "current": current,
+        "latest": latest,
+        "tag": tag,
+        "url": format!("https://github.com/ZouDongj/ZTerm/releases/tag/{tag}"),
+        "newer": newer,
+        "asset_name": info.name,
+        "asset_size": info.size,
+        "ready": info.ready,
+        "download_available": info.name.is_some(),
+        "rate_limited": rate_limited,
+        "asset_error": asset_error,
+    }))
 }
 
 // ── In-app update download & apply ──
@@ -4980,6 +4961,7 @@ enum UpdateDlPhase {
 #[derive(Debug, Clone)]
 struct UpdateDlState {
     phase: UpdateDlPhase,
+    attempt: u64,
     tag: String,
     file_name: String,
     sha256: String,
@@ -4992,6 +4974,7 @@ impl UpdateDlState {
     const fn idle() -> Self {
         UpdateDlState {
             phase: UpdateDlPhase::Idle,
+            attempt: 0,
             tag: String::new(),
             file_name: String::new(),
             sha256: String::new(),
@@ -5022,64 +5005,20 @@ impl UpdateDlState {
 static UPDATE_DL: parking_lot::Mutex<UpdateDlState> =
     parking_lot::Mutex::new(UpdateDlState::idle());
 
-/// Pick the unique Windows x64 NSIS setup asset from a GitHub release's
-/// assets array. Returns (name, download_url, size, sha256_hex).
-/// Errors when there is not exactly one candidate, the download URL is
-/// missing or not absolute HTTPS, or GitHub did not provide a sha256 digest.
-fn select_setup_asset(assets: &[Value]) -> Result<(String, String, u64, String), String> {
-    let mut hits: Vec<&Value> = assets
-        .iter()
-        .filter(|a| {
-            a.get("name")
-                .and_then(|n| n.as_str())
-                // Reject anything with path semantics: this name is joined
-                // into the download dir and later spawned as the installer.
-                .map(|n| {
-                    n.starts_with("ZTerm_")
-                        && n.ends_with("_x64-setup.exe")
-                        && !n.contains(['/', '\\'])
-                        && !n.contains("..")
-                })
-                .unwrap_or(false)
-        })
-        .collect();
-    if hits.is_empty() {
-        return Err("release has no ZTerm_*_x64-setup.exe asset".to_string());
-    }
-    if hits.len() > 1 {
-        return Err(format!(
-            "release has {} x64 setup assets, expected exactly one",
-            hits.len()
-        ));
-    }
-    let a = hits.pop().unwrap();
-    let name = a.get("name").and_then(|v| v.as_str()).unwrap().to_string();
-    let url = a
-        .get("browser_download_url")
-        .and_then(|v| v.as_str())
-        .ok_or("setup asset missing browser_download_url")?
-        .to_string();
-    if !crate::update_http::is_https_url(&url) {
-        return Err("setup asset browser_download_url must be an absolute HTTPS URL".to_string());
-    }
-    let size = a.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-    let digest = a.get("digest").and_then(|v| v.as_str()).unwrap_or("");
-    let sha = digest
-        .strip_prefix("sha256:")
-        .filter(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()))
-        .ok_or("setup asset missing sha256 digest")?
-        .to_string();
-    Ok((name, url, size, sha))
-}
-
 /// Streaming SHA-256 of a file, lowercase hex.
 fn file_sha256_hex(path: &std::path::Path) -> std::io::Result<String> {
+    file_sha256_hex_reader(&std::fs::File::open(path)?)
+}
+
+/// Streaming SHA-256 of an open reader, lowercase hex. Taking the reader
+/// instead of a path lets the update launcher hash and then use the same
+/// open file object.
+fn file_sha256_hex_reader(mut reader: impl std::io::Read) -> std::io::Result<String> {
     use sha2::Digest;
-    let mut f = std::fs::File::open(path)?;
     let mut hasher = sha2::Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = std::io::Read::read(&mut f, &mut buf)?;
+        let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
@@ -5090,6 +5029,109 @@ fn file_sha256_hex(path: &std::path::Path) -> std::io::Result<String> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect())
+}
+
+/// Validate and strip the `\\?\` prefix from a normalized wide-char path
+/// returned by `GetFinalPathNameByHandleW`. Rejects UNC shares, volume GUID
+/// paths, and any non-local drive path without lossy UTF-8 round-tripping.
+#[cfg(windows)]
+fn parse_final_local_dos_path(wide: &[u16]) -> Result<PathBuf, String> {
+    use std::os::windows::ffi::OsStringExt;
+
+    const EXTENDED_PREFIX: [u16; 4] = [b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    let rest = wide
+        .strip_prefix(&EXTENDED_PREFIX)
+        .ok_or_else(|| "apply-update: installer resolved to non-local path".to_string())?;
+    let drive = rest.first().copied().unwrap_or(0);
+    let is_ascii_letter = drive <= u8::MAX as u16 && (drive as u8).is_ascii_alphabetic();
+    if rest.len() < 3 || !is_ascii_letter || rest[1] != b':' as u16 || rest[2] != b'\\' as u16 {
+        return Err("apply-update: installer resolved to non-local path".to_string());
+    }
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(rest)))
+}
+
+/// Resolve the canonical local drive path for an already-opened handle via
+/// `GetFinalPathNameByHandleW`. Launching the resolved path instead of the
+/// original `%TEMP%\zterm-update\...` path prevents an unprivileged same-account
+/// process from retargeting an NTFS directory junction between hash verification
+/// and an elevated `ShellExecuteExW("runas")` launch.
+#[cfg(windows)]
+fn final_local_path_for_handle(file: &std::fs::File) -> Result<PathBuf, String> {
+    use std::os::windows::io::AsRawHandle;
+    use winapi::um::fileapi::GetFinalPathNameByHandleW;
+
+    // VOLUME_NAME_DOS (0x0) | FILE_NAME_NORMALIZED (0x0).
+    const FILE_NAME_NORMALIZED: u32 = 0x0;
+
+    let raw = file.as_raw_handle() as winapi::um::winnt::HANDLE;
+    let needed =
+        unsafe { GetFinalPathNameByHandleW(raw, std::ptr::null_mut(), 0, FILE_NAME_NORMALIZED) };
+    if needed == 0 {
+        return Err(format!(
+            "apply-update: resolve installer path: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut buf = vec![0u16; needed as usize + 1];
+    let written = unsafe {
+        GetFinalPathNameByHandleW(
+            raw,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            FILE_NAME_NORMALIZED,
+        )
+    };
+    if written == 0 || (written as usize) >= buf.len() {
+        return Err(format!(
+            "apply-update: resolve installer path: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    parse_final_local_dos_path(&buf[..written as usize])
+}
+
+/// Open the installer for the final verification pass and return both the
+/// locked handle and its canonical local path. The handle keeps read access
+/// only and denies other writers, deleters, and ancestor renames for as long
+/// as it is held, so the bytes hashed are the exact bytes the launcher opens.
+#[cfg(windows)]
+fn open_verified_installer(
+    path: &std::path::Path,
+    expected_sha256: &str,
+) -> Result<(std::fs::File, PathBuf), String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_SHARE_READ: allow readers (including the installer) but no writer
+    // or deleter until this handle is closed.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1)
+        .open(path)
+        .map_err(|e| format!("apply-update: open installer: {e}"))?;
+    verify_installer_handle(&file, expected_sha256)?;
+    let final_path = final_local_path_for_handle(&file)?;
+    Ok((file, final_path))
+}
+
+#[cfg(not(windows))]
+fn open_verified_installer(
+    path: &std::path::Path,
+    expected_sha256: &str,
+) -> Result<(std::fs::File, PathBuf), String> {
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("apply-update: open installer: {e}"))?;
+    verify_installer_handle(&file, expected_sha256)?;
+    let final_path = std::fs::canonicalize(path)
+        .map_err(|e| format!("apply-update: resolve installer path: {e}"))?;
+    Ok((file, final_path))
+}
+
+fn verify_installer_handle(file: &std::fs::File, expected_sha256: &str) -> Result<(), String> {
+    let hex =
+        file_sha256_hex_reader(file).map_err(|e| format!("apply-update: hash installer: {e}"))?;
+    if !hex.eq_ignore_ascii_case(expected_sha256) {
+        return Err("apply-update: installer sha256 changed, download again".to_string());
+    }
+    Ok(())
 }
 
 /// When the installer for `asset_name` already sits in the download dir with
@@ -5119,22 +5161,25 @@ struct NewerAssetInfo {
 /// a hash-matching copy already sits in the download dir (downloaded on a
 /// previous run). A release without a usable asset yields a default (empty)
 /// info — the caller still reports newer so the manual page stays reachable.
+#[cfg(test)]
 fn newer_asset_info(body: &Value) -> NewerAssetInfo {
     let assets = match body.get("assets").and_then(|a| a.as_array()) {
         Some(a) => a,
         None => return NewerAssetInfo::default(),
     };
     match select_setup_asset(assets) {
-        Ok((name, _url, size, sha)) => {
-            let ready = ready_installer_path(&name, &sha).is_some();
-            NewerAssetInfo {
-                name: Some(name),
-                size: Some(size),
-                sha256: Some(sha),
-                ready,
-            }
-        }
+        Ok(asset) => asset_info(asset),
         Err(_) => NewerAssetInfo::default(),
+    }
+}
+
+fn asset_info(asset: SetupAsset) -> NewerAssetInfo {
+    let ready = ready_installer_path(&asset.name, &asset.sha256).is_some();
+    NewerAssetInfo {
+        name: Some(asset.name),
+        size: Some(asset.size),
+        sha256: Some(asset.sha256),
+        ready,
     }
 }
 
@@ -5186,28 +5231,6 @@ fn update_proxy_choice() -> Result<crate::update_http::ProxyChoice, String> {
 /// to friendly guidance (timeout / resolve / connect / http / other).
 fn update_http_fail(prefix: &str, e: crate::update_http::HttpFail) -> String {
     format!("{prefix} [{}]: {}", e.tag, e.detail)
-}
-
-/// Fetch the latest-release JSON from GitHub (shared by check/download).
-fn fetch_latest_release() -> Result<Value, String> {
-    let proxy = update_proxy_choice().map_err(|e| format!("update: {e}"))?;
-    let resp = crate::update_http::http_get(
-        RELEASES_LATEST_URL,
-        &[
-            ("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION"))),
-            ("Accept", "application/vnd.github+json"),
-        ],
-        &proxy,
-        crate::update_http::Preset::Check,
-    )
-    .map_err(|e| update_http_fail("update: release query failed", e))?;
-    if resp.status != 200 {
-        return Err(format!(
-            "update: release query failed [http]: status {}",
-            resp.status
-        ));
-    }
-    serde_json::from_slice(&resp.body).map_err(|e| format!("update: bad release json: {e}"))
 }
 
 /// Stream the installer to <name>.part, verify sha256, rename to final.
@@ -5287,6 +5310,154 @@ fn download_setup_exe(url: &str, name: &str, size_hint: u64, sha256: &str) -> Re
     Ok(())
 }
 
+/// Validate that `tag` is a syntactically clean, stable release tag strictly
+/// newer than `current`. Enforcing all three invariants up front prevents an
+/// IPC caller from inducing a downgrade or pulling a pre-release tag even when
+/// the GitHub API is rate-limited and falls back to expanded-assets HTML.
+fn validate_upgrade_tag(current: &str, tag: &str) -> Result<(), String> {
+    if !is_valid_tag(tag) {
+        return Err(format!("update: invalid release tag '{tag}'"));
+    }
+    if !is_stable_tag(tag) {
+        return Err(format!(
+            "update: release '{tag}' is a pre-release; stable channel only"
+        ));
+    }
+    if !version_newer_checked(current, tag)? {
+        return Err(format!(
+            "update: release '{tag}' is not newer than current version '{current}'"
+        ));
+    }
+    Ok(())
+}
+
+/// Select the installer for `want_tag` without trusting renderer-supplied
+/// URLs or digests. An empty tag resolves the latest stable release; a
+/// non-empty tag is validated and looked up directly. Both paths require the
+/// resolved tag to be a stable release strictly newer than `current`.
+fn resolve_update_asset_for(
+    http: &dyn ReleaseHttp,
+    current: &str,
+    want_tag: &str,
+) -> Result<(String, SetupAsset), String> {
+    let tag = if want_tag.is_empty() {
+        resolve_latest_tag(http)?
+            .ok_or_else(|| "update: no stable release available".to_string())?
+    } else {
+        want_tag.to_string()
+    };
+    validate_upgrade_tag(current, &tag)?;
+    let resolution = resolve_release_asset(http, &tag);
+    match resolution.asset {
+        Some(asset) => Ok((tag, asset)),
+        None => {
+            if let Some(rate) = resolution.limited {
+                Err(rate_limit_error("update: download failed", &rate))
+            } else if let Some(err) = resolution.error {
+                if err.starts_with('[') {
+                    Err(format!("update: download failed {err}"))
+                } else {
+                    Err(format!("update: {err}"))
+                }
+            } else {
+                Err("update: release has no usable x64 installer".to_string())
+            }
+        }
+    }
+}
+
+/// Reset `state` from `Downloading` to `Failed` if the download task exits
+/// abnormally (for example via panic) before committing its final phase.
+/// Scoped to `attempt` so a late unwind or `JoinError` recovery from a prior
+/// attempt can never clobber a newer retry that has already started.
+struct DownloadStateGuard {
+    state: &'static parking_lot::Mutex<UpdateDlState>,
+    attempt: u64,
+    committed: bool,
+}
+
+impl DownloadStateGuard {
+    fn new(state: &'static parking_lot::Mutex<UpdateDlState>, attempt: u64) -> Self {
+        Self {
+            state,
+            attempt,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for DownloadStateGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut st = self.state.lock();
+        if st.attempt == self.attempt && st.phase == UpdateDlPhase::Downloading {
+            st.phase = UpdateDlPhase::Failed;
+            st.error = "update download task aborted unexpectedly".to_string();
+            st.downloaded = 0;
+        }
+    }
+}
+
+async fn run_download_update_task_on<F>(
+    state: &'static parking_lot::Mutex<UpdateDlState>,
+    attempt: u64,
+    work: F,
+) -> Result<Value, String>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    let joined = tokio::task::spawn_blocking(move || {
+        let mut guard = DownloadStateGuard::new(state, attempt);
+        // Evaluate work() BEFORE taking the lock: work() acquires `state`
+        // itself for progress updates — locking first would self-deadlock.
+        let result = work();
+        let mut st = state.lock();
+        let out = if st.attempt != attempt {
+            match result {
+                Ok(()) => Ok(st.snapshot_json()),
+                Err(e) => Err(e),
+            }
+        } else {
+            match result {
+                Ok(()) => {
+                    st.phase = UpdateDlPhase::Ready;
+                    Ok(st.snapshot_json())
+                }
+                // Any failure lands in Failed so the UI offers a retry button.
+                Err(e) => {
+                    st.phase = UpdateDlPhase::Failed;
+                    st.error = e.clone();
+                    st.downloaded = 0;
+                    Err(e)
+                }
+            }
+        };
+        guard.commit();
+        out
+    })
+    .await;
+
+    match joined {
+        Ok(result) => result,
+        Err(e) => {
+            let msg = format!("update download task: {e}");
+            let mut st = state.lock();
+            if st.attempt == attempt && st.phase == UpdateDlPhase::Downloading {
+                st.phase = UpdateDlPhase::Failed;
+                st.error = msg.clone();
+                st.downloaded = 0;
+            }
+            Err(msg)
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn download_update(args: Vec<Value>) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
@@ -5295,7 +5466,11 @@ pub async fn download_update(args: Vec<Value>) -> Result<Value, String> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    {
+    let current = env!("CARGO_PKG_VERSION");
+    if !want_tag.is_empty() {
+        validate_upgrade_tag(current, &want_tag)?;
+    }
+    let attempt = {
         let mut st = UPDATE_DL.lock();
         let short_circuit = match st.phase {
             UpdateDlPhase::Downloading => {
@@ -5319,61 +5494,32 @@ pub async fn download_update(args: Vec<Value>) -> Result<Value, String> {
         // Transition to Downloading while still holding the lock: a
         // concurrent call must be rejected before we release it —
         // otherwise both pass the check and double-download.
+        let next_attempt = st.attempt.wrapping_add(1);
         *st = UpdateDlState::idle();
+        st.attempt = next_attempt;
         st.phase = UpdateDlPhase::Downloading;
         st.tag = want_tag.clone();
-    }
-    tokio::task::spawn_blocking(move || {
-        // Re-fetch the release JSON and select the asset here instead of
-        // trusting URLs/digests passed from the renderer.
-        let work = || -> Result<(), String> {
-            let body = fetch_latest_release()?;
-            let tag = body
-                .get("tag_name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if tag.is_empty() {
-                return Err("update: release response missing tag_name".to_string());
-            }
-            if !want_tag.is_empty() && tag != want_tag {
-                return Err(format!(
-                    "update: release changed ({tag} != {want_tag}), re-check first"
-                ));
-            }
-            let assets = body
-                .get("assets")
-                .and_then(|a| a.as_array())
-                .ok_or("update: release response missing assets")?;
-            let (name, url, size, sha) = select_setup_asset(assets)?;
-            {
-                let mut st = UPDATE_DL.lock();
+        next_attempt
+    };
+    run_download_update_task_on(&UPDATE_DL, attempt, move || {
+        // Resolve the asset for the exact tag selected by the check instead of
+        // trusting URLs or digests passed from the renderer. An empty tag is
+        // only possible for direct command callers; resolve the latest stable
+        // release in that case.
+        let proxy = update_proxy_choice().map_err(|e| format!("update: {e}"))?;
+        let http = WinHttpRelease { proxy };
+        let (tag, asset) = resolve_update_asset_for(&http, current, &want_tag)?;
+        {
+            let mut st = UPDATE_DL.lock();
+            if st.attempt == attempt {
                 st.tag = tag.clone();
-                st.file_name = name.clone();
-                st.sha256 = sha.clone();
-            }
-            download_setup_exe(&url, &name, size, &sha)
-        };
-        // Evaluate work() BEFORE taking the lock: work() acquires UPDATE_DL
-        // itself for progress updates — locking first would self-deadlock.
-        let result = work();
-        let mut st = UPDATE_DL.lock();
-        match result {
-            Ok(()) => {
-                st.phase = UpdateDlPhase::Ready;
-                Ok(st.snapshot_json())
-            }
-            // Any failure lands in Failed so the UI offers a retry button.
-            Err(e) => {
-                st.phase = UpdateDlPhase::Failed;
-                st.error = e.clone();
-                st.downloaded = 0;
-                Err(e)
+                st.file_name = asset.name.clone();
+                st.sha256 = asset.sha256.clone();
             }
         }
+        download_setup_exe(&asset.url, &asset.name, asset.size, &asset.sha256)
     })
     .await
-    .map_err(|e| format!("update download task: {e}"))?
 }
 
 #[tauri::command]
@@ -5538,8 +5684,8 @@ fn is_per_machine_install() -> bool {
 /// the installer itself — the app never needs to run elevated, and a declined
 /// prompt comes back as an error instead of a silent not-running-as-admin
 /// failure halfway through the install.
-fn launch_update_installer(path: &std::path::Path) -> Result<(), String> {
-    if is_per_machine_install() {
+fn launch_update_installer(path: &std::path::Path, elevated: bool) -> Result<(), String> {
+    if elevated {
         launch_elevated(path, "/P /UPDATE /R")
     } else {
         std::process::Command::new(path)
@@ -5605,32 +5751,37 @@ pub async fn apply_update(args: Vec<Value>) -> Result<Value, String> {
     if !path.is_file() {
         return Err("apply-update: installer file missing, download again".to_string());
     }
-    // Re-verify before handing the file to the user account's installer:
-    // the bytes on disk must still be the ones we validated at download time.
-    let hex = file_sha256_hex(&path).map_err(|e| format!("apply-update: hash installer: {e}"))?;
-    if !hex.eq_ignore_ascii_case(&sha) {
-        return Err("apply-update: installer sha256 changed, download again".to_string());
-    }
-    let cmdline = format!("\"{}\" /P /UPDATE /R", path.display());
+    // Re-verify and keep the verified handle open through launch and exit.
+    // Launching the handle's canonical local path (resolved via
+    // GetFinalPathNameByHandleW) plus the read-only share lock prevents a
+    // same-account process from swapping the file or retargeting an NTFS
+    // junction between verification and an elevated launch.
+    let (_handle, launch_path) = open_verified_installer(&path, &sha)?;
+    let elevated = is_per_machine_install();
+    let cmdline = format!("\"{}\" /P /UPDATE /R", launch_path.display());
     if dry_run {
+        drop(_handle);
         return Ok(json!({
             "ok": true,
             "dry_run": true,
             "tag": tag,
             "cmdline": cmdline,
-            "elevated": is_per_machine_install(),
+            "elevated": elevated,
         }));
     }
     // ShellExecuteExW with the "runas" verb blocks until the user answers the
     // UAC prompt — user-controlled and unbounded — so it must not run on the
     // webview's message thread.
-    let launched = tokio::task::spawn_blocking(move || launch_update_installer(&path))
-        .await
-        .map_err(|e| format!("apply-update: launch task: {e}"))?;
+    let spawn_path = launch_path.clone();
+    let launched =
+        tokio::task::spawn_blocking(move || launch_update_installer(&spawn_path, elevated))
+            .await
+            .map_err(|e| format!("apply-update: launch task: {e}"))?;
     launched.map_err(|e| format!("apply-update: {e}"))?;
-    // Let the installer come up before we vanish; NSIS CheckIfAppIsRunning
-    // would kill us anyway, exiting here is just the clean path.
+    // Keep `_handle` open across the brief startup grace so the installer
+    // reads the exact verified bytes before we exit (the OS closes it on exit).
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    drop(_handle);
     std::process::exit(0);
 }
 
@@ -12003,9 +12154,12 @@ mod tests {
         assert!(!version_newer("1.0.5", "1.0.5"));
         assert!(!version_newer("1.0.5", "v1.0.5"));
         assert!(!version_newer("1.0.5", "1.0.4"));
-        // Pre-release suffix is stripped: 1.0.6-beta.1 counts as 1.0.6.
+        // SemVer precedence: a pre-release is below its stable core, so
+        // 1.0.6-beta.1 is newer than 1.0.5 but 1.0.5-beta.1 is older than 1.0.5.
         assert!(version_newer("1.0.5", "v1.0.6-beta.1"));
         assert!(!version_newer("1.0.5", "1.0.5-beta.1"));
+        assert!(version_newer("1.0.5-beta.1", "1.0.5"));
+        assert!(version_newer("1.0.5-beta.1", "1.0.5-beta.2"));
         // Two-component tag pads with zeros.
         assert!(version_newer("1.0.5", "1.1"));
         assert!(!version_newer("1.0.5", "1.0"));
@@ -12013,13 +12167,17 @@ mod tests {
 
     // ── In-app update download ──
 
-    fn gh_asset(name: &str, size: u64, digest: Option<&str>) -> Value {
+    fn gh_asset_for_tag(tag: &str, name: &str, size: u64, digest: Option<&str>) -> Value {
         json!({
             "name": name,
-            "browser_download_url": format!("https://github.com/ZouDongj/ZTerm/releases/download/v1.0.8/{name}"),
+            "browser_download_url": format!("https://github.com/ZouDongj/ZTerm/releases/download/{tag}/{name}"),
             "size": size,
             "digest": digest,
         })
+    }
+
+    fn gh_asset(name: &str, size: u64, digest: Option<&str>) -> Value {
+        gh_asset_for_tag("v1.0.8", name, size, digest)
     }
 
     #[test]
@@ -12037,11 +12195,11 @@ mod tests {
                 Some(&format!("sha256:{sha}")),
             ),
         ];
-        let (name, url, size, got_sha) = select_setup_asset(&assets).unwrap();
-        assert_eq!(name, "ZTerm_1.0.8_x64-setup.exe");
-        assert!(url.ends_with("/ZTerm_1.0.8_x64-setup.exe"));
-        assert_eq!(size, 4_700_000);
-        assert_eq!(got_sha, sha);
+        let asset = select_setup_asset(&assets).unwrap();
+        assert_eq!(asset.name, "ZTerm_1.0.8_x64-setup.exe");
+        assert!(asset.url.ends_with("/ZTerm_1.0.8_x64-setup.exe"));
+        assert_eq!(asset.size, 4_700_000);
+        assert_eq!(asset.sha256, sha);
     }
 
     #[test]
@@ -12088,16 +12246,19 @@ mod tests {
         })];
         assert!(select_setup_asset(&no_url)
             .unwrap_err()
-            .contains("browser_download_url"));
+            .contains("valid GitHub"));
         for invalid_url in [
             "http://example.com/ZTerm_1.0.8_x64-setup.exe",
             "//example.com/ZTerm_1.0.8_x64-setup.exe",
             "https://",
+            "https://example.com/ZouDongj/ZTerm/releases/download/v1/ZTerm_1.0.8_x64-setup.exe",
+            "https://github.com/Other/ZTerm/releases/download/v1/ZTerm_1.0.8_x64-setup.exe",
+            "https://github.com/ZouDongj/ZTerm/releases/download/v1/../ZTerm_1.0.8_x64-setup.exe",
         ] {
             let mut asset = gh_asset("ZTerm_1.0.8_x64-setup.exe", 1, Some(&sha));
             asset["browser_download_url"] = json!(invalid_url);
             let error = select_setup_asset(&[asset]).unwrap_err();
-            assert!(error.contains("absolute HTTPS"), "{invalid_url}: {error}");
+            assert!(error.contains("valid GitHub"), "{invalid_url}: {error}");
         }
         // Path separators / parent refs in the asset name are rejected (the
         // name is joined into the download dir and spawned as the installer).
@@ -12113,6 +12274,433 @@ mod tests {
                 "traversal name must be rejected: {evil}"
             );
         }
+    }
+
+    #[test]
+    fn check_update_wiring_uses_the_release_redirect_and_the_tag_api() {
+        use crate::update_release::test_support::{headers, FakeHttp, FakeReply};
+        use crate::update_release::RELEASES_LATEST_PAGE;
+        let http = FakeHttp::new();
+        http.on_no_redirect(
+            RELEASES_LATEST_PAGE,
+            FakeReply::with_headers(
+                302,
+                "",
+                headers(
+                    Some("/ZouDongj/ZTerm/releases/tag/v9.9.9"),
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        );
+        let sha = "a".repeat(64);
+        let release = json!({
+            "tag_name": "v9.9.9",
+            "draft": false,
+            "prerelease": false,
+            "assets": [gh_asset_for_tag("v9.9.9", "ZTerm_9.9.9check_x64-setup.exe", 42, Some(&format!("sha256:{sha}")))],
+        });
+        http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v9.9.9",
+            FakeReply::response(200, &release.to_string()),
+        );
+        let value = check_update_with(&http, "1.2.5").expect("check");
+        assert_eq!(value["tag"], "v9.9.9");
+        assert_eq!(value["latest"], "9.9.9");
+        assert_eq!(value["newer"], true);
+        assert_eq!(value["download_available"], true);
+        assert_eq!(value["rate_limited"], false);
+        assert_eq!(value["ready"], false);
+        assert_eq!(
+            value["url"],
+            "https://github.com/ZouDongj/ZTerm/releases/tag/v9.9.9"
+        );
+        // The stable tag comes from the page redirect; the API latest endpoint
+        // is not touched.
+        assert_eq!(http.calls()[0].0, false);
+        assert!(!http.calls().iter().any(|(_, url)| {
+            url.contains("api.github.com") && url.ends_with("/releases/latest")
+        }));
+    }
+
+    #[test]
+    fn check_update_treats_a_prerelease_build_as_older_than_the_same_stable_core() {
+        use crate::update_release::test_support::{headers, FakeHttp, FakeReply};
+        use crate::update_release::RELEASES_LATEST_PAGE;
+        let http = FakeHttp::new();
+        http.on_no_redirect(
+            RELEASES_LATEST_PAGE,
+            FakeReply::with_headers(
+                302,
+                "",
+                headers(
+                    Some("https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.5"),
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        );
+        let release = json!({
+            "tag_name": "v1.2.5",
+            "draft": false,
+            "prerelease": false,
+            "assets": [gh_asset_for_tag(
+                "v1.2.5",
+                "ZTerm_1.2.5_x64-setup.exe",
+                7,
+                Some(&format!("sha256:{}", "b".repeat(64))),
+            )],
+        });
+        http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.5",
+            FakeReply::response(200, &release.to_string()),
+        );
+        let value = check_update_with(&http, "1.2.5-dev.1").expect("check");
+        assert_eq!(value["newer"], true);
+        assert_eq!(value["download_available"], true);
+    }
+
+    #[test]
+    fn check_update_reports_a_rate_limit_without_an_asset() {
+        use crate::update_release::test_support::{headers, FakeHttp, FakeReply};
+        use crate::update_release::RELEASES_LATEST_PAGE;
+        let http = FakeHttp::new();
+        http.on_no_redirect(
+            RELEASES_LATEST_PAGE,
+            FakeReply::with_headers(
+                302,
+                "",
+                headers(
+                    Some("/ZouDongj/ZTerm/releases/tag/v9.9.9"),
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        );
+        let limited = || {
+            FakeReply::with_headers(
+                403,
+                "{\"message\":\"API rate limit exceeded\"}",
+                headers(None, None, Some("2000000000"), Some("0")),
+            )
+        };
+        http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v9.9.9",
+            limited(),
+        );
+        http.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v9.9.9",
+            limited(),
+        );
+        let value = check_update_with(&http, "1.0.0").expect("check");
+        assert_eq!(value["newer"], true);
+        assert_eq!(value["download_available"], false);
+        assert_eq!(value["rate_limited"], true);
+    }
+
+    #[test]
+    fn check_update_reports_no_stable_release_without_an_api_lookup() {
+        use crate::update_release::test_support::{FakeHttp, FakeReply};
+        use crate::update_release::RELEASES_LATEST_PAGE;
+        let http = FakeHttp::new();
+        http.on_no_redirect(RELEASES_LATEST_PAGE, FakeReply::response(404, ""));
+        let value = check_update_with(&http, "1.0.0").expect("check");
+        assert_eq!(value["none"], true);
+        assert!(value.get("latest").is_some_and(Value::is_null));
+        assert_eq!(http.calls().len(), 1);
+    }
+
+    #[test]
+    fn download_asset_resolution_uses_the_selected_tag() {
+        use crate::update_release::test_support::{headers, FakeHttp, FakeReply};
+        use crate::update_release::RELEASES_LATEST_PAGE;
+        let http = FakeHttp::new();
+        let sha = "c".repeat(64);
+        let release = json!({
+            "tag_name": "v9.9.9",
+            "draft": false,
+            "prerelease": false,
+            "assets": [gh_asset_for_tag("v9.9.9", "ZTerm_9.9.9download_x64-setup.exe", 5, Some(&format!("sha256:{sha}")))],
+        });
+        http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v9.9.9",
+            FakeReply::response(200, &release.to_string()),
+        );
+        let (tag, asset) =
+            resolve_update_asset_for(&http, "1.2.5", "v9.9.9").expect("selected tag");
+        assert_eq!(tag, "v9.9.9");
+        assert_eq!(asset.name, "ZTerm_9.9.9download_x64-setup.exe");
+        assert_eq!(asset.sha256, sha);
+        assert_eq!(http.calls().len(), 1, "a selected tag never probes latest");
+
+        let empty = FakeHttp::new();
+        empty.on_no_redirect(
+            RELEASES_LATEST_PAGE,
+            FakeReply::with_headers(
+                302,
+                "",
+                headers(
+                    Some("/ZouDongj/ZTerm/releases/tag/v9.9.9"),
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        );
+        empty.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v9.9.9",
+            FakeReply::response(200, &release.to_string()),
+        );
+        let (tag, _) = resolve_update_asset_for(&empty, "1.2.5", "").expect("latest tag");
+        assert_eq!(tag, "v9.9.9");
+    }
+
+    #[test]
+    fn download_asset_resolution_rejects_invalid_and_downgrade_tags() {
+        use crate::update_release::test_support::{headers, FakeHttp, FakeReply};
+        use crate::update_release::RELEASES_LATEST_PAGE;
+
+        let http = FakeHttp::new();
+        for bad in [" v9.9.9", "../v9.9.9", "v9.9.9?x=1", "not-a-tag"] {
+            let err = resolve_update_asset_for(&http, "1.2.5", bad).unwrap_err();
+            assert!(err.contains("invalid release tag"), "{bad}: {err}");
+        }
+        for pre in ["v1.3.0-rc.1", "v1.2.5-dev.2", "1.2.5-dev.1"] {
+            let err = resolve_update_asset_for(&http, "1.2.5", pre).unwrap_err();
+            assert!(err.contains("pre-release"), "{pre}: {err}");
+        }
+        for stale in ["v1.2.4", "v1.2.5"] {
+            let err = resolve_update_asset_for(&http, "1.2.5", stale).unwrap_err();
+            assert!(err.contains("not newer"), "{stale}: {err}");
+        }
+        assert!(
+            http.calls().is_empty(),
+            "invalid/pre-release/downgrade tags fail before network"
+        );
+
+        // Empty tag resolving to an older/equal latest release is also refused.
+        let latest_older = FakeHttp::new();
+        latest_older.on_no_redirect(
+            RELEASES_LATEST_PAGE,
+            FakeReply::with_headers(
+                302,
+                "",
+                headers(
+                    Some("/ZouDongj/ZTerm/releases/tag/v1.2.4"),
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        );
+        let err = resolve_update_asset_for(&latest_older, "1.2.5", "").unwrap_err();
+        assert!(err.contains("not newer"), "{err}");
+    }
+
+    #[test]
+    fn download_asset_resolution_reports_rate_limit_separately() {
+        use crate::update_release::test_support::{headers, FakeHttp, FakeReply};
+        let http = FakeHttp::new();
+        let limited = || FakeReply::with_headers(429, "", headers(None, Some("120"), None, None));
+        http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v9.9.9",
+            limited(),
+        );
+        http.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v9.9.9",
+            limited(),
+        );
+        let error = resolve_update_asset_for(&http, "1.2.5", "v9.9.9").unwrap_err();
+        assert!(error.contains("rate-limit: retry_in=120"), "{error}");
+        assert!(!error.contains("no usable x64 installer"), "{error}");
+    }
+
+    #[test]
+    fn download_asset_resolution_preserves_transport_and_http_errors() {
+        use crate::update_release::test_support::{FakeHttp, FakeReply};
+
+        let offline = FakeHttp::new();
+        offline.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v9.9.9",
+            FakeReply::fail("connect", "connection refused"),
+        );
+        offline.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v9.9.9",
+            FakeReply::fail("connect", "connection refused"),
+        );
+        let err = resolve_update_asset_for(&offline, "1.2.5", "v9.9.9").unwrap_err();
+        assert!(err.contains("[connect]: connection refused"), "{err}");
+        assert!(!err.contains("no usable x64 installer"), "{err}");
+
+        let gateway = FakeHttp::new();
+        gateway.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v9.9.9",
+            FakeReply::response(502, "bad gateway"),
+        );
+        gateway.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v9.9.9",
+            FakeReply::response(503, "unavailable"),
+        );
+        let err = resolve_update_asset_for(&gateway, "1.2.5", "v9.9.9").unwrap_err();
+        assert!(err.contains("[http]: status 503"), "{err}");
+        assert!(!err.contains("no usable x64 installer"), "{err}");
+    }
+
+    #[test]
+    fn check_update_rejects_prerelease_and_surfaces_asset_lookup_errors() {
+        use crate::update_release::test_support::{headers, FakeHttp, FakeReply};
+        use crate::update_release::RELEASES_LATEST_PAGE;
+
+        let sha = "a".repeat(64);
+        let rejected = FakeHttp::new();
+        rejected.on_no_redirect(
+            RELEASES_LATEST_PAGE,
+            FakeReply::with_headers(
+                302,
+                "",
+                headers(
+                    Some("/ZouDongj/ZTerm/releases/tag/v9.9.9"),
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        );
+        rejected.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v9.9.9",
+            FakeReply::response(
+                200,
+                &format!(
+                    r#"{{"tag_name":"v9.9.9","prerelease":true,"assets":[{{"name":"ZTerm_9.9.9_x64-setup.exe","size":42,"digest":"sha256:{sha}","browser_download_url":"https://github.com/ZouDongj/ZTerm/releases/download/v9.9.9/ZTerm_9.9.9_x64-setup.exe"}}]}}"#
+                ),
+            ),
+        );
+        let err = check_update_with(&rejected, "1.2.5").unwrap_err();
+        assert!(err.contains("stable channel"), "{err}");
+
+        let asset_offline = FakeHttp::new();
+        asset_offline.on_no_redirect(
+            RELEASES_LATEST_PAGE,
+            FakeReply::with_headers(
+                302,
+                "",
+                headers(
+                    Some("/ZouDongj/ZTerm/releases/tag/v9.9.9"),
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        );
+        asset_offline.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v9.9.9",
+            FakeReply::fail("connect", "connection refused"),
+        );
+        asset_offline.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v9.9.9",
+            FakeReply::fail("connect", "connection refused"),
+        );
+        let val = check_update_with(&asset_offline, "1.2.5").expect("newer with asset error");
+        assert_eq!(val["newer"], json!(true));
+        assert_eq!(val["download_available"], json!(false));
+        assert_eq!(val["rate_limited"], json!(false));
+        assert!(
+            val["asset_error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("[connect]: connection refused"),
+            "{val}"
+        );
+    }
+
+    #[test]
+    fn download_task_panic_resets_state_from_downloading_to_failed() {
+        static TEST_DL: parking_lot::Mutex<UpdateDlState> =
+            parking_lot::Mutex::new(UpdateDlState::idle());
+        {
+            let mut st = TEST_DL.lock();
+            *st = UpdateDlState::idle();
+            st.attempt = 1;
+            st.phase = UpdateDlPhase::Downloading;
+            st.tag = "v9.9.9".to_string();
+            st.downloaded = 1234;
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt
+            .block_on(run_download_update_task_on(&TEST_DL, 1, || {
+                panic!("simulated worker panic");
+            }))
+            .unwrap_err();
+        assert!(err.contains("update download task"), "{err}");
+        let st = TEST_DL.lock();
+        assert_eq!(st.phase, UpdateDlPhase::Failed);
+        assert_eq!(st.downloaded, 0);
+        assert!(!st.error.is_empty());
+    }
+
+    #[test]
+    fn download_task_stale_attempt_does_not_clobber_active_retry() {
+        static TEST_DL_RACE: parking_lot::Mutex<UpdateDlState> =
+            parking_lot::Mutex::new(UpdateDlState::idle());
+        {
+            let mut st = TEST_DL_RACE.lock();
+            *st = UpdateDlState::idle();
+            st.attempt = 1;
+            st.phase = UpdateDlPhase::Downloading;
+            st.tag = "v9.9.8".to_string();
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let attempt1 = tokio::spawn(run_download_update_task_on(&TEST_DL_RACE, 1, move || {
+                let _ = started_tx.send(());
+                panic!("attempt 1 worker panic");
+            }));
+            // Drive attempt 1 once so spawn_blocking starts on the blocking pool.
+            tokio::task::yield_now().await;
+            started_rx.recv().unwrap();
+            // While the single-threaded runtime stays parked here (so attempt 1's
+            // JoinError continuation cannot run yet), wait for attempt 1's
+            // DownloadStateGuard::drop to flip phase -> Failed.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if TEST_DL_RACE.lock().phase == UpdateDlPhase::Failed {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for DownloadStateGuard::drop"
+                );
+                std::thread::yield_now();
+            }
+            // Start attempt 2 before attempt 1's JoinError continuation runs.
+            {
+                let mut st = TEST_DL_RACE.lock();
+                *st = UpdateDlState::idle();
+                st.attempt = 2;
+                st.phase = UpdateDlPhase::Downloading;
+                st.tag = "v9.9.9".to_string();
+                st.downloaded = 512;
+            }
+            // Now let attempt 1 finish its Err(JoinError) handling.
+            let err = attempt1.await.unwrap().unwrap_err();
+            assert!(err.contains("update download task"), "{err}");
+            // Attempt 2 must remain intact in Downloading.
+            let st = TEST_DL_RACE.lock();
+            assert_eq!(st.attempt, 2);
+            assert_eq!(st.phase, UpdateDlPhase::Downloading);
+            assert_eq!(st.tag, "v9.9.9");
+            assert_eq!(st.downloaded, 512);
+        });
     }
 
     #[test]
@@ -12202,6 +12790,161 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    struct TestDirCleanup {
+        dir: PathBuf,
+        junction: Option<PathBuf>,
+    }
+
+    impl TestDirCleanup {
+        fn new(dir: PathBuf) -> Self {
+            Self {
+                dir,
+                junction: None,
+            }
+        }
+    }
+
+    impl Drop for TestDirCleanup {
+        fn drop(&mut self) {
+            if let Some(link) = &self.junction {
+                let _ = std::fs::remove_dir(link);
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_final_local_dos_path_accepts_local_drives_and_rejects_unc_and_volumes() {
+        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().collect() };
+        assert_eq!(
+            parse_final_local_dos_path(&wide(r"\\?\C:\Users\alice\Temp\ZTerm_x64-setup.exe"))
+                .unwrap(),
+            PathBuf::from(r"C:\Users\alice\Temp\ZTerm_x64-setup.exe")
+        );
+        assert_eq!(
+            parse_final_local_dos_path(&wide(r"\\?\d:\setup.exe")).unwrap(),
+            PathBuf::from(r"d:\setup.exe")
+        );
+        for bad in [
+            r"\\?\UNC\server\share\ZTerm_x64-setup.exe",
+            r"\\?\Volume{12345678-1234-1234-1234-1234567890ab}\ZTerm_x64-setup.exe",
+            r"C:\Users\alice\ZTerm_x64-setup.exe",
+            r"\\?\1:\bad-drive.exe",
+            r"\\?\C:",
+            "",
+        ] {
+            let err = parse_final_local_dos_path(&wide(bad)).unwrap_err();
+            assert!(err.contains("non-local path"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn verified_installer_handle_rejects_changed_bytes() {
+        let dir = config_test_dir("verified-installer-mismatch");
+        let _cleanup = TestDirCleanup::new(dir.clone());
+        let path = dir.join("ZTerm_test_x64-setup.exe");
+        std::fs::write(&path, b"verified installer bytes").unwrap();
+        let sha = file_sha256_hex(&path).unwrap();
+        let (handle, final_path) =
+            open_verified_installer(&path, &sha).expect("matching hash opens");
+        assert!(
+            !final_path.to_string_lossy().starts_with(r"\\?\"),
+            "launch path must not carry the extended-length prefix: {}",
+            final_path.display()
+        );
+        assert!(final_path.is_file());
+        drop(handle);
+        let err = open_verified_installer(&path, &"0".repeat(64))
+            .err()
+            .expect("mismatching hash must be rejected");
+        assert!(err.contains("sha256 changed"), "unexpected error: {err}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verified_installer_handle_denies_write_until_dropped() {
+        let dir = config_test_dir("verified-installer-share");
+        let _cleanup = TestDirCleanup::new(dir.clone());
+        let path = dir.join("ZTerm_test_x64-setup.exe");
+        std::fs::write(&path, b"verified installer bytes").unwrap();
+        let sha = file_sha256_hex(&path).unwrap();
+        let (handle, final_path) =
+            open_verified_installer(&path, &sha).expect("matching hash opens");
+        assert!(
+            std::fs::File::open(&final_path).is_ok(),
+            "concurrent readers (including the launcher) must be allowed"
+        );
+        let denied = std::fs::OpenOptions::new().write(true).open(&path);
+        assert!(
+            denied.is_err(),
+            "a writer must be denied while the verified handle is held"
+        );
+        let deleted = std::fs::remove_file(&path);
+        assert!(
+            deleted.is_err(),
+            "deleting the installer must be denied while the verified handle is held"
+        );
+        drop(handle);
+        let allowed = std::fs::OpenOptions::new().write(true).open(&path);
+        assert!(
+            allowed.is_ok(),
+            "the file is writable again after the handle is released"
+        );
+        drop(allowed);
+        drop(_cleanup);
+        assert!(
+            !dir.exists(),
+            "test directory must be removed cleanly after handles drop"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verified_installer_resolves_junction_to_canonical_target() {
+        let dir = config_test_dir("verified-installer-junction");
+        let mut cleanup = TestDirCleanup::new(dir.clone());
+        let real_dir = dir.join("real");
+        let link_dir = dir.join("link");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let real_exe = real_dir.join("ZTerm_test_x64-setup.exe");
+        std::fs::write(&real_exe, b"junction target installer bytes").unwrap();
+        let sha = file_sha256_hex(&real_exe).unwrap();
+
+        let status = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link_dir.to_string_lossy(),
+                &real_dir.to_string_lossy(),
+            ])
+            .status()
+            .expect("spawn mklink /J");
+        assert!(status.success(), "mklink /J failed: {status}");
+        cleanup.junction = Some(link_dir.clone());
+
+        let via_junction = link_dir.join("ZTerm_test_x64-setup.exe");
+        let (handle, final_path) =
+            open_verified_installer(&via_junction, &sha).expect("junction open");
+        let final_str = final_path.to_string_lossy().to_ascii_lowercase();
+        let real_str = real_exe.to_string_lossy().to_ascii_lowercase();
+        assert!(
+            !final_str.starts_with(r"\\?\"),
+            "canonical launch path must strip \\\\?\\ prefix: {final_str}"
+        );
+        assert!(
+            final_str.ends_with(r"\real\zterm_test_x64-setup.exe"),
+            "expected canonical real path ({real_str}), got {final_str}"
+        );
+        drop(handle);
+        drop(cleanup);
+        assert!(
+            !dir.exists(),
+            "junction test directory must be removed cleanly"
+        );
+    }
+
     #[test]
     fn update_proxy_setting_parsing() {
         assert_eq!(configured_update_proxy(&json!({})), None);
@@ -12233,17 +12976,24 @@ mod tests {
     #[test]
     #[ignore = "live network probe (downloads the real installer)"]
     fn update_download_live_probe() {
-        let body = fetch_latest_release().expect("release query failed");
-        let assets = body
-            .get("assets")
-            .and_then(|a| a.as_array())
-            .expect("assets missing");
-        let (name, url, size, sha) = select_setup_asset(assets).expect("no usable asset");
-        println!("asset: {name} size={size}");
-        download_setup_exe(&url, &name, size, &sha).expect("download failed");
-        let p = update_download_dir().join(&name);
+        let proxy = update_proxy_choice().expect("proxy");
+        let http = WinHttpRelease { proxy };
+        let tag = resolve_latest_tag(&http)
+            .expect("release query failed")
+            .expect("no stable release");
+        let asset = resolve_release_asset(&http, &tag)
+            .asset
+            .expect("no usable asset");
+        println!("asset: {} size={}", asset.name, asset.size);
+        download_setup_exe(&asset.url, &asset.name, asset.size, &asset.sha256)
+            .expect("download failed");
+        let p = update_download_dir().join(&asset.name);
         let got = file_sha256_hex(&p).expect("hash");
-        assert_eq!(got.to_lowercase(), sha.to_lowercase(), "sha mismatch");
+        assert_eq!(
+            got.to_lowercase(),
+            asset.sha256.to_lowercase(),
+            "sha mismatch"
+        );
         println!(
             "download live probe ok: {} bytes, sha256 verified",
             std::fs::metadata(&p).unwrap().len()
@@ -13412,6 +14162,22 @@ mod tests {
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), r"\installer.nsh")).unwrap()
     }
 
+    fn installer_nsi_text() -> String {
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), r"\nsis\installer.nsi"))
+            .unwrap()
+    }
+
+    fn installer_uninstall_app_data_block(text: &str) -> &str {
+        let start = text
+            .find("; Delete app data if the checkbox is selected")
+            .expect("uninstall app-data block present");
+        let end = text[start..]
+            .find("\n  ${EndIf}")
+            .map(|offset| start + offset + "\n  ${EndIf}".len())
+            .expect("uninstall app-data block terminated");
+        &text[start..end]
+    }
+
     fn installer_postinstall_macro(text: &str) -> &str {
         let start = text
             .find("!macro NSIS_HOOK_POSTINSTALL")
@@ -13524,6 +14290,62 @@ mod tests {
             postinstall.find("icacls").is_some_and(|at| at > gate),
             "ACL commands run only for per-machine installs"
         );
+    }
+
+    #[test]
+    fn uninstaller_app_data_option_targets_the_real_account_dirs() {
+        let text = installer_nsi_text();
+        let block = installer_uninstall_app_data_block(&text);
+        let gate = block
+            .find("$DeleteAppDataCheckboxState = 1")
+            .expect("checkbox gate");
+        let update_gate = block.find("$UpdateMode <> 1").expect("update gate");
+        let context = block
+            .find("SetShellVarContext current")
+            .expect("current-account context");
+        let appdata = block
+            .find(r#"RmDir /r "$APPDATA\ZTerm""#)
+            .expect("roaming ZTerm data delete");
+        let local = block
+            .find(r#"RmDir /r "$LOCALAPPDATA\ZTerm""#)
+            .expect("local ZTerm data delete");
+        assert!(gate < update_gate && update_gate < context && context < appdata);
+        assert!(appdata < local, "both account data trees are removed");
+        // The bundle identifier cache is still cleared, and a custom dataDir
+        // pointer is never parsed or followed by the uninstaller.
+        assert!(block.contains(r#"RmDir /r "$APPDATA\${BUNDLEID}""#));
+        assert!(block.contains(r#"RmDir /r "$LOCALAPPDATA\${BUNDLEID}""#));
+        assert!(
+            !text.contains("dataDir"),
+            "custom dataDir must stay untouched"
+        );
+        // Safe default: the checkbox starts cleared.
+        assert!(text.contains("${BM_SETCHECK} ${BST_UNCHECKED}"));
+    }
+
+    #[test]
+    fn uninstaller_app_data_label_names_the_scope_and_exclusion() {
+        let chinese = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            r"\installer-languages\SimpChinese.nsh"
+        ))
+        .unwrap();
+        let english = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            r"\installer-languages\English.nsh"
+        ))
+        .unwrap();
+        let chinese_line = chinese
+            .lines()
+            .find(|line| line.contains("LangString deleteAppData"))
+            .expect("deleteAppData line in SimpChinese.nsh");
+        let english_line = english
+            .lines()
+            .find(|line| line.contains("LangString deleteAppData"))
+            .expect("deleteAppData line in English.nsh");
+        assert!(chinese_line.contains("删除当前账户的应用数据（自定义数据目录除外）"));
+        assert!(english_line.contains("current account"));
+        assert!(english_line.contains("custom data directory"));
     }
 
     #[test]

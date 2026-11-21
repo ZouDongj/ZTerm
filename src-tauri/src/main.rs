@@ -7,6 +7,7 @@ mod background_e2e;
 mod execution_trust;
 mod system_animation;
 mod update_http;
+mod update_release;
 mod zterm;
 
 use serde_json::json;

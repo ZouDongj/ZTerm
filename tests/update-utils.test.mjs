@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { countUpdateBlockers } = require('../src/renderer/update-utils.js');
+const { countUpdateBlockers, updateReleasePageUrl } = require('../src/renderer/update-utils.js');
 
 const sshTab = (connected) => ({ id: 't1', type: 'ssh', connected });
 const localTab = { id: 't2', type: 'local', connected: true };
@@ -52,4 +52,41 @@ test('SFTP：仅未 done 且未 cancelled 的传输计入', () => {
 test('混合：SSH + SFTP 同时计数', () => {
     const r = countUpdateBlockers([sshTab(true)], [{ done: false, cancelled: false }], () => []);
     assert.deepEqual(r, { ssh: 1, sftp: 1 });
+});
+
+test('发行页链接：接受本项目 releases 页面', () => {
+    assert.equal(
+        updateReleasePageUrl('https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.4'),
+        'https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.4'
+    );
+    assert.equal(
+        updateReleasePageUrl('https://github.com/ZouDongj/ZTerm/releases/latest'),
+        'https://github.com/ZouDongj/ZTerm/releases/latest'
+    );
+});
+
+test('发行页链接：空值、畸形值与非本仓库地址回退到 latest', () => {
+    const fallback = 'https://github.com/ZouDongj/ZTerm/releases/latest';
+    for (const value of [
+        undefined,
+        null,
+        '',
+        '   ',
+        'http://github.com/ZouDongj/ZTerm/releases/tag/v1.2.4',
+        'https://evil.example/ZouDongj/ZTerm/releases/tag/v1.2.4',
+        'https://github.com/ZouDongj/ZTerm.evil/releases/tag/v1.2.4',
+        'https://github.com/ZouDongj/ZTerm/releases/../../Other/ZTerm',
+        'https://github.com/ZouDongj/ZTerm/releases/%2e%2e/%2e%2e/%2e%2e/attacker/ZTerm/releases',
+        'https://github.com/ZouDongj/ZTerm/releases/.%2e/issues',
+        'https://github.com/ZouDongj/ZTerm/releases/download/v1.2.4/ZTerm_1.2.4_x64-setup.exe',
+        'https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.4?foo=1',
+        'https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.4?',
+        'https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.4#frag',
+        'https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.4#',
+        'https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.4 extra',
+        'https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.4\\..\\evil',
+        'javascript:alert(1)',
+    ]) {
+        assert.equal(updateReleasePageUrl(value), fallback, String(value));
+    }
 });

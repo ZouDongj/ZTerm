@@ -61,9 +61,14 @@ use windows::Win32::Networking::WinHttp::WINHTTP_FLAG_SECURE;
 use windows::Win32::Networking::WinHttp::WINHTTP_INTERNET_SCHEME_HTTPS;
 use windows::Win32::Networking::WinHttp::WINHTTP_OPEN_REQUEST_FLAGS;
 use windows::Win32::Networking::WinHttp::WINHTTP_OPTION_PROXY;
+use windows::Win32::Networking::WinHttp::WINHTTP_OPTION_REDIRECT_POLICY;
+use windows::Win32::Networking::WinHttp::WINHTTP_OPTION_REDIRECT_POLICY_DEFAULT;
+use windows::Win32::Networking::WinHttp::WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
 use windows::Win32::Networking::WinHttp::WINHTTP_PROXY_INFO;
 use windows::Win32::Networking::WinHttp::WINHTTP_QUERY_CONTENT_LENGTH;
+use windows::Win32::Networking::WinHttp::WINHTTP_QUERY_CUSTOM;
 use windows::Win32::Networking::WinHttp::WINHTTP_QUERY_FLAG_NUMBER;
+use windows::Win32::Networking::WinHttp::WINHTTP_QUERY_LOCATION;
 use windows::Win32::Networking::WinHttp::WINHTTP_QUERY_STATUS_CODE;
 
 /// WinHTTP handles are opaque pointers; null means the call failed.
@@ -183,12 +188,6 @@ fn free_winhttp_string(pw: PWSTR) {
             let _ = GlobalFree(Some(HGLOBAL(pw.0 as *mut _)));
         }
     }
-}
-
-pub(crate) fn is_https_url(url: &str) -> bool {
-    crack_url(url)
-        .map(|parts| parts.https && !parts.host.is_empty())
-        .unwrap_or(false)
 }
 
 struct UrlParts {
@@ -503,11 +502,24 @@ fn resolve_auto_proxy(session: Handle, url: &str, host: &str) -> Result<Resolved
     }
 }
 
+/// Response headers the update resolver needs, queried from the completed
+/// WinHTTP response before the body is read so redirects and rate limits can
+/// be classified cleanly.
+#[derive(Debug, Clone, Default)]
+pub struct ResponseHeaders {
+    pub location: Option<String>,
+    pub retry_after: Option<String>,
+    pub rate_limit_reset: Option<String>,
+    pub rate_limit_remaining: Option<String>,
+}
+
 /// Full response of a completed exchange (any status — the caller decides
 /// what counts as an error, e.g. 404 "no releases yet").
+#[derive(Debug)]
 pub struct HttpResponse {
     pub status: u16,
     pub body: Vec<u8>,
+    pub headers: ResponseHeaders,
 }
 
 /// Streaming body for downloads: headers (and proxy authentication) are
@@ -571,13 +583,15 @@ impl HttpStream {
 }
 
 /// Open a GET exchange and carry it through proxy authentication and header
-/// completion. Returns (session, connect, request, status, content_length).
+/// completion. Returns the handles, status, content length, and the headers
+/// the update resolver needs.
 fn send_get(
     url: &str,
     extra_headers: &[(&str, &str)],
     proxy: &ProxyChoice,
     preset: Preset,
-) -> Result<(Handle, Handle, Handle, u16, Option<u64>), HttpFail> {
+    follow_redirects: bool,
+) -> Result<(Handle, Handle, Handle, u16, Option<u64>, ResponseHeaders), HttpFail> {
     let parts = crack_url(url)?;
 
     // Validate/crack the explicit override before opening any handle, so a
@@ -689,6 +703,31 @@ fn send_get(
                 detail: "WinHttpSetOption(PROXY) failed".to_string(),
             });
         }
+        // The release page is probed with redirects disabled so its 302
+        // Location is observable; ordinary API and installer-download calls
+        // keep WinHTTP's default redirect handling (GitHub redirects release
+        // assets to a CDN).
+        let redirect_policy = if follow_redirects {
+            WINHTTP_OPTION_REDIRECT_POLICY_DEFAULT
+        } else {
+            WINHTTP_OPTION_REDIRECT_POLICY_NEVER
+        };
+        let redirect_bytes = redirect_policy.to_le_bytes();
+        if WinHttpSetOption(
+            Some(request),
+            WINHTTP_OPTION_REDIRECT_POLICY,
+            Some(&redirect_bytes),
+        )
+        .is_err()
+        {
+            let _ = WinHttpCloseHandle(request);
+            close_handle(connect);
+            close_handle(session);
+            return Err(HttpFail {
+                tag: "other",
+                detail: "WinHttpSetOption(REDIRECT_POLICY) failed".to_string(),
+            });
+        }
         for (name, value) in extra_headers {
             let line = to_wide(&format!("{name}: {value}\r\n"));
             let _ = WinHttpAddRequestHeaders(
@@ -715,7 +754,21 @@ fn send_get(
             }
         };
         let content_length = query_content_length(request);
-        Ok((session, connect, request, status, content_length))
+        let headers = ResponseHeaders {
+            location: query_header(request, WINHTTP_QUERY_LOCATION, None),
+            retry_after: query_header(request, WINHTTP_QUERY_CUSTOM, Some("Retry-After")),
+            rate_limit_reset: query_header(
+                request,
+                WINHTTP_QUERY_CUSTOM,
+                Some("X-RateLimit-Reset"),
+            ),
+            rate_limit_remaining: query_header(
+                request,
+                WINHTTP_QUERY_CUSTOM,
+                Some("X-RateLimit-Remaining"),
+            ),
+        };
+        Ok((session, connect, request, status, content_length, headers))
     }
 }
 
@@ -823,14 +876,71 @@ fn query_content_length(request: Handle) -> Option<u64> {
         .ok()
 }
 
-/// GET returning the whole body. Used by the release check (small JSON).
-pub fn http_get(
+/// Query one response header. A missing header is not an error: the update
+/// resolver treats every field as optional. The first call sizes the buffer,
+/// the second fills it; WinHTTP returns UTF-16.
+fn query_header(request: Handle, query: u32, name: Option<&str>) -> Option<String> {
+    let name_w = name.map(to_wide);
+    let name_ptr = name_w
+        .as_ref()
+        .map_or(PCWSTR::null(), |w| PCWSTR(w.as_ptr()));
+    let mut size: u32 = 0;
+    // The sizing call normally fails with ERROR_INSUFFICIENT_BUFFER and fills
+    // `size`; that is the success path for a present header. A missing header
+    // leaves `size` at zero.
+    let _ = unsafe {
+        WinHttpQueryHeaders(
+            request,
+            query,
+            name_ptr,
+            None,
+            &mut size,
+            std::ptr::null_mut(),
+        )
+    };
+    if size == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; (size as usize / 2) + 1];
+    let mut filled = (buf.len() * 2) as u32;
+    let ok = unsafe {
+        WinHttpQueryHeaders(
+            request,
+            query,
+            name_ptr,
+            Some(buf.as_mut_ptr() as *mut c_void),
+            &mut filled,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok.is_err() {
+        return None;
+    }
+    let end = (filled as usize / 2).min(buf.len());
+    let value = String::from_utf16_lossy(&buf[..end]);
+    let value = value.trim_matches('\0').trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn http_get_with(
     url: &str,
     extra_headers: &[(&str, &str)],
     proxy: &ProxyChoice,
     preset: Preset,
+    follow_redirects: bool,
 ) -> Result<HttpResponse, HttpFail> {
-    let (status, content_length, mut stream) = http_open_stream(url, extra_headers, proxy, preset)?;
+    let (session, connect, request, status, content_length, headers) =
+        send_get(url, extra_headers, proxy, preset, follow_redirects)?;
+    let mut stream = HttpStream {
+        session,
+        connect,
+        request,
+        deadline: Instant::now() + preset.overall_deadline(),
+    };
     let mut body = Vec::new();
     if let Some(cap) = content_length {
         body.reserve(cap.min(64 * 1024 * 1024) as usize);
@@ -843,7 +953,33 @@ pub fn http_get(
         }
         body.extend_from_slice(&buf[..n]);
     }
-    Ok(HttpResponse { status, body })
+    Ok(HttpResponse {
+        status,
+        body,
+        headers,
+    })
+}
+
+/// GET returning the whole body and following redirects.
+pub fn http_get(
+    url: &str,
+    extra_headers: &[(&str, &str)],
+    proxy: &ProxyChoice,
+    preset: Preset,
+) -> Result<HttpResponse, HttpFail> {
+    http_get_with(url, extra_headers, proxy, preset, true)
+}
+
+/// GET that stops at the first response, exposing 3xx status and Location.
+/// Used to resolve the latest stable release from GitHub's release-page
+/// redirect without spending the API rate-limit budget.
+pub fn http_get_no_redirect(
+    url: &str,
+    extra_headers: &[(&str, &str)],
+    proxy: &ProxyChoice,
+    preset: Preset,
+) -> Result<HttpResponse, HttpFail> {
+    http_get_with(url, extra_headers, proxy, preset, false)
 }
 
 /// GET returning a streaming body for large downloads.
@@ -853,8 +989,8 @@ pub fn http_open_stream(
     proxy: &ProxyChoice,
     preset: Preset,
 ) -> Result<(u16, Option<u64>, HttpStream), HttpFail> {
-    let (session, connect, request, status, content_length) =
-        send_get(url, extra_headers, proxy, preset)?;
+    let (session, connect, request, status, content_length, _headers) =
+        send_get(url, extra_headers, proxy, preset, true)?;
     let deadline = Instant::now() + preset.overall_deadline();
     Ok((
         status,
@@ -1198,6 +1334,201 @@ mod tests {
             Preset::Download.overall_deadline(),
             Duration::from_secs(300)
         );
+    }
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    struct ProxyServer {
+        addr: std::net::SocketAddr,
+        join: Option<thread::JoinHandle<Vec<String>>>,
+    }
+
+    impl ProxyServer {
+        fn start(responses: Vec<String>) -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback proxy");
+            let addr = listener.local_addr().expect("loopback addr");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let join = thread::spawn(move || {
+                let mut requests = Vec::new();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                for response in responses {
+                    loop {
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                // Windows inherits non-blocking mode from the
+                                // listening socket; restore blocking mode so
+                                // read() actually waits up to the read timeout.
+                                stream.set_nonblocking(false).expect("blocking stream");
+                                stream
+                                    .set_read_timeout(Some(Duration::from_secs(5)))
+                                    .expect("read timeout");
+                                let mut buf = [0u8; 16 * 1024];
+                                let mut request = Vec::new();
+                                loop {
+                                    match stream.read(&mut buf) {
+                                        Ok(0) => break,
+                                        Ok(n) => {
+                                            request.extend_from_slice(&buf[..n]);
+                                            if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                                                break;
+                                            }
+                                        }
+                                        Err(e)
+                                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                                        {
+                                            break
+                                        }
+                                        Err(e) => panic!("proxy read failed: {e}"),
+                                    }
+                                }
+                                requests.push(String::from_utf8_lossy(&request).into_owned());
+                                stream.write_all(response.as_bytes()).expect("proxy write");
+                                stream.flush().expect("proxy flush");
+                                break;
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                if Instant::now() >= deadline {
+                                    panic!("loopback proxy timed out waiting for a request");
+                                }
+                                thread::sleep(Duration::from_millis(10));
+                            }
+                            Err(e) => panic!("proxy accept failed: {e}"),
+                        }
+                    }
+                }
+                requests
+            });
+            Self {
+                addr,
+                join: Some(join),
+            }
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}", self.addr)
+        }
+
+        fn finish(mut self) -> Vec<String> {
+            self.join
+                .take()
+                .expect("proxy thread")
+                .join()
+                .expect("proxy")
+        }
+    }
+
+    fn proxy_response(status: &str, headers: &[(&str, &str)], body: &str) -> String {
+        let mut response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            body.len()
+        );
+        for (name, value) in headers {
+            response.push_str(&format!("{name}: {value}\r\n"));
+        }
+        response.push_str("\r\n");
+        response.push_str(body);
+        response
+    }
+
+    #[test]
+    fn no_redirect_exposes_location_without_following() {
+        let server = ProxyServer::start(vec![proxy_response(
+            "302 Found",
+            &[(
+                "Location",
+                "http://updates.fixture.invalid/releases/tag/v1.2.4",
+            )],
+            "",
+        )]);
+        let response = http_get_no_redirect(
+            "http://updates.fixture.invalid/releases/latest",
+            &[],
+            &ProxyChoice::Explicit(server.url()),
+            Preset::Check,
+        )
+        .expect("302 response");
+        assert_eq!(response.status, 302);
+        assert_eq!(
+            response.headers.location.as_deref(),
+            Some("http://updates.fixture.invalid/releases/tag/v1.2.4")
+        );
+        let requests = server.finish();
+        assert_eq!(requests.len(), 1, "no-redirect must not issue a second GET");
+        assert!(requests[0].contains("releases/latest"));
+    }
+
+    #[test]
+    fn default_redirect_policy_follows_302() {
+        let server = ProxyServer::start(vec![
+            proxy_response(
+                "302 Found",
+                &[("Location", "http://updates.fixture.invalid/final")],
+                "",
+            ),
+            proxy_response("200 OK", &[], "ok"),
+        ]);
+        let response = http_get(
+            "http://updates.fixture.invalid/releases/latest",
+            &[],
+            &ProxyChoice::Explicit(server.url()),
+            Preset::Check,
+        )
+        .expect("followed response");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
+        let requests = server.finish();
+        assert_eq!(requests.len(), 2, "redirect target must be requested");
+        assert!(requests[1].contains("updates.fixture.invalid/final"));
+    }
+
+    #[test]
+    fn rate_limit_headers_are_exposed() {
+        let server = ProxyServer::start(vec![proxy_response(
+            "403 Forbidden",
+            &[
+                ("X-RateLimit-Remaining", "0"),
+                ("X-RateLimit-Reset", "1730000000"),
+            ],
+            r#"{"message":"API rate limit exceeded"}"#,
+        )]);
+        let response = http_get_no_redirect(
+            "http://updates.fixture.invalid/releases/latest",
+            &[],
+            &ProxyChoice::Explicit(server.url()),
+            Preset::Check,
+        )
+        .expect("403 response");
+        assert_eq!(response.status, 403);
+        assert_eq!(response.headers.rate_limit_remaining.as_deref(), Some("0"));
+        assert_eq!(
+            response.headers.rate_limit_reset.as_deref(),
+            Some("1730000000")
+        );
+        let _ = server.finish();
+    }
+
+    #[test]
+    fn retry_after_header_is_exposed() {
+        let server = ProxyServer::start(vec![proxy_response(
+            "429 Too Many Requests",
+            &[("Retry-After", "120")],
+            "",
+        )]);
+        let response = http_get_no_redirect(
+            "http://updates.fixture.invalid/releases/latest",
+            &[],
+            &ProxyChoice::Explicit(server.url()),
+            Preset::Check,
+        )
+        .expect("429 response");
+        assert_eq!(response.status, 429);
+        assert_eq!(response.headers.retry_after.as_deref(), Some("120"));
+        let _ = server.finish();
     }
 
     /// Live-network smoke probe for the WinHTTP stack (direct or whatever

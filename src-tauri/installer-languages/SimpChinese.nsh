@@ -1,9 +1,10 @@
 ; ZTerm copy of the tauri-bundler NSIS language file (SimpChinese).
 ; Source: tauri-bundler 2.9.4 languages/SimpChinese.nsh, embedded in
-; @tauri-apps/cli 2.11.4. Only dontUninstall and
-; olderOrUnknownVersionInstalled are reworded to present installing
-; over an existing version as an in-place upgrade that keeps user
-; data (issue #20). Re-sync with upstream when upgrading the CLI.
+; @tauri-apps/cli 2.11.4. dontUninstall and olderOrUnknownVersionInstalled
+; are reworded to present installing over an existing version as an in-place
+; upgrade that keeps user data (issue #20), and deleteAppData clarifies
+; current-account scope (excluding custom data directories). Re-sync with
+; upstream when upgrading the CLI.
 ; Length budget: the reinstall page shows these in a fixed 24u label
 ; (~2 full CJK lines; installer.nsi NSD_CreateLabel 0 0 100% 24u). The
 ; first rewording overflowed it and clipped the last line's bottoms —
@@ -34,4 +35,4 @@ LangString webview2DownloadSuccess ${LANG_SIMPCHINESE} "WebView2 引导程序下
 LangString webview2Downloading ${LANG_SIMPCHINESE} "正在下载 WebView2 引导程序..."
 LangString webview2InstallError ${LANG_SIMPCHINESE} "错误：安装 WebView2 时失败，错误代码：$1"
 LangString webview2InstallSuccess ${LANG_SIMPCHINESE} "成功安装 WebView2"
-LangString deleteAppData ${LANG_SIMPCHINESE} "删除应用程序数据"
+LangString deleteAppData ${LANG_SIMPCHINESE} "删除当前账户的应用数据（自定义数据目录除外）"
