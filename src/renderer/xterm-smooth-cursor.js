@@ -142,6 +142,17 @@
     let smoothEnabled = options?.smooth !== false;
     let cursorStyle = options?.cursorStyle === 'block' ? 'block'
       : options?.cursorStyle === 'underline' ? 'underline' : 'bar';
+    // DECSCUSR updates the terminal option directly (not through this
+    // adapter). Follow it so the drawn caret keeps the app-requested shape.
+    const optionsService = terminal._core?.optionsService || terminal.optionsService;
+    if (typeof optionsService?.onSpecificOptionChange === 'function') {
+      addSubscription(optionsService.onSpecificOptionChange('cursorStyle', value => {
+        if (disposed || value === cursorStyle) return;
+        if (value !== 'bar' && value !== 'block' && value !== 'underline') return;
+        cursorStyle = value;
+        scheduleContinuation();
+      }));
+    }
     let continuationQueued = false;
     // Continuation render scope. 'full' re-renders the whole viewport on
     // every animation frame; 'cursor' re-renders only the rows the caret
@@ -551,16 +562,88 @@
       lastRestoreRow: null,
     };
 
+    // Protocol-cursor decision shared by readCursor and the ownership mirror.
+    // Pure: callers that only need the decision must not revoke or clear.
+    function protocolCursorDrawable() {
+      const active = terminal.buffer.active;
+      const viewportY = finite(active.viewportY, terminal._core?.buffer?.ydisp);
+      const y = active.baseY + active.cursorY - viewportY;
+      const initialized = renderer._coreService.isCursorInitialized !== false;
+      const hidden = renderer._coreService.isCursorHidden === true;
+      const focused = renderer._coreBrowserService.isFocused === true;
+      return {
+        initialized,
+        hidden,
+        focused,
+        y,
+        drawable: initialized && !hidden && focused && y >= 0 && y < terminal.rows,
+      };
+    }
+
+    // Draw-time ownership without mutating any cursor state. This mirrors the
+    // predicate the base pass uses (enabled && readCursor().drawable), but
+    // only the reachable protocol path: clearSoftwareVisual runs after revoke
+    // cleared the software source, or while an unparsed chunk suspends drawing.
+    // The software branches therefore never apply here; including them would
+    // make the mirror approximate a decision it cannot reach. readCursor
+    // itself may revoke or clear, so callers that only need the decision
+    // cannot call it.
+    function cursorDrawable() {
+      if (renderer._cursorBlinkStateManager?.value?.isCursorVisible === false) return false;
+      if (sw.enqueued > sw.watermark) return false;
+      return protocolCursorDrawable().drawable;
+    }
+
+    function currentlyOwnsCursor() {
+      return enabled && cursorDrawable();
+    }
+
     function clearSoftwareVisual() {
       if (sw.lastRestoreRow === null) return;
       const staleRows = new Set([sw.lastRestoreRow, lastDrawnRow]);
       sw.lastRestoreRow = null;
       lastDrawnRow = null;
       instrumentation.customDrawSource = 'none';
-      for (const stale of staleRows) {
-        if (stale !== null) {
-          try { originalRenderRows.call(renderer, stale, stale); } catch (error) { /* mid-dispose */ }
+      // A base-row repaint must not draw the protocol cursor underneath the
+      // caret this adapter is about to draw. Ownership is evaluated at the
+      // call site: revoke may already have released the software source but
+      // still own the protocol cursor. A teardown race must leave the native
+      // cursor state alone rather than break the observer's data path.
+      const coreService = renderer._coreService;
+      const hiddenBefore = coreService?.isCursorHidden;
+      let ownsCursor = false;
+      try {
+        ownsCursor = currentlyOwnsCursor();
+      } catch (error) {
+        /* mid-dispose: an ownership probe failure is not ownership */
+      }
+      if (ownsCursor && coreService) coreService.isCursorHidden = true;
+      try {
+        for (const stale of staleRows) {
+          if (stale !== null) {
+            try { originalRenderRows.call(renderer, stale, stale); } catch (error) { /* mid-dispose */ }
+          }
         }
+      } finally {
+        if (ownsCursor && coreService) coreService.isCursorHidden = hiddenBefore;
+      }
+    }
+
+    // The IME textarea must follow the trusted software caret even when the
+    // ink app moves only its painted caret (no protocol cursorMove). Reuse the
+    // patched _syncTextArea: it anchors at perceivedCaretCell or falls back to
+    // the stock protocol cursor, and it is cheap (no composition-view rect).
+    function syncIdleTextarea() {
+      if (disposed) return false;
+      const core = terminal._core;
+      if (!core || core._compositionHelper?.isComposing === true) return false;
+      if (typeof core._syncTextArea !== 'function') return false;
+      try {
+        core._syncTextArea();
+        return true;
+      } catch (error) {
+        /* mid-dispose: the textarea is already gone */
+        return false;
       }
     }
 
@@ -574,6 +657,7 @@
       snapBeforeNextDraw = true;
       instrumentation.softwareCaret = { active: false, reason };
       clearSoftwareVisual();
+      syncIdleTextarea();
       scheduleContinuation();
     }
 
@@ -667,6 +751,7 @@
         // real parse front and break the checkpoint binding.
         if (typeof seq === 'number' && seq > sw.watermark && seq <= sw.enqueued) sw.watermark = seq;
         if (sw.enqueued > sw.watermark) return;
+        let publishedChanged = false;
         if (sw.pending && sw.pending.chunkSeq <= sw.watermark && sw.candidateGeneration === sw.generation) {
           if (!softwareCellMatches(sw.pending)) {
             revokeSoftware('candidate-cell-mismatch');
@@ -674,15 +759,18 @@
           }
           sw.published = sw.pending;
           sw.pending = null;
+          publishedChanged = true;
           if (sw.runStreak >= 2 && !sw.active) {
             sw.active = true;
             snapBeforeNextDraw = true; // source switch never flies from the protocol anchor
             instrumentation.softwareCaret = { active: true, since: clock() };
           }
         }
+        if (sw.active && publishedChanged) syncIdleTextarea();
         if (sw.active) scheduleContinuation();
       },
       invalidate(reason) {
+        if (disposed) return;
         sw.generation += 1;
         // Coordinate space changed: write evidence from before the boundary
         // would classify against cells that no longer mean the same thing.
@@ -731,6 +819,21 @@
       const coreService = renderer._coreService;
       const previousHidden = coreService.isCursorHidden;
       if (ownsCursor) coreService.isCursorHidden = true;
+
+      // Clearing a stale caret row must never let the native cursor paint:
+      // the custom caret still owns it, and stock renderRows would draw the
+      // protocol cursor on the row just vacated (a one-frame native flash).
+      const renderStaleRow = stale => {
+        const hiddenBefore = coreService.isCursorHidden;
+        if (ownsCursor) coreService.isCursorHidden = true;
+        try {
+          originalRenderRows.call(renderer, stale, stale);
+        } catch (error) {
+          /* mid-dispose: nothing to clear */
+        } finally {
+          if (ownsCursor) coreService.isCursorHidden = hiddenBefore;
+        }
+      };
       instrumentation.drawPassStatus = 'base';
       instrumentation.customDrawSource = 'none';
       try {
@@ -816,27 +919,21 @@
         const currentRow = Math.floor(finite(visual?.y, lastDrawnRow));
         for (const stale of [Math.floor(lastDrawnRow), Math.floor(lastDrawnRow) + 1]) {
           if (stale !== currentRow && stale !== currentRow + 1) {
-            try {
-              originalRenderRows.call(renderer, stale, stale);
-            } catch (error) {
-              /* mid-dispose: nothing to clear */
-            }
+            renderStaleRow(stale);
           }
         }
       }
       if (sw.active && cursorBeforeBase.software) {
         const restoreRow = cursorBeforeBase.y;
         if (sw.lastRestoreRow !== null && Math.floor(sw.lastRestoreRow) !== Math.floor(restoreRow)) {
-          try {
-            originalRenderRows.call(renderer, Math.floor(sw.lastRestoreRow), Math.floor(sw.lastRestoreRow));
-          } catch (error) { /* mid-dispose */ }
+          renderStaleRow(Math.floor(sw.lastRestoreRow));
         }
         drawRestoreCell(cursorBeforeBase);
         sw.lastRestoreRow = restoreRow;
       } else if (sw.lastRestoreRow !== null) {
         const stale = Math.floor(sw.lastRestoreRow);
         sw.lastRestoreRow = null;
-        try { originalRenderRows.call(renderer, stale, stale); } catch (error) { /* mid-dispose */ }
+        renderStaleRow(stale);
       }
       drawCursor(cursorBeforeBase, visual);
       lastDrawnRow = Math.floor(finite(visual?.y, 0));
@@ -948,6 +1045,10 @@
         return { drawable: false };
       }
       if (sw.enqueued > sw.watermark) {
+        // The uncommitted chunk's base display is native-owned. Clear the
+        // stale software overlay without suppressing the protocol cursor:
+        // currentlyOwnsCursor() sees the suspension and returns false here,
+        // so this branch is only a visual cleanup, not a takeover.
         clearSoftwareVisual();
         // The base renderer alone owns the uncommitted display. In
         // particular, a visible protocol cursor must not become a second
@@ -998,8 +1099,7 @@
       }
       const active = terminal.buffer.active;
       const absoluteY = active.baseY + active.cursorY;
-      const viewportY = finite(active.viewportY, terminal._core?.buffer?.ydisp);
-      const y = absoluteY - viewportY;
+      const protocol = protocolCursorDrawable();
       let x = Math.max(0, Math.min(terminal.cols - 1, active.cursorX));
       const publicLine = active.getLine?.(absoluteY);
       let publicCell = publicLine?.getCell?.(x);
@@ -1008,18 +1108,15 @@
         publicCell = publicLine.getCell(x);
       }
       const width = Math.max(1, finite(publicCell?.getWidth?.(), 1));
-      const initialized = renderer._coreService.isCursorInitialized !== false;
-      const hidden = renderer._coreService.isCursorHidden === true;
-      const focused = renderer._coreBrowserService.isFocused === true;
       return {
         x,
-        y,
+        y: protocol.y,
         absoluteY,
         width,
-        initialized,
-        hidden,
-        focused,
-        drawable: initialized && !hidden && focused && y >= 0 && y < terminal.rows,
+        initialized: protocol.initialized,
+        hidden: protocol.hidden,
+        focused: protocol.focused,
+        drawable: protocol.drawable,
       };
     }
 
@@ -1491,6 +1588,7 @@
               'cell-overwritten', 'candidate-cell-mismatch', 'out-of-range', 'buffer-switch',
               'invalidate:scroll', 'invalidate:resize', 'invalidate:session-reset',
               'invalidate:observer:resize', 'invalidate:observer:unmodeled-coordinate-change',
+              'invalidate:observer:decom', 'decom',
             ].includes(instrumentation.softwareCaret?.reason) ? instrumentation.softwareCaret.reason : null,
           },
           scheduler: instrumentation.scheduler,
@@ -1520,9 +1618,10 @@
         diagnostic.held = false;
         diagnostic.remaining = 0;
         renderer.renderRows = originalRenderRows;
-        // terminal.options.cursorStyle is always the user's current style —
-        // written by setCursorStyle or by the caller before retiring the
-        // adapter (context loss) — so disposal must not roll it back.
+        // terminal.options.cursorStyle is the live style — either the user's
+        // default or an app's explicit DECSCUSR — and the caller owns it when
+        // retiring the adapter (context loss), so disposal must not roll it
+        // back.
         for (const subscription of subscriptions.splice(0)) subscription.dispose();
         motion.dispose();
         renderer._requestRedrawViewport();

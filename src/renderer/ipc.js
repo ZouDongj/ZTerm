@@ -238,12 +238,24 @@ function _inkFeed(owner, tab, pane, data) {
         // a reconnect. No-op for genuinely fresh adapters/sessions.
         port?.rebindObserver?.();
         const buffer = liveTerm?.buffer?.active;
+        const coreBuffer = liveTerm?._core?._bufferService?.buffer;
+        const normal = liveTerm?._core?._bufferService?.buffers?.normal;
+        const originMode = liveTerm?._core?.coreService?.decPrivateModes?.origin === true;
         owner._inkObserver = factory({
             rows: liveTerm?.rows,
             cols: liveTerm?.cols,
             row: (buffer?.cursorY || 0) + 1,
             col: (buffer?.cursorX || 0) + 1,
             pendingWrap: !!liveTerm && buffer?.cursorX === liveTerm.cols,
+            // A rebuilt observer starts from the real terminal state. Under
+            // DECOM its coordinates are intentionally unknown (fail closed).
+            scrollTop: coreBuffer?.scrollTop,
+            scrollBottom: coreBuffer?.scrollBottom,
+            normalScrollTop: normal?.scrollTop,
+            normalScrollBottom: normal?.scrollBottom,
+            originMode,
+            bufferType: buffer?.type,
+            positionKnown: !originMode,
             onCandidate: c => port?.candidate(c),
             onUnit: u => port?.unit(u),
             onChunkWrites: w => { owner._inkWrites = w; port?.chunkWrites?.(w); },

@@ -137,6 +137,10 @@
         return emit(text);
       }
       if (text === SYNC_BEGIN) {
+        // A nested begin is ordinary in-band data: keep the current block so
+        // its buffered prefix stays ahead of this marker (dropping the block
+        // would reorder the stream and lose already-received output).
+        if (inSync) return emit(text);
         inSync = true;
         block = [];
         return text;

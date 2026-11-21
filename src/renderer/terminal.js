@@ -746,16 +746,12 @@ function _attachWebglRenderer(holder, term, opts) {
         rec.lastRetryResult = holder._smoothCursor?._adapter ? 'attached' : 'attached-no-adapter';
         rec.lastRetryError = null;
     }
-    // Re-sync settings the wrapper would have received while detached (its
-    // setOptions also writes term.options, which hot-reload skips for
-    // adapter-less holders).
+    // Only animations need re-syncing. Cursor style and blink are read from
+    // the live term.options, so an app-owned DECSCUSR survives re-attach;
+    // settings.js already writes those options for every tab and pane term.
     if (holder._smoothCursor) {
         try {
-            holder._smoothCursor.setOptions({
-                animations: _settingsConfig.animations,
-                cursorBlink: _settingsConfig.cursorBlink === true,
-                cursorStyle: _settingsConfig.cursor || 'bar',
-            });
+            holder._smoothCursor.setOptions({ animations: _settingsConfig.animations });
         } catch (e) {}
     }
     // Repaint through the new renderer in this frame — both renderers draw
@@ -1266,6 +1262,15 @@ function _tryWin32CtrlJ(term, e) {
 // must not break terminal creation. perceivedCaret is looked up lazily
 // because the smooth-cursor adapter is only created after term.open().
 function _installTerminalBehavior(term, perceivedCaret) {
+    try {
+        const install = window.ZTermCursorStyleDefaults?.installCursorStyleDefaults;
+        if (install) {
+            term._cursorStyleDefaults = install(term, {
+                cursorStyle: term.options.cursorStyle,
+                cursorBlink: term.options.cursorBlink,
+            });
+        }
+    } catch(e) { console.warn('cursor style defaults install failed:', e); }
     try { window.__unicodeWidth?.installOn(term); } catch(e) { console.warn('unicode width install failed:', e); }
     try { window.__imeCaretAnchor?.patchTerminal(term, { perceivedCaret }); } catch(e) { console.warn('IME anchor patch failed:', e); }
 }

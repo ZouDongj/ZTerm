@@ -19,18 +19,26 @@ const require = createRequire(import.meta.url);
 const api = require('../src/renderer/ime-caret-anchor.js');
 
 function fakeTerm({ withHelper = true, withOnWillOpen = false } = {}) {
-    const calls = { sync: 0, update: [] };
+    const calls = { sync: 0, update: [], rects: 0 };
     const listeners = [];
+    const view = {
+        style: {},
+        getBoundingClientRect() {
+            calls.rects += 1;
+            return { width: 50, height: 18 };
+        },
+    };
     const core = {
         coreService: { isCursorHidden: false },
         options: { fontFamily: 'TestMono', fontSize: 16 },
         textarea: { style: {} },
         _renderService: { dimensions: { css: { cell: { width: 8, height: 18 } } } },
-        _compositionView: { style: {}, getBoundingClientRect: () => ({ width: 50, height: 18 }) },
+        _compositionView: view,
         _syncTextArea() { calls.sync += 1; },
     };
     if (withHelper) {
         core._compositionHelper = {
+            isComposing: false,
             updateCompositionElements(dontRecurse) { calls.update.push(dontRecurse); },
         };
     }
@@ -44,10 +52,22 @@ function fakeTerm({ withHelper = true, withOnWillOpen = false } = {}) {
     return { term: { _core: core }, core, calls, listeners, fireWillOpen };
 }
 
+test('idle composition guard reads the public isComposing getter', () => {
+    const { term, core, calls } = fakeTerm();
+    core._compositionHelper._isComposing = true;
+    Object.defineProperty(core._compositionHelper, 'isComposing', { get: () => false });
+    core.coreService.isCursorHidden = true;
+    core.__imeAnchorPerceivedCaret = () => ({ x: 2, y: 1 });
+    assert.equal(api.patchTerminal(term), true);
+    core._compositionHelper.updateCompositionElements(true);
+    assert.equal(calls.rects, 0, 'composing must return before touching the composition view');
+});
+
 test('visible cursor: both anchors delegate to xterm', () => {
     const { term, core, calls } = fakeTerm();
     assert.equal(api.patchTerminal(term), true);
     core._syncTextArea();
+    core._compositionHelper.isComposing = true;
     core._compositionHelper.updateCompositionElements(true);
     assert.equal(calls.sync, 1);
     assert.deepEqual(calls.update, [true]);
@@ -58,6 +78,7 @@ test('hidden cursor without a perceived caret: stock protocol anchoring', () => 
     assert.equal(api.patchTerminal(term), true);
     core.coreService.isCursorHidden = true;
     core._syncTextArea();
+    core._compositionHelper.isComposing = true;
     core._compositionHelper.updateCompositionElements(true);
     assert.equal(calls.sync, 1, 'no caret -> stock protocol anchoring (probe: it tracks the insertion point)');
     assert.deepEqual(calls.update, [true]);
@@ -74,10 +95,43 @@ test('hidden cursor + perceived caret: textarea anchors at the caret cell', () =
     });
 });
 
+test('hidden cursor + perceived caret: idle renders do not reflow or resize', () => {
+    const { term, core, calls } = fakeTerm();
+    assert.equal(api.patchTerminal(term, { perceivedCaret: () => ({ x: 2, y: 1 }) }), true);
+    core.coreService.isCursorHidden = true;
+    core.textarea.style.width = '24px';
+    core.textarea.style.height = '18px';
+    core._compositionHelper.updateCompositionElements();
+    core._compositionHelper.updateCompositionElements();
+    assert.equal(calls.rects, 0, 'stock skips updateCompositionElements while not composing');
+    assert.equal(core.textarea.style.width, '24px', 'idle textarea width must not be rewritten');
+    assert.equal(core.textarea.style.height, '18px', 'idle textarea height must not be rewritten');
+});
+
+test('hidden cursor + perceived caret: sync skips while composing', () => {
+    const { term, core } = fakeTerm();
+    assert.equal(api.patchTerminal(term, { perceivedCaret: () => ({ x: 4, y: 2, width: 1 }) }), true);
+    core.coreService.isCursorHidden = true;
+    core._compositionHelper.isComposing = true;
+    core._syncTextArea();
+    assert.deepEqual(core.textarea.style, {}, 'stock _syncTextArea returns while composing');
+});
+
+test('hidden cursor + perceived caret: sync anchors while not composing', () => {
+    const { term, core, calls } = fakeTerm();
+    assert.equal(api.patchTerminal(term, { perceivedCaret: () => ({ x: 4, y: 2, width: 1 }) }), true);
+    core.coreService.isCursorHidden = true;
+    core._syncTextArea();
+    assert.equal(calls.sync, 0, 'perceived caret owns the textarea');
+    assert.equal(core.textarea.style.left, '32px', 'TSF reads this rect when composition starts');
+    assert.equal(core.textarea.style.top, '36px');
+});
+
 test('hidden cursor + perceived caret: composition view anchors at the caret cell', () => {
     const { term, core, calls } = fakeTerm();
     assert.equal(api.patchTerminal(term, { perceivedCaret: () => ({ x: 2, y: 7 }) }), true);
     core.coreService.isCursorHidden = true;
+    core._compositionHelper.isComposing = true;
     core._compositionHelper.updateCompositionElements(true);
     assert.deepEqual(calls.update, [], 'stock composition anchoring stays skipped while hidden');
     assert.equal(core._compositionView.style.left, '16px');
@@ -111,6 +165,7 @@ test('provider is read dynamically: swap and broken providers', async () => {
     assert.equal(calls.sync, 3);
     // composition wrapper re-anchors once async when dontRecurse is falsy
     let anchorCount = 0;
+    core._compositionHelper.isComposing = true;
     core.__imeAnchorPerceivedCaret = () => { anchorCount += 1; return { x: 0, y: 0, width: 1 }; };
     core._compositionHelper.updateCompositionElements();
     assert.equal(anchorCount, 1);
@@ -128,6 +183,7 @@ test('pre-open install: sync guard is immediate, helper patch defers to onWillOp
     assert.equal(core.textarea.style.left, '32px', 'caret anchoring works before open too');
     // open() creates the helper, then fires onWillOpen
     core._compositionHelper = {
+        isComposing: true,
         updateCompositionElements(dontRecurse) { calls.update.push(dontRecurse); },
     };
     fireWillOpen();
@@ -152,5 +208,13 @@ test('changed xterm internals: loud false, no throw', () => {
     assert.equal(api.patchTerminal(null, { warn }), false);
     assert.equal(api.patchTerminal({ _core: {} }, { warn }), false);
     assert.equal(api.patchTerminal({ _core: { coreService: { isCursorHidden: true }, _compositionHelper: {} } }, { warn }), false);
-    assert.equal(warnings.length, 3);
+    // Missing boolean isComposing on CompositionHelper must also fail loudly.
+    assert.equal(api.patchTerminal({
+        _core: {
+            _syncTextArea() {},
+            coreService: { isCursorHidden: false },
+            _compositionHelper: { updateCompositionElements() {} },
+        },
+    }, { warn }), false);
+    assert.equal(warnings.length, 4);
 });

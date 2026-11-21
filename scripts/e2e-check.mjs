@@ -1313,14 +1313,43 @@ async function main() {
       // textarea must anchor at the software cursor cell, not the protocol park position.
       const prevProvider = core?.__imeAnchorPerceivedCaret;
       let p4 = null;
+      let idle = null;
       if (core && cell) {
         core.__imeAnchorPerceivedCaret = () => ({ x: 15, y: 5, width: 1 });
         await write('\\u001b[?25l\\u001b[22;30H');
         p4 = pos();
-        core.__imeAnchorPerceivedCaret = prevProvider;
-        await write('\\u001b[?25h');
+        // Idle render: stock updateCompositionElements returns before layout
+        // while not composing. Without that guard every onRender re-reads a
+        // 0x0 idle composition view and rewrites the textarea to 1px.
+        const helper = core._compositionHelper;
+        const view = core._compositionView;
+        try {
+          if (helper && view && typeof view.getBoundingClientRect === 'function') {
+            const prevRect = view.getBoundingClientRect;
+            const width = term.textarea.style.width;
+            const height = term.textarea.style.height;
+            let rects = 0;
+            view.getBoundingClientRect = function () {
+              rects += 1;
+              return prevRect.call(this);
+            };
+            try {
+              helper.updateCompositionElements();
+              helper.updateCompositionElements();
+            } finally {
+              view.getBoundingClientRect = prevRect;
+            }
+            idle = { rects, width, height,
+              widthAfter: term.textarea.style.width,
+              heightAfter: term.textarea.style.height,
+              composing: helper.isComposing === true };
+          }
+        } finally {
+          core.__imeAnchorPerceivedCaret = prevProvider;
+          await write('\\u001b[?25h');
+        }
       }
-      return { ok: true, p1, p2, p3, p4,
+      return { ok: true, p1, p2, p3, p4, idle,
         e1: px(9, 9), e2: px(39, 19), e3: px(11, 11), e4: px(15, 5),
         hiddenKnown: typeof core?.coreService?.isCursorHidden === 'boolean' };
     })()`);
@@ -1335,8 +1364,55 @@ async function main() {
         && nearPx(imeProbe.p1.left, imeProbe.e1.left) && nearPx(imeProbe.p1.top, imeProbe.e1.top)
         && nearPx(imeProbe.p2.left, imeProbe.e2.left) && nearPx(imeProbe.p2.top, imeProbe.e2.top)
         && nearPx(imeProbe.p3.left, imeProbe.e3.left) && nearPx(imeProbe.p3.top, imeProbe.e3.top)
-        && imeProbe.p4 !== null && nearPx(imeProbe.p4.left, imeProbe.e4.left) && nearPx(imeProbe.p4.top, imeProbe.e4.top),
+        && imeProbe.p4 !== null && nearPx(imeProbe.p4.left, imeProbe.e4.left) && nearPx(imeProbe.p4.top, imeProbe.e4.top)
+        && imeProbe.idle !== null && imeProbe.idle.composing === false
+        && imeProbe.idle.rects === 0
+        && imeProbe.idle.width === imeProbe.idle.widthAfter
+        && imeProbe.idle.height === imeProbe.idle.heightAfter,
       JSON.stringify(imeProbe));
+
+    // DECSCUSR changes the terminal option directly; the WebGL smooth-cursor
+    // adapter must redraw with the app-requested shape, not keep the value it
+    // snapshotted at construction.
+    const decscusrProbe = await cdp.eval(`(async () => {
+      const pane = getAllPanes(TabManager.getActive())[0];
+      const term = pane?.term;
+      const adapter = pane?._smoothCursor?._adapter;
+      if (!term || !adapter?.snapshot) return { ok: false, why: 'no-adapter' };
+      const write = s => new Promise(r => term.write(s, r));
+      const previous = term.options.cursorStyle;
+      const previousBlink = term.options.cursorBlink;
+      const user = term._cursorStyleDefaults?.snapshot?.() || null;
+      let underline, bar, oppositeBlink, defaultStyle, defaultBlink, defaultAdapter;
+      try {
+        await write('\\u001b[3 q');
+        underline = adapter.snapshot().cursorStyle;
+        await write('\\u001b[5 q');
+        bar = adapter.snapshot().cursorStyle;
+        // Pick a DECSCUSR shape whose blink opposes the user's configured
+        // blink so CSI 0 SP q proves both shape and blink restoration.
+        await write(user?.cursorBlink ? '\\u001b[4 q' : '\\u001b[3 q');
+        oppositeBlink = term.options.cursorBlink;
+        await write('\\u001b[0 q');
+        defaultStyle = term.options.cursorStyle;
+        defaultBlink = term.options.cursorBlink;
+        defaultAdapter = adapter.snapshot().cursorStyle;
+      } finally {
+        await write(previous === 'underline' ? '\\u001b[3 q' : previous === 'block' ? '\\u001b[1 q' : '\\u001b[5 q');
+        term.options.cursorBlink = previousBlink;
+      }
+      const blinkAfter = term.options.cursorBlink;
+      return { ok: true, underline, bar, oppositeBlink, previous, previousBlink, user, defaultStyle, defaultBlink, defaultAdapter, blinkAfter };
+    })()`);
+    check('WebGL smooth cursor follows DECSCUSR shape',
+      decscusrProbe.ok === true && decscusrProbe.underline === 'underline' && decscusrProbe.bar === 'bar'
+        && decscusrProbe.user !== null
+        && decscusrProbe.oppositeBlink === !decscusrProbe.user.cursorBlink
+        && decscusrProbe.defaultStyle === decscusrProbe.user.cursorStyle
+        && decscusrProbe.defaultBlink === decscusrProbe.user.cursorBlink
+        && decscusrProbe.defaultAdapter === decscusrProbe.user.cursorStyle
+        && decscusrProbe.blinkAfter === decscusrProbe.previousBlink,
+      JSON.stringify(decscusrProbe));
 
     // 9.8 Terminal search (batch 03): synthetic local content + the REAL
     //     bundled xterm/addon-search through the REAL renderer handlers.

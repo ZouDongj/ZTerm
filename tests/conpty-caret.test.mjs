@@ -55,6 +55,16 @@ test('chunked feeding equals one big write, multi-byte text survives', () => {
     assert.ok(chunked.includes('\u4f60\u597d'));
 });
 
+test('a nested ?2026h inside a sync block never drops buffered output', () => {
+    const f = createConPtyCaretFilter({ mode: 'fix' });
+    const BEGIN = '\u001b[?2026h';
+    const END = '\u001b[?2026l';
+    let out = '';
+    for (const piece of [BEGIN, 'A', BEGIN, 'B', END]) out += f.push(piece);
+    assert.equal(out, BEGIN + 'A' + BEGIN + 'B' + END + '\u001b[?25h',
+        'the first block must stay buffered, in stream order, through a nested begin');
+});
+
 test('captured herdr stream: painted caret removed, ?25h re-asserted at every chunk size', () => {
     const lines = readFileSync(join(here, 'fixtures', 'herdr-local.jsonl'), 'utf8')
         .split(/\r?\n/).filter(Boolean).map(l => JSON.parse(l));

@@ -98,6 +98,20 @@ test('setup failure cleans its diagnostics, timers and capture flag', () => {
     assert.equal(f.timers.size + f.intervals.size + f.frames.size, 0);
 });
 
+test('caret report accepts the DECOM fail-closed reasons', () => {
+    const f = fixture();
+    f.tab._inkObserver = { state: () => ({ positionKnown: false, positionReason: 'decom', checkpointReason: 'decom', recoveries: 1 }) };
+    f.tab._smoothCursor = { _adapter: { snapshot: () => ({
+        counters: { cursorDrawPasses: 1, baseDrawPasses: 2 }, retargets: [], drawPassStatus: 'base-only',
+        caretOwnership: { customDrawSource: 'none', active: false, reason: 'invalidate:observer:decom' },
+    }) } };
+    f.start(); f.advance(4000);
+    const report = f.report();
+    assert.equal(report.cursor.caret.positionReason, 'decom');
+    assert.equal(report.cursor.caret.checkpointReason, 'decom');
+    assert.equal(report.cursor.caret.reason, 'invalidate:observer:decom');
+});
+
 test('cursor gate, configuredAnimations and pre-sampling gate history are copied; ring keeps 32; private fields stay out', () => {
     const f = fixture();
     f.context._settingsConfig = { animations: true };

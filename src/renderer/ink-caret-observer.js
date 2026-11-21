@@ -106,16 +106,25 @@
     // by the live terminal size at wiring time (ipc.js).
     let rows = Math.max(2, Math.floor(options?.rows) || 24);
     let cols = Math.max(2, Math.floor(options?.cols) || 80);
-    let scrollTop = 0, scrollBottom = rows - 1;
-    let normalScrollTop = 0, normalScrollBottom = rows - 1;
-    let regionBuffer = 'normal';
-    let originMode = false;
+    // A rebuilt observer must inherit the live buffer's scroll region and
+    // origin mode; otherwise its first relative move is measured against a
+    // full-screen region that the terminal no longer has.
+    const seededTop = Number.isFinite(options?.scrollTop) ? Math.floor(options.scrollTop) : 0;
+    const seededBottom = Number.isFinite(options?.scrollBottom) ? Math.floor(options.scrollBottom) : rows - 1;
+    let scrollTop = Math.min(rows - 1, Math.max(0, seededTop));
+    let scrollBottom = Math.min(rows - 1, Math.max(scrollTop, seededBottom));
+    const seededNormalTop = Number.isFinite(options?.normalScrollTop) ? Math.floor(options.normalScrollTop) : 0;
+    const seededNormalBottom = Number.isFinite(options?.normalScrollBottom) ? Math.floor(options.normalScrollBottom) : rows - 1;
+    let normalScrollTop = Math.min(rows - 1, Math.max(0, seededNormalTop));
+    let normalScrollBottom = Math.min(rows - 1, Math.max(normalScrollTop, seededNormalBottom));
+    let regionBuffer = options?.bufferType === 'alternate' ? 'alternate' : 'normal';
+    let originMode = options?.originMode === true;
     // Cursor model inside the current unit (1-based row/col like CUP).
     let row = Math.min(rows, Math.max(1, Math.floor(options?.row) || 1));
     let col = Math.min(cols, Math.max(1, Math.floor(options?.col) || 1));
     let pendingWrap = options?.pendingWrap === true;
-    let positionKnown = true;
-    let positionReason = null;
+    let positionKnown = options?.positionKnown === false ? false : !originMode;
+    let positionReason = positionKnown ? null : (options?.positionReason || (originMode ? 'decom' : null));
     let checkpointReason = null;
     let recoveries = 0;
     // The captured bare repaint returns from a lower parked row with
@@ -373,10 +382,16 @@
         // reset coordinates).
         row = 1; col = 1;
         clampMove();
-        positionKnown = true;
-        positionReason = null;
-        checkpointReason = null;
-        barePositionStep = 0;
+        if (originMode) {
+          // Vendored DECOM relative moves add the region offset inconsistently;
+          // a frame HOME cannot certify a coordinate while origin mode is on.
+          losePosition('decom');
+        } else {
+          positionKnown = true;
+          positionReason = null;
+          checkpointReason = null;
+          barePositionStep = 0;
+        }
         beginUnit('frame');
         return;
       }
@@ -464,12 +479,17 @@
               scrollTop = normalScrollTop; scrollBottom = normalScrollBottom;
             }
           }
-          if (modes.some(p => /^(?:\?)?6$/.test(p))) {
+          const hasDecom = modes.some(p => /^(?:\?)?6$/.test(p));
+          if (hasDecom) {
             originMode = fin === 'h';
             row = originMode ? scrollTop + 1 : 1; col = 1;
             pendingWrap = false;
           }
-          if (modes.some(p => /^(?:\?)?(?:6|7|47|1047|1048|1049)$/.test(p))) losePosition();
+          if (hasDecom && originMode) {
+            losePosition('decom');
+          } else if (modes.some(p => /^(?:\?)?(?:6|7|47|1047|1048|1049)$/.test(p))) {
+            losePosition();
+          }
           return;
         }
         losePosition();
@@ -498,6 +518,14 @@
         row = (originMode ? scrollTop : 0) + (parts[0] === '' ? 1 : (parseInt(parts[0], 10) || 1));
         col = parts[1] === '' ? 1 : (parseInt(parts[1], 10) || 1);
         clampMove();
+        if (originMode) {
+          // Fail closed under DECOM: the vendored terminal double-adds the
+          // region offset for relative moves, so an absolute park cannot
+          // certify this observer's row model. Ending the frame here would
+          // certify a coordinate we do not trust.
+          losePosition('decom');
+          return;
+        }
         positionKnown = true;
         positionReason = null;
         checkpointReason = null;
@@ -515,8 +543,23 @@
         if (unitMode === 'frame' && unit && unit.caret) finishUnit(seq);
         return;
       }
-      if (fin === 'A') { row = Math.max(1, row - n); clampMove(); if (barePositionStep === 2) barePositionStep = 3; return; }
-      if (fin === 'B') { row += n; clampMove(); return; }
+      if (fin === 'A') {
+        const y = row - 1;
+        row = y >= scrollTop
+          ? Math.max(scrollTop + 1, row - n)
+          : Math.max(1, row - n);
+        clampMove();
+        if (barePositionStep === 2) barePositionStep = 3;
+        return;
+      }
+      if (fin === 'B') {
+        const y = row - 1;
+        row = y <= scrollBottom
+          ? Math.min(scrollBottom + 1, row + n)
+          : Math.min(rows, row + n);
+        clampMove();
+        return;
+      }
       if (fin === 'C') { col += n; clampMove(); if (barePositionStep === 1) barePositionStep = 2; return; }
       if (fin === 'D') { col = Math.max(1, col - n); clampMove(); return; }
       if (fin === 'G') { col = params === '' ? 1 : (parseInt(params, 10) || 1); clampMove(); return; }
@@ -704,6 +747,7 @@
         // A parsed checkpoint repairs only future gestures. Never certify a
         // candidate whose prefix was observed with an unknown origin.
         if (positionKnown) return false;
+        if (originMode) { checkpointReason = 'decom'; return false; }
         checkpointReason = null;
         if (!point || point.seq !== chunkSeq) { checkpointReason = 'stale-watermark'; return false; }
         if (buffer || unit || inSync || bareRev.on) { checkpointReason = 'open-lexical-unit'; return false; }
@@ -742,6 +786,8 @@
           unitSeq, chunkSeq, inSync, frameUnits,
           pendingCandidate: !!(unit && unit.caret && !unit.ambiguous),
           positionKnown, positionReason, checkpointReason, recoveries,
+          originMode, scrollTop, scrollBottom, regionBuffer,
+          normalScrollTop, normalScrollBottom,
         };
       },
     };

@@ -1372,7 +1372,7 @@ const TabManager = {
                     // Stagger per-pane term.dispose like the tab-level
                     // stagger: a split tab closing must not fire N WebGL
                     // context teardowns in one task.
-                    if (p.term) setTimeout(() => { try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(p.term); p._smoothCursor?.dispose(); p._smoothCursor = null; p.term.dispose(); } catch(e) {} }, i * 80);
+                    if (p.term) setTimeout(() => { try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(p.term); p._smoothCursor?.dispose(); p._smoothCursor = null; p.term._cursorStyleDefaults?.dispose?.(); p.term._cursorStyleDefaults = null; p.term.dispose(); } catch(e) {} }, i * 80);
                 });
                 const split = document.getElementById('split_' + id);
                 if (split) split.remove();
@@ -1388,7 +1388,7 @@ const TabManager = {
                     _cancelSshAttemptOf(tab, tab.tabId);
                     delete ptyBuffers[tab.tabId];
                 }
-                if (tab.term) try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(tab.term); tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}
+                if (tab.term) try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(tab.term); tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term._cursorStyleDefaults?.dispose?.(); tab.term._cursorStyleDefaults = null; tab.term.dispose(); } catch(e) {}
             }
             this.render();
             // Correct activeId regardless of wasActive: a BACKGROUND tab
@@ -1473,7 +1473,7 @@ const TabManager = {
         // fallback (SSH_CONNECT_SLOT_FALLBACK_MS) fires.
         _cancelSshAttemptOf(tab, tab.tabId, 'ssh-disconnect');
         if (_clearOnConnect(tab, null)) {
-            if (tab.term) { try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(tab.term); tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
+            if (tab.term) { try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(tab.term); tab._smoothCursor?.dispose(); tab._smoothCursor = null; tab.term._cursorStyleDefaults?.dispose?.(); tab.term._cursorStyleDefaults = null; tab.term.dispose(); } catch(e) {}; tab.term = null; tab.fitAddon = null; }
             // Reset at display teardown, before any new-session output arrives.
             tab._altScreen = false;
             const wrap = document.getElementById('wrap_' + id);
@@ -1553,7 +1553,7 @@ const TabManager = {
         // display address.
         _cancelSshAttemptOf(pane, pane.tabId, 'ssh-disconnect');
         if (_clearOnConnect(tab, pane)) {
-            if (pane.term) { try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(pane.term); pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
+            if (pane.term) { try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(pane.term); pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term._cursorStyleDefaults?.dispose?.(); pane.term._cursorStyleDefaults = null; pane.term.dispose(); } catch(e) {}; pane.term = null; pane.fitAddon = null; }
             // A kept terminal retains its gate; a cleared terminal starts normal.
             pane._altScreen = false;
             const body = document.getElementById('pane-body_' + pane.id);
@@ -2665,7 +2665,7 @@ const TabManager = {
             // by the pty-created handler.)
             _cancelSshAttemptOf(pane, null);
         }
-        if (pane.term) try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(pane.term); pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term.dispose(); } catch(e) {}
+        if (pane.term) try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(pane.term); pane._smoothCursor?.dispose(); pane._smoothCursor = null; pane.term._cursorStyleDefaults?.dispose?.(); pane.term._cursorStyleDefaults = null; pane.term.dispose(); } catch(e) {}
         // Disconnect the dying pane's body observer NOW: every path the
         // deferred removal fans into (survivors re-render, collapse via
         // _exitSplit, whole-tab closeTab) iterates only SURVIVING panes, so
@@ -3307,7 +3307,7 @@ const TabManager = {
                 // Attempt identity carries the pending cancel — see _closePane.
                 _cancelSshAttemptOf(p, p.tabId);
             }
-            if (i > 0 && p.term) try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(p.term); p._smoothCursor?.dispose(); p._smoothCursor = null; p.term.dispose(); } catch(e) {}
+            if (i > 0 && p.term) try { if (typeof _releaseWebglForTerm === 'function') _releaseWebglForTerm(p.term); p._smoothCursor?.dispose(); p._smoothCursor = null; p.term._cursorStyleDefaults?.dispose?.(); p.term._cursorStyleDefaults = null; p.term.dispose(); } catch(e) {}
         });
         // Sync all tab fields from the surviving pane — otherwise tab.type/host/user etc. keep the old tab's type
         // (e.g. an SSH tab exits split leaving a local pane but stays marked SSH: after restart it would really connect via SSH with a mismatched pane name)

@@ -235,6 +235,7 @@ test('DECOM home and relative CUP produce partial-region LF/RI evidence', () => 
   assert.equal(ri.reports[0].text, true);
   assert.equal(ri.reports[0].complete, false);
   assert.equal(ri.state.positionKnown, false, 'DECOM/DECSTBM keep caret recovery conservative');
+  assert.equal(observeChunks(['\u001b[?6h']).state.positionReason, 'decom');
   const outside = observeChunks(['\u001b[2;4r\u001b[?6l\u001b[1;1H\u001bM']);
   assert.equal(outside.reports[0].scroll, null);
   assert.equal(outside.reports[0].text, false);
@@ -251,6 +252,93 @@ test('RIS and resize restore full-region scroll evidence', () => {
   assert.equal(reports[1].scroll, 'full');
 });
 
+
+for (const [name, chunks, expectedRow] of [
+  ['CUU stops at the scroll-region top', ['\u001b[5;22r\u001b[20;1H\u001b[30A', 'X'], 4],
+  ['CUU at the region top does not escape', ['\u001b[5;22r\u001b[5;1H\u001b[1A', 'X'], 4],
+  ['CUD stops at the scroll-region bottom', ['\u001b[5;22r\u001b[22;1H\u001b[1B', 'X'], 21],
+  ['CUD from above the region stops at its bottom', ['\u001b[5;22r\u001b[3;1H\u001b[30B', 'X'], 21],
+  ['CUU from below the region stops at its top', ['\u001b[5;22r\u001b[24;1H\u001b[30A', 'X'], 4],
+  ['CUU from above the region clamps to the screen top', ['\u001b[5;22r\u001b[3;1H\u001b[30A', 'X'], 0],
+  ['CUD from below the region clamps to the screen bottom', ['\u001b[5;22r\u001b[24;1H\u001b[5B', 'X'], 23],
+]) {
+  test(`real xterm differential: ${name}`, async t => {
+    const { terminal, reports, state } = await differential(chunks, { cols: 8, rows: 24 });
+    t.after(() => terminal.dispose());
+    const actual = xLocations(terminal);
+    assert.deepEqual(actual, [[expectedRow, 0, 'X', 1]], 'the real xterm fixture writes X at the clamped row');
+    assert.deepEqual(reports.at(-1).cells, actual, 'observer and xterm clamp CUU/CUD identically');
+    assert.equal(reports.at(-1).complete, true);
+    assert.equal(state.positionKnown, true);
+  });
+}
+
+test('real xterm differential: CUU/CUD region clamp in the alternate buffer', async t => {
+  const { terminal, reports, state } = await differential([
+    '\u001b[?1049h', '\u001b[5;22r',
+    '\u001b[20;1H\u001b[30AX',
+    '\u001b[22;1H\u001b[1BY',
+  ], { cols: 8, rows: 24 });
+  t.after(() => terminal.dispose());
+  const actual = xLocations(terminal, 'XY');
+  assert.deepEqual(actual, [[4, 0, 'X', 1], [21, 0, 'Y', 1]], 'the real alternate buffer holds both clamped cells');
+  assert.deepEqual(reports.at(-2).cells, [actual[0]], 'CUU is clamped in the alternate buffer too');
+  assert.deepEqual(reports.at(-1).cells, [actual[1]], 'CUD is clamped in the alternate buffer too');
+  assert.equal(state.positionKnown, true);
+});
+
+test('real xterm differential: DECOM keeps VPA coordinates unknown', async t => {
+  const { terminal, reports, state } = await differential([
+    '\u001b[2;10r\u001b[?6h\u001b[3;1H\u001b[5dX',
+  ], { cols: 8, rows: 24 });
+  t.after(() => terminal.dispose());
+  assert.deepEqual(xLocations(terminal), [[5, 0, 'X', 1]], 'the real terminal lands on the DECOM-adjusted row');
+  assert.deepEqual(reports.at(-1).cells, [], 'observer refuses to report a coordinate it cannot certify');
+  assert.equal(reports.at(-1).complete, false);
+  assert.equal(state.positionKnown, false, 'DECOM stays fail-closed even after an absolute park');
+});
+
+test('real xterm differential: DECOM keeps CHA coordinates unknown', async t => {
+  const { terminal, reports, state } = await differential([
+    '\u001b[2;10r\u001b[?6h\u001b[3;1H\u001b[1GX',
+  ], { cols: 8, rows: 24 });
+  t.after(() => terminal.dispose());
+  assert.deepEqual(xLocations(terminal), [[4, 0, 'X', 1]], 'the real terminal applies the DECOM offset again');
+  assert.deepEqual(reports.at(-1).cells, []);
+  assert.equal(reports.at(-1).complete, false);
+  assert.equal(state.positionKnown, false, 'relative column moves cannot re-certify under DECOM');
+});
+
+test('real xterm differential: DECOM reset restores certification', async t => {
+  const { terminal, reports, state } = await differential([
+    '\u001b[2;10r\u001b[?6h\u001b[3;1H',
+    '\u001b[?6l\u001b[3;1HX',
+  ], { cols: 8, rows: 24 });
+  t.after(() => terminal.dispose());
+  assert.deepEqual(xLocations(terminal), [[2, 0, 'X', 1]]);
+  assert.deepEqual(reports.at(-1).cells, [[2, 0, 'X', 1]]);
+  assert.equal(reports.at(-1).complete, true);
+  assert.equal(state.positionKnown, true, '?6l leaves DECOM; the next absolute park is trustworthy again');
+});
+
+test('DECOM keeps the frame-form HOME coordinate unknown', () => {
+  const o = createInkCaretObserver({});
+  // Region + DECOM, then the SGR0 / OSC8-end / HOME prefix that starts a
+  // frame unit. Stock xterm moves HOME to the region top under DECOM; the
+  // observer must not certify its unscoped row 1.
+  o.push('\u001b[2;10r\u001b[?6h\u001b[0m\u001b]8;;\u0007\u001b[H');
+  assert.equal(o.state().positionKnown, false);
+  assert.equal(o.state().positionReason, 'decom');
+});
+
+test('DECOM refuses a parser checkpoint', () => {
+  const o = createInkCaretObserver({});
+  const { chunkSeq } = o.push('\u001b[?6h');
+  const repaired = o.checkpoint({ seq: chunkSeq, safe: true, x: 1, y: 1, rows: 24, cols: 80 });
+  assert.equal(repaired, false, 'a DECOM session degrades to the unknown path');
+  assert.equal(o.state().positionKnown, false);
+  assert.equal(o.state().checkpointReason, 'decom');
+});
 
 // Steps are byte strings fed to both sides, or `{ resize: [cols, rows] }`
 // entries that model a host resize applied to both sides at that point.
@@ -271,11 +359,12 @@ async function differential(chunks, { cols = 8, rows = 24 } = {}) {
   return { terminal, reports, state: observer.state() };
 }
 
-function xLocations(terminal) {
+function xLocations(terminal, wanted = 'X') {
   const cells = [];
   for (let row = 0; row < terminal.rows; row++) {
     const cell = terminal.buffer.active.getLine(row)?.getCell(0);
-    if (cell?.getChars() === 'X') cells.push([row, 0, 'X', 1]);
+    const chars = cell?.getChars();
+    if (chars && wanted.includes(chars)) cells.push([row, 0, chars, 1]);
   }
   return cells;
 }

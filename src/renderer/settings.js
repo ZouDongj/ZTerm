@@ -1069,6 +1069,7 @@ function saveTerminal() {
             // for falsy values, so no hardcoded copy of the default is needed.
             t.term.options.wordSeparator = wordSeparators;
             if (t._smoothCursor) t._smoothCursor.setOptions({ cursorBlink, cursorStyle: cursor });
+            t.term._cursorStyleDefaults?.setUserOptions({ cursorStyle: cursor, cursorBlink });
         }
         if (t.splitRoot) {
             getAllPanes(t).forEach(p => {
@@ -1078,6 +1079,7 @@ function saveTerminal() {
                     p.term.options.scrollback = scrollback;
                     p.term.options.wordSeparator = wordSeparators;
                     if (p._smoothCursor) p._smoothCursor.setOptions({ cursorBlink, cursorStyle: cursor });
+                    p.term._cursorStyleDefaults?.setUserOptions({ cursorStyle: cursor, cursorBlink });
                 }
             });
         }

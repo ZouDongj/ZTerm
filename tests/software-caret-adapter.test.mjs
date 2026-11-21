@@ -13,6 +13,7 @@ const require = createRequire(import.meta.url);
 const { SmoothCursorMotion } = require('../src/renderer/smooth-cursor-overlay.js');
 const { createXtermWebglSmoothCursor } = require('../src/renderer/xterm-smooth-cursor.js');
 const { createInkCaretObserver } = require('../src/renderer/ink-caret-observer.js');
+const imeAnchor = require('../src/renderer/ime-caret-anchor.js');
 require('../src/vendor/xterm.js');
 const { Terminal } = globalThis.TabbyXterm;
 const BundledTerminal = globalThis.TabbyXterm.Terminal;
@@ -209,6 +210,34 @@ for (const stale of ['observer', 'term', 'adapter', 'session', 'generation']) {
   });
 }
 
+test('rebuilt observer inherits the live scroll region and DECOM fail-closed state', async t => {
+  const f = ipcParserFixture(t);
+  await f.write('\x1b[2;10r\x1b[?6h');
+  f.owner._inkObserver = null;
+  f.context._inkFeed(f.owner, f.owner, null, '\x1b[0m');
+  const state = f.owner._inkObserver.state();
+  assert.equal(state.originMode, true);
+  assert.equal(state.scrollTop, 1);
+  assert.equal(state.scrollBottom, 9);
+  assert.equal(state.positionKnown, false);
+  assert.equal(state.positionReason, 'decom');
+});
+
+test('rebuilt observer inherits the alternate buffer and the saved normal region', async t => {
+  const f = ipcParserFixture(t);
+  await f.write('\x1b[3;8r');       // normal buffer region, rows 3-8
+  await f.write('\x1b[?1049h');     // switch to the alternate buffer
+  await f.write('\x1b[2;10r');      // alternate region, rows 2-10
+  f.owner._inkObserver = null;
+  f.context._inkFeed(f.owner, f.owner, null, '\x1b[0m');
+  const state = f.owner._inkObserver.state();
+  assert.equal(state.regionBuffer, 'alternate');
+  assert.equal(state.scrollTop, 1);
+  assert.equal(state.scrollBottom, 9);
+  assert.equal(state.normalScrollTop, 2);
+  assert.equal(state.normalScrollBottom, 7);
+});
+
 test('real parser scroll during the final write acknowledges parsing without applying a stale checkpoint', async t => {
   const f = ipcParserFixture(t, { cols: 10, rows: 3 });
   let scrolls = 0;
@@ -292,6 +321,7 @@ function fixture({ reduced = true } = {}) {
   const glyphDraws = [];
   const glyphCellCalls = [];
   const baseRenders = [];
+  const baseHiddenStates = [];
   const rectangle = {
     _gl: gl,
     _verticesCursor: { attributes: new Float32Array(32), count: 0 },
@@ -325,7 +355,7 @@ function fixture({ reduced = true } = {}) {
     _workCell: cell,
     _devicePixelRatio: 1,
     dimensions: { device: { cell: { width: 10, height: 20 }, canvas: { width: 100, height: 60 } } },
-    renderRows(start, end) { baseRenders.push([start, end]); },
+    renderRows(start, end) { baseRenders.push([start, end]); baseHiddenStates.push(coreService.isCursorHidden); },
     _requestRedrawViewport() {},
   };
   const active = {
@@ -352,7 +382,7 @@ function fixture({ reduced = true } = {}) {
     now: () => time, root: { performance: { now: () => time }, queueMicrotask },
   });
   return {
-    adapter, terminal, renderer, cellState, rectangleDraws, glyphDraws, glyphCellCalls, baseRenders,
+    adapter, terminal, renderer, cellState, rectangleDraws, glyphDraws, glyphCellCalls, baseRenders, baseHiddenStates,
     coreService, coreBrowserService,
     cand: (over) => ({ x: 4, y: 1, char: 'd', width: 1, style: 'truecolor', fg: '40;44;52', bg: '220;223;228', unitSeq: 1, chunkSeq: 1, ...over }),
     setTime(t) { time = t; },
@@ -388,6 +418,168 @@ test('perceivedCaretCell: null until the adapter owns the caret, then the publis
     'the IME anchor must follow the caret the user sees');
   p.invalidate('scroll');
   assert.equal(f.adapter.perceivedCaretCell(), null, 'invalidation revokes the perceived cell');
+});
+
+test('a published software caret re-anchors the idle textarea without a cursorMove', () => {
+  const f = fixture();
+  const core = f.terminal._core;
+  core.textarea = { style: {} };
+  core._renderService = { dimensions: { css: { cell: { width: 10, height: 20 } } } };
+  let stockSyncs = 0;
+  core._syncTextArea = function () {
+    stockSyncs += 1;
+    this.textarea.style.left = 'stock';
+    this.textarea.style.top = 'stock';
+  };
+  core._compositionHelper = { isComposing: false, updateCompositionElements() {} };
+  assert.equal(imeAnchor.patchTerminal({ _core: core }, {
+    perceivedCaret: () => f.adapter.perceivedCaretCell(),
+  }), true);
+
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4, y: 1 })); p.parsed(1);
+  assert.equal(core.textarea.style.left, undefined, 'one candidate has no trusted anchor yet');
+  assert.equal(stockSyncs, 0);
+
+  p.candidate(f.cand({ chunkSeq: 2, x: 5, y: 1 })); p.parsed(2);
+  assert.equal(core.textarea.style.left, '50px');
+  assert.equal(core.textarea.style.top, '20px');
+  assert.equal(stockSyncs, 0, 'anchored at the trusted software cell, not the stock cursor');
+
+  p.candidate(f.cand({ chunkSeq: 3, x: 7, y: 0 })); p.parsed(3);
+  assert.equal(core.textarea.style.left, '70px');
+  assert.equal(core.textarea.style.top, '0px');
+
+  core._compositionHelper.isComposing = true;
+  p.candidate(f.cand({ chunkSeq: 4, x: 8, y: 2 })); p.parsed(4);
+  assert.equal(core.textarea.style.left, '70px', 'composition keeps its own anchor');
+  core._compositionHelper.isComposing = false;
+
+  p.invalidate('scroll');
+  assert.equal(core.textarea.style.left, 'stock', 'revoke returns to stock protocol anchoring');
+  assert.equal(stockSyncs, 1);
+});
+
+test('idle textarea sync failures do not escape the data path', () => {
+  const f = fixture();
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f);
+
+  f.terminal._core._syncTextArea = () => { throw new Error('disposed'); };
+  assert.doesNotThrow(() => p.invalidate('scroll'),
+    'a torn-down textarea must not break observer invalidation');
+});
+
+test('clearSoftwareVisual suppresses the native cursor whenever the adapter owns it', () => {
+  const f = fixture();
+  f.coreService.isCursorHidden = false;
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f);
+  assert.equal(f.adapter.instrumentation.softwareCaret.active, true);
+
+  f.baseHiddenStates.length = 0;
+  p.candidate(f.cand({ chunkSeq: 3, x: 6 })); p.enqueued(3);
+  assert.ok(f.baseHiddenStates.length > 0, 'suspending a parsed chunk repaints the stale caret row');
+  assert.ok(f.baseHiddenStates.every(hidden => hidden === false),
+    'an unparsed suspension leaves the base display to the native cursor');
+
+  p.parsed(3);
+  render(f);
+  f.baseHiddenStates.length = 0;
+  p.invalidate('scroll');
+  assert.ok(f.baseHiddenStates.length > 0, 'revoking repaints the stale caret row');
+  assert.ok(f.baseHiddenStates.every(Boolean),
+    'after revoke the visible protocol cursor is still owned by the adapter');
+});
+
+test('an unfocused non-drawable adapter does not force-hide the native cursor', () => {
+  const f = fixture();
+  f.coreService.isCursorHidden = false;
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f);
+  f.coreBrowserService.isFocused = false;
+
+  f.baseHiddenStates.length = 0;
+  p.invalidate('blur');
+  assert.ok(f.baseHiddenStates.length > 0, 'revoking still repaints the stale caret row');
+  assert.ok(f.baseHiddenStates.every(hidden => hidden === false),
+    'an unfocused terminal leaves the native cursor state to the base renderer');
+});
+
+test('clearSoftwareVisual mirrors the protocol cursor ownership matrix', () => {
+  const variants = [
+    ['blink off', f => { f.renderer._cursorBlinkStateManager = { value: { isCursorVisible: false } }; }, false],
+    ['disabled', f => { f.adapter.setEnabled(false); }, false],
+    ['unfocused', f => { f.coreBrowserService.isFocused = false; }, false],
+    ['out of range', f => { f.terminal.buffer.active.cursorY = 3; }, false],
+    ['uninitialized', f => { f.coreService.isCursorInitialized = false; }, false],
+    ['visible and focused', () => {}, true],
+  ];
+
+  for (const [name, arrange, expected] of variants) {
+    const f = fixture();
+    f.coreService.isCursorHidden = false;
+    const p = f.adapter.softwareCaretPort;
+    p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+    p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+    render(f);
+    arrange(f);
+
+    f.baseHiddenStates.length = 0;
+    p.invalidate('matrix');
+    assert.ok(f.baseHiddenStates.length > 0, `${name}: revoking repaints the stale row`);
+    assert.ok(f.baseHiddenStates.every(hidden => hidden === expected),
+      `${name}: stale-row hidden state ${JSON.stringify(f.baseHiddenStates)} must be ${expected}`);
+  }
+});
+
+test('a failed ownership probe is treated as not owning', () => {
+  const f = fixture();
+  f.coreService.isCursorHidden = false;
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  render(f);
+  Object.defineProperty(f.coreBrowserService, 'isFocused', {
+    configurable: true,
+    get() { throw new Error('torn down'); },
+  });
+
+  f.baseHiddenStates.length = 0;
+  assert.doesNotThrow(() => p.invalidate('torn-down'),
+    'a teardown race must not break observer invalidation');
+  assert.ok(f.baseHiddenStates.length > 0, 'the stale row is still repainted');
+  assert.ok(f.baseHiddenStates.every(hidden => hidden === false),
+    'a failed probe leaves the native cursor state alone');
+});
+
+test('invalidate after dispose does not advance the adapter generation', () => {
+  const f = fixture();
+  f.coreService.isCursorHidden = false;
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  const generation = f.adapter.snapshot().caretOwnership.generation;
+
+  f.adapter.dispose();
+  p.invalidate('late');
+  assert.equal(f.adapter.snapshot().caretOwnership.generation, generation,
+    'a retired adapter must ignore later observer invalidations');
+});
+
+test('snapshot exposes a DECOM observer invalidation reason', () => {
+  const f = fixture();
+  const p = f.adapter.softwareCaretPort;
+  p.candidate(f.cand({ chunkSeq: 1, x: 4 })); p.parsed(1);
+  p.candidate(f.cand({ chunkSeq: 2, x: 5 })); p.parsed(2);
+  p.invalidate('observer:decom');
+  assert.equal(f.adapter.snapshot().caretOwnership.reason, 'invalidate:observer:decom');
 });
 
 test('watermark gating: a candidate publishes only after its chunk is parsed', () => {
