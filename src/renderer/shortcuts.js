@@ -727,18 +727,26 @@ function _renderUpdateReady(tag) {
 // Rust (update_http.rs), independent of any error display wording.
 function _friendlyUpdateError(raw) {
     const s = (raw && raw !== '未知错误') ? String(raw) : '';
+    if (s.includes('TLS-to-proxy')) return '暂不支持 HTTPS 代理，请使用 HTTP 代理端点（仍可访问 HTTPS 更新地址）。详细信息：' + s;
+    const envProxy = /invalid update proxy environment (\w+)/.exec(s);
+    if (envProxy) return '环境变量 ' + envProxy[1] + ' 中的更新代理地址无效（仅支持 HTTP 代理），请修正或清除该环境变量后重启 ZTerm。详细信息：' + s;
+    if (s.includes('invalid update proxy')) return '更新代理地址无效（仅支持 HTTP 代理），请在 设置 → 关于 中修正。详细信息：' + s;
     if (s.includes('rate-limit:')) {
         const tail = s.slice(s.indexOf('rate-limit:') + 'rate-limit:'.length);
+        const maxHintMs = 24 * 60 * 60 * 1000;
         const retry = /retry_in=(\d+)/.exec(tail);
         if (retry) {
-            const mins = Math.max(1, Math.ceil(Number(retry[1]) / 60));
-            return `GitHub 更新接口请求过于频繁（已限流），约 ${mins} 分钟后重试。详细信息：${s}`;
+            const secs = Number(retry[1]);
+            if (secs > 0 && secs * 1000 <= maxHintMs) {
+                const mins = Math.max(1, Math.ceil(secs / 60));
+                return `GitHub 更新接口请求过于频繁（已限流），约 ${mins} 分钟后重试。详细信息：${s}`;
+            }
         }
         const reset = /reset_at=(\d+)/.exec(tail);
         if (reset) {
             const at = Number(reset[1]) * 1000;
             const diff = at - Date.now();
-            if (diff > 0) {
+            if (diff > 0 && diff <= maxHintMs) {
                 const mins = Math.max(1, Math.ceil(diff / 60000));
                 const clock = new Date(at).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
                 return `GitHub 更新接口请求过于频繁（已限流），约 ${mins} 分钟后（${clock}）重试。详细信息：${s}`;
@@ -746,10 +754,6 @@ function _friendlyUpdateError(raw) {
         }
         return 'GitHub 更新接口请求过于频繁（已限流），请稍后重试。详细信息：' + s;
     }
-    if (s.includes('TLS-to-proxy')) return '暂不支持 HTTPS 代理，请使用 HTTP 代理端点（仍可访问 HTTPS 更新地址）。详细信息：' + s;
-    const envProxy = /invalid update proxy environment (\w+)/.exec(s);
-    if (envProxy) return '环境变量 ' + envProxy[1] + ' 中的更新代理地址无效（仅支持 HTTP 代理），请修正或清除该环境变量后重启 ZTerm。详细信息：' + s;
-    if (s.includes('invalid update proxy')) return '更新代理地址无效（仅支持 HTTP 代理），请在 设置 → 关于 中修正。详细信息：' + s;
     const m = /\[(\w+)\]/.exec(s);
     const tag = m && m[1];
     let msg = '';
@@ -850,9 +854,13 @@ async function checkForUpdates() {
                 if (r.download_available === false) {
                     if (dl) dl.style.display = 'none';
                     _showUpdateManualLink('打开发行页');
-                    desc.textContent += r.rate_limited
-                        ? '；GitHub API 限流，内置下载暂不可用，请手动下载'
-                        : '；该版本没有可用的自动安装包，请手动下载';
+                    if (r.rate_limited) {
+                        desc.textContent += '；GitHub API 限流，内置下载暂不可用，请手动下载';
+                    } else if (r.asset_error) {
+                        desc.textContent += '；安装包信息获取失败（' + _friendlyUpdateError(r.asset_error) + '），请稍后重试或手动下载';
+                    } else {
+                        desc.textContent += '；该版本没有可用的自动安装包，请手动下载';
+                    }
                 } else if (dl) {
                     dl.style.display = '';
                     dl.disabled = false;
@@ -867,6 +875,8 @@ async function checkForUpdates() {
             window.__updateUrl = null;
             window.__updateTag = null;
         } else {
+            window.__updateUrl = null;
+            window.__updateTag = null;
             desc.textContent = '检查失败：空响应';
             _showUpdateManualLink('打开发行页');
         }

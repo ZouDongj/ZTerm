@@ -502,9 +502,9 @@ fn resolve_auto_proxy(session: Handle, url: &str, host: &str) -> Result<Resolved
     }
 }
 
-/// Response headers the update resolver needs. They are read before the body
-/// is consumed so a redirect or a rate-limit response can be classified
-/// without buffering its contents.
+/// Response headers the update resolver needs, queried from the completed
+/// WinHTTP response before the body is read so redirects and rate limits can
+/// be classified cleanly.
 #[derive(Debug, Clone, Default)]
 pub struct ResponseHeaders {
     pub location: Option<String>,
@@ -591,17 +591,7 @@ fn send_get(
     proxy: &ProxyChoice,
     preset: Preset,
     follow_redirects: bool,
-) -> Result<
-    (
-        Handle,
-        Handle,
-        Handle,
-        u16,
-        Option<u64>,
-        ResponseHeaders,
-    ),
-    HttpFail,
-> {
+) -> Result<(Handle, Handle, Handle, u16, Option<u64>, ResponseHeaders), HttpFail> {
     let parts = crack_url(url)?;
 
     // Validate/crack the explicit override before opening any handle, so a
@@ -943,13 +933,8 @@ fn http_get_with(
     preset: Preset,
     follow_redirects: bool,
 ) -> Result<HttpResponse, HttpFail> {
-    let (session, connect, request, status, content_length, headers) = send_get(
-        url,
-        extra_headers,
-        proxy,
-        preset,
-        follow_redirects,
-    )?;
+    let (session, connect, request, status, content_length, headers) =
+        send_get(url, extra_headers, proxy, preset, follow_redirects)?;
     let mut stream = HttpStream {
         session,
         connect,
@@ -1364,7 +1349,9 @@ mod tests {
         fn start(responses: Vec<String>) -> Self {
             let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback proxy");
             let addr = listener.local_addr().expect("loopback addr");
-            listener.set_nonblocking(true).expect("nonblocking listener");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
             let join = thread::spawn(move || {
                 let mut requests = Vec::new();
                 let deadline = Instant::now() + Duration::from_secs(10);
@@ -1372,6 +1359,10 @@ mod tests {
                     loop {
                         match listener.accept() {
                             Ok((mut stream, _)) => {
+                                // Windows inherits non-blocking mode from the
+                                // listening socket; restore blocking mode so
+                                // read() actually waits up to the read timeout.
+                                stream.set_nonblocking(false).expect("blocking stream");
                                 stream
                                     .set_read_timeout(Some(Duration::from_secs(5)))
                                     .expect("read timeout");
@@ -1396,9 +1387,7 @@ mod tests {
                                     }
                                 }
                                 requests.push(String::from_utf8_lossy(&request).into_owned());
-                                stream
-                                    .write_all(response.as_bytes())
-                                    .expect("proxy write");
+                                stream.write_all(response.as_bytes()).expect("proxy write");
                                 stream.flush().expect("proxy flush");
                                 break;
                             }
@@ -1425,7 +1414,11 @@ mod tests {
         }
 
         fn finish(mut self) -> Vec<String> {
-            self.join.take().expect("proxy thread").join().expect("proxy")
+            self.join
+                .take()
+                .expect("proxy thread")
+                .join()
+                .expect("proxy")
         }
     }
 
@@ -1516,6 +1509,7 @@ mod tests {
             response.headers.rate_limit_reset.as_deref(),
             Some("1730000000")
         );
+        let _ = server.finish();
     }
 
     #[test]
@@ -1534,6 +1528,7 @@ mod tests {
         .expect("429 response");
         assert_eq!(response.status, 429);
         assert_eq!(response.headers.retry_after.as_deref(), Some("120"));
+        let _ = server.finish();
     }
 
     /// Live-network smoke probe for the WinHTTP stack (direct or whatever

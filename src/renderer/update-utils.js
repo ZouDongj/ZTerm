@@ -21,15 +21,29 @@ function countUpdateBlockers(tabs, transfers, getPanes) {
 }
 
 // Return a safe release page for the manual-download link. Only the project's
-// own HTTPS releases pages are accepted; anything else (stale value, tampered
-// field, empty) falls back to the stable latest-release page.
+// own HTTPS releases pages are accepted; percent-encoded traversals, queries,
+// fragments, or other paths fall back to the stable latest-release page.
 function updateReleasePageUrl(url) {
     const fallback = 'https://github.com/ZouDongj/ZTerm/releases/latest';
     if (typeof url !== 'string') return fallback;
     const trimmed = url.trim();
-    if (trimmed.includes('..') || trimmed.includes('\\')) return fallback;
-    if (/^https:\/\/github\.com\/ZouDongj\/ZTerm\/releases(\/|$)/.test(trimmed)) return trimmed;
-    return fallback;
+    if (!trimmed || /[\s%\\?#]/.test(trimmed) || trimmed.includes('..')) return fallback;
+    let parsed;
+    try { parsed = new URL(trimmed); } catch (_) { return fallback; }
+    if (parsed.protocol !== 'https:'
+        || parsed.hostname !== 'github.com'
+        || parsed.port !== ''
+        || parsed.username !== ''
+        || parsed.password !== ''
+        || parsed.search !== ''
+        || parsed.hash !== '') {
+        return fallback;
+    }
+    if (!/^\/ZouDongj\/ZTerm\/releases(?:\/(?:latest|tag\/[A-Za-z0-9.+-]+))?$/.test(parsed.pathname)) {
+        return fallback;
+    }
+    if (parsed.pathname.includes('..')) return fallback;
+    return parsed.href;
 }
 
 if (typeof module !== 'undefined' && module.exports) {

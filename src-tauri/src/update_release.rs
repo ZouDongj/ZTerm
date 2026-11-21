@@ -67,20 +67,14 @@ impl ReleaseHttp for WinHttpRelease {
 
 fn json_headers() -> [(&'static str, &'static str); 2] {
     [
-        (
-            "User-Agent",
-            concat!("zterm/", env!("CARGO_PKG_VERSION")),
-        ),
+        ("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION"))),
         ("Accept", "application/vnd.github+json"),
     ]
 }
 
 fn html_headers() -> [(&'static str, &'static str); 2] {
     [
-        (
-            "User-Agent",
-            concat!("zterm/", env!("CARGO_PKG_VERSION")),
-        ),
+        ("User-Agent", concat!("zterm/", env!("CARGO_PKG_VERSION"))),
         ("Accept", "text/html,application/xhtml+xml"),
     ]
 }
@@ -96,11 +90,16 @@ pub struct SetupAsset {
 
 /// Result of looking up one tag's installer. `limited` is set only when the
 /// API was rate-limited and the HTML fallback also failed to provide an
-/// asset, so the UI can distinguish "try again later" from "no asset".
+/// asset; `rejected` is set when the release is explicitly refused by stable-
+/// channel policy (draft or pre-release); `error` preserves transport or HTTP
+/// failures (or channel rejection detail) when neither source returned a
+/// usable 200 response.
 #[derive(Debug, Clone, Default)]
 pub struct AssetResolution {
     pub asset: Option<SetupAsset>,
     pub limited: Option<RateLimit>,
+    pub rejected: bool,
+    pub error: Option<String>,
 }
 
 /// A rate-limit signal extracted from response headers and body. The detail
@@ -143,28 +142,42 @@ pub fn rate_limit_for(response: &HttpResponse) -> Option<RateLimit> {
         .and_then(|value| value.trim().parse::<u64>().ok())
         == Some(0);
     let body = String::from_utf8_lossy(&response.body).to_ascii_lowercase();
-    let body_says_rate_limit =
-        body.contains("rate limit") || body.contains("rate-limit") || body.contains("abuse");
+    let body_says_rate_limit = body.contains("rate limit")
+        || body.contains("rate-limit")
+        || body.contains("abuse detection");
 
     if response.status == 429 {
-        return Some(RateLimit {
-            reset_at,
-            retry_in,
-        });
+        return Some(RateLimit { reset_at, retry_in });
     }
-    if response.status == 403
-        && (remaining_zero || reset_at.is_some() || retry_in.is_some() || body_says_rate_limit)
-    {
-        return Some(RateLimit {
-            reset_at,
-            retry_in,
-        });
+    // GitHub sends X-RateLimit-Reset on nearly every response, even with quota
+    // remaining, so reset_at alone must not turn an unrelated 403 into a rate
+    // limit.
+    if response.status == 403 && (remaining_zero || retry_in.is_some() || body_says_rate_limit) {
+        return Some(RateLimit { reset_at, retry_in });
     }
     None
 }
 
 pub fn rate_limit_error(prefix: &str, rate: &RateLimit) -> String {
     format!("{prefix} rate-limit: {}", rate.detail())
+}
+
+/// Validate a release tag string before using it in URLs or comparisons.
+/// Requires a clean ASCII SemVer token with no whitespace or path separators.
+pub fn is_valid_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && !tag.contains('/')
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+        && parse_semver(tag).is_ok()
+}
+
+/// Validate that `tag` is a syntactically clean stable SemVer release tag
+/// (no pre-release suffix). Used by the stable update channel to reject
+/// pre-releases even when the API is rate-limited.
+pub fn is_stable_tag(tag: &str) -> bool {
+    is_valid_tag(tag) && parse_semver(tag).is_ok_and(|ver| ver.pre.is_empty())
 }
 
 /// Extract a valid tag from a release-page Location such as
@@ -181,15 +194,9 @@ pub fn tag_from_location(location: &str) -> Option<String> {
     } else {
         path.strip_prefix(prefix.as_str())?
     };
-    if tag.is_empty()
-        || tag.contains('/')
-        || !tag
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
-    {
+    if !is_stable_tag(tag) {
         return None;
     }
-    parse_semver(tag).ok()?;
     Some(tag.to_string())
 }
 
@@ -212,7 +219,7 @@ pub fn resolve_latest_tag(http: &dyn ReleaseHttp) -> Result<Option<String>, Stri
                     }
                 }
                 page_error = Some(format!(
-                    "release page redirected without a valid tag (status {})",
+                    "redirected without a valid tag (status {})",
                     response.status
                 ));
             } else if let Some(rate) = rate_limit_for(&response) {
@@ -278,33 +285,96 @@ fn stable_tag_from_release_json(body: &[u8]) -> Result<String, String> {
         .get("tag_name")
         .and_then(Value::as_str)
         .ok_or_else(|| "release response has no tag_name".to_string())?;
-    parse_semver(tag).map_err(|e| format!("invalid release tag '{tag}': {e}"))?;
+    if !is_valid_tag(tag) {
+        return Err(format!("invalid release tag '{tag}'"));
+    }
+    if !is_stable_tag(tag) {
+        return Err("latest release is a pre-release; stable channel only".to_string());
+    }
     Ok(tag.to_string())
 }
 
-/// Fetch the installer metadata for one tag. The API is tried first; when it
-/// is rate-limited or unavailable, the expanded-assets HTML page is parsed.
+enum ApiAsset {
+    Found(SetupAsset),
+    /// The API positively identified the matching release as a draft or
+    /// pre-release; do not bypass this channel policy via the HTML fallback.
+    RejectedRelease,
+    /// The API returned valid metadata for this matching stable release, but
+    /// it contained no usable x64 setup asset; try the HTML fallback in case
+    /// metadata is incomplete, while still knowing the release itself exists.
+    NoUsableAsset,
+    /// The API 200 response was malformed or described a different tag; fall
+    /// back to HTML without letting this unusable response mask a subsequent
+    /// HTML transport, HTTP, or rate-limit failure.
+    InvalidResponse,
+}
+
+/// Fetch the installer metadata for one stable tag. The API is tried first;
+/// when it is rate-limited or unavailable, the expanded-assets HTML page is
+/// parsed.
 pub fn resolve_release_asset(http: &dyn ReleaseHttp, tag: &str) -> AssetResolution {
+    if !is_valid_tag(tag) {
+        return AssetResolution {
+            asset: None,
+            limited: None,
+            rejected: false,
+            error: Some(format!("invalid release tag '{tag}'")),
+        };
+    }
+    if !is_stable_tag(tag) {
+        return AssetResolution {
+            asset: None,
+            limited: None,
+            rejected: true,
+            error: Some("release is a pre-release; stable channel only".to_string()),
+        };
+    }
+    let mut api_ok = false;
     let mut api_limited: Option<RateLimit> = None;
+    let mut api_error: Option<String> = None;
     let api_url = format!("https://api.github.com/repos/{REPO}/releases/tags/{tag}");
     match http.get(&api_url, &json_headers(), Preset::Check) {
         Ok(response) if response.status == 200 => {
-            if let Some(asset) = asset_from_release_json(&response.body, tag) {
-                return AssetResolution {
-                    asset: Some(asset),
-                    limited: None,
-                };
+            match asset_from_release_json(&response.body, tag) {
+                ApiAsset::Found(asset) => {
+                    return AssetResolution {
+                        asset: Some(asset),
+                        limited: None,
+                        rejected: false,
+                        error: None,
+                    };
+                }
+                ApiAsset::RejectedRelease => {
+                    return AssetResolution {
+                        asset: None,
+                        limited: None,
+                        rejected: true,
+                        error: Some(
+                            "release is a pre-release or draft; stable channel only".to_string(),
+                        ),
+                    };
+                }
+                ApiAsset::NoUsableAsset => {
+                    api_ok = true;
+                }
+                ApiAsset::InvalidResponse => {}
             }
         }
         Ok(response) => {
             api_limited = rate_limit_for(&response);
+            if api_limited.is_none() {
+                api_error = Some(format!("[http]: status {}", response.status));
+            }
         }
-        Err(_) => {}
+        Err(error) => {
+            api_error = Some(format!("[{}]: {}", error.tag, error.detail));
+        }
     }
 
     let expanded_url = format!("https://github.com/{REPO}/releases/expanded_assets/{tag}");
     let mut html_ok = false;
     let mut html_limited: Option<RateLimit> = None;
+    let mut html_error: Option<String> = None;
     match http.get(&expanded_url, &html_headers(), Preset::Check) {
         Ok(response) if response.status == 200 => {
             html_ok = true;
@@ -313,27 +383,54 @@ pub fn resolve_release_asset(http: &dyn ReleaseHttp, tag: &str) -> AssetResoluti
                 return AssetResolution {
                     asset: Some(asset),
                     limited: None,
+                    rejected: false,
+                    error: None,
                 };
             }
         }
         Ok(response) => {
             html_limited = rate_limit_for(&response);
+            if html_limited.is_none() {
+                html_error = Some(format!("[http]: status {}", response.status));
+            }
         }
-        Err(_) => {}
+        Err(error) => {
+            html_error = Some(format!("[{}]: {}", error.tag, error.detail));
+        }
     }
 
+    if html_ok || api_ok {
+        return AssetResolution {
+            asset: None,
+            limited: None,
+            rejected: false,
+            error: None,
+        };
+    }
+    let limited = html_limited.or(api_limited);
+    let error = if limited.is_some() {
+        None
+    } else {
+        html_error.or(api_error)
+    };
     AssetResolution {
         asset: None,
-        limited: if html_ok {
-            None
-        } else {
-            html_limited.or(api_limited)
-        },
+        limited,
+        rejected: false,
+        error,
     }
 }
 
-fn asset_from_release_json(body: &[u8], tag: &str) -> Option<SetupAsset> {
-    let release: Value = serde_json::from_slice(body).ok()?;
+fn asset_from_release_json(body: &[u8], tag: &str) -> ApiAsset {
+    let Ok(release) = serde_json::from_slice::<Value>(body) else {
+        return ApiAsset::InvalidResponse;
+    };
+    let Some(release_tag) = release.get("tag_name").and_then(Value::as_str) else {
+        return ApiAsset::InvalidResponse;
+    };
+    if !is_valid_tag(release_tag) || !same_tag(release_tag, tag) {
+        return ApiAsset::InvalidResponse;
+    }
     if release
         .get("draft")
         .and_then(Value::as_bool)
@@ -343,14 +440,15 @@ fn asset_from_release_json(body: &[u8], tag: &str) -> Option<SetupAsset> {
             .and_then(Value::as_bool)
             .unwrap_or(false)
     {
-        return None;
+        return ApiAsset::RejectedRelease;
     }
-    let release_tag = release.get("tag_name").and_then(Value::as_str)?;
-    if !same_tag(release_tag, tag) {
-        return None;
+    let Some(assets) = release.get("assets").and_then(Value::as_array) else {
+        return ApiAsset::InvalidResponse;
+    };
+    match select_setup_asset_for_tag(assets, Some(release_tag)) {
+        Ok(asset) => ApiAsset::Found(asset),
+        Err(_) => ApiAsset::NoUsableAsset,
     }
-    let assets = release.get("assets")?.as_array()?;
-    select_setup_asset(assets).ok()
 }
 
 fn strip_tag_prefix(value: &str) -> &str {
@@ -365,20 +463,44 @@ pub fn same_tag(left: &str, right: &str) -> bool {
 }
 
 /// GitHub's release assets are served from this repository's download path.
-/// The API is trusted, but a strict URL keeps a tampered response from
-/// pointing the downloader at another origin.
-fn is_github_release_download(url: &str) -> bool {
+/// The API is trusted, but an exact `/{repo}/releases/download/{tag}/{name}`
+/// check keeps a tampered response from pointing the downloader at another
+/// origin, another release, or percent-encoded traversal segments.
+fn is_github_release_download(url: &str, expected_tag: Option<&str>, expected_name: &str) -> bool {
     let Some(path) = url.strip_prefix("https://github.com") else {
         return false;
     };
     let prefix = format!("/{REPO}/releases/download/");
-    path.starts_with(prefix.as_str())
-        && !path.contains(['\\', '?', '#', '@'])
-        && !path.contains("..")
+    let Some(rest) = path.strip_prefix(prefix.as_str()) else {
+        return false;
+    };
+    if rest.contains(['\\', '?', '#', '@', '%']) || rest.contains("..") {
+        return false;
+    }
+    let Some((url_tag, url_name)) = rest.split_once('/') else {
+        return false;
+    };
+    if url_name.contains('/') || url_name != expected_name || !is_valid_tag(url_tag) {
+        return false;
+    }
+    match expected_tag {
+        Some(tag) => same_tag(url_tag, tag),
+        None => true,
+    }
 }
 
 /// Select exactly one x64 NSIS setup asset and validate its URL and digest.
+#[cfg(test)]
 pub fn select_setup_asset(assets: &[Value]) -> Result<SetupAsset, String> {
+    select_setup_asset_for_tag(assets, None)
+}
+
+/// Select exactly one x64 NSIS setup asset, binding its download URL to
+/// `expected_tag` (when provided) and the asset's own validated filename.
+pub fn select_setup_asset_for_tag(
+    assets: &[Value],
+    expected_tag: Option<&str>,
+) -> Result<SetupAsset, String> {
     let candidates: Vec<&Value> = assets
         .iter()
         .filter(|asset| {
@@ -407,7 +529,7 @@ pub fn select_setup_asset(assets: &[Value]) -> Result<SetupAsset, String> {
     let url = asset
         .get("browser_download_url")
         .and_then(Value::as_str)
-        .filter(|url| is_github_release_download(url))
+        .filter(|url| is_github_release_download(url, expected_tag, &name))
         .ok_or_else(|| "asset has no valid GitHub release download URL".to_string())?
         .to_string();
     let size = asset
@@ -420,9 +542,7 @@ pub fn select_setup_asset(assets: &[Value]) -> Result<SetupAsset, String> {
         .ok_or_else(|| "asset has no sha256 digest".to_string())?;
     let sha256 = digest
         .strip_prefix("sha256:")
-        .filter(|value| {
-            value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
-        })
+        .filter(|value| value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit()))
         .ok_or_else(|| "asset has no sha256 digest".to_string())?
         .to_ascii_lowercase();
     Ok(SetupAsset {
@@ -436,7 +556,9 @@ pub fn select_setup_asset(assets: &[Value]) -> Result<SetupAsset, String> {
 fn valid_setup_name(name: &str) -> bool {
     name.starts_with("ZTerm_")
         && name.ends_with("_x64-setup.exe")
-        && !name.contains(['/', '\\'])
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         && !name.contains("..")
 }
 
@@ -444,17 +566,28 @@ fn valid_setup_name(name: &str) -> bool {
 /// field is validated exactly like the JSON API shape; a missing or ambiguous
 /// digest makes the fallback fail rather than downloading unverified bytes.
 pub fn parse_expanded_assets(html: &str, tag: &str) -> Result<SetupAsset, String> {
-    if tag.is_empty() || tag.contains(['/', '\\']) {
+    if !is_valid_tag(tag) {
         return Err("invalid release tag".to_string());
     }
     let mut tags = vec![tag.to_string()];
-    let with_v = format!("v{}", tag.trim_start_matches('v'));
+    let with_v = format!("v{}", strip_tag_prefix(tag));
     if !tags.contains(&with_v) {
         tags.push(with_v);
     }
 
     let mut found: Vec<SetupAsset> = Vec::new();
-    for chunk in html.split("<li").skip(1) {
+    for raw_chunk in html.split("<li").skip(1) {
+        // Match real <li> items only, not prefixes such as <link>.
+        if !raw_chunk
+            .chars()
+            .next()
+            .is_some_and(|c| c == '>' || c.is_ascii_whitespace())
+        {
+            continue;
+        }
+        // Bound digest lookup to this list item so a trailing digest elsewhere
+        // on the page cannot verify a setup entry that lacked its own digest.
+        let chunk = raw_chunk.split("</li>").next().unwrap_or(raw_chunk);
         let Some((tag_used, name)) = tags.iter().find_map(|tag| {
             let prefix = format!("/{REPO}/releases/download/{tag}/");
             let start = chunk.find(&prefix)? + prefix.len();
@@ -467,8 +600,12 @@ pub fn parse_expanded_assets(html: &str, tag: &str) -> Result<SetupAsset, String
         }) else {
             continue;
         };
+        // Every matching setup entry must carry an unambiguous digest; fail
+        // closed instead of dropping an unverified/conflicting candidate.
         let Some(sha256) = unique_sha256(chunk) else {
-            continue;
+            return Err(format!(
+                "setup asset '{name}' has no unambiguous sha256 digest"
+            ));
         };
         let url = format!("https://github.com/{REPO}/releases/download/{tag_used}/{name}");
         let asset = SetupAsset {
@@ -477,9 +614,10 @@ pub fn parse_expanded_assets(html: &str, tag: &str) -> Result<SetupAsset, String
             size: 0,
             sha256,
         };
-        if !found.iter().any(|existing| {
-            existing.name == asset.name && existing.sha256 == asset.sha256
-        }) {
+        if !found
+            .iter()
+            .any(|existing| existing.name == asset.name && existing.sha256 == asset.sha256)
+        {
             found.push(asset);
         }
     }
@@ -504,9 +642,7 @@ fn unique_sha256(chunk: &str) -> Option<String> {
             .next()
             .map(|c| !c.is_ascii_hexdigit())
             .unwrap_or(true);
-        if candidate.len() == 64
-            && candidate.chars().all(|c| c.is_ascii_hexdigit())
-            && boundary_ok
+        if candidate.len() == 64 && candidate.chars().all(|c| c.is_ascii_hexdigit()) && boundary_ok
         {
             let candidate = candidate.to_ascii_lowercase();
             if let Some(existing) = &found {
@@ -517,7 +653,9 @@ fn unique_sha256(chunk: &str) -> Option<String> {
                 found = Some(candidate);
             }
         }
-        offset = start + 1;
+        // `start` sits right after ASCII "sha256:", so it is strictly past
+        // `offset`, <= chunk.len(), and guaranteed to be a UTF-8 char boundary.
+        offset = start;
     }
     found
 }
@@ -647,10 +785,7 @@ fn parse_semver(raw: &str) -> Result<SemVer, String> {
             identifiers
         }
     };
-    Ok(SemVer {
-        core: numbers,
-        pre,
-    })
+    Ok(SemVer { core: numbers, pre })
 }
 
 /// Lenient comparison used by the UI-facing check: an unparsable version on
@@ -695,11 +830,7 @@ pub(crate) mod test_support {
             })
         }
 
-        pub(crate) fn with_headers(
-            status: u16,
-            body: &str,
-            headers: ResponseHeaders,
-        ) -> Self {
+        pub(crate) fn with_headers(status: u16, body: &str, headers: ResponseHeaders) -> Self {
             FakeReply::Response(HttpResponse {
                 status,
                 body: body.as_bytes().to_vec(),
@@ -811,6 +942,8 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::test_support::*;
     use super::*;
 
@@ -854,14 +987,16 @@ mod tests {
         }
         assert_eq!(version_newer_checked("1.0.0", "v1.0.1").unwrap(), true);
         // Build metadata is ignored for precedence but must still be valid.
-        assert_eq!(version_newer_checked("1.0.0", "1.0.0+build.7").unwrap(), false);
+        assert_eq!(
+            version_newer_checked("1.0.0", "1.0.0+build.7").unwrap(),
+            false
+        );
     }
 
     #[test]
     fn tag_from_location_accepts_absolute_and_relative_paths() {
         assert_eq!(
-            tag_from_location("https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.4")
-                .as_deref(),
+            tag_from_location("https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.4").as_deref(),
             Some("v1.2.4")
         );
         assert_eq!(
@@ -905,7 +1040,10 @@ mod tests {
             resolve_latest_tag(&http).unwrap().as_deref(),
             Some("v1.2.4")
         );
-        assert_eq!(http.calls(), vec![(false, RELEASES_LATEST_PAGE.to_string())]);
+        assert_eq!(
+            http.calls(),
+            vec![(false, RELEASES_LATEST_PAGE.to_string())]
+        );
     }
 
     #[test]
@@ -919,7 +1057,10 @@ mod tests {
                 r#"{"tag_name":"v1.3.0","prerelease":false,"draft":false}"#,
             ),
         );
-        assert_eq!(resolve_latest_tag(&http).unwrap().as_deref(), Some("v1.3.0"));
+        assert_eq!(
+            resolve_latest_tag(&http).unwrap().as_deref(),
+            Some("v1.3.0")
+        );
     }
 
     #[test]
@@ -936,7 +1077,10 @@ mod tests {
                 r#"{"tag_name":"v1.3.1","prerelease":false,"draft":false}"#,
             ),
         );
-        assert_eq!(resolve_latest_tag(&http).unwrap().as_deref(), Some("v1.3.1"));
+        assert_eq!(
+            resolve_latest_tag(&http).unwrap().as_deref(),
+            Some("v1.3.1")
+        );
     }
 
     #[test]
@@ -1075,11 +1219,7 @@ mod tests {
         );
         http.on_get(
             "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.4",
-            FakeReply::with_headers(
-                403,
-                "",
-                headers(None, None, Some("1730000000"), Some("0")),
-            ),
+            FakeReply::with_headers(403, "", headers(None, None, Some("1730000000"), Some("0"))),
         );
         let result = resolve_release_asset(&http, "v1.2.4");
         assert!(result.asset.is_none());
@@ -1089,12 +1229,17 @@ mod tests {
     #[test]
     fn asset_lookup_tolerates_a_missing_or_stale_api_tag() {
         let http = FakeHttp::new();
+        let sha_stale = "1".repeat(64);
         let sha = "e".repeat(64);
+        // The API returns a valid release and asset, but for the wrong tag;
+        // same_tag must reject it and fall back to the expanded-assets HTML.
         http.on_get(
             "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.4",
             FakeReply::response(
                 200,
-                r#"{"tag_name":"v9.9.9","prerelease":false,"draft":false,"assets":[]}"#,
+                &format!(
+                    r#"{{"tag_name":"v9.9.9","prerelease":false,"draft":false,"assets":[{{"name":"ZTerm_9.9.9_x64-setup.exe","size":42,"digest":"sha256:{sha_stale}","browser_download_url":"https://github.com/ZouDongj/ZTerm/releases/download/v9.9.9/ZTerm_9.9.9_x64-setup.exe"}}]}}"#
+                ),
             ),
         );
         http.on_get(
@@ -1106,6 +1251,307 @@ mod tests {
                 ),
             ),
         );
-        assert_eq!(resolve_release_asset(&http, "v1.2.4").asset.unwrap().sha256, sha);
+        let asset = resolve_release_asset(&http, "v1.2.4").asset.unwrap();
+        assert_eq!(asset.name, "ZTerm_1.2.4_x64-setup.exe");
+        assert_eq!(asset.sha256, sha);
+    }
+
+    #[test]
+    fn rate_limit_for_ignores_403_with_only_reset_header_or_proxy_abuse_text() {
+        let plain_403 = HttpResponse {
+            status: 403,
+            body: b"Forbidden by upstream".to_vec(),
+            headers: headers(None, None, Some("1730000000"), Some("59")),
+        };
+        assert_eq!(rate_limit_for(&plain_403), None);
+
+        let proxy_403 = HttpResponse {
+            status: 403,
+            body: b"Blocked by corporate acceptable use / abuse policy".to_vec(),
+            headers: headers(None, None, Some("1730000000"), Some("59")),
+        };
+        assert_eq!(rate_limit_for(&proxy_403), None);
+
+        let gh_abuse_403 = HttpResponse {
+            status: 403,
+            body: b"You have triggered an abuse detection mechanism".to_vec(),
+            headers: headers(None, Some("60"), Some("1730000000"), Some("59")),
+        };
+        assert_eq!(
+            rate_limit_for(&gh_abuse_403),
+            Some(RateLimit {
+                reset_at: Some(1_730_000_000),
+                retry_in: Some(60),
+            })
+        );
+    }
+
+    #[test]
+    fn unique_sha256_handles_trailing_prefix_multibyte_utf8_and_conflicting_digests() {
+        let sha_a = "a".repeat(64);
+        let sha_b = "b".repeat(64);
+
+        // Trailing "sha256:" and multi-byte UTF-8 immediately after the colon
+        // must never panic on slice bounds or char boundaries.
+        assert_eq!(unique_sha256("<li>sha256:"), None);
+        assert_eq!(unique_sha256("<li>sha256:中文字符"), None);
+        assert_eq!(
+            unique_sha256(&format!("<li>sha256:中文 sha256:sha256:{sha_a}</li>")),
+            Some(sha_a.clone())
+        );
+
+        // Two distinct valid digests in the same <li> are ambiguous and rejected.
+        let conflicting = format!(
+            r#"<li><a href="/ZouDongj/ZTerm/releases/download/v1.2.4/ZTerm_1.2.4_x64-setup.exe">x</a>sha256:{sha_a} sha256:{sha_b}</li>"#
+        );
+        assert!(parse_expanded_assets(&conflicting, "v1.2.4").is_err());
+    }
+
+    #[test]
+    fn tag_charset_rejects_whitespace_in_location_and_release_json() {
+        assert!(!is_valid_tag(" v1.2.4"));
+        assert!(!is_valid_tag("v1.2.4 "));
+        assert!(
+            tag_from_location("https://github.com/ZouDongj/ZTerm/releases/tag/ v1.2.4").is_none()
+        );
+        let json_body = br#"{"tag_name":" v1.2.4","prerelease":false,"draft":false}"#;
+        assert!(stable_tag_from_release_json(json_body).is_err());
+    }
+
+    #[test]
+    fn select_setup_asset_binds_url_to_tag_and_strict_filename_charset() {
+        let sha = format!("sha256:{}", "a".repeat(64));
+        let wrong_tag_url = json!({
+            "name": "ZTerm_1.2.4_x64-setup.exe",
+            "size": 10,
+            "digest": sha,
+            "browser_download_url": "https://github.com/ZouDongj/ZTerm/releases/download/v1.0.0/ZTerm_1.2.4_x64-setup.exe",
+        });
+        assert!(select_setup_asset_for_tag(&[wrong_tag_url], Some("v1.2.4")).is_err());
+
+        for bad_url in [
+            "https://github.com/ZouDongj/ZTerm/releases/download/v1.2.4/%2e%2e/ZTerm_1.2.4_x64-setup.exe",
+            "https://github.com/ZouDongj/ZTerm/releases/download/v1.2.4/sub%2fZTerm_1.2.4_x64-setup.exe",
+            "https://github.com/ZouDongj/ZTerm/releases/download/v1.2.4/other_x64-setup.exe",
+        ] {
+            let asset = json!({
+                "name": "ZTerm_1.2.4_x64-setup.exe",
+                "size": 10,
+                "digest": sha,
+                "browser_download_url": bad_url,
+            });
+            assert!(
+                select_setup_asset_for_tag(&[asset], Some("v1.2.4")).is_err(),
+                "{bad_url}"
+            );
+        }
+
+        for bad_name in [
+            "ZTerm_1.2.4:ads_x64-setup.exe",
+            "ZTerm_1.2.4%20_x64-setup.exe",
+            "ZTerm_1.2.4#1_x64-setup.exe",
+            "ZTerm_1.2.4 _x64-setup.exe",
+        ] {
+            let asset = json!({
+                "name": bad_name,
+                "size": 10,
+                "digest": sha,
+                "browser_download_url": format!("https://github.com/ZouDongj/ZTerm/releases/download/v1.2.4/{bad_name}"),
+            });
+            assert!(
+                select_setup_asset_for_tag(&[asset], Some("v1.2.4")).is_err(),
+                "{bad_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn api_prerelease_or_draft_does_not_fall_back_to_expanded_assets_html() {
+        let sha = "a".repeat(64);
+        // Use a stable-formatted tag so API metadata rejection is exercised
+        // independently of the SemVer pre-release tag guard.
+        for flag in ["prerelease", "draft"] {
+            let http = FakeHttp::new();
+            http.on_get(
+                "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.3.0",
+                FakeReply::response(
+                    200,
+                    &format!(
+                        r#"{{"tag_name":"v1.3.0","{flag}":true,"assets":[{{"name":"ZTerm_1.3.0_x64-setup.exe","size":42,"digest":"sha256:{sha}","browser_download_url":"https://github.com/ZouDongj/ZTerm/releases/download/v1.3.0/ZTerm_1.3.0_x64-setup.exe"}}]}}"#
+                    ),
+                ),
+            );
+            http.on_get(
+                "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.3.0",
+                FakeReply::response(
+                    200,
+                    &format!(
+                        r#"<li><a href="/ZouDongj/ZTerm/releases/download/v1.3.0/ZTerm_1.3.0_x64-setup.exe">x</a>sha256:{sha}</li>"#
+                    ),
+                ),
+            );
+            let res = resolve_release_asset(&http, "v1.3.0");
+            assert!(res.asset.is_none(), "{flag} must not return an asset");
+            assert!(res.rejected, "{flag} must mark resolution as rejected");
+            assert!(
+                res.error
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("stable channel"),
+                "{flag}: {:?}",
+                res.error
+            );
+            assert_eq!(
+                http.calls().len(),
+                1,
+                "{flag} rejection must stop before HTML fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn prerelease_semver_tags_are_rejected_across_all_stable_channel_paths() {
+        assert!(
+            tag_from_location("https://github.com/ZouDongj/ZTerm/releases/tag/v1.3.0-rc.1")
+                .is_none()
+        );
+
+        let http = FakeHttp::new();
+        http.on_no_redirect(
+            RELEASES_LATEST_PAGE,
+            FakeReply::with_headers(
+                302,
+                "",
+                headers(
+                    Some("https://github.com/ZouDongj/ZTerm/releases/tag/v1.3.0-rc.1"),
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        );
+        http.on_get(
+            RELEASES_LATEST_API,
+            FakeReply::response(
+                200,
+                r#"{"tag_name":"v1.3.0-rc.1","prerelease":false,"draft":false}"#,
+            ),
+        );
+        let err = resolve_latest_tag(&http).unwrap_err();
+        assert!(err.contains("pre-release"), "{err}");
+
+        let asset_http = FakeHttp::new();
+        let res = resolve_release_asset(&asset_http, "v1.3.0-rc.1");
+        assert!(res.asset.is_none());
+        assert!(res.rejected);
+        assert!(
+            asset_http.calls().is_empty(),
+            "pre-release tag must fail before API or HTML fallback"
+        );
+    }
+
+    #[test]
+    fn malformed_api_200_does_not_mask_html_fallback_errors() {
+        let http = FakeHttp::new();
+        http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.4",
+            FakeReply::response(200, "<html>captive portal</html>"),
+        );
+        http.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.4",
+            FakeReply::response(503, "Service Unavailable"),
+        );
+        let res = resolve_release_asset(&http, "v1.2.4");
+        assert!(res.asset.is_none());
+        assert!(
+            res.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("[http]: status 503"),
+            "{:?}",
+            res.error
+        );
+
+        let limited_http = FakeHttp::new();
+        limited_http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.4",
+            FakeReply::response(200, r#"{"tag_name":"v1.0.0","assets":[]}"#),
+        );
+        limited_http.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.4",
+            FakeReply::with_headers(429, "", headers(None, Some("90"), None, None)),
+        );
+        let res = resolve_release_asset(&limited_http, "v1.2.4");
+        assert!(res.asset.is_none());
+        assert_eq!(
+            res.limited,
+            Some(RateLimit {
+                reset_at: None,
+                retry_in: Some(90)
+            })
+        );
+    }
+
+    #[test]
+    fn expanded_assets_html_bounds_items_at_li_close_and_fails_closed_on_unverified_sibling() {
+        let sha = "a".repeat(64);
+        // Digest sitting outside </li> must not be attached to the setup item.
+        let outside = format!(
+            r#"<li><a href="/ZouDongj/ZTerm/releases/download/v1.2.4/ZTerm_1.2.4_x64-setup.exe">x</a></li><div>sha256:{sha}</div>"#
+        );
+        assert!(parse_expanded_assets(&outside, "v1.2.4").is_err());
+
+        // <link> must not be matched by the <li split.
+        let link_tag = format!(
+            r#"<link href="/ZouDongj/ZTerm/releases/download/v1.2.4/ZTerm_1.2.4_x64-setup.exe">sha256:{sha}"#
+        );
+        assert!(parse_expanded_assets(&link_tag, "v1.2.4").is_err());
+
+        // One verified setup entry plus one unverified setup entry must fail
+        // closed rather than silently dropping the unverified one.
+        let mixed = format!(
+            r#"<li><a href="/ZouDongj/ZTerm/releases/download/v1.2.4/ZTerm_1.2.4_x64-setup.exe">x</a>sha256:{sha}</li><li><a href="/ZouDongj/ZTerm/releases/download/v1.2.4/ZTerm_1.2.4b_x64-setup.exe">x</a></li>"#
+        );
+        assert!(parse_expanded_assets(&mixed, "v1.2.4").is_err());
+    }
+
+    #[test]
+    fn asset_lookup_preserves_transport_and_http_errors_when_both_sources_fail() {
+        let http = FakeHttp::new();
+        http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.4",
+            FakeReply::fail("connect", "WinHttpSendRequest: 0x80072EFD"),
+        );
+        http.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.4",
+            FakeReply::fail("connect", "WinHttpSendRequest: 0x80072EFD"),
+        );
+        let res = resolve_release_asset(&http, "v1.2.4");
+        assert!(res.asset.is_none());
+        assert!(res.limited.is_none());
+        assert!(
+            res.error.as_deref().unwrap_or("").contains("[connect]"),
+            "{:?}",
+            res.error
+        );
+
+        let http_503 = FakeHttp::new();
+        http_503.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.4",
+            FakeReply::response(503, "Service Unavailable"),
+        );
+        http_503.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.4",
+            FakeReply::response(503, "Service Unavailable"),
+        );
+        let res = resolve_release_asset(&http_503, "v1.2.4");
+        assert!(
+            res.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("[http]: status 503"),
+            "{:?}",
+            res.error
+        );
     }
 }

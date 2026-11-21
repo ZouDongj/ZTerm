@@ -1,9 +1,10 @@
 ; ZTerm copy of the tauri-bundler NSIS language file (SimpChinese).
 ; Source: tauri-bundler 2.9.4 languages/SimpChinese.nsh, embedded in
-; @tauri-apps/cli 2.11.4. Only dontUninstall and
-; olderOrUnknownVersionInstalled are reworded to present installing
-; over an existing version as an in-place upgrade that keeps user
-; data (issue #20). Re-sync with upstream when upgrading the CLI.
+; @tauri-apps/cli 2.11.4. dontUninstall and olderOrUnknownVersionInstalled
+; are reworded to present installing over an existing version as an in-place
+; upgrade that keeps user data (issue #20), and deleteAppData clarifies
+; current-account scope (excluding custom data directories). Re-sync with
+; upstream when upgrading the CLI.
 ; Length budget: the reinstall page shows these in a fixed 24u label
 ; (~2 full CJK lines; installer.nsi NSD_CreateLabel 0 0 100% 24u). The
 ; first rewording overflowed it and clipped the last line's bottoms —
