@@ -71,9 +71,13 @@ test('源 profile 不被修改，凭据字段不进入展示模型', () => {
     assert.equal(p.encryptedPassword, 'DPAPI-BLOB');
 });
 
-test('authType 非 key 时 keyAuth 为 false', () => {
+test('authType 非 key 时 keyAuth 为 false（但存在 privateKeyPath 按密钥展示）', () => {
     assert.equal(sshDisplayModel({ host: 'h', authType: 'password' }).keyAuth, false);
     assert.equal(sshDisplayModel({ host: 'h' }).keyAuth, false);
+    assert.equal(
+        sshDisplayModel({ host: 'h', authType: 'password', privateKeyPath: 'C:\\keys\\id' }).keyAuth,
+        true
+    );
 });
 
 // ── search matching ──

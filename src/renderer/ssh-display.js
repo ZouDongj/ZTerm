@@ -44,7 +44,7 @@
             user: user,
             port: port,
             named: named,
-            keyAuth: p.authType === 'key',
+            keyAuth: p.authType === 'key' || !!p.privateKeyPath,
         };
     }
 
