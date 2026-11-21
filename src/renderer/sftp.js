@@ -492,8 +492,12 @@ const SFTP = {
         if (!sessionId) return;
         const bound = this._tabId === sessionId;
         this.forgetSession(sessionId);
-        if (!bound) return;
-        this._markSessionDead();
+        if (bound) {
+            this._markSessionDead();
+        }
+        // Always sync the toggle button: even when the panel was not bound to
+        // this session (closed or bound elsewhere), the active tab or pane may
+        // just have transitioned to connected === false.
         this._syncToggleBtn();
     },
 

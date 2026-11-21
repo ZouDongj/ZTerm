@@ -1442,7 +1442,9 @@ const TabManager = {
         // non-split session). A split delegates to _reconnectPane, where the
         // retry budget belongs to the pane — bumping the tab token here would
         // cancel a sibling pane's unrelated retry.
-        tab._sshRetryToken = (tab._sshRetryToken || 0) + 1;
+        tab._sshRetryToken = typeof nextSshRetryToken === 'function'
+            ? nextSshRetryToken()
+            : ((tab._sshRetryToken || 0) + 1);
 
         // In-flight reconnect dedupe (pre-attempt window): between initiation
         // and the 500ms fire there is no attempt identity yet to cancel, so a
@@ -1539,7 +1541,9 @@ const TabManager = {
         if (pane._reconnectPending) return;
         // Cancel only THIS pane's pending automatic retry (both would enqueue
         // a connect; the loser's session gets orphaned).
-        pane._sshRetryToken = (pane._sshRetryToken || 0) + 1;
+        pane._sshRetryToken = typeof nextSshRetryToken === 'function'
+            ? nextSshRetryToken()
+            : ((pane._sshRetryToken || 0) + 1);
         pane._reconnectPending = true;
         pane._sshConnecting = true;
         pane._sshErrored = false;
@@ -2058,6 +2062,14 @@ const TabManager = {
             // pane (pane-fields.js adoptPaneFieldsIntoTab does the reverse).
             existing._sshConnecting = tab._sshConnecting === true;
             existing._sshErrored = tab._sshErrored === true;
+            // Carry spent retry budget onto the promoted pane and invalidate
+            // any pending tab-level retry timer permanently so a later split
+            // collapse can never resurrect it.
+            existing._sshRetried = tab._sshRetried || 0;
+            delete tab._sshRetried;
+            tab._sshRetryToken = typeof nextSshRetryToken === 'function'
+                ? nextSshRetryToken()
+                : ((tab._sshRetryToken || 0) + 1);
             // The stored tool-provided name travels with the terminal onto its
             // new pane wrapper — the split branch of resolveTabDisplayName only reads pane slots.
             if (tab._toolName !== undefined) { existing._toolName = tab._toolName; delete tab._toolName; }
@@ -3194,6 +3206,11 @@ const TabManager = {
             // as well (same rule as the liveness marker above).
             fp._sshConnecting = targetTab._sshConnecting === true;
             fp._sshErrored = targetTab._sshErrored === true;
+            fp._sshRetried = targetTab._sshRetried || 0;
+            delete targetTab._sshRetried;
+            targetTab._sshRetryToken = typeof nextSshRetryToken === 'function'
+                ? nextSshRetryToken()
+                : ((targetTab._sshRetryToken || 0) + 1);
             // The terminal moves from targetTab onto the fp pane, so onData must use fp.tabId
             // (targetTab.tabId is about to be cleared; the rebind resolves the owner at send time)
             if (targetTab._onDataDisp) { targetTab._onDataDisp.dispose(); targetTab._onDataDisp = null; }
@@ -3240,6 +3257,7 @@ const TabManager = {
             // moved session too — same rule as the liveness marker above.
             _sshConnecting: mconnecting,
             _sshErrored: merrored,
+            _sshRetried: movedOwner._sshRetried || 0,
             _sshHost: paneType === 'ssh' ? sshHost : undefined,
             _sshPort: paneType === 'ssh' ? sshPort : undefined,
             _sshUser: paneType === 'ssh' ? sshUser : undefined,

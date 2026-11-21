@@ -206,8 +206,10 @@ test('reconnecting a split tab does not bump the tab retry token', async () => {
 test('splitting the tab during a tab-level backoff cancels the retry', async () => {
     const ctx = loadVm();
     patchInvoke(ctx);
-    const tab = { id: 't_split_retry', name: 'sr', type: 'ssh', host: 'h1', user: 'u1', connected: false, tabId: null, term: null, fitAddon: null };
-    ctx.TabManager.tabs.push(tab);
+    ctx.TabManager.sshProfiles = [{ id: 'p_keep', host: 'h1', username: 'u1', clearOnConnect: false }];
+    const tab = wiredTab(ctx, 't_split_retry', null, 'sr', {
+        type: 'ssh', host: 'h1', user: 'u1', sshProfileId: 'p_keep', connected: false,
+    });
 
     ctx.TabManager.reconnectTab(tab.id);
     ctx.__tq.advance(500); // pre-attempt window
@@ -218,17 +220,75 @@ test('splitting the tab during a tab-level backoff cancels the retry', async () 
     ctx.__emit('ssh-error', { tabId: null, attemptId: att1, error: 'connection reset by peer' });
     assert.equal(tab._sshRetried, 1, 'tab-level retry budget spent');
 
-    // Observe the scheduled retry without depending on the serial connect
-    // queue, whose first slot never settles under this fake.
-    let retried = 0;
-    ctx._sshConnectWithCredentials = () => { retried += 1; };
+    // Use the real first-split transition: tab's session moves onto a pane,
+    // its spent retry budget moves with it, and the tab retry token bumps.
+    ctx.TabManager.addPaneRelativeTo(tab, 'r');
+    const panes = ctx.getAllPanes(tab);
+    assert.equal(panes[0]._sshRetried, 1, 'spent retry budget migrates onto the promoted pane');
 
-    // The user splits before the backoff elapses: the tab no longer owns the
-    // terminal the retry would connect.
-    tab.splitRoot = { type: 'v', children: [] };
+    // Observe only retries firing AFTER the split (ignoring the new split pane's
+    // initial connect triggered inside addPaneRelativeTo).
+    let tabRetries = 0;
+    ctx._sshConnectWithCredentials = (_t, p) => {
+        if (!p) tabRetries += 1;
+    };
+
     ctx.__tq.advance(2500);
     await flush();
-    assert.equal(retried, 0, 'a tab retry superseded by a split must not start a second backend');
+    assert.equal(tabRetries, 0, 'a tab retry superseded by a split must not start a second backend');
+});
+
+test('split collapse adopting a failing pane never resurrects an earlier tab-level retry timer', async () => {
+    const ctx = loadVm();
+    patchInvoke(ctx);
+    ctx.TabManager.sshProfiles = [{ id: 'p_keep', host: 'h1', username: 'u1', clearOnConnect: false }];
+    const tab = wiredTab(ctx, 't_no_resurrect', null, 'nr', {
+        type: 'ssh', host: 'h1', user: 'u1', sshProfileId: 'p_keep', connected: false,
+    });
+
+    // 1. Single-tab failure schedules Timer A on tab.
+    ctx.TabManager.reconnectTab(tab.id);
+    ctx.__tq.advance(500);
+    await flush();
+    const att1 = tab._pendingAttempt;
+    ctx.__emit('ssh-error', { tabId: null, attemptId: att1, error: 'connection reset by peer' });
+    assert.equal(tab._sshRetried, 1);
+
+    // 2. User splits the tab (invalidating Timer A) and pane 2 connects to h2 and fails (Timer B).
+    ctx.TabManager.addPaneRelativeTo(tab, 'r');
+    const [p1, p2] = ctx.getAllPanes(tab);
+    p2.type = 'ssh';
+    p2._sshHost = 'h2';
+    p2._sshUser = 'u2';
+    p2.tabId = 'ssh_p2';
+    p2.connected = false;
+    if (!p2.term) {
+        p2.term = {
+            element: ctx.document.createElement('div'),
+            write() {},
+            dispose() {},
+            onData() { return { dispose() {} }; },
+        };
+    }
+    ctx.__emit('ssh-error', { tabId: 'ssh_p2', rendererId: p2.requestId, error: 'connection refused' });
+    assert.equal(p2._sshRetried, 1);
+
+    const retryTargets = [];
+    ctx._sshConnectWithCredentials = (t, p) => {
+        retryTargets.push({ host: p ? p._sshHost : t.host, isPane: !!p });
+    };
+
+    // 3. Close p1 -> split collapses and adopts p2 onto tab (splitRoot = null).
+    ctx.TabManager._closePane(tab.id, p1.id);
+    ctx.__tq.advance(300); // finish pane close fade and _exitSplit adoption
+    assert.equal(tab.splitRoot, null, 'split collapsed onto tab');
+    assert.equal(tab.host, 'h2', 'tab adopted p2 host');
+
+    // 4. Advance past both Timer A and Timer B: only Timer B fires (once, for h2).
+    ctx.__tq.advance(3000);
+    await flush();
+    assert.deepEqual(retryTargets, [{ host: 'h2', isPane: false }],
+        'global monotonic retry token prevents Timer A from resurrecting after collapse');
 });
 
 test('a tab-level retry still fires while the tab stays unsplit', async () => {

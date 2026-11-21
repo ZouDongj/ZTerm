@@ -23,6 +23,16 @@
 // _ptyRequestId, _smoothCursor, name, _toolName, onData disposal/rebind, DOM
 // mounts and resize observers.
 
+// Global monotonic token generator for SSH handshake retry timers. Using a
+// single sequence across all tabs and panes guarantees that adopting a pane's
+// retry token onto a tab during split collapse can never collide with an older
+// tab-level retry token and resurrect a superseded timer.
+let _sshRetryTokenSeq = 0;
+function nextSshRetryToken() {
+    _sshRetryTokenSeq += 1;
+    return _sshRetryTokenSeq;
+}
+
 // Connection state of a wrapper about to hand its terminal over. An explicit
 // connected === false (a dropped session, or an SSH pane that is merely
 // connecting) always wins; the `!!tabId` fallback only covers panes that
@@ -72,5 +82,5 @@ function adoptPaneFieldsIntoTab(tab, pane) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { adoptPaneFieldsIntoTab, paneConnectedState };
+    module.exports = { adoptPaneFieldsIntoTab, paneConnectedState, nextSshRetryToken };
 }

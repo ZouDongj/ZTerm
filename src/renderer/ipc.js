@@ -874,21 +874,15 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, attemptId, error }) => 
         // The discarded session no longer backs an SSH target: drop the dock
         // binding and the bar button until the retry reconnects
         if (typeof SFTP !== 'undefined' && SFTP.updateTarget) SFTP.updateTarget();
-        // A manual reconnect (reconnectTab / clicking a down tab) supersedes
-        // this scheduled retry: both would start a new attempt and the
-        // loser's session gets orphaned. reconnectTab bumps the token, making
-        // superseded timers no-op. Pane liveness is checked separately —
-        // closing the pane (not the tab) during the backoff must not spawn a
+        // A manual reconnect (reconnectTab / clicking a down tab) or a tab
+        // split supersedes this scheduled retry via a globally monotonic token,
+        // so adopting a pane's token onto the tab during collapse can never
+        // collide with an older tab token. Pane liveness is checked separately
+        // — closing the pane (not the tab) during the backoff must not spawn a
         // backend for a dead pane.
-        const token = (owner._sshRetryToken = (owner._sshRetryToken || 0) + 1);
-        // A split collapse adopts the failed pane onto the tab; a later
-        // tab-level reconnect must still supersede this timer. Capture the tab
-        // token for that adopted case only — sibling pane failures never touch
-        // it, so they cannot cancel each other.
-        const tabToken = (tab._sshRetryToken || 0);
-        // Adoption copies the pane token onto the tab (pane-fields), so the
-        // token this timer must survive is the pane's, not the tab's old one.
-        const adoptedTabToken = pane ? (pane._sshRetryToken || tabToken) : tabToken;
+        const token = (owner._sshRetryToken = typeof nextSshRetryToken === 'function'
+            ? nextSshRetryToken()
+            : ((owner._sshRetryToken || 0) + 1));
         // A split collapse during the backoff adopts the failed pane back
         // into the tab (_exitSplit: tab.term = pane.term, splitRoot = null) —
         // the pane leaves the tree, yet its session is still owed this retry.
@@ -912,9 +906,10 @@ ipcRenderer.on('ssh-error', (event, { tabId, rendererId, attemptId, error }) => 
             // and the connected transition would then dispose the newcomer.
             if (!pane) return !tab.splitRoot;
             if (pane._closing) return false;
-            // An adopted pane's session now lives on the tab: the tab's token
-            // (bumped only by an explicit tab reconnect) decides.
-            if (paneAdopted()) return (tab._sshRetryToken || 0) === adoptedTabToken;
+            // An adopted pane's session now lives on the tab: adoptPaneFieldsIntoTab
+            // copied this pane's globally unique token onto tab._sshRetryToken, so
+            // only a later tab-level reconnect can supersede it.
+            if (paneAdopted()) return (tab._sshRetryToken || 0) === token;
             return TabManager.tabs.some(t => t.id === tab.id && getAllPanes(t).some(p => p.id === pane.id));
         };
         setTimeout(() => {
@@ -940,14 +935,14 @@ ipcRenderer.on('ssh-disconnected', (event, { tabId, reason, path }) => {
     if (TabManager._consumeClosed(tabId)) {
         return;
     }
-    // The backend session is gone for good. A dock bound to it must stop
-    // showing its listing before the user acts; the reason event cannot be
-    // relied on (user closes carry none, and it races this event).
-    if (typeof SFTP !== 'undefined' && SFTP.sessionDied) SFTP.sessionDied(tabId);
     const line = '\r\n\x1b[33m[SSH Disconnected]\x1b[0m' + (reason ? ` \x1b[2m${reason}\x1b[0m` : '') + '\r\n';
     // Session-level event (no attempt payload): backend-id routing only.
     const hit = _findSessionOwner(tabId, null);
-    if (!hit) return;
+    if (!hit) {
+        // Still retire any orphaned SFTP binding for this dead backend id.
+        if (typeof SFTP !== 'undefined' && SFTP.sessionDied) SFTP.sessionDied(tabId);
+        return;
+    }
     const { tab, pane } = hit;
     if (pane) {
         tab.connected = false;
@@ -959,6 +954,9 @@ ipcRenderer.on('ssh-disconnected', (event, { tabId, reason, path }) => {
         tab._sshReconnectNotice = false;
         // This pane is dead, but live siblings keep the tab connected.
         _aggregateSplitConnected(tab);
+        // Flip connected state BEFORE notifying SFTP so SFTP._syncToggleBtn()
+        // observes the updated target state immediately.
+        if (typeof SFTP !== 'undefined' && SFTP.sessionDied) SFTP.sessionDied(tabId);
         if (pane.term) pane.term.write(line);
         TabManager.render();
         TabManager.updateStatus();
@@ -969,6 +967,9 @@ ipcRenderer.on('ssh-disconnected', (event, { tabId, reason, path }) => {
     tab._sshConnecting = false;
     tab._sshErrored = false;
     tab._sshReconnectNotice = false;
+    // Flip connected state BEFORE notifying SFTP so SFTP._syncToggleBtn()
+    // hides the toolbar button instead of seeing a stale connected === true.
+    if (typeof SFTP !== 'undefined' && SFTP.sessionDied) SFTP.sessionDied(tabId);
     if (tab.term) tab.term.write(line);
     TabManager.render();
     TabManager.updateStatus();

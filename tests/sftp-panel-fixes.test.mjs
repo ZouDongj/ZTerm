@@ -590,3 +590,34 @@ test('T40: sessionDied of a sibling session leaves the bound listing intact', as
     assert.equal(vm.SFTP._files.length, 1, 'listing intact');
     assert.equal(vm.SFTP._tabId, 'sessA', 'binding unchanged');
 });
+
+test('T40: ssh-disconnected hides #sftp-toggle-btn for both bound and unbound docks', async () => {
+    for (const bound of [true, false]) {
+        const vm = await loadSftpVm();
+        const toggleBtn = vm.ctx.document.createElement('button');
+        toggleBtn.id = 'sftp-toggle-btn';
+        vm.ctx.document.body.appendChild(toggleBtn);
+        const tab = {
+            id: 't_btn', name: 'srv', type: 'ssh', host: 'h1', user: 'u1',
+            tabId: 'sessBtn', connected: true, term: { write() {} },
+        };
+        vm.ctx.TabManager.tabs.push(tab);
+        vm.ctx.TabManager.activeId = tab.id;
+        if (bound) {
+            await openOn(vm, 'sessBtn', '/srv/app', [F('a.txt')]);
+        }
+        vm.SFTP._syncToggleBtn();
+        assert.equal(toggleBtn.classList.contains('visible'), true,
+            `bound=${bound}: toggle button starts visible for live SSH tab`);
+
+        vm.emit('ssh-disconnected', { tabId: 'sessBtn' });
+        await vm.drain();
+
+        assert.equal(tab.connected, false);
+        assert.equal(toggleBtn.classList.contains('visible'), false,
+            `bound=${bound}: toggle button must hide immediately on ssh-disconnected`);
+        assert.equal(toggleBtn.classList.contains('on'), false,
+            `bound=${bound}: toggle button must clear active highlight on ssh-disconnected`);
+    }
+});
+
