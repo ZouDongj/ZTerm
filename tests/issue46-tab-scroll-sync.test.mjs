@@ -34,11 +34,12 @@ function classSet(str) {
     return new Set(String(str || '').split(/\s+/).filter(Boolean));
 }
 
-function createRealXtermEnv({ dpr = 1, width = 800, height = 705 } = {}) {
+function createRealXtermEnv({ dpr = 1, width = 800, height = 705, lineHeight = 1.125 } = {}) {
     const tq = new TimerQueue();
     const rafs = new Map();
     let rafSeq = 1;
-    const pendingScrollEvents = [];
+    // Coalesce multiple scrollTop writes per element per frame like Blink.
+    const pendingScrollEvents = new Set();
     const docListeners = new Map();
     const windowListeners = new Map();
     const sends = [];
@@ -104,6 +105,7 @@ function createRealXtermEnv({ dpr = 1, width = 800, height = 705 } = {}) {
             value: '',
             tabIndex: 0,
             parentElement: null,
+            get parentNode() { return this.parentElement; },
             _customW: null,
             _customH: null,
             get className() { return _className; },
@@ -245,7 +247,7 @@ function createRealXtermEnv({ dpr = 1, width = 800, height = 705 } = {}) {
                 const snapped = Math.round(clamped * ctx.devicePixelRatio) / ctx.devicePixelRatio;
                 if (snapped !== _scrollTop) {
                     _scrollTop = snapped;
-                    pendingScrollEvents.push(this);
+                    pendingScrollEvents.add(this);
                 }
             },
             _resetScrollTopSilently() { _scrollTop = 0; },
@@ -354,8 +356,8 @@ function createRealXtermEnv({ dpr = 1, width = 800, height = 705 } = {}) {
             invoke: () => new Promise(() => {}),
         },
         require: () => ({ clipboard: { readText: () => '', writeText() {} } }),
-        ClipboardAddon: class { activate() {} },
-        SearchAddon: class { activate() {} onDidChangeResults() {} clearDecorations() {} },
+        ClipboardAddon: class { activate() {} dispose() {} },
+        SearchAddon: class { activate() {} onDidChangeResults() {} clearDecorations() {} dispose() {} },
         WebglAddon: class { activate() {} dispose() {} },
         ResizeObserver: class { observe() {} disconnect() {} },
         MutationObserver: class { observe() {} disconnect() {} },
@@ -366,14 +368,14 @@ function createRealXtermEnv({ dpr = 1, width = 800, height = 705 } = {}) {
         _getAccentColor: () => 'rgb(97,175,239)',
         _getAccentColorAlpha: a => `rgba(97,175,239,${a})`,
         _clampFontWeight: (v, d) => d,
-        _settingsConfig: { lineHeight: 1.125, fontSize: 16, scrollback: 10000 },
+        _settingsConfig: { lineHeight, fontSize: 16, scrollback: 10000 },
         ptyBuffers: {},
         GAP_PX: 8,
         Icons: { iconSvg: () => 'svg' },
         escHtml: s => String(s),
         showToast() {},
         LinkOpen: { handleLinkActivate() {}, showLinkTip() {}, hideLinkTip() {} },
-        _createWebLinksAddon: () => ({ activate() {} }),
+        _createWebLinksAddon: () => ({ activate() {}, dispose() {} }),
         saveConfig() {},
         clearAlternateScreen() {},
     };
@@ -439,14 +441,16 @@ function createRealXtermEnv({ dpr = 1, width = 800, height = 705 } = {}) {
     function flushFramesAndScrolls() {
         for (let pass = 0; pass < 30; pass++) {
             let ran = false;
+            // Match HTML/Blink rendering order: scroll events dispatch before rAF callbacks.
+            if (pendingScrollEvents.size) {
+                const targets = [...pendingScrollEvents];
+                pendingScrollEvents.clear();
+                for (const target of targets) target.dispatch('scroll', {});
+                ran = true;
+            }
             for (const [id, fn] of [...rafs]) {
                 rafs.delete(id);
                 fn();
-                ran = true;
-            }
-            while (pendingScrollEvents.length) {
-                const target = pendingScrollEvents.shift();
-                target.dispatch('scroll', {});
                 ran = true;
             }
             if (!ran) break;
@@ -489,16 +493,16 @@ function createRealXtermEnv({ dpr = 1, width = 800, height = 705 } = {}) {
     }
 
     function setSize(w, h) { envWidth = w; envHeight = h; }
-    function setDocHidden(hidden) {
+    function setDocHidden(hidden, { flush = true } = {}) {
         const prev = docHidden;
         docHidden = hidden;
         if (!prev && hidden) resetSubtreeScrollTop(body);
         (docListeners.get('visibilitychange') || []).slice().forEach(fn => fn({}));
-        flushFramesAndScrolls();
+        if (flush) flushFramesAndScrolls();
     }
 
     return {
-        ctx, tq, sends, mainArea, doc,
+        ctx, tq, sends, mainArea, doc, rafs,
         flushFramesAndScrolls, advance, writeLines, wheel, makeTab, setSize, setDocHidden,
     };
 }
@@ -882,8 +886,11 @@ test('sub-row container height growth (fit no-op) + spanner drag still syncs scr
     assert.equal(p1.term.buffer.active.viewportY, p1BaseY, 'wheel down reaches exact bottom after spanner drag');
 });
 
-test('paused RenderService resize, renderer swap stale _renderDimensions, and fractional DPR (1.5x) stay synced', () => {
-    const env = createRealXtermEnv({ dpr: 1.5, height: 705 });
+test('paused RenderService resize, renderer swap stale _renderDimensions, and non-integer fractional DPR (1.5x) stay synced', () => {
+    // At dpr = 1.5, CELL_H = 21, lineHeight = 1.1:
+    // device.char.height = ceil(21 * 1.5) = 32, device.cell.height = floor(32 * 1.1) = 35,
+    // _currentRowHeight = 35 / 1.5 = 23.3333... (genuinely non-integer).
+    const env = createRealXtermEnv({ dpr: 1.5, lineHeight: 1.1, height: 705 });
     const tabA = env.makeTab('t_dpr', 'pty_dpr');
     env.makeTab('t_other', 'pty_other');
     env.ctx.TabManager.switchTo('t_dpr');
@@ -893,6 +900,7 @@ test('paused RenderService resize, renderer swap stale _renderDimensions, and fr
     const core = tabA.term._core;
     const rs = core._renderService;
     const vp = core.viewport;
+    const vpEl = vp._viewportElement;
 
     // 1. Simulate renderer swap (WebGL attach/dispose) leaving vp._renderDimensions stale.
     const fakeOldDims = {
@@ -908,24 +916,231 @@ test('paused RenderService resize, renderer swap stale _renderDimensions, and fr
     env.flushFramesAndScrolls();
 
     assert.equal(vp._renderDimensions, rs.dimensions, 'Viewport._renderDimensions re-bound to live renderer');
+    assert.ok(vp._currentRowHeight % 1 !== 0, `expected non-integer _currentRowHeight, got ${vp._currentRowHeight}`);
     assert.equal(
         rs.dimensions.css.canvas.height,
         Math.round(tabA.term.rows * rs.dimensions.device.cell.height / 1.5),
         'paused resize task flushed so renderer dimensions match live rows',
     );
 
-    // 3. Repeated sync at fractional DPR must not leave _ignoreNextScrollEvent stuck true.
+    // 3. Advance output to a baseY where exact float baseY * _currentRowHeight
+    //    exceeds integer maxScrollTop (scrollHeight - clientHeight) by +0.33px,
+    //    so vpEl.scrollTop !== e is TRUE while clamping makes the write a no-op
+    //    (afterTop === beforeTop), genuinely exercising the ignore-flag guard.
+    for (let k = 0; k < 3; k++) {
+        const curBase = tabA.term.buffer.active.baseY;
+        const maxTop = vpEl.scrollHeight - vpEl.clientHeight;
+        if (curBase * vp._currentRowHeight > maxTop) break;
+        env.writeLines(tabA.term, 1, 'pad');
+    }
+    const baseY = tabA.term.buffer.active.baseY;
+    const expectedFloatTop = core._bufferService.buffer.ydisp * vp._currentRowHeight;
+    assert.ok(expectedFloatTop > vpEl.scrollHeight - vpEl.clientHeight, 'float target exceeds integer maxScrollTop');
+    assert.notEqual(vpEl.scrollTop, expectedFloatTop, 'clamped scrollTop differs from exact float ydisp * rowH');
+    // Clear any pre-existing flag from xterm's own rAF write to verify our sync
+    // does not leave a fresh dangling _ignoreNextScrollEvent on the clamped write.
+    vp._ignoreNextScrollEvent = false;
+
+    const topBefore = vpEl.scrollTop;
     env.ctx._syncTerminalViewport(tabA.term);
+    assert.equal(vpEl.scrollTop, topBefore, 'clamped write left scrollTop unchanged (afterTop === beforeTop)');
+    assert.equal(vp._ignoreNextScrollEvent, false, 'afterTop === beforeTop guard cleared no-op write ignore flag');
     env.flushFramesAndScrolls();
-    assert.equal(vp._ignoreNextScrollEvent, false, 'no dangling ignore flag after fractional-DPR sync');
 
     // 4. Wheel UP then DOWN reaches exact bottom at 1.5x DPR.
-    const baseY = tabA.term.buffer.active.baseY;
     for (let i = 0; i < 20; i++) env.wheel(tabA.term, -100);
     assert.ok(tabA.term.buffer.active.viewportY < baseY - 20);
     for (let i = 0; i < 40; i++) env.wheel(tabA.term, 100);
     assert.equal(tabA.term.buffer.active.viewportY, baseY, 'reaches exact bottom at 1.5x DPR');
     assert.equal(core._bufferService.isUserScrolling, false);
+});
+
+test('WebGL -> DOM fallback (onContextLoss, dead-at-creation, live LRU eviction) rebinds Viewport._renderDimensions to live DomRenderer', () => {
+    const env = createRealXtermEnv({ dpr: 1, height: 705 });
+    let failNextCreate = false;
+    let createDeadContext = false;
+    const liveAddons = [];
+
+    // Mirrors vendored addon-webgl.js:3430-3433: activate swaps in a Webgl-like
+    // renderer with its own dimensions object, and dispose restores a fresh
+    // DomRenderer via setRenderer(core._createRenderer()) + handleResize()
+    // WITHOUT firing onDimensionsChange.
+    env.ctx.WebglAddon = class RealSwapWebglAddon {
+        constructor() {
+            if (failNextCreate) throw new Error('WebGL2 unavailable');
+            this._lossCbs = [];
+            this._disposed = false;
+            this._contextLost = createDeadContext;
+            this._renderer = { _gl: { isContextLost: () => this._contextLost } };
+            liveAddons.push(this);
+        }
+        onContextLoss(cb) { this._lossCbs.push(cb); }
+        activate(term) {
+            this._term = term;
+            const core = term._core;
+            const prevDims = core._renderService.dimensions;
+            const glDims = {
+                device: {
+                    char: { ...prevDims.device.char },
+                    cell: { ...prevDims.device.cell },
+                    canvas: { ...prevDims.device.canvas },
+                },
+                css: {
+                    cell: { ...prevDims.css.cell },
+                    canvas: { ...prevDims.css.canvas },
+                },
+            };
+            const fakeGlRenderer = {
+                dimensions: glDims,
+                _gl: this._renderer._gl,
+                onRequestRedraw: () => ({ dispose() {} }),
+                handleResize() {},
+                handleDevicePixelRatioChange() {},
+                handleCharSizeChanged() {},
+                handleBlur() {},
+                handleFocus() {},
+                handleSelectionChanged() {},
+                handleCursorMove() {},
+                clear() {},
+                renderRows() {},
+                dispose() {},
+            };
+            this._renderer = fakeGlRenderer;
+            core._renderService.setRenderer(fakeGlRenderer);
+        }
+        dispose() {
+            if (this._disposed || !this._term) return;
+            this._disposed = true;
+            const core = this._term._core;
+            const rs = core._renderService;
+            rs.setRenderer(core._createRenderer());
+            rs.handleResize(this._term.cols, this._term.rows);
+        }
+        triggerContextLoss() {
+            this._contextLost = true;
+            this._lossCbs.slice().forEach(cb => cb());
+        }
+    };
+
+    // Case A: Active tab loses WebGL context and re-attach fails (GPU outage) ->
+    // falls back to DomRenderer; DPR then changes from 1 -> 1.5 and bottom wheel
+    // scrolling must stay exact using the live DomRenderer dimensions.
+    const tabA = env.makeTab('t_gl', 'pty_gl');
+    env.ctx.TabManager.switchTo('t_gl');
+    env.advance(100);
+    env.writeLines(tabA.term, 300, 'webgl');
+
+    const core = tabA.term._core;
+    const rs = core._renderService;
+    const vp = core.viewport;
+    const activeAddon = liveAddons[liveAddons.length - 1];
+    assert.equal(vp._renderDimensions, rs.dimensions, 'WebGL attach bound viewport to WebGL dimensions');
+    const oldGlDims = rs.dimensions;
+
+    failNextCreate = true;
+    activeAddon.triggerContextLoss();
+    env.advance(50);
+
+    assert.notEqual(rs.dimensions, oldGlDims, 'dispose restored a fresh DomRenderer dimensions object');
+    assert.equal(vp._renderDimensions, rs.dimensions, 'onContextLoss fallback rebound Viewport._renderDimensions to live DomRenderer');
+
+    // Simulate DPR change (1 -> 1.5) while on fallback DomRenderer: if Viewport
+    // were still pointing at oldGlDims (cell.height = 23), rowH would be 23 / 1.5 = 15.33.
+    env.ctx.devicePixelRatio = 1.5;
+    rs.handleDevicePixelRatioChange();
+    env.ctx._syncTerminalViewport(tabA.term);
+    env.flushFramesAndScrolls();
+    assert.equal(vp._currentRowHeight, rs.dimensions.device.cell.height / 1.5, 'rowH tracks live DomRenderer DPR update');
+
+    const baseY = tabA.term.buffer.active.baseY;
+    for (let i = 0; i < 20; i++) env.wheel(tabA.term, -100);
+    for (let i = 0; i < 60; i++) env.wheel(tabA.term, 100);
+    assert.equal(tabA.term.buffer.active.viewportY, baseY, 'wheel up->down reaches exact bottom after WebGL->DOM fallback + DPR change');
+
+    // Case B: Dead-at-creation WebGL context immediately disposes back to DOM renderer.
+    env.ctx.devicePixelRatio = 1;
+    failNextCreate = false;
+    createDeadContext = true;
+    const tabDead = env.makeTab('t_dead', 'pty_dead');
+    env.ctx.TabManager.switchTo('t_dead');
+    env.advance(100);
+    assert.equal(
+        tabDead.term._core.viewport._renderDimensions,
+        tabDead.term._core._renderService.dimensions,
+        'dead-at-creation WebGL fallback rebound Viewport._renderDimensions to live DomRenderer',
+    );
+
+    // Case C: Live WEBGL_CONTEXT_BUDGET eviction (9 visible panes in one split tab)
+    // evicts the oldest live pane back to DomRenderer and rebinds its viewport dimensions.
+    createDeadContext = false;
+    const tabBig = env.makeTab('t_budget', 'pty_b0');
+    env.ctx.TabManager.switchTo('t_budget');
+    env.advance(100);
+    for (let i = 1; i <= 8; i++) {
+        env.ctx.TabManager.addPaneRelativeTo(tabBig, 'r');
+        const all = env.ctx.getAllPanes(tabBig);
+        const newest = all[all.length - 1];
+        newest.tabId = 'pty_b' + i;
+        env.ctx.wireTerminalToPane(tabBig, newest);
+    }
+    env.advance(400);
+    const oldestPane = env.ctx.getAllPanes(tabBig)[0];
+    assert.equal(
+        oldestPane.term._core.viewport._renderDimensions,
+        oldestPane.term._core._renderService.dimensions,
+        'budget-evicted visible pane rebound Viewport._renderDimensions to live DomRenderer',
+    );
+});
+
+test('disposed, detached, null-_core, and renderer-less terminals short-circuit _syncTerminalViewport safely', () => {
+    const env = createRealXtermEnv({ height: 705 });
+    const tabA = env.makeTab('t_safe', 'pty_safe');
+    env.ctx.TabManager.switchTo('t_safe');
+    env.advance(100);
+
+    // Null / partial inputs never throw.
+    assert.doesNotThrow(() => env.ctx._syncTerminalViewport(null));
+    assert.doesNotThrow(() => env.ctx._syncTerminalViewport({}));
+    assert.doesNotThrow(() => env.ctx._syncTerminalViewport({ _core: {} }));
+
+    // Renderer-less RenderService short-circuits before touching charSize/pausedResizeTask.
+    let measureCalls = 0;
+    let flushCalls = 0;
+    const fakeTerm = {
+        _core: {
+            _isDisposed: false,
+            viewport: {
+                _isDisposed: false,
+                _viewportElement: { isConnected: true, offsetHeight: 705, scrollTop: 0 },
+                _innerRefresh() { throw new Error('must not refresh without renderer'); },
+            },
+            _charSizeService: { hasValidSize: false, measure() { measureCalls++; } },
+            _renderService: {
+                hasRenderer: () => false,
+                _pausedResizeTask: { flush() { flushCalls++; } },
+            },
+        },
+    };
+    env.ctx._syncTerminalViewport(fakeTerm);
+    assert.equal(measureCalls, 0);
+    assert.equal(flushCalls, 0);
+
+    // Detached viewport element (isConnected === false) short-circuits even if offsetHeight stub > 0.
+    fakeTerm._core._renderService.hasRenderer = () => true;
+    fakeTerm._core.viewport._viewportElement.isConnected = false;
+    env.ctx._syncTerminalViewport(fakeTerm);
+    assert.equal(measureCalls, 0);
+    assert.equal(flushCalls, 0);
+
+    // Disposed real terminal (with real Terminal.dispose()) short-circuits cleanly.
+    const term = tabA.term;
+    let realFlushCalls = 0;
+    term._core._renderService._pausedResizeTask.flush = () => { realFlushCalls++; };
+    term.dispose();
+    assert.equal(term._core._isDisposed, true, 'real vendored Terminal.dispose() sets _isDisposed');
+    assert.equal(term.element.isConnected, false, 'real vendored Terminal.dispose() detaches element via parentNode');
+    assert.doesNotThrow(() => env.ctx._syncTerminalViewport(term));
+    assert.equal(realFlushCalls, 0, 'disposed terminal never runs _pausedResizeTask.flush()');
 });
 
 test('switchTo under _sftpAnimating still suppresses fitAddon.fit() at 10ms while syncing viewport', () => {
@@ -956,7 +1171,7 @@ test('switchTo under _sftpAnimating still suppresses fitAddon.fit() at 10ms whil
     assert.equal(tabA.term.buffer.active.viewportY, baseY, 'wheel down stays at bottom even when fit was suppressed');
 });
 
-test('window visibilitychange (minimize -> background output -> restore) repairs active tab viewport', () => {
+test('window visibilitychange (minimize -> background output -> restore, including delayed layout rAF retry) repairs active tab viewport', () => {
     const env = createRealXtermEnv({ height: 705 });
     const tabA = env.makeTab('t_vis', 'pty_vis');
     env.ctx.TabManager.switchTo('t_vis');
@@ -967,7 +1182,16 @@ test('window visibilitychange (minimize -> background output -> restore) repairs
     env.writeLines(tabA.term, 300, 'while-minimized');
     assert.equal(tabA.term._core.viewport._lastRecordedViewportHeight, 0);
 
-    env.setDocHidden(false);
+    // Simulate Windows SW_MINIMIZE restore where visibilitychange fires 1 frame
+    // BEFORE WM_SIZE restores non-zero layout height (offsetHeight === 0 at event time).
+    env.setSize(800, 0);
+    env.setDocHidden(false, { flush: false });
+    assert.equal(tabA.term._core.viewport._lastRecordedViewportHeight, 0, '0px layout defers sync');
+    assert.ok(env.rafs.size > 0, 'scheduled one-frame rAF retry when active viewport was 0px');
+
+    // Next frame: WM_SIZE has committed non-zero height -> rAF retry repairs viewport.
+    env.setSize(800, 705);
+    env.flushFramesAndScrolls();
     const baseY = tabA.term.buffer.active.baseY;
     assert.equal(tabA.term._core.viewport._lastRecordedViewportHeight, 705);
     assert.equal(tabA.term._core.viewport._viewportElement.scrollTop, baseY * tabA.term._core.viewport._currentRowHeight);

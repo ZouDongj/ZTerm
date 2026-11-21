@@ -2900,8 +2900,12 @@ const TabManager = {
                     getAllPanes(tab).forEach(p => {
                         if (p === pane || !p.term) return;
                         const sb = document.getElementById('pane-body_' + p.id);
-                        if (sb && p.fitAddon) _fitWithScroll(p.term, p.fitAddon, sb);
-                        else if (typeof _syncTerminalViewport === 'function') _syncTerminalViewport(p.term);
+                        if (sb && p.fitAddon) {
+                            if (typeof _fitTermSync === 'function') _fitTermSync(p.term, p.fitAddon, sb);
+                            else _fitWithScroll(p.term, p.fitAddon, sb);
+                        } else if (typeof _syncTerminalViewport === 'function') {
+                            _syncTerminalViewport(p.term);
+                        }
                     });
                 }
                 // Fire-time validated focus only: a close/switch inside the
