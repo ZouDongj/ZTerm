@@ -6,8 +6,10 @@
 //
 // The stub receives window.electron from ipc-polyfill.js, which loads before
 // the inline script (renderer.html:1043); only __TAURI__ may be injected
-// later, so the stub checks it at call time. The extracted object literal is
-// evaluated in a VM with fake timers so the trailing debounce is exercised.
+// later, so the stub checks it at call time. Writes are immediate: xterm only
+// fires selectionchange on mouseup, so deferring the write would let a paste
+// in the gap read the previous clipboard. The stub also tracks a write
+// generation so a failed bridge write cannot fall back over a newer one.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -33,17 +35,25 @@ function extractObjectLiteral(source, name) {
 
 const clipboardSrc = extractObjectLiteral(html, 'electronClipboard');
 
-function makeClipboard({ tauri, rejectInvoke = false }) {
+// defer: the returned invoke promise stays pending and records its resolve and
+// reject handles, so a test can settle the bridge write out of order.
+function makeClipboard({ tauri = false, defer = false } = {}) {
     const invokes = [];
     const writes = [];
-    const timers = new Map();
-    let nextTimer = 1;
+    const richWrites = [];
+    const warnings = [];
+    const timers = [];
     const window = {
         electron: {
             ipcRenderer: {
                 invoke: (cmd, payload) => {
-                    invokes.push({ cmd, payload });
-                    return rejectInvoke ? Promise.reject(new Error('bridge down')) : Promise.resolve();
+                    const call = { cmd, payload };
+                    invokes.push(call);
+                    if (!defer) return Promise.resolve();
+                    return new Promise((resolve, reject) => {
+                        call.resolve = resolve;
+                        call.reject = reject;
+                    });
                 },
             },
         },
@@ -51,24 +61,24 @@ function makeClipboard({ tauri, rejectInvoke = false }) {
     if (tauri) window.__TAURI__ = { event: {} };
     const sandbox = {
         window,
-        navigator: { clipboard: { writeText: (text) => { writes.push(text); return Promise.resolve(); } } },
-        ClipboardItem: class {},
+        navigator: {
+            clipboard: {
+                writeText: (text) => { writes.push(text); return Promise.resolve(); },
+                write: (items) => { richWrites.push(items); return Promise.resolve(); },
+            },
+        },
+        ClipboardItem: class { constructor(items) { this.items = items; } },
         Blob,
-        console,
-        setTimeout: (fn) => { const id = nextTimer++; timers.set(id, fn); return id; },
-        clearTimeout: (id) => { timers.delete(id); },
+        console: {
+            log() {},
+            warn: (...args) => warnings.push(args),
+            error: (...args) => warnings.push(args),
+        },
+        setTimeout: (fn, delay) => { timers.push({ fn, delay }); return timers.length; },
+        clearTimeout: (id) => { timers[id - 1] = null; },
     };
     const clipboard = vm.runInNewContext(`const electronClipboard = ${clipboardSrc};\nelectronClipboard;`, sandbox);
-    return {
-        clipboard,
-        invokes,
-        writes,
-        flushTimers: () => {
-            const pending = Array.from(timers.values());
-            timers.clear();
-            for (const fn of pending) fn();
-        },
-    };
+    return { clipboard, window, invokes, writes, richWrites, warnings, timers };
 }
 
 const drain = () => new Promise(resolve => setImmediate(resolve));
@@ -77,50 +87,88 @@ test('clipboard stub no longer tests the undefined isTauri global', () => {
     assert.ok(!/typeof\s+isTauri/.test(clipboardSrc), 'dead isTauri branch removed');
 });
 
-test('Tauri writeText debounces selection updates into one backend write', () => {
-    const { clipboard, invokes, writes, flushTimers } = makeClipboard({ tauri: true });
-    clipboard.writeText('a');
-    clipboard.writeText('ab');
-    clipboard.writeText('abc');
-    assert.equal(invokes.length, 0, 'no write while a drag is still updating the selection');
+test('writeText detects __TAURI__ at call time, not at load time', () => {
+    const { clipboard, window, invokes, writes } = makeClipboard();
+    // The stub is evaluated while __TAURI__ is still undefined, exactly as in
+    // the page before Tauri's initialization script lands.
+    window.__TAURI__ = { event: {} };
+    clipboard.writeText('selection');
 
-    flushTimers();
-    assert.equal(invokes.length, 1, 'one trailing write for the whole drag');
+    assert.equal(invokes.length, 1, 'the late-injected Tauri bridge is used');
     assert.equal(invokes[0].cmd, 'clipboard-write-text');
-    assert.equal(invokes[0].payload.text, 'abc', 'the latest selection wins');
-    assert.deepEqual(writes, [], 'navigator.writeText is not used while the bridge works');
+    assert.equal(invokes[0].payload.text, 'selection');
+    assert.deepEqual(writes, [], 'navigator.writeText is not used under Tauri');
 });
 
-test('a rejected bridge write falls back to the browser clipboard', async () => {
-    const { clipboard, invokes, writes, flushTimers } = makeClipboard({ tauri: true, rejectInvoke: true });
-    clipboard.writeText('fallback text');
-    flushTimers();
+test('writeText invokes the bridge synchronously, without a debounce', () => {
+    const { clipboard, invokes, writes, timers } = makeClipboard({ tauri: true });
+    clipboard.writeText('a');
+
+    assert.equal(invokes.length, 1, 'the backend write starts inside the call');
+    assert.equal(invokes[0].cmd, 'clipboard-write-text');
+    assert.equal(invokes[0].payload.text, 'a');
+    assert.equal(timers.length, 0, 'no deferred write is scheduled');
+    assert.deepEqual(writes, [], 'navigator.writeText is not used while the bridge works');
+
+    // A second selection must not be coalesced into a later trailing write.
+    clipboard.writeText('ab');
+    assert.equal(invokes.length, 2, 'every selection writes immediately');
+    assert.equal(invokes[1].payload.text, 'ab');
+});
+
+test('a rejection of an older bridge write does not overwrite a newer one', async () => {
+    const { clipboard, invokes, writes, warnings } = makeClipboard({ tauri: true, defer: true });
+    clipboard.writeText('old selection');
+    clipboard.writeText('new selection');
+    assert.equal(invokes.length, 2);
+
+    invokes[0].reject(new Error('ClipboardOccupied'));
     await drain();
 
-    assert.equal(invokes.length, 1);
+    assert.deepEqual(writes, [], 'the superseded text never reaches the browser clipboard');
+    assert.equal(warnings.length, 1, 'the bridge failure is observable in the console');
+    assert.match(String(warnings[0][0]), /clipboard bridge write failed/);
+});
+
+test('a rejection of the latest bridge write falls back to the browser clipboard', async () => {
+    const { clipboard, invokes, writes } = makeClipboard({ tauri: true, defer: true });
+    clipboard.writeText('fallback text');
+
+    invokes[0].reject(new Error('ClipboardOccupied'));
+    await drain();
+
     assert.deepEqual(writes, ['fallback text'], 'a failed backend write is not silent');
 });
 
-test('cancelPendingWriteText drops a queued selection write before a direct write', () => {
-    const { clipboard, invokes, writes, flushTimers } = makeClipboard({ tauri: true });
-    clipboard.writeText('stale selection');
-    clipboard.cancelPendingWriteText();
-    flushTimers();
+test('a direct bridge write supersedes an in-flight failure fallback', async () => {
+    const { clipboard, invokes, writes } = makeClipboard({ tauri: true, defer: true });
+    clipboard.writeText('old selection');
+    // The context menu and OSC 52 write the bridge directly and announce it.
+    clipboard.noteDirectWrite();
 
-    assert.equal(invokes.length, 0, 'the superseded selection is never written');
-    assert.deepEqual(writes, [], 'no browser write either');
+    invokes[0].reject(new Error('ClipboardOccupied'));
+    await drain();
 
-    // A later direct write still works normally.
-    clipboard.writeText('new selection');
-    flushTimers();
-    assert.equal(invokes.length, 1);
-    assert.equal(invokes[0].payload.text, 'new selection');
+    assert.deepEqual(writes, [], 'the older selection must not overwrite the direct write');
 });
 
-test('non-Tauri writeText keeps using the browser clipboard immediately', () => {
-    const { clipboard, invokes, writes, flushTimers } = makeClipboard({ tauri: false });
+test('a rich-text write supersedes an in-flight failure fallback', async () => {
+    const { clipboard, invokes, writes } = makeClipboard({ tauri: true, defer: true });
+    clipboard.writeText('old selection');
+    clipboard.write({ text: 'rich', html: '<b>rich</b>' });
+    assert.equal(clipboard._writeSeq, 2, 'the rich-text write advanced the generation');
+
+    invokes[0].reject(new Error('ClipboardOccupied'));
+    await drain();
+
+    assert.deepEqual(writes, [], 'the older selection must not overwrite the rich-text write');
+});
+
+test('non-Tauri writeText goes straight to the browser clipboard without IPC', () => {
+    const { clipboard, invokes, writes, timers } = makeClipboard();
     clipboard.writeText('browser copy');
-    assert.equal(invokes.length, 0, 'no backend command outside Tauri');
-    assert.deepEqual(writes, ['browser copy']);
-    assert.equal(flushTimers(), undefined);
+
+    assert.deepEqual(invokes, [], 'no backend command outside Tauri');
+    assert.deepEqual(writes, ['browser copy'], 'the browser clipboard is written synchronously');
+    assert.equal(timers.length, 0, 'no deferred write is scheduled');
 });

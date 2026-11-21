@@ -158,3 +158,42 @@ test('button decisions stay exactly-once against later overlay sweeps', () => {
     ctx.closeAllOverlays();
     assert.equal(decisions(ctx, 'ssh_D2').length, 1, 'no compensating reject follows an accept');
 });
+
+// A throwing focus handoff (for example a disposed terminal) used to escape
+// the hostkey cleanup, aborting the rest of closeAllOverlays before the modal
+// lock could drain. The hostkey path calls _restoreFocusAfterModal directly,
+// so the helper itself must contain the failure.
+test('_restoreFocusAfterModal contains a throwing focus handoff', () => {
+    const ctx = loadVm();
+    loadUtils(ctx);
+    mountConfirmDom(ctx);
+    vm.runInContext('console.error = function() {};', ctx);
+    vm.runInContext('_refocusActiveTerminal = function() { throw new Error("focus failed"); };', ctx);
+
+    assert.doesNotThrow(() => ctx._restoreFocusAfterModal(),
+        'the modal helper absorbs focus failures for every caller');
+});
+
+test('a throwing focus restore in the hostkey cleanup still drains the overlay sweep', () => {
+    const ctx = loadVm();
+    loadUtils(ctx);
+    const overlay = mountConfirmDom(ctx);
+    const tab = pendingSshTab(ctx, 't_hkF');
+    emitMismatch(ctx, 'ssh_F', tab._pendingAttempt);
+    assert.equal(overlay.classList.contains('open'), true, 'hostkey dialog opened');
+
+    // The color picker / tab context menu register here instead of being
+    // .overlay elements; the sweep drains them after the dialog cleanups.
+    let layerClosed = 0;
+    ctx.pushModalLayer('color-picker', () => { layerClosed++; });
+
+    vm.runInContext('console.error = function() {};', ctx);
+    vm.runInContext('_refocusActiveTerminal = function() { throw new Error("focus failed"); };', ctx);
+
+    ctx.closeAllOverlays();
+
+    assert.equal(layerClosed, 1, 'the registered layer still closes');
+    assert.equal(ctx.hasModalLayer(), false, 'the modal layer stack is drained');
+    assert.equal(overlay.classList.contains('open'), false, 'the hostkey dialog is closed');
+    assert.equal(decisions(ctx, 'ssh_F').length, 1, 'the pending decision was still sent');
+});

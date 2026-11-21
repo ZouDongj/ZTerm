@@ -336,12 +336,13 @@ function _textMenuItems(el) {
     };
     // Clipboard goes through the Rust commands (system clipboard; works
     // outside a user gesture, unlike navigator.clipboard in WebView2).
-    // A menu copy is newer than a queued selection auto-copy, so drop the
-    // pending debounced write before sending this one.
+    // A menu copy is newer than any in-flight selection auto-copy, so advance
+    // the bridge generation and keep that write's failure fallback from
+    // overwriting this one.
     const writeClipboard = (text) => {
         try {
             const bridge = window.require && window.require('electron').clipboard;
-            if (bridge && typeof bridge.cancelPendingWriteText === 'function') bridge.cancelPendingWriteText();
+            if (bridge && typeof bridge.noteDirectWrite === 'function') bridge.noteDirectWrite();
         } catch (e) {}
         return ipcRenderer.invoke('clipboard-write-text', { text });
     };

@@ -133,10 +133,16 @@ function _focusConfirmSafeDefault(cancelBtn) {
 // Dismissal returns the keyboard to the terminal — but only when no other
 // overlay stays open beneath (a confirm layered on the SSH manager etc. leaves
 // focus where the click put it, exactly as before). The Escape path already
-// refocuses through shortcuts.js's closeAllOverlays handler.
+// refocuses through shortcuts.js's closeAllOverlays handler. A throwing focus
+// handoff must never abort the caller's remaining overlay cleanup, so the
+// exception stops here.
 function _restoreFocusAfterModal() {
     if (document.querySelector('.overlay.open')) return;
-    if (typeof _refocusActiveTerminal === 'function') _refocusActiveTerminal();
+    try {
+        if (typeof _refocusActiveTerminal === 'function') _refocusActiveTerminal();
+    } catch (error) {
+        console.error('[ZTerm] modal focus restore failed:', error);
+    }
 }
 
 // `onDismiss` (optional) runs when the dialog closes by any path other than
@@ -170,7 +176,7 @@ function showConfirm(msg, onOk, okText, tone, onDismiss) {
         okBtn.className = 'btn-danger';
         // Focus restoration must never prevent onDismiss from settling a
         // pending trust or upload promise.
-        try { _restoreFocusAfterModal(); } catch (error) { console.error('[ZTerm] confirm focus restore failed:', error); }
+        _restoreFocusAfterModal();
         if (!accepted && typeof onDismiss === 'function') {
             try { onDismiss(); } catch (error) { console.error('[ZTerm] confirm dismiss callback failed:', error); }
         }
