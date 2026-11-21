@@ -76,7 +76,14 @@ function _stopSpannerDrag(e) {
     const rootEl = document.getElementById('split_' + tab.id);
     if (rootEl) rootEl.classList.remove('resizing');
     getAllPanes(tab).forEach(p => {
-        if (p.term && p.fitAddon) p.fitAddon.fit();
+        if (!p.term || !p.fitAddon) return;
+        const body = document.getElementById('pane-body_' + p.id);
+        if (body && typeof _fitTermSync === 'function') _fitTermSync(p.term, p.fitAddon, body);
+        else if (body && typeof _fitWithScroll === 'function') _fitWithScroll(p.term, p.fitAddon, body);
+        else {
+            p.fitAddon.fit();
+            if (typeof _syncTerminalViewport === 'function') _syncTerminalViewport(p.term);
+        }
     });
     _spannerDrag = null;
     document.removeEventListener('mousemove', _onSpannerDrag);

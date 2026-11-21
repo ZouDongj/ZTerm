@@ -1,22 +1,121 @@
 // ZTerm - terminal creation/wiring/search/sync-input (extracted verbatim from renderer.html, logic unchanged)
 // Rendering engine: xterm.js + WebGL (the experimental libghostty WASM engine has been removed)
 
+// ── Shared: re-sync xterm viewport geometry & DOM scrollTop ──
+// Hiding a tab/pane via display:none collapses offsetHeight to 0 and resets
+// DOM scrollTop to 0 without emitting a scroll event. Background output that
+// runs Viewport._innerRefresh() while hidden computes .xterm-scroll-area height
+// as round(rowH * lines) + (0 - canvas.height) — one full page too short — and
+// leaves _ignoreNextScrollEvent dangling true. Re-syncing immediately on show
+// (and after fit/renderer swaps) restores the scroll area, repairs stale
+// renderer-dimension references across WebGL attach/dispose, flushes any
+// paused-resize geometry, and reconciles scrollTop with buffer.ydisp without
+// overriding an intentional scrolled-up position (issue #46).
+function _syncTerminalViewport(term) {
+    const core = term && term._core;
+    const viewport = core && core.viewport;
+    if (!viewport) return;
+    const vpEl = viewport._viewportElement;
+    // Never refresh while hidden: display:none yields offsetHeight === 0 and
+    // would shrink .xterm-scroll-area by a full viewport height.
+    if (!vpEl || !(vpEl.offsetHeight > 0)) return;
+    try {
+        const charSize = core._charSizeService;
+        if (charSize && !charSize.hasValidSize && typeof charSize.measure === 'function') {
+            charSize.measure();
+        }
+        const rs = core._renderService;
+        if (rs && rs._pausedResizeTask && typeof rs._pausedResizeTask.flush === 'function') {
+            rs._pausedResizeTask.flush();
+        }
+        if (rs && rs.dimensions) {
+            viewport._renderDimensions = rs.dimensions;
+        }
+        const buf = core._bufferService && core._bufferService.buffer;
+        if (buf && buf.lines) {
+            viewport._lastRecordedBufferLength = buf.lines.length;
+        }
+        // Cancel any queued rAF before refreshing synchronously: xterm's
+        // _refresh(true) runs _innerRefresh() first (which nulls
+        // _refreshAnimationFrame) and only then checks the id to cancel it.
+        if (viewport._refreshAnimationFrame !== null && viewport._refreshAnimationFrame !== undefined) {
+            try {
+                const win = (viewport._coreBrowserService && viewport._coreBrowserService.window) || window;
+                win.cancelAnimationFrame(viewport._refreshAnimationFrame);
+            } catch (e) {}
+            viewport._refreshAnimationFrame = null;
+        }
+        const wasHidden = viewport._lastRecordedViewportHeight === 0
+            || (vpEl.scrollTop === 0 && viewport._lastScrollTop > 0);
+        if (wasHidden) viewport._ignoreNextScrollEvent = false;
+        const hadIgnoreBefore = !!viewport._ignoreNextScrollEvent;
+        const beforeTop = vpEl.scrollTop;
+        if (typeof viewport._innerRefresh === 'function') {
+            viewport._innerRefresh();
+        } else if (typeof viewport.syncScrollArea === 'function') {
+            viewport.syncScrollArea(true);
+        }
+        const afterTop = vpEl.scrollTop;
+        viewport._lastScrollTop = afterTop;
+        if (afterTop === beforeTop) {
+            // Preserve a genuinely pending visible scroll event; otherwise
+            // drop any flag set by a no-op clamped write (e.g. fractional DPR
+            // or ydisp === 0) so the next user wheel event is never swallowed.
+            viewport._ignoreNextScrollEvent = !wasHidden && hadIgnoreBefore;
+        }
+    } catch (e) {}
+}
+
+function _syncActiveTabViewports() {
+    if (typeof TabManager === 'undefined' || !TabManager || typeof TabManager.getActive !== 'function') return;
+    const tab = TabManager.getActive();
+    if (!tab || tab.type === 'settings') return;
+    if (tab.splitRoot && typeof getAllPanes === 'function') {
+        getAllPanes(tab).forEach(p => { if (p.term) _syncTerminalViewport(p.term); });
+    } else if (tab.term) {
+        _syncTerminalViewport(tab.term);
+    }
+}
+
+let _viewportVisibilityWired = false;
+function _wireViewportVisibilitySync() {
+    if (_viewportVisibilityWired) return;
+    if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return;
+    _viewportVisibilityWired = true;
+    try {
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') _syncActiveTabViewports();
+        });
+    } catch (e) {}
+}
+
 // ── Shared: fit terminal + preserve scroll-to-bottom ──
 function _fitWithScroll(term, fitAddon, parentEl) {
     if (!term || !fitAddon || !parentEl) return;
     if (parentEl.clientWidth === 0 || parentEl.clientHeight === 0) return;
-    const vp = parentEl.querySelector('.xterm-viewport');
-    const dist = vp ? (vp.scrollHeight - vp.scrollTop - vp.clientHeight) : 0;
-    const rowH = vp && term.rows ? (vp.clientHeight / term.rows) : 20;
-    const wasAtBottom = dist < rowH;
-    fitAddon.fit();
-    if (wasAtBottom) {
-        // Defer scroll-to-bottom so xterm has finished rendering the new row count
-        requestAnimationFrame(() => {
-            try { term.scrollToBottom(); } catch(e) {}
-            if (vp) vp.scrollTop = vp.scrollHeight;
-        });
+    const activeBuf = term.buffer && term.buffer.active;
+    const hasBufferPos = !!activeBuf && Number.isFinite(activeBuf.viewportY) && Number.isFinite(activeBuf.baseY);
+    let wasAtBottom;
+    if (hasBufferPos) {
+        // Use xterm's authoritative buffer position rather than DOM scrollTop,
+        // which resets to 0 under display:none while the terminal is hidden.
+        wasAtBottom = activeBuf.viewportY >= activeBuf.baseY;
+    } else {
+        const vp = parentEl.querySelector('.xterm-viewport');
+        const dist = vp ? (vp.scrollHeight - vp.scrollTop - vp.clientHeight) : 0;
+        const rowH = vp && term.rows ? (vp.clientHeight / term.rows) : 20;
+        wasAtBottom = dist < rowH;
     }
+    const colsBefore = term.cols, rowsBefore = term.rows;
+    fitAddon.fit();
+    const resized = term.cols !== colsBefore || term.rows !== rowsBefore;
+    if (wasAtBottom && (resized || !hasBufferPos || activeBuf.viewportY < activeBuf.baseY)) {
+        try { term.scrollToBottom(); } catch (e) {}
+    }
+    // Always re-sync viewport geometry & scrollTop even when cols/rows did not
+    // change (returning from a hidden tab, sub-row height changes, or after a
+    // paused resize). Preserves scrolled-up viewportY when wasAtBottom is false.
+    _syncTerminalViewport(term);
 }
 
 // Same-frame repaint after a grid resize. fit()/term.resize() clears the
@@ -756,9 +855,11 @@ function _attachWebglRenderer(holder, term, opts) {
     }
     // Repaint through the new renderer in this frame — both renderers draw
     // the same buffer, and the flush keeps the swap free of any
-    // cleared-canvas composite.
+    // cleared-canvas composite. Also re-sync viewport dimensions so xterm's
+    // Viewport does not keep referencing the disposed renderer's dimensions.
     try { term.refresh(0, term.rows - 1); } catch (e) {}
     _flushTermRender(term);
+    _syncTerminalViewport(term);
     return { ok: true, adapter: !!holder._smoothCursor?._adapter };
 }
 
@@ -1343,6 +1444,7 @@ function wireTerminal(tab, tabId) {
     // _attachWebglRenderer); a background tab renders through the DOM
     // renderer until activation.
     if (wrap.classList.contains('active')) _attachWebglRenderer(tab, term);
+    _wireViewportVisibilitySync();
 
     function applyFit() {
         if (_spannerDrag || TabManager._maximizing) return;
@@ -1575,6 +1677,7 @@ function wireTerminalToPane(tab, pane) {
     // details; contexts are budgeted by visibility (only the active tab's
     // panes hold one).
     if (TabManager.activeId === tab.id) _attachWebglRenderer(pane, term);
+    _wireViewportVisibilitySync();
 
     function applyFit(retries = 10) {
         // _windowResizing: suppress fit (and the immediate resize report)
