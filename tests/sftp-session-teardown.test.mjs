@@ -24,11 +24,13 @@ function stubSftp(ctx, boundTabId, openTabs = []) {
         closeCount: 0,      // user-facing close() (active-tab semantics)
         closedForTabs: [],  // teardown closeForTab() targets
         forgotSessions: [],
+        diedFor: [],
         forgotTabs: [],
         updateCount: 0,
         close() { this.closeCount++; this._tabId = null; },
         closeForTab(tabId) { this.closedForTabs.push(tabId); this._openTabs.delete(tabId); this._tabId = null; },
         forgetSession(id) { this.forgotSessions.push(id); },
+        sessionDied(id) { this.diedFor.push(id); },
         forgetTabState(tabId, ids) { this.forgotTabs.push({ tabId, ids: [...(ids || [])] }); },
         updateTarget() { this.updateCount++; },
     };
@@ -167,3 +169,32 @@ test('the last-tab dead-shell reset clears the SFTP open state and hides the doc
     assert.deepEqual(sftp.closedForTabs, ['t_dead'], 'the dock is hidden with the reset, by name');
     assert.equal(sftp.closeCount, 0, 'the user-facing close is never used for teardown');
 });
+test('ssh-disconnected flips connected false BEFORE calling SFTP.sessionDied', () => {
+    const ctx = loadVm();
+    const tab = wiredTab(ctx, 't_dd', 'ssh_D', null, { type: 'ssh', connected: true, host: 'h', user: 'u' });
+    const sftp = stubSftp(ctx, 'ssh_D', ['t_dd']);
+    let connectedWhenDied = null;
+    const origDied = sftp.sessionDied.bind(sftp);
+    sftp.sessionDied = (id) => {
+        connectedWhenDied = tab.connected;
+        origDied(id);
+    };
+
+    ctx.__emit('ssh-disconnected', { tabId: 'ssh_D' });
+
+    assert.deepEqual(sftp.diedFor, ['ssh_D'], 'the handler invalidates the dock binding itself');
+    assert.equal(connectedWhenDied, false,
+        'tab.connected must already be false before SFTP.sessionDied runs _syncToggleBtn');
+});
+
+test('a user-closed tab consumes ssh-disconnected before the dock call', () => {
+    const ctx = loadVm();
+    wiredTab(ctx, 't_dd', 'ssh_D');
+    const sftp = stubSftp(ctx, 'ssh_D', ['t_dd']);
+    ctx.TabManager._markClosed('ssh_D');
+
+    ctx.__emit('ssh-disconnected', { tabId: 'ssh_D' });
+
+    assert.deepEqual(sftp.diedFor, [], 'no dock work for a user-closed session');
+});
+

@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -273,6 +274,10 @@ pub struct SshSession {
     /// disconnected() keeps an existing label; otherwise the handler fills in
     /// the label russh reports.
     pub disconnect_reason: Arc<Mutex<Option<String>>>,
+    /// One ssh-disconnected per session lifetime: the reader task and the
+    /// command paths race, and losing the race must not print a second
+    /// "[SSH Disconnected]" line or a second reason.
+    pub disconnected_announced: Arc<AtomicBool>,
 }
 
 pub enum SessionType {
@@ -499,22 +504,85 @@ pub fn classify_disconnect(
     }
 }
 
-/// Emit the reader-side ssh-disconnected event, attaching the session-level
-/// disconnect reason when the handler callback already recorded one (the
-/// reader usually wins the race on channel EOF, so a late reason arrives via
-/// the separate ssh-disconnect-reason event instead).
-fn emit_ssh_disconnected(
-    app: &AppHandle,
+/// Claim the single ssh-disconnected announcement of a session. Returns true
+/// for the one caller that may emit, false for everyone after it.
+fn claim_disconnect_announcement(announced: &AtomicBool) -> bool {
+    !announced.swap(true, std::sync::atomic::Ordering::AcqRel)
+}
+
+/// Pick the kind/text to report for a session-level disconnect. `existing` is
+/// the reason slot at the time of the callback: a user close pre-filled it,
+/// and another path may have classified the end first, in which case its text
+/// is kept. Pure so the "keep the real reason" rule is testable.
+fn disconnect_report(
+    existing: Option<String>,
+    reason: &russh::client::DisconnectReason<russh::Error>,
+) -> (&'static str, String) {
+    match existing {
+        Some(text) => (recorded_reason_kind(&text), text),
+        None => classify_disconnect(reason),
+    }
+}
+
+/// Recover the UI kind from a reason text another path recorded first. The
+/// text was produced by classify_disconnect (or the user-close label), so the
+/// kind must be derived from it rather than from the reason this caller sees:
+/// a keepalive text paired with a "closed" kind would make the UI lie.
+fn recorded_reason_kind(text: &str) -> &'static str {
+    if text == USER_CLOSE_REASON {
+        "closed"
+    } else if text == "session closed" {
+        // classify_disconnect maps russh Error::Disconnect to this text.
+        "closed"
+    } else if text == "server stopped replying (keepalive timeout)" {
+        "keepalive"
+    } else if text.starts_with("server sent disconnect: ") {
+        "server"
+    } else {
+        "error"
+    }
+}
+
+/// Build the single ssh-disconnected payload of a session, or None when a
+/// previous caller already claimed the announcement. Pure so the once-per-
+/// session rule and the reason attachment are testable without an AppHandle.
+fn disconnect_event_payload(
     tab_id: &str,
-    renderer_id: &str,
-    path: &str,
+    renderer_id: Option<&str>,
+    path: Option<&str>,
     reason: &Arc<Mutex<Option<String>>>,
-) {
-    let mut payload = json!({ "tabId": tab_id, "rendererId": renderer_id, "path": path });
+    announced: &AtomicBool,
+) -> Option<Value> {
+    if !claim_disconnect_announcement(announced) {
+        return None;
+    }
+    let mut payload = json!({ "tabId": tab_id });
+    if let Some(rid) = renderer_id {
+        payload["rendererId"] = json!(rid);
+    }
+    if let Some(p) = path {
+        payload["path"] = json!(p);
+    }
     if let Some(r) = reason.lock().clone() {
         payload["reason"] = json!(r);
     }
-    let _ = app.emit("ssh-disconnected", payload);
+    Some(payload)
+}
+
+/// Emit ssh-disconnected at most once per session, attaching the session-level
+/// disconnect reason when one is recorded. The reader task passes the renderer
+/// id and the reader path; the command paths only know the tab id.
+fn emit_ssh_disconnected(
+    app: &AppHandle,
+    tab_id: &str,
+    renderer_id: Option<&str>,
+    path: Option<&str>,
+    reason: &Arc<Mutex<Option<String>>>,
+    announced: &AtomicBool,
+) {
+    if let Some(payload) = disconnect_event_payload(tab_id, renderer_id, path, reason, announced) {
+        let _ = app.emit("ssh-disconnected", payload);
+    }
 }
 
 /// SSH client config. SSH-level keepalive every 30s: keeps middlebox (NAT /
@@ -612,10 +680,20 @@ impl russh::client::Handler for SshHandler {
         use russh::keys::HashAlg;
         let fingerprint = server_public_key.fingerprint(HashAlg::Sha256).to_string();
         let algorithm = server_public_key.algorithm().to_string();
-        match known_hosts_check(&self.host, self.port, &fingerprint) {
+        let status = match known_hosts_check(&self.host, self.port, &fingerprint).await {
+            Ok(status) => status,
+            Err(err) => {
+                eprintln!(
+                    "[zterm] known_hosts check failed closed for {}:{}: {}",
+                    self.host, self.port, err
+                );
+                return Ok(false);
+            }
+        };
+        match status {
             HostKeyStatus::Known => Ok(true),
             HostKeyStatus::Unknown => {
-                known_hosts_trust(&self.host, self.port, &algorithm, &fingerprint);
+                known_hosts_trust(&self.host, self.port, &algorithm, &fingerprint).await;
                 Ok(true)
             }
             HostKeyStatus::Mismatch {
@@ -648,7 +726,8 @@ impl russh::client::Handler for SshHandler {
                 match decision {
                     Ok(decision) => {
                         if decision.accept && decision.trust {
-                            known_hosts_trust(&self.host, self.port, &algorithm, &fingerprint);
+                            known_hosts_trust(&self.host, self.port, &algorithm, &fingerprint)
+                                .await;
                         }
                         Ok(decision.accept)
                     }
@@ -666,14 +745,15 @@ impl russh::client::Handler for SshHandler {
         // User-initiated closes (ssh_disconnect / tab close) pre-fill the
         // slot; the Error::Disconnect russh reports for those carries no
         // information, so keep the explicit label and report kind "closed".
-        let user_initiated = self.disconnect_reason.lock().is_some();
-        let (kind, text) = if user_initiated {
-            ("closed", "closed by user".to_string())
-        } else {
-            let (k, t) = classify_disconnect(&reason);
-            *self.disconnect_reason.lock() = Some(t.clone());
-            (k, t)
-        };
+        // One lock, then work on the clone: a check-then-lock pair could see
+        // a label written in between and report the wrong cause.
+        let mut slot = self.disconnect_reason.lock();
+        let existing = slot.clone();
+        let (kind, text) = disconnect_report(existing.clone(), &reason);
+        if existing.is_none() {
+            *slot = Some(text.clone());
+        }
+        drop(slot);
         let at_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -700,10 +780,9 @@ fn known_hosts_path() -> PathBuf {
     PathBuf::from(base).join("ZTerm").join("known_hosts.json")
 }
 
-fn load_known_hosts() -> Value {
-    let path = known_hosts_path();
+fn load_known_hosts_at(path: &std::path::Path) -> Value {
     if path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&path) {
+        if let Ok(content) = std::fs::read_to_string(path) {
             if let Ok(v) = serde_json::from_str::<Value>(&content) {
                 return v;
             }
@@ -712,14 +791,13 @@ fn load_known_hosts() -> Value {
     json!({})
 }
 
-fn save_known_hosts(hosts: &Value) {
-    let path = known_hosts_path();
+fn save_known_hosts_at(path: &std::path::Path, hosts: &Value) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     // Atomic write: tmp + rename (parity with known-hosts.js)
     let _ = atomic_write_config(
-        &path,
+        path,
         &serde_json::to_string_pretty(hosts).unwrap_or_default(),
     );
 }
@@ -760,19 +838,71 @@ fn check_known_host_entry(entry: Option<&Value>, fingerprint: &str) -> HostKeySt
     }
 }
 
-fn known_hosts_check(host: &str, port: u16, fingerprint: &str) -> HostKeyStatus {
-    let id = format!("{}:{}", host, port);
-    let hosts = load_known_hosts();
-    check_known_host_entry(hosts.get(&id), fingerprint)
+async fn known_hosts_check(
+    host: &str,
+    port: u16,
+    fingerprint: &str,
+) -> Result<HostKeyStatus, String> {
+    known_hosts_check_at(
+        known_hosts_path(),
+        host.to_string(),
+        port,
+        fingerprint.to_string(),
+    )
+    .await
 }
 
-fn known_hosts_trust(host: &str, port: u16, algorithm: &str, fingerprint: &str) {
-    // Serialize load-modify-save so concurrent trusts cannot overwrite each other's records
-    let _guard = KNOWN_HOSTS_WRITE_LOCK.lock();
+/// Read the known-hosts file on the blocking pool under `KNOWN_HOSTS_WRITE_LOCK`
+/// so a concurrent trust rewrite cannot race with the check and a slow or
+/// AV-scanned APPDATA read cannot park an async worker. A blocking-task failure
+/// returns Err so `check_server_key` fails closed instead of auto-trusting.
+async fn known_hosts_check_at(
+    path: PathBuf,
+    host: String,
+    port: u16,
+    fingerprint: String,
+) -> Result<HostKeyStatus, String> {
     let id = format!("{}:{}", host, port);
-    let mut hosts = load_known_hosts();
-    hosts[id] = json!({ "algorithm": algorithm, "fingerprint": fingerprint });
-    save_known_hosts(&hosts);
+    tokio::task::spawn_blocking(move || {
+        let _guard = KNOWN_HOSTS_WRITE_LOCK.lock();
+        let hosts = load_known_hosts_at(&path);
+        check_known_host_entry(hosts.get(&id), &fingerprint)
+    })
+    .await
+    .map_err(|e| format!("known_hosts check task failed: {e}"))
+}
+
+async fn known_hosts_trust(host: &str, port: u16, algorithm: &str, fingerprint: &str) {
+    known_hosts_trust_at(
+        known_hosts_path(),
+        host.to_string(),
+        port,
+        algorithm.to_string(),
+        fingerprint.to_string(),
+    )
+    .await;
+}
+
+/// Serialize load-modify-save so concurrent trusts cannot overwrite each
+/// other's records, and run it on the blocking pool: both this write and the
+/// check read in check_server_key touch APPDATA from an async task, and a slow
+/// or AV-scanned read must not park a runtime worker (and every other
+/// session's I/O behind it).
+async fn known_hosts_trust_at(
+    path: PathBuf,
+    host: String,
+    port: u16,
+    algorithm: String,
+    fingerprint: String,
+) {
+    let _ = tokio::task::spawn_blocking(move || {
+        let _guard = KNOWN_HOSTS_WRITE_LOCK.lock();
+        let id = format!("{}:{}", host, port);
+        let mut hosts = load_known_hosts_at(&path);
+        hosts[id] = json!({ "algorithm": algorithm, "fingerprint": fingerprint });
+        save_known_hosts_at(&path, &hosts);
+    })
+    .await;
 }
 
 // ── Credential store ──
@@ -1808,16 +1938,24 @@ async fn run_local_writer<W: std::io::Write + Send + 'static>(
         native_trace::input_stage(&tab_id, "write-begin", bytes, trace, None);
         let data = input.data;
         let writer_for_write = writer.clone();
-        let ok = tokio::task::spawn_blocking(move || {
+        let outcome = tokio::task::spawn_blocking(move || {
             let mut guard = writer_for_write.lock();
             match guard.as_mut() {
-                Some(w) => std::io::Write::write_all(w, &data).is_ok(),
-                None => false,
+                Some(w) => std::io::Write::write_all(w, &data).map_err(|e| e.kind()),
+                None => Err(std::io::ErrorKind::BrokenPipe),
             }
         })
         .await
-        .unwrap_or(false);
-        native_trace::input_stage(&tab_id, "write-end", bytes, trace, Some(ok));
+        .unwrap_or(Err(std::io::ErrorKind::Other));
+        native_trace::input_stage(&tab_id, "write-end", bytes, trace, Some(outcome.is_ok()));
+        // The child exited and its ConPTY end is gone: no later write can
+        // succeed, and keeping the loop alive only parks a task per keystroke.
+        if matches!(
+            outcome,
+            Err(std::io::ErrorKind::BrokenPipe) | Err(std::io::ErrorKind::NotConnected)
+        ) {
+            break;
+        }
     }
     *writer.lock() = None;
 }
@@ -1836,7 +1974,7 @@ pub async fn pty_create(
             return Err(error);
         }
     };
-    let params = &execution.payload;
+    let params = execution.payload.clone();
     let execution_owner = requested
         .get("executionOwner")
         .and_then(Value::as_str)
@@ -1844,7 +1982,8 @@ pub async fn pty_create(
     let shell = params
         .get("shell")
         .and_then(|v| v.as_str())
-        .unwrap_or("powershell.exe");
+        .unwrap_or("powershell.exe")
+        .to_string();
     let shell_args: Vec<String> = params
         .get("args")
         .and_then(|v| v.as_array())
@@ -1863,7 +2002,8 @@ pub async fn pty_create(
     let colorfgbg = params
         .get("colorFgbg")
         .and_then(|v| v.as_str())
-        .and_then(sanitize_colorfgbg);
+        .and_then(sanitize_colorfgbg)
+        .map(str::to_string);
     let request_id = params
         .get("requestId")
         .and_then(|v| v.as_str())
@@ -1890,36 +2030,37 @@ pub async fn pty_create(
         );
     };
 
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| {
-            let msg = format!("openpty failed: {e}");
-            emit_spawn_error(&app, &request_id, &msg);
-            msg
-        })?;
+    // ConPTY creation and the process spawn are blocking calls (openpty can
+    // take tens of milliseconds under load, and CreateProcess waits on the
+    // child's loader). Run the pair on the blocking pool so the window thread
+    // and async workers stay free (same class as issue #55). Ordering is
+    // unchanged: the PTY is created, the shell spawned, then the session is
+    // registered with the master/child produced here.
+    let spawn = tokio::task::spawn_blocking(move || {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| format!("openpty failed: {e}"))?;
 
-    let mut cmd = CommandBuilder::new(shell);
-    for arg in &shell_args {
-        cmd.arg(arg);
-    }
-    if let Some(ref cwd) = cwd {
-        cmd.cwd(cwd);
-    }
-    if let Some(v) = colorfgbg {
-        cmd.env("COLORFGBG", v);
-    }
-    // The renderer (xterm.js) draws 24-bit color; advertise it so truecolor-
-    // aware TUI apps (which key on COLORTERM) enable their direct-color paths.
-    cmd.env("COLORTERM", "truecolor");
+        let mut cmd = CommandBuilder::new(shell);
+        for arg in &shell_args {
+            cmd.arg(arg);
+        }
+        if let Some(ref cwd) = cwd {
+            cmd.cwd(cwd);
+        }
+        if let Some(v) = colorfgbg {
+            cmd.env("COLORFGBG", v);
+        }
+        // The renderer (xterm.js) draws 24-bit color; advertise it so truecolor-
+        // aware TUI apps (which key on COLORTERM) enable their direct-color paths.
+        cmd.env("COLORTERM", "truecolor");
 
-    let child = execution
-        .start(|| {
+        let mut child = execution.start(|| {
             pair.slave.spawn_command(cmd).map_err(|e| {
                 // os error 267 ("The directory name is invalid") is the common
                 // case: the profile's startup directory no longer exists. Name
@@ -1930,18 +2071,29 @@ pub async fn pty_create(
                 };
                 msg
             })
-        })
-        .map_err(|msg| {
-            emit_spawn_error(&app, &request_id, &msg);
-            msg
         })?;
-    let mut reader = pair.master.try_clone_reader().map_err(|e| {
-        let msg = format!("reader failed: {e}");
-        emit_spawn_error(&app, &request_id, &msg);
-        msg
-    })?;
-    let writer = pair.master.take_writer().map_err(|e| {
-        let msg = format!("writer failed: {e}");
+        // Clone reader and take writer inside the blocking task so any failure
+        // kills the child and drops ConPTY handles off the async worker.
+        let reader = match pair.master.try_clone_reader() {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = child.kill();
+                return Err(format!("reader failed: {e}"));
+            }
+        };
+        let writer = match pair.master.take_writer() {
+            Ok(w) => w,
+            Err(e) => {
+                let _ = child.kill();
+                return Err(format!("writer failed: {e}"));
+            }
+        };
+        Ok::<_, String>((pair, child, reader, writer))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("pty spawn task failed: {e}")));
+
+    let (pair, child, mut reader, writer) = spawn.map_err(|msg| {
         emit_spawn_error(&app, &request_id, &msg);
         msg
     })?;
@@ -3381,6 +3533,10 @@ pub async fn ssh_connect(
     // it loses the race, ssh_disconnect/tab-close pre-fill it for
     // user-initiated closes.
     let disconnect_reason = Arc::new(Mutex::new(None::<String>));
+    // Shared between the reader task and ssh_disconnect/pty_destroy: whichever
+    // path observes the end of the session first emits ssh-disconnected, and
+    // the others stay silent.
+    let disconnected_announced = Arc::new(AtomicBool::new(false));
     // The handler sets this while a host-key-mismatch dialog awaits the user:
     // the connect deadline pauses for it (thinking time is not a tarpit).
     let user_waiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3810,6 +3966,9 @@ pub async fn ssh_connect(
     let cwd = Arc::new(Mutex::new(None::<String>));
     let cwd_reader = Arc::clone(&cwd);
     let reason_reader = Arc::clone(&disconnect_reason);
+    let announced_reader = Arc::clone(&disconnected_announced);
+    let state_reader = state.inner().clone();
+    let handle_reader = Arc::clone(&handle);
     let (reader_start_tx, reader_start_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
         // Registration and ssh-connected must precede buffered output or a
@@ -3917,11 +4076,11 @@ pub async fn ssh_connect(
                             } else {
                                 "channel-closed"
                             };
-                            emit_ssh_disconnected(&app2, &tid, &rid, path, &reason_reader);
+                            emit_ssh_disconnected(&app2, &tid, Some(&rid), Some(path), &reason_reader, &announced_reader);
                             break;
                         }
                         None => {
-                            emit_ssh_disconnected(&app2, &tid, &rid, "session-ended", &reason_reader);
+                            emit_ssh_disconnected(&app2, &tid, Some(&rid), Some("session-ended"), &reason_reader, &announced_reader);
                             break;
                         }
                         _ => {}
@@ -3935,6 +4094,18 @@ pub async fn ssh_connect(
                     }
                 }
             }
+        }
+        // The session is over: drop its map entry so input for a dead tab is
+        // rejected instead of queued into a closed channel, stop the writer
+        // task, cancel any in-flight SFTP transfers, and explicitly disconnect
+        // the SSH transport so remote sshd does not linger behind a wedged
+        // SFTP channel after the shell exited.
+        let finished = reap_reader_session(&state_reader, &tid, &handle_reader);
+        if let Some(SessionType::Ssh(session)) = finished {
+            let handle = Arc::clone(&session.handle);
+            let cancels = Arc::clone(&session.transfer_cancels);
+            drop(session);
+            finish_reaped_ssh_session(&handle, cancels).await;
         }
     });
 
@@ -3964,6 +4135,7 @@ pub async fn ssh_connect(
                 transfer_cancels: cancels.clone(),
                 cwd,
                 disconnect_reason,
+                disconnected_announced,
             }),
         )
     };
@@ -3985,11 +4157,13 @@ pub async fn ssh_connect(
 /// "closed", so the pre-fill must happen before the session becomes unreachable.
 const USER_CLOSE_REASON: &str = "closed by user";
 
-/// Mark `slot` as a user-initiated close. Callers hold the session map guard so
-/// no reader can observe a removed session without a shutdown cause; the slot
-/// itself is a per-session lock, a leaf in the map -> per-session order.
+/// Mark `slot` as a user-initiated close if no earlier disconnect cause has
+/// already been recorded. Callers hold the session map guard so no reader can
+/// observe a removed session without a shutdown cause; the slot itself is a
+/// per-session lock, a leaf in the map -> per-session order.
 fn mark_user_close(slot: &Mutex<Option<String>>) {
-    *slot.lock() = Some(USER_CLOSE_REASON.to_string());
+    let mut guard = slot.lock();
+    guard.get_or_insert_with(|| USER_CLOSE_REASON.to_string());
 }
 
 /// Take the SSH session for `tab_id` out of the map for an explicit
@@ -4080,13 +4254,19 @@ pub async fn ssh_disconnect(
         take_ssh_for_disconnect(&mut map, &tab_id)
     };
     let close_handle = removed.map(|session| {
-        let close_handle = (session.handle.clone(), session.transfer_cancels.clone());
+        let close_handle = (
+            session.handle.clone(),
+            session.transfer_cancels.clone(),
+            Arc::clone(&session.disconnect_reason),
+            Arc::clone(&session.disconnected_announced),
+        );
         // Dropping the session drops the writer_tx, which stops the writer task.
-        // The reader task will detect EOF and emit ssh-disconnected.
+        // The reader task may observe EOF first; the announcement flag makes
+        // this path and the reader emit exactly one ssh-disconnected together.
         drop(session);
         close_handle
     });
-    if let Some((h, cancels)) = close_handle {
+    if let Some((h, cancels, reason, announced)) = close_handle {
         // Cancel in-flight SFTP transfers first so their tasks drop temp
         // files and release the handle before the channel goes away; the
         // helper waits briefly for the registry to drain.
@@ -4096,7 +4276,7 @@ pub async fn ssh_disconnect(
             .disconnect(russh::Disconnect::ByApplication, "ZTerm closed", "")
             .await
             .ok();
-        let _ = app.emit("ssh-disconnected", json!({ "tabId": tab_id }));
+        emit_ssh_disconnected(&app, &tab_id, None, None, &reason, &announced);
     }
     Ok(json!({ "ok": true }))
 }
@@ -4271,6 +4451,8 @@ enum SessionClosePlan {
     Ssh {
         handle: Arc<russh::client::Handle<SshHandler>>,
         cancels: TransferCancels,
+        reason: Arc<Mutex<Option<String>>>,
+        announced: Arc<AtomicBool>,
     },
 }
 
@@ -4288,10 +4470,18 @@ fn close_plan_for_session(session: SessionType) -> SessionClosePlan {
         SessionType::Ssh(session) => {
             let handle = session.handle.clone();
             let cancels = session.transfer_cancels.clone();
+            let reason = Arc::clone(&session.disconnect_reason);
+            let announced = Arc::clone(&session.disconnected_announced);
             // Dropping the session drops the writer_tx, which stops the writer
-            // task; the reader task detects EOF and emits ssh-disconnected.
+            // task; the reader task may see EOF first, and the shared
+            // announcement flag keeps the two emitters to a single event.
             drop(session);
-            SessionClosePlan::Ssh { handle, cancels }
+            SessionClosePlan::Ssh {
+                handle,
+                cancels,
+                reason,
+                announced,
+            }
         }
     }
 }
@@ -4321,6 +4511,52 @@ fn take_session_for_close<V, T>(
     // what blocks.
     drop(guard);
     Some(close(removed))
+}
+
+/// Finish tearing down an SSH session reaped by its channel reader: drain
+/// active SFTP transfers and send a bounded transport disconnect so the remote
+/// sshd exits even when an SFTP channel outlives the shell.
+async fn finish_reaped_ssh_session<H: russh::client::Handler + 'static>(
+    handle: &russh::client::Handle<H>,
+    cancels: TransferCancels,
+) {
+    cancel_sftp_transfers(&cancels).await;
+    let _ = tokio::time::timeout(
+        SSH_SHELL_CLEANUP_TIMEOUT,
+        handle.disconnect(russh::Disconnect::ByApplication, "ZTerm shell ended", ""),
+    )
+    .await;
+}
+
+/// Remove the map entry this reader served, if it is still the same SSH
+/// session. Identity (not the tab id alone) decides: a successor attempt may
+/// already have registered under the same tab id, and a local session must
+/// never be reaped by a dead SSH reader.
+fn reap_reader_session(
+    state: &SessionMap,
+    tab_id: &str,
+    handle: &Arc<russh::client::Handle<SshHandler>>,
+) -> Option<SessionType> {
+    let mut map = state.lock();
+    take_matching_session(
+        &mut map,
+        tab_id,
+        |session| matches!(session, SessionType::Ssh(s) if Arc::ptr_eq(&s.handle, handle)),
+    )
+}
+
+/// Remove `tab_id` from the session map when `matches` accepts the entry. The
+/// caller drops the returned session only after releasing the map guard:
+/// dropping stops the writer task and may close the connection.
+fn take_matching_session<V, F>(map: &mut HashMap<String, V>, tab_id: &str, matches: F) -> Option<V>
+where
+    F: FnOnce(&V) -> bool,
+{
+    if map.get(tab_id).is_some_and(matches) {
+        map.remove(tab_id)
+    } else {
+        None
+    }
 }
 
 #[tauri::command]
@@ -4391,7 +4627,12 @@ pub async fn pty_destroy(
             // blocking pool so it never occupies an async worker.
             let _ = tokio::task::spawn_blocking(move || drop(session)).await;
         }
-        Some(SessionClosePlan::Ssh { handle, cancels }) => {
+        Some(SessionClosePlan::Ssh {
+            handle,
+            cancels,
+            reason,
+            announced,
+        }) => {
             // Cancel in-flight SFTP transfers first so their tasks drop temp
             // files before the session is disconnected underneath them.
             cancel_sftp_transfers(&cancels).await;
@@ -4400,7 +4641,7 @@ pub async fn pty_destroy(
                 .disconnect(russh::Disconnect::ByApplication, "ZTerm closed", "")
                 .await
                 .ok();
-            let _ = app.emit("ssh-disconnected", json!({ "tabId": tab_id }));
+            emit_ssh_disconnected(&app, &tab_id, None, None, &reason, &announced);
         }
         None => {}
     }
@@ -4700,18 +4941,41 @@ pub fn save_terminal_settings(args: Vec<Value>) -> Result<Value, String> {
 // ── SSH Profiles ──
 
 #[tauri::command]
-pub fn save_ssh_profiles(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
-    let _config_guard = CONFIG_WRITE_LOCK.lock();
+pub async fn save_ssh_profiles(app: AppHandle, args: Vec<Value>) -> Result<Value, String> {
     let params = args.into_iter().next().unwrap_or(json!({}));
     let profiles = params.get("sshProfiles").cloned().unwrap_or(json!([]));
-    let mut config = load_config();
-    if let Value::Object(ref mut c) = config {
-        c.insert("sshProfiles".into(), profiles);
-    }
-    save_config(&config)?;
+    let dirs = account_dirs()?;
+    save_ssh_profiles_with_dirs(dirs, profiles).await?;
     // The renderer listens for the ssh-profiles-saved event to refresh its UI
     let _ = app.emit("ssh-profiles-saved", json!({}));
     Ok(json!({ "ok": true }))
+}
+
+/// Replace the whole profile list under the config write lock. Async because
+/// sync commands run on the window thread: this path reads and rewrites
+/// config.json.
+async fn save_ssh_profiles_with_dirs(dirs: AccountDirs, profiles: Value) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let _config_guard = CONFIG_WRITE_LOCK.lock();
+        // Resolve the paths under the lock: changing the data directory
+        // updates the anchor config's `dataDir` pointer, so a path captured
+        // earlier could target a directory that is no longer current.
+        save_ssh_profiles_in(&dirs.config_path(), &dirs.anchor_config_path(), profiles)
+    })
+    .await
+    .map_err(|e| format!("ssh profile save task failed: {e}"))?
+}
+
+fn save_ssh_profiles_in(
+    primary: &std::path::Path,
+    anchor: &std::path::Path,
+    profiles: Value,
+) -> Result<(), String> {
+    let mut config = load_config_from(primary, anchor);
+    if let Value::Object(ref mut c) = config {
+        c.insert("sshProfiles".into(), profiles);
+    }
+    save_config_to(primary, anchor, &config)
 }
 
 // ── Shortcuts ──
@@ -9023,6 +9287,313 @@ mod tests {
         assert_eq!(pending_size_for(&pending.lock(), "att_1"), Some((44, 120)));
     }
 
+    struct BrokenPipeWriter;
+
+    impl std::io::Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the child closed its end",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn local_writer_stops_when_the_child_pipe_is_gone() {
+        let (tx, rx) = mpsc::channel(4);
+        let writer = Arc::new(Mutex::new(Some(BrokenPipeWriter)));
+        let task = tokio::spawn(run_local_writer(
+            rx,
+            Arc::clone(&writer),
+            "t_local".to_string(),
+        ));
+        tx.send(LocalInput {
+            data: b"x".to_vec(),
+            trace: None,
+        })
+        .await
+        .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("a broken pipe must end the writer loop")
+            .unwrap();
+        assert!(writer.lock().is_none(), "the writer slot is cleared");
+        drop(tx);
+    }
+    #[tokio::test]
+    async fn known_hosts_check_at_reads_a_recorded_entry() {
+        let dir = config_test_dir("known_hosts_check_at");
+        let path = dir.join("known_hosts.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "example.test:2222": { "algorithm": "ssh-ed25519", "fingerprint": "SHA256:zzz" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            known_hosts_check_at(
+                path.clone(),
+                "example.test".to_string(),
+                2222,
+                "SHA256:zzz".to_string()
+            )
+            .await
+            .unwrap(),
+            HostKeyStatus::Known
+        ));
+        assert!(matches!(
+            known_hosts_check_at(
+                path,
+                "example.test".to_string(),
+                2222,
+                "SHA256:other".to_string()
+            )
+            .await
+            .unwrap(),
+            HostKeyStatus::Mismatch { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_ssh_profiles_with_dirs_replaces_the_profile_list() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        let dir = config_test_dir("save_ssh_profiles_with_dirs");
+        let dirs = account_dirs_from(
+            Some(dir.join("roaming").into_os_string()),
+            Some(dir.join("local")),
+        )
+        .unwrap();
+        let primary = dirs.config_path();
+        let anchor = dirs.anchor_config_path();
+        save_config_to(
+            &primary,
+            &anchor,
+            &json!({ "sshProfiles": [{ "id": "old" }], "theme": "dark" }),
+        )
+        .unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(save_ssh_profiles_with_dirs(
+                dirs,
+                json!([{ "id": "new", "host": "h" }]),
+            ))
+            .unwrap();
+
+        let stored = load_config_from(&primary, &anchor);
+        assert_eq!(stored["sshProfiles"][0]["id"], "new");
+        assert_eq!(stored["theme"], "dark", "unrelated keys survive");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_ssh_profiles_does_not_park_the_async_worker() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        let dir = config_test_dir("save_ssh_profiles_off_worker");
+        let dirs = account_dirs_from(
+            Some(dir.join("roaming").into_os_string()),
+            Some(dir.join("local")),
+        )
+        .unwrap();
+        let primary = dirs.config_path();
+        let anchor = dirs.anchor_config_path();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = CONFIG_WRITE_LOCK.lock();
+            let _ = locked_tx.send(());
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+        });
+        locked_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the holder must take the lock before the probe runs");
+
+        // Single-worker runtime: if save_ssh_profiles_with_dirs waited for
+        // CONFIG_WRITE_LOCK inline on the worker, the concurrent probe task
+        // below would be starved until the lock was released.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let write_task = runtime.spawn(async move {
+            let _ = started_tx.send(());
+            save_ssh_profiles_with_dirs(dirs, json!([{ "id": "off-worker" }])).await
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("write task started on worker");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        let probe = runtime.spawn(async { 42u8 });
+        let probe_result = runtime
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(2), probe).await
+            })
+            .expect("the config write must wait on the blocking pool, not park the single worker")
+            .unwrap();
+        assert_eq!(probe_result, 42);
+        assert!(
+            !write_task.is_finished(),
+            "the write must still be blocked on CONFIG_WRITE_LOCK while the holder holds it"
+        );
+
+        let _ = release_tx.send(());
+        holder.join().unwrap();
+        // Await the original write_task to completion before inspecting disk or
+        // cleaning up so no detached blocking task can race remove_dir_all.
+        runtime.block_on(write_task).unwrap().unwrap();
+        let stored = load_config_from(&primary, &anchor);
+        assert_eq!(stored["sshProfiles"][0]["id"], "off-worker");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn known_hosts_trust_at_records_the_fingerprint() {
+        let dir = config_test_dir("known_hosts_trust_at");
+        let path = dir.join("known_hosts.json");
+
+        known_hosts_trust_at(
+            path.clone(),
+            "example.test".to_string(),
+            2222,
+            "ssh-ed25519".to_string(),
+            "SHA256:abc".to_string(),
+        )
+        .await;
+
+        let stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored["example.test:2222"]["algorithm"], "ssh-ed25519");
+        assert_eq!(stored["example.test:2222"]["fingerprint"], "SHA256:abc");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn known_hosts_trust_does_not_park_the_async_worker() {
+        let dir = config_test_dir("known_hosts_off_worker");
+        let path = dir.join("known_hosts.json");
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = KNOWN_HOSTS_WRITE_LOCK.lock();
+            let _ = locked_tx.send(());
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+        });
+        locked_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the holder must take the lock before the probe runs");
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let path_for_task = path.clone();
+        let write_task = runtime.spawn(async move {
+            let _ = started_tx.send(());
+            known_hosts_trust_at(
+                path_for_task,
+                "blocked.test".to_string(),
+                22,
+                "ssh-ed25519".to_string(),
+                "SHA256:blocked".to_string(),
+            )
+            .await
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("trust task started on worker");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        let probe = runtime.spawn(async { 99u8 });
+        let probe_result = runtime
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(2), probe).await
+            })
+            .expect("the lock wait must happen on the blocking pool, not park the single worker")
+            .unwrap();
+        assert_eq!(probe_result, 99);
+        assert!(
+            !write_task.is_finished(),
+            "the trust write must still wait while the holder holds KNOWN_HOSTS_WRITE_LOCK"
+        );
+
+        let _ = release_tx.send(());
+        holder.join().unwrap();
+        runtime.block_on(write_task).unwrap();
+        let stored: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored["blocked.test:22"]["fingerprint"], "SHA256:blocked");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn finish_reaped_ssh_session_cancels_transfers_and_disconnects_handle() {
+        let fixture = shell_fixture(ShellServerMode::AcceptedExit).await;
+        let cancels: TransferCancels = Arc::new(Mutex::new(HashMap::new()));
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        cancels.lock().insert("xfer_1".to_string(), flag.clone());
+        let cancels_bg = Arc::clone(&cancels);
+        let flag_bg = Arc::clone(&flag);
+        tokio::spawn(async move {
+            while !flag_bg.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            cancels_bg.lock().remove("xfer_1");
+        });
+
+        finish_reaped_ssh_session(&fixture.handle, cancels).await;
+
+        assert!(
+            flag.load(std::sync::atomic::Ordering::Relaxed),
+            "reap teardown must cancel active SFTP transfers"
+        );
+        let reopened = fixture.handle.channel_open_session().await;
+        assert!(
+            reopened.is_err(),
+            "reap teardown must explicitly disconnect the SSH transport"
+        );
+    }
+
+    #[test]
+    fn mark_user_close_preserves_existing_disconnect_reason() {
+        let slot = Mutex::new(Some(
+            "server stopped replying (keepalive timeout)".to_string(),
+        ));
+        mark_user_close(&slot);
+        assert_eq!(
+            slot.lock().as_deref(),
+            Some("server stopped replying (keepalive timeout)")
+        );
+
+        let empty = Mutex::new(None);
+        mark_user_close(&empty);
+        assert_eq!(empty.lock().as_deref(), Some(USER_CLOSE_REASON));
+    }
+
+    #[test]
+    fn take_matching_session_removes_only_the_matching_entry() {
+        let mut map: HashMap<String, u8> = HashMap::new();
+        map.insert("t".to_string(), 1);
+        assert!(take_matching_session(&mut map, "t", |v| *v == 2).is_none());
+        assert_eq!(map.get("t"), Some(&1), "a non-matching entry stays");
+        assert_eq!(take_matching_session(&mut map, "t", |v| *v == 1), Some(1));
+        assert!(map.get("t").is_none(), "the matching entry is reaped");
+        assert!(take_matching_session(&mut map, "missing", |_| true).is_none());
+    }
     #[test]
     fn take_ssh_for_disconnect_leaves_local_sessions_registered() {
         // ssh-1 backstop: an ssh_disconnect carrying a local PTY id must not
@@ -13209,6 +13780,112 @@ mod tests {
         assert_eq!(c.keepalive_max, 3);
     }
 
+    #[test]
+    fn disconnect_announcement_is_claimed_once() {
+        let announced = AtomicBool::new(false);
+        assert!(
+            claim_disconnect_announcement(&announced),
+            "the first observer emits"
+        );
+        assert!(
+            !claim_disconnect_announcement(&announced),
+            "later observers stay silent"
+        );
+    }
+
+    #[test]
+    fn disconnect_report_keeps_the_reason_recorded_first() {
+        use russh::client::DisconnectReason as R;
+        let keepalive = R::Error(russh::Error::KeepaliveTimeout);
+        let (k, t) = disconnect_report(None, &keepalive);
+        assert_eq!(k, "keepalive");
+        assert!(t.contains("keepalive"), "text names the cause: {t}");
+
+        let (k, t) = disconnect_report(Some(USER_CLOSE_REASON.to_string()), &keepalive);
+        assert_eq!((k, t.as_str()), ("closed", USER_CLOSE_REASON));
+
+        // A reason another path recorded first must survive a later generic
+        // callback. The kind is derived from that text, not from the reason
+        // this callback happens to see, so kind and text cannot disagree.
+        let (k, t) = disconnect_report(Some("server said bye".to_string()), &keepalive);
+        assert_eq!(k, "error", "an unknown recorded text is a generic error");
+        assert_eq!(t, "server said bye");
+
+        let (k, _) = disconnect_report(
+            Some("server stopped replying (keepalive timeout)".to_string()),
+            &R::Error(russh::Error::Disconnect),
+        );
+        assert_eq!(k, "keepalive", "the recorded text decides the kind");
+
+        let recorded_server = classify_disconnect(&R::ReceivedDisconnect(
+            russh::client::RemoteDisconnectInfo {
+                reason_code: russh::Disconnect::ByApplication,
+                message: "maintenance".to_string(),
+                lang_tag: String::new(),
+            },
+        ))
+        .1;
+        let (k, t) = disconnect_report(Some(recorded_server.clone()), &keepalive);
+        assert_eq!(k, "server");
+        assert_eq!(t, recorded_server);
+    }
+
+    #[test]
+    fn disconnect_payload_is_produced_once_per_session() {
+        let reason = Arc::new(Mutex::new(Some(USER_CLOSE_REASON.to_string())));
+        let announced = AtomicBool::new(false);
+        let first = disconnect_event_payload(
+            "ssh_1",
+            Some("r1"),
+            Some("channel-eof"),
+            &reason,
+            &announced,
+        )
+        .expect("the first caller emits");
+        assert_eq!(first["tabId"], "ssh_1");
+        assert_eq!(first["rendererId"], "r1");
+        assert_eq!(first["path"], "channel-eof");
+        assert_eq!(first["reason"], USER_CLOSE_REASON);
+        assert!(
+            disconnect_event_payload("ssh_1", None, None, &reason, &announced).is_none(),
+            "a second emitter of the same session must stay silent"
+        );
+    }
+
+    #[test]
+    fn disconnect_payload_carries_the_recorded_reason_text() {
+        use russh::client::DisconnectReason as R;
+        let keepalive = Arc::new(Mutex::new(Some(
+            "server stopped replying (keepalive timeout)".to_string(),
+        )));
+        let payload =
+            disconnect_event_payload("ssh_2", None, None, &keepalive, &AtomicBool::new(false))
+                .unwrap();
+        assert_eq!(
+            payload["reason"],
+            "server stopped replying (keepalive timeout)"
+        );
+
+        let server_text = classify_disconnect(&R::ReceivedDisconnect(
+            russh::client::RemoteDisconnectInfo {
+                reason_code: russh::Disconnect::ByApplication,
+                message: "going down".to_string(),
+                lang_tag: String::new(),
+            },
+        ))
+        .1;
+        let server = Arc::new(Mutex::new(Some(server_text.clone())));
+        let payload = disconnect_event_payload(
+            "ssh_3",
+            None,
+            Some("session-ended"),
+            &server,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(payload["reason"], server_text);
+        assert_eq!(payload["path"], "session-ended");
+    }
     #[test]
     fn classify_disconnect_kinds() {
         use russh::client::DisconnectReason as R;
