@@ -2730,15 +2730,25 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
              export COLORTERM=truecolor\n\
              if [ -n \"$HISTFILE\" ] && [ \"${{HISTFILE#{dir}/}}\" != \"$HISTFILE\" ]; then export HISTFILE=\"$HOME/.zsh_history\"; fi\n"
         );
+        // Unexport ZDOTDIR immediately before forwarding ~/.zshenv so child
+        // processes or daemons started during startup (e.g. tmux, screen,
+        // emacs --daemon) never inherit the temporary /tmp path, while zsh
+        // itself still reads the unexported shell parameter to source our
+        // wrapper .zprofile, .zshrc, and .zlogin. Redirecting stdout/stderr
+        // suppresses output under default NO_TYPESET_SILENT.
+        let zshenv = format!(
+            "[ \"$ZDOTDIR\" = \"{dir}\" ] && typeset +x ZDOTDIR >/dev/null 2>&1\n\
+             [ -f ~/.zshenv ] && . ~/.zshenv\n"
+        );
         // The temp dir is removed by .zlogin, the LAST file zsh reads: removing
-        // it in .zshrc would delete .zlogin before zsh gets to it. Unset
-        // ZDOTDIR whenever it still points at our temporary wrapper directory
-        // (preserving any custom ZDOTDIR set in the user's own startup files)
-        // so logout (.zlogout) and child zsh processes never look in a removed
-        // /tmp path that another local user could recreate. Cleanup removes
-        // exactly the four wrapper files by path and only removes the inner
-        // and outer directories when empty, sparing any history file that still
-        // landed inside the temp dir.
+        // it in .zshrc would delete .zlogin before zsh gets to it. Unset the
+        // remaining unexported ZDOTDIR parameter whenever it still points at
+        // our temporary wrapper directory (preserving any custom ZDOTDIR set in
+        // the user's own startup files) so logout (.zlogout) never looks in a
+        // removed /tmp path that another local user could recreate. Cleanup
+        // removes exactly the four wrapper files by path and only removes the
+        // inner and outer directories when empty, sparing any history file that
+        // still landed inside the temp dir.
         let zlogin = format!(
             "[ \"$ZDOTDIR\" = \"{dir}\" ] && unset ZDOTDIR\n\
              [ -f ~/.zlogin ] && . ~/.zlogin\n\
@@ -2747,10 +2757,7 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
         );
         Some((
             vec![
-                (
-                    format!("{}/.zshenv", dir),
-                    b"[ -f ~/.zshenv ] && . ~/.zshenv\n".to_vec(),
-                ),
+                (format!("{}/.zshenv", dir), zshenv.into_bytes()),
                 (
                     format!("{}/.zprofile", dir),
                     b"[ -f ~/.zprofile ] && . ~/.zprofile\n".to_vec(),
@@ -2863,17 +2870,19 @@ async fn prepare_cwd_wrapper(
         return Err(CwdFollowUnavailable::WrapperUploadFailed);
     }
     // Step 3: create the inner directory `w` inside the 0700-locked outer
-    // directory. If another user somehow planted `w` during the 1-RTT window
-    // before outer chmod, create_dir fails with EEXIST and aborts; any other
-    // planted file in `outer_dir` is ignored because ZDOTDIR/rcfile point only
-    // to `inner_dir`.
+    // directory. Register `inner_dir` in the cleanup guard before awaiting
+    // mkdir so cancellation while mkdir is in flight still removes `w` before
+    // `outer_dir` (removing a non-existent inner dir is a harmless ENOENT). If
+    // another user somehow planted `w` during the 1-RTT window before outer
+    // chmod, create_dir fails with EEXIST and aborts; any other planted file in
+    // `outer_dir` is ignored because ZDOTDIR/rcfile point only to `inner_dir`.
+    let dirs_deepest_first = vec![inner_dir.clone(), outer_dir.clone()];
+    cleanup.dirs = dirs_deepest_first.clone();
     if sftp.create_dir(&inner_dir).await.is_err() {
         cleanup_cwd_wrapper(Arc::clone(&sftp), vec![outer_dir], Vec::new()).await;
         cleanup.active = false;
         return Err(CwdFollowUnavailable::WrapperUploadFailed);
     }
-    let dirs_deepest_first = vec![inner_dir.clone(), outer_dir.clone()];
-    cleanup.dirs = dirs_deepest_first.clone();
     cleanup.files = file_paths.clone();
     if sftp
         .set_metadata(&inner_dir, cwd_wrapper_dir_attributes())
@@ -2934,9 +2943,10 @@ impl CwdWrapper {
 /// or the shell never starts. Cleanup is best effort: the SFTP channel may
 /// already be unusable, and it must never delay the fallback to a plain shell.
 ///
-/// Two cases stay uncovered by design: a cancel before the server's mkdir reply
-/// can leave a directory this process never learned about, and a shell killed
-/// between the exec reply and sourcing its rc leaves residue the shell owns.
+/// Two cases stay uncovered by design: a cancel before the server's outer mkdir
+/// reply can leave a directory this process never learned about, and a shell
+/// killed between the exec reply and sourcing its rc leaves residue the shell
+/// owns.
 struct CwdWrapperCleanup {
     sftp: Arc<russh_sftp::client::SftpSession>,
     /// Directories ordered deepest-first (`[inner, outer]`) for sequential rmdir.
@@ -12553,6 +12563,31 @@ mod tests {
         assert!(
             text.contains("rmdir /tmp/.zterm-t123/w /tmp/.zterm-t123 2>/dev/null || :"),
             "dir removal must require inner and outer dirs to be empty and preserve exit status: {text}"
+        );
+    }
+
+    #[test]
+    fn zsh_wrapper_zshenv_unexports_zdotdir_before_user_startup() {
+        // Processes forked from ~/.zshenv, ~/.zprofile, or ~/.zshrc (such as
+        // tmux autostart) would inherit exported ZDOTDIR pointing into /tmp if
+        // we waited until .zlogin to unset it. Unexporting ZDOTDIR on line 1 of
+        // the wrapper .zshenv keeps it in the shell's own parameter table so
+        // zsh still reads wrapper .zprofile/.zshrc/.zlogin while children never
+        // inherit the temporary /tmp path.
+        let (files, _) = cwd_wrapper_files("/bin/zsh", "t123").expect("zsh wrapper");
+        let zshenv = files.iter().find(|(p, _)| p.ends_with("/.zshenv")).unwrap();
+        let text = String::from_utf8_lossy(&zshenv.1);
+        let first_line = text.lines().next().expect("non-empty .zshenv");
+        assert_eq!(
+            first_line,
+            "[ \"$ZDOTDIR\" = \"/tmp/.zterm-t123/w\" ] && typeset +x ZDOTDIR >/dev/null 2>&1",
+            ".zshenv must unexport ZDOTDIR silently on line 1: {text}"
+        );
+        let unexport_pos = text.find("typeset +x ZDOTDIR").unwrap();
+        let user_zshenv_pos = text.find("[ -f ~/.zshenv ]").unwrap();
+        assert!(
+            unexport_pos < user_zshenv_pos,
+            "ZDOTDIR must be unexported before forwarding user ~/.zshenv: {text}"
         );
     }
 
