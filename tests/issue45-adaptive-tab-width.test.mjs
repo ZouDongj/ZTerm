@@ -379,8 +379,6 @@ function loadSettingsIntegrationVm() {
         { id: 't2', _desiredW: 240 },
     ];
     let renderCalls = 0;
-    const relayoutForces = [];
-    let desiredClearedBeforeRender = false;
 
     const context = {
         console: { ...console, error() {} },
@@ -408,10 +406,6 @@ function loadSettingsIntegrationVm() {
             tabs,
             render() {
                 renderCalls += 1;
-                desiredClearedBeforeRender = tabs.every(t => t._desiredW === undefined);
-            },
-            _relayout(force) {
-                relayoutForces.push(force);
             },
         },
         Icons: { iconSvg: () => 'svg' },
@@ -438,8 +432,6 @@ function loadSettingsIntegrationVm() {
     return {
         context, els, calls, tabs, tabbarClasses, getConfig, setConfigField,
         getRenderCalls: () => renderCalls,
-        getRelayoutForces: () => relayoutForces,
-        wasDesiredClearedBeforeRender: () => desiredClearedBeforeRender,
     };
 }
 
@@ -458,20 +450,22 @@ test('settings.js: loadSettingsIntoForm, saveAppearance, persistSettings, and lo
     env.context.loadSettingsIntoForm();
     assert.equal(env.els.get('toggle-adaptive-tab-width').classList.contains('on'), true);
 
-    // Toggle back OFF, then turn ON via saveAppearance: verifies live chrome flag,
-    // _desiredW invalidation before render, _relayout(true), and save-appearance payload
+    // Unrelated appearance save (adaptiveTabWidth stays false) must not wipe cached _desiredW on tabs
     env.setConfigField('adaptiveTabWidth', false);
-    env.els.get('toggle-adaptive-tab-width').classList.toggle('on', true);
+    env.els.get('toggle-adaptive-tab-width').classList.toggle('on', false);
     env.tabs[0]._desiredW = 110;
     env.tabs[1]._desiredW = 240;
+    await env.context.saveAppearance();
+    assert.equal(env.tabs[0]._desiredW, 110, 'unrelated appearance save leaves cached _desiredW intact for render()');
+    assert.equal(env.getRenderCalls(), 1);
 
+    // Turn ON via saveAppearance: verifies live chrome flag, TabManager.render(), and save-appearance payload
+    env.els.get('toggle-adaptive-tab-width').classList.toggle('on', true);
     await env.context.saveAppearance();
 
     assert.equal(env.getConfig().adaptiveTabWidth, true);
     assert.equal(env.tabbarClasses.has('tabbar-adaptive'), true, 'applyChromeFlags adds tabbar-adaptive immediately');
-    assert.equal(env.wasDesiredClearedBeforeRender(), true, 'cached _desiredW invalidated before TabManager.render()');
-    assert.equal(env.getRenderCalls(), 1);
-    assert.deepEqual(env.getRelayoutForces(), [true], 'saveAppearance calls TabManager._relayout(true)');
+    assert.equal(env.getRenderCalls(), 2);
     const savedOn = env.calls.filter(c => c.command === 'save-appearance').pop();
     assert.equal(savedOn?.payload?.adaptiveTabWidth, true);
 
@@ -482,6 +476,92 @@ test('settings.js: loadSettingsIntoForm, saveAppearance, persistSettings, and lo
     assert.equal(env.tabbarClasses.has('tabbar-adaptive'), false);
     const savedOff = env.calls.filter(c => c.command === 'save-appearance').pop();
     assert.equal(savedOff?.payload?.adaptiveTabWidth, false);
+});
+
+test('real settings.js + tabs.js live toggle: saveAppearance re-measures _desiredW and updates strip layout immediately without restart', async () => {
+    const ctx = loadVm();
+    ctx._wireSmoothCursorWebgl = () => ({ _adapter: null, setOptions() {}, dispose() {} });
+    const widths = new Map([['t1', 66], ['t2', 80], ['t3', 240], ['t4', 240]]);
+    // bar clientWidth = 730 -> avail = 654
+    // Default floor 110 -> [110, 110, 240, 240], sum = 706 > 654 -> sharing
+    // Adaptive floor 72 -> [72, 80, 240, 240], sum = 638 <= 654 -> sparse
+    const { bar } = installCssTabMetrics(ctx, widths, 730);
+    for (const id of ['t1', 't2', 't3', 't4']) wiredTab(ctx, id, 'b_' + id, null);
+    ctx.TabManager.switchTo('t3');
+    ctx.TabManager.render();
+    assert.equal(bar.classList.contains('tabbar-sharing'), true);
+    assert.equal(ctx.TabManager.tabs[0]._desiredW, 110);
+
+    // Mount minimal appearance controls + real settings.js in the same VM
+    const extraEls = new Map();
+    const mkInput = (v) => ({ tagName: 'INPUT', value: v, style: {} });
+    const mkSelect = () => ({ tagName: 'SELECT', options: [], value: '', style: {} });
+    for (const id of ['set-font', 'set-ui-font', 'set-ui-fallback-font', 'set-fallback-font']) extraEls.set(id, mkSelect());
+    extraEls.set('set-font-size', mkInput('16'));
+    extraEls.set('set-line-height', mkInput('1.125'));
+    extraEls.set('set-font-weight', mkInput('400'));
+    extraEls.set('set-font-weight-bold', mkInput('600'));
+    extraEls.set('set-accent', mkInput('#61afef'));
+    extraEls.set('set-terminal-scheme', mkInput('onedark'));
+    extraEls.set('set-contrast', mkInput('1'));
+    const mkToggle = (on) => {
+        const el = ctx.document.createElement('div');
+        el.classList.add('toggle-switch');
+        if (on) el.classList.add('on');
+        return el;
+    };
+    extraEls.set('toggle-animations', mkToggle(true));
+    extraEls.set('toggle-statusdot', mkToggle(true));
+    extraEls.set('toggle-adaptive-tab-width', mkToggle(false));
+    extraEls.set('toggle-pane-ring', mkToggle(false));
+    extraEls.set('toggle-panel-edge', mkToggle(true));
+    extraEls.set('toggle-sftp-material', mkToggle(false));
+
+    const origGetById = ctx.document.getElementById;
+    ctx.document.getElementById = (id) => extraEls.get(id) || origGetById(id);
+    const savedPayloads = [];
+    ctx.ipcRenderer.invoke = async (cmd, payload) => {
+        if (cmd === 'save-appearance') savedPayloads.push(payload);
+        return undefined;
+    };
+    ctx.getToggle = (id) => {
+        const el = ctx.document.getElementById(id);
+        return el ? el.classList.contains('on') : true;
+    };
+    ctx.setToggle = (id, on) => {
+        const el = ctx.document.getElementById(id);
+        if (el) el.classList.toggle('on', on);
+    };
+    ctx.updateAccentDot = () => {};
+    ctx.applyTerminalScheme = () => {};
+    ctx.applyChromeFlags = () => {
+        bar.classList.toggle('tabbar-adaptive', ctx._settingsConfig.adaptiveTabWidth === true);
+    };
+    vm.runInContext(settingsSrc, ctx, { filename: 'settings.js' });
+
+    // Flip toggle ON and call real saveAppearance()
+    extraEls.get('toggle-adaptive-tab-width').classList.toggle('on', true);
+    await ctx.saveAppearance();
+
+    const vp = ctx.document.getElementById('tab-viewport');
+    assert.equal(bar.classList.contains('tabbar-adaptive'), true);
+    assert.equal(bar.classList.contains('tabbar-sharing'), false);
+    assert.equal(bar.classList.contains('tabbar-overflow'), false);
+    assert.equal(ctx.TabManager.tabs[0]._desiredW, 72, 'saveAppearance -> render() re-measured short tab to 72');
+    assert.equal(ctx.TabManager.tabs[1]._desiredW, 80);
+    for (const el of vp.querySelectorAll('.tab')) {
+        assert.equal(el.style.width, '', 'inline widths cleared live by saveAppearance -> render()');
+    }
+    assert.equal(savedPayloads.at(-1)?.adaptiveTabWidth, true);
+
+    // Flip toggle OFF and call real saveAppearance()
+    extraEls.get('toggle-adaptive-tab-width').classList.toggle('on', false);
+    await ctx.saveAppearance();
+
+    assert.equal(bar.classList.contains('tabbar-adaptive'), false);
+    assert.equal(bar.classList.contains('tabbar-sharing'), true);
+    assert.equal(ctx.TabManager.tabs[0]._desiredW, 110, 'saveAppearance -> render() re-measured back to 110');
+    assert.equal(savedPayloads.at(-1)?.adaptiveTabWidth, false);
 });
 
 test('settings.js: loadSettings success path restores adaptiveTabWidth: true and applies tabbar-adaptive immediately', async () => {

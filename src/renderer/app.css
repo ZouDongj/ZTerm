@@ -148,7 +148,7 @@ body.no-animations .startup-splash .cell{transition:none}
    stalls the WebView2 pump — see .tab-exit). */
 .tab{display:flex;align-items:center;gap:7px;padding:5px 12px;font-size:12.5px;color:var(--text-2);cursor:pointer;border-radius:12px;transition:background 0.12s,color 0.12s;white-space:nowrap;height:28px;min-width:110px;max-width:240px;-webkit-app-region:no-drag;user-select:none}/* min-width mirrors TAB_CONTENT_MIN, max-width mirrors TAB_MAX_WIDTH in tabstrip-layout.js — the sparse flip is decided from these measured content widths */
 #tabbar.tabbar-sharing .tab,#tabbar.tabbar-overflow .tab{flex:0 0 auto;min-width:0;max-width:none}
-#tabbar.tabbar-overflow .tab{width:100px}/* mirrors TAB_MIN_WIDTH in tabstrip-layout.js; inline pinning alone would arrive too late — render() restores scrollLeft before _relayout pins widths, so the width must come from CSS at append time */
+#tabbar.tabbar-overflow .tab{width:100px}/* mirrors TAB_MIN_WIDTH in tabstrip-layout.js; keeps default overflow tabs at 100px before inline pinning runs (render() restores scrollLeft after _relayout) */
 #tabbar.tabbar-adaptive .tab,#tabbar.tabbar-adaptive.tabbar-overflow .tab{flex:0 0 auto;width:auto;min-width:72px;max-width:240px}/* mirrors TAB_ADAPTIVE_MIN and TAB_MAX_WIDTH in tabstrip-layout.js; keeps short titles compact and prevents equal-width pinning in adaptive overflow */
 /* Semantic action buttons inside tabs: UA reset + stable hit regions.
    Every action lives in a permanently-reserved slot; hover/focus

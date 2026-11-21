@@ -971,13 +971,10 @@ function saveAppearance() {
     if (winEl) winEl.classList.toggle('no-animations', animations === false);
     if (typeof applyChromeFlags === 'function') applyChromeFlags();
 
-    // Apply status dot and adaptive tab width settings; clear cached tab
-    // widths so tabs immediately re-measure under the updated CSS/chrome rules.
-    if (Array.isArray(TabManager.tabs)) {
-        TabManager.tabs.forEach(t => { delete t._desiredW; });
-    }
+    // Apply status dot and adaptive tab width settings; TabManager.render()
+    // detects adaptiveTabWidth flips via _lastAdaptiveTabWidth, invalidates
+    // cached widths, re-measures under the new CSS floor, and forces relayout.
     TabManager.render();
-    if (typeof TabManager._relayout === 'function') TabManager._relayout(true);
 
     // Apply terminal color scheme (all terminals + container background)
     applyTerminalScheme();
