@@ -676,6 +676,18 @@ function _setUpdateDesc(text, color) {
     if (desc) { desc.textContent = text; desc.style.color = color || ''; }
 }
 
+// Manual-download fallback: every check/download failure keeps a way forward
+// even when the API is rate-limited. The URL is restricted to this project's
+// releases pages by updateReleasePageUrl.
+function _showUpdateManualLink(label) {
+    const notes = document.getElementById('update-release-notes');
+    if (!notes) return;
+    window.__updateUrl = updateReleasePageUrl(window.__updateUrl);
+    notes.style.display = '';
+    const link = notes.querySelector('a');
+    if (link) link.textContent = label || '打开发行页';
+}
+
 function _toastUpdateReadyOnce(tag) {
     if (_updateToastTag === tag) return;
     _updateToastTag = tag;
@@ -715,6 +727,25 @@ function _renderUpdateReady(tag) {
 // Rust (update_http.rs), independent of any error display wording.
 function _friendlyUpdateError(raw) {
     const s = (raw && raw !== '未知错误') ? String(raw) : '';
+    if (s.includes('rate-limit:')) {
+        const tail = s.slice(s.indexOf('rate-limit:') + 'rate-limit:'.length);
+        const retry = /retry_in=(\d+)/.exec(tail);
+        if (retry) {
+            const mins = Math.max(1, Math.ceil(Number(retry[1]) / 60));
+            return `GitHub 更新接口请求过于频繁（已限流），约 ${mins} 分钟后重试。详细信息：${s}`;
+        }
+        const reset = /reset_at=(\d+)/.exec(tail);
+        if (reset) {
+            const at = Number(reset[1]) * 1000;
+            const diff = at - Date.now();
+            if (diff > 0) {
+                const mins = Math.max(1, Math.ceil(diff / 60000));
+                const clock = new Date(at).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
+                return `GitHub 更新接口请求过于频繁（已限流），约 ${mins} 分钟后（${clock}）重试。详细信息：${s}`;
+            }
+        }
+        return 'GitHub 更新接口请求过于频繁（已限流），请稍后重试。详细信息：' + s;
+    }
     if (s.includes('TLS-to-proxy')) return '暂不支持 HTTPS 代理，请使用 HTTP 代理端点（仍可访问 HTTPS 更新地址）。详细信息：' + s;
     const envProxy = /invalid update proxy environment (\w+)/.exec(s);
     if (envProxy) return '环境变量 ' + envProxy[1] + ' 中的更新代理地址无效（仅支持 HTTP 代理），请修正或清除该环境变量后重启 ZTerm。详细信息：' + s;
@@ -737,6 +768,7 @@ function _renderUpdateFailed(err) {
     if (apply) apply.style.display = 'none';
     if (check) { check.disabled = false; check.textContent = '检查更新'; }
     if (dl) { dl.style.display = ''; dl.disabled = false; dl.textContent = '重试下载'; }
+    _showUpdateManualLink('打开发行页');
     _setUpdateDesc('下载失败：' + _friendlyUpdateError(err), 'rgba(220,120,120,0.9)');
 }
 
@@ -793,11 +825,20 @@ async function checkForUpdates() {
     try {
         const r = await ipcRenderer.invoke('check-update');
         if (r && r.none) {
-            desc.textContent = '官方还没有发布版本';
+            desc.textContent = '没有可用的稳定版本';
+            if (dl) dl.style.display = 'none';
+            if (apply) apply.style.display = 'none';
+            window.__updateUrl = null;
+            window.__updateTag = null;
+            _showUpdateManualLink('打开发行页');
         } else if (r && r.newer) {
-            window.__updateUrl = r.url;
+            window.__updateUrl = updateReleasePageUrl(r.url);
             window.__updateTag = r.tag;
-            if (notes) notes.style.display = '';
+            if (notes) {
+                notes.style.display = '';
+                const link = notes.querySelector('a');
+                if (link) link.textContent = '查看发布说明';
+            }
             if (r.ready) {
                 // Verified installer already on disk from an earlier
                 // download (survives restarts): skip straight to apply.
@@ -806,7 +847,17 @@ async function checkForUpdates() {
                 desc.textContent = `发现新版本 ${r.latest}（当前 ${r.current}）`;
                 desc.style.color = 'rgba(120,200,120,0.9)';
                 if (apply) apply.style.display = 'none';
-                if (dl) { dl.style.display = ''; dl.disabled = false; dl.textContent = '下载更新'; }
+                if (r.download_available === false) {
+                    if (dl) dl.style.display = 'none';
+                    _showUpdateManualLink('打开发行页');
+                    desc.textContent += r.rate_limited
+                        ? '；GitHub API 限流，内置下载暂不可用，请手动下载'
+                        : '；该版本没有可用的自动安装包，请手动下载';
+                } else if (dl) {
+                    dl.style.display = '';
+                    dl.disabled = false;
+                    dl.textContent = '下载更新';
+                }
             }
         } else if (r) {
             desc.textContent = `已是最新版本 (${r.current})`;
@@ -817,8 +868,12 @@ async function checkForUpdates() {
             window.__updateTag = null;
         } else {
             desc.textContent = '检查失败：空响应';
+            _showUpdateManualLink('打开发行页');
         }
     } catch (e) {
+        window.__updateUrl = null;
+        window.__updateTag = null;
+        _showUpdateManualLink('打开发行页');
         desc.textContent = '检查失败：' + _friendlyUpdateError(e && e.message ? e.message : String(e));
         desc.style.color = 'rgba(220,120,120,0.9)';
     } finally {

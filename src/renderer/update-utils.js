@@ -20,6 +20,18 @@ function countUpdateBlockers(tabs, transfers, getPanes) {
     return { ssh, sftp };
 }
 
+// Return a safe release page for the manual-download link. Only the project's
+// own HTTPS releases pages are accepted; anything else (stale value, tampered
+// field, empty) falls back to the stable latest-release page.
+function updateReleasePageUrl(url) {
+    const fallback = 'https://github.com/ZouDongj/ZTerm/releases/latest';
+    if (typeof url !== 'string') return fallback;
+    const trimmed = url.trim();
+    if (trimmed.includes('..') || trimmed.includes('\\')) return fallback;
+    if (/^https:\/\/github\.com\/ZouDongj\/ZTerm\/releases(\/|$)/.test(trimmed)) return trimmed;
+    return fallback;
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { countUpdateBlockers };
+    module.exports = { countUpdateBlockers, updateReleasePageUrl };
 }
