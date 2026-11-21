@@ -5010,6 +5010,47 @@ fn file_sha256_hex_reader(mut reader: impl std::io::Read) -> std::io::Result<Str
         .collect())
 }
 
+/// Open the installer for the final verification pass. The handle keeps
+/// read access only and denies other writers and deleters for as long as it
+/// is held; the bytes hashed are therefore the bytes the installer opens,
+/// instead of a path that could be swapped between the hash and the launch.
+#[cfg(windows)]
+fn open_verified_installer(
+    path: &std::path::Path,
+    expected_sha256: &str,
+) -> Result<std::fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // FILE_SHARE_READ: allow readers (including the installer) but no writer
+    // or deleter until this handle is closed.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x1)
+        .open(path)
+        .map_err(|e| format!("apply-update: open installer: {e}"))?;
+    verify_installer_handle(&file, expected_sha256)?;
+    Ok(file)
+}
+
+#[cfg(not(windows))]
+fn open_verified_installer(
+    path: &std::path::Path,
+    expected_sha256: &str,
+) -> Result<std::fs::File, String> {
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("apply-update: open installer: {e}"))?;
+    verify_installer_handle(&file, expected_sha256)?;
+    Ok(file)
+}
+
+fn verify_installer_handle(file: &std::fs::File, expected_sha256: &str) -> Result<(), String> {
+    let hex = file_sha256_hex_reader(file)
+        .map_err(|e| format!("apply-update: hash installer: {e}"))?;
+    if !hex.eq_ignore_ascii_case(expected_sha256) {
+        return Err("apply-update: installer sha256 changed, download again".to_string());
+    }
+    Ok(())
+}
+
 /// When the installer for `asset_name` already sits in the download dir with
 /// a sha256 matching the release digest, return its path. Lets check_update
 /// offer "restart & install" directly after an app restart.
@@ -5448,8 +5489,8 @@ fn is_per_machine_install() -> bool {
 /// the installer itself — the app never needs to run elevated, and a declined
 /// prompt comes back as an error instead of a silent not-running-as-admin
 /// failure halfway through the install.
-fn launch_update_installer(path: &std::path::Path) -> Result<(), String> {
-    if is_per_machine_install() {
+fn launch_update_installer(path: &std::path::Path, elevated: bool) -> Result<(), String> {
+    if elevated {
         launch_elevated(path, "/P /UPDATE /R")
     } else {
         std::process::Command::new(path)
@@ -5515,29 +5556,32 @@ pub async fn apply_update(args: Vec<Value>) -> Result<Value, String> {
     if !path.is_file() {
         return Err("apply-update: installer file missing, download again".to_string());
     }
-    // Re-verify before handing the file to the user account's installer:
-    // the bytes on disk must still be the ones we validated at download time.
-    let hex = file_sha256_hex(&path).map_err(|e| format!("apply-update: hash installer: {e}"))?;
-    if !hex.eq_ignore_ascii_case(&sha) {
-        return Err("apply-update: installer sha256 changed, download again".to_string());
-    }
+    // Re-verify and keep the verified handle open until the launch returns.
+    // The installer opens the path again, but the read-only share lock stops
+    // a same-account process from replacing the file between hash and launch.
+    let handle = open_verified_installer(&path, &sha)?;
+    let elevated = is_per_machine_install();
     let cmdline = format!("\"{}\" /P /UPDATE /R", path.display());
     if dry_run {
+        drop(handle);
         return Ok(json!({
             "ok": true,
             "dry_run": true,
             "tag": tag,
             "cmdline": cmdline,
-            "elevated": is_per_machine_install(),
+            "elevated": elevated,
         }));
     }
     // ShellExecuteExW with the "runas" verb blocks until the user answers the
     // UAC prompt — user-controlled and unbounded — so it must not run on the
     // webview's message thread.
-    let launched = tokio::task::spawn_blocking(move || launch_update_installer(&path))
-        .await
-        .map_err(|e| format!("apply-update: launch task: {e}"))?;
+    let launch_path = path.clone();
+    let launched =
+        tokio::task::spawn_blocking(move || launch_update_installer(&launch_path, elevated))
+            .await
+            .map_err(|e| format!("apply-update: launch task: {e}"))?;
     launched.map_err(|e| format!("apply-update: {e}"))?;
+    drop(handle);
     // Let the installer come up before we vanish; NSIS CheckIfAppIsRunning
     // would kill us anyway, exiting here is just the clean path.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -12318,6 +12362,43 @@ mod tests {
         assert_eq!(
             file_sha256_hex(&p).unwrap(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verified_installer_handle_rejects_changed_bytes() {
+        let dir = config_test_dir("verified-installer-mismatch");
+        let path = dir.join("ZTerm_test_x64-setup.exe");
+        std::fs::write(&path, b"verified installer bytes").unwrap();
+        let sha = file_sha256_hex(&path).unwrap();
+        let handle = open_verified_installer(&path, &sha).expect("matching hash opens");
+        drop(handle);
+        let err = open_verified_installer(&path, &"0".repeat(64))
+            .err()
+            .expect("mismatching hash must be rejected");
+        assert!(err.contains("sha256 changed"), "unexpected error: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verified_installer_handle_denies_write_until_dropped() {
+        let dir = config_test_dir("verified-installer-share");
+        let path = dir.join("ZTerm_test_x64-setup.exe");
+        std::fs::write(&path, b"verified installer bytes").unwrap();
+        let sha = file_sha256_hex(&path).unwrap();
+        let handle = open_verified_installer(&path, &sha).expect("matching hash opens");
+        let denied = std::fs::OpenOptions::new().write(true).open(&path);
+        assert!(
+            denied.is_err(),
+            "a writer must be denied while the verified handle is held"
+        );
+        drop(handle);
+        let allowed = std::fs::OpenOptions::new().write(true).open(&path);
+        assert!(
+            allowed.is_ok(),
+            "the file is writable again after the handle is released"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
