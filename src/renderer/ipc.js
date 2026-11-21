@@ -653,32 +653,42 @@ function _upgradeStoredSshAuth(tab, pane) {
     if (!tab) return;
     const profileId = (pane && pane._sshProfileId) || tab.sshProfileId;
     if (!profileId) return;
-    const find = () => (TabManager.sshProfiles || []).find(p => p.id === profileId);
-    const profile = find();
-    if (!profile) return;
-    const expected = profile.encryptedPassword || '';
-    if (!expected) return;
-    const wasKey = _sshProfileUsesKeyAuth(profile);
-    if (!wasKey && expected.startsWith('dpapi:')) return;
-    // Snapshot the auth the connect actually used: the edit dialog may switch
-    // this profile to password auth (or another key) while the reply is in
-    // flight, and a late rewrite must not undo that edit.
-    const authType = profile.authType || '';
-    const keyPath = profile.privateKeyPath || '';
-    ipcRenderer.invoke('upgrade-ssh-profile-auth', { profileId, expectedPassword: expected })
-        .then(res => {
-            if (!res || !res.changed || typeof res.encryptedPassword !== 'string') return;
-            const current = find();
-            if (!current) return;
-            if ((current.encryptedPassword || '') !== expected) return;
-            if ((current.authType || '') !== authType) return;
-            if ((current.privateKeyPath || '') !== keyPath) return;
-            // Only a key profile may lose its password; a password profile
-            // keeps the ciphertext it authenticated with.
-            if (res.encryptedPassword === '' && !wasKey) return;
-            current.encryptedPassword = res.encryptedPassword;
-        })
-        .catch(() => {});
+    const runUpgrade = async () => {
+        const list = TabManager.sshProfiles || [];
+        const idx = list.findIndex(p => p.id === profileId);
+        if (idx < 0) return;
+        const profile = list[idx];
+        const expected = profile.encryptedPassword || '';
+        if (!expected) return;
+        const wasKey = _sshProfileUsesKeyAuth(profile);
+        if (!wasKey && expected.startsWith('dpapi:')) return;
+        // Snapshot the auth the connect actually used: the edit dialog may
+        // switch this profile to password auth (or another key) while the
+        // reply is in flight, and a late rewrite must not undo that edit.
+        const authType = profile.authType || '';
+        const keyPath = profile.privateKeyPath || '';
+        const res = await ipcRenderer.invoke('upgrade-ssh-profile-auth', { profileId, expectedPassword: expected });
+        if (!res || !res.changed || typeof res.encryptedPassword !== 'string') return;
+        const latest = TabManager.sshProfiles || [];
+        const curIdx = latest.findIndex(p => p.id === profileId);
+        if (curIdx < 0) return;
+        const current = latest[curIdx];
+        if ((current.encryptedPassword || '') !== expected) return;
+        if ((current.authType || '') !== authType) return;
+        if ((current.privateKeyPath || '') !== keyPath) return;
+        // Only a key profile may lose its password; a password profile keeps
+        // the ciphertext it authenticated with.
+        if (res.encryptedPassword === '' && !wasKey) return;
+        const nextProfile = { ...current, encryptedPassword: res.encryptedPassword };
+        if (wasKey && res.authType === 'key') nextProfile.authType = 'key';
+        const nextList = [...latest];
+        nextList[curIdx] = nextProfile;
+        TabManager.sshProfiles = nextList;
+    };
+    const scheduled = typeof _serializeSSHProfileOp === 'function'
+        ? _serializeSSHProfileOp(runUpgrade)
+        : runUpgrade();
+    Promise.resolve(scheduled).catch(() => {});
 }
 
 // Failure application shared by the ssh-error event and the own invocation

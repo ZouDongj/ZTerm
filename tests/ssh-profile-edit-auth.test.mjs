@@ -113,7 +113,7 @@ test('C3 (control): password auth keeps the ciphertext when no new password is t
     assert.equal(saved[0].sshProfiles[0].privateKeyPath, '');
 });
 
-test('P2: an inline password saved after switching a key profile survives a background clear', async () => {
+test('P2: inline password on a key profile stages in the dialog without writing a hybrid profile to disk', async () => {
     const ctx = loadSshVm();
     stubSshDisplay(ctx);
     const profile = {
@@ -125,7 +125,7 @@ test('P2: an inline password saved after switching a key profile survives a back
     assert.equal(runIn(ctx, '_sshOpenedPwd'), 'dpapi:legacy-L',
         'dialog snapshots the ciphertext it shows as saved');
 
-    // Switch the dropdown to password auth and save a new secret inline.
+    // Switch the dropdown to password auth and click inline save.
     const g = id => ctx.document.getElementById(id);
     g('ssh-edit-auth').value = '密码';
     ctx.updateAuthFields();
@@ -140,20 +140,92 @@ test('P2: an inline password saved after switching a key profile survives a back
     };
     await ctx._savePasswordInline();
     await flush();
-    assert.equal(ctx.TabManager.sshProfiles[0].encryptedPassword, 'dpapi:inline-N');
+    assert.equal(saved.length, 0,
+        'inline save must not persist a hybrid key+password profile before full Save');
+    assert.equal(ctx.TabManager.sshProfiles[0].privateKeyPath, 'C:/keys/id_ed25519');
+    assert.equal(ctx.TabManager.sshProfiles[0].encryptedPassword, 'dpapi:legacy-L');
+    assert.equal(runIn(ctx, '_sshStagedPwd'), 'dpapi:inline-N',
+        'staged ciphertext is held in the dialog for atomic commit on full Save');
 
     // A key connect that started earlier replies now and clears the profile it
     // still saw as key auth.
-    ctx.TabManager.sshProfiles[0].encryptedPassword = '';
+    ctx.TabManager.sshProfiles[0] = { ...ctx.TabManager.sshProfiles[0], encryptedPassword: '' };
 
     await ctx.saveSSHEdit();
     await flush();
 
-    assert.equal(saved.length, 2, 'inline save then full save');
-    const persisted = saved.at(-1).sshProfiles[0];
+    assert.equal(saved.length, 1, 'full save commits auth mode and staged password atomically');
+    const persisted = saved[0].sshProfiles[0];
     assert.equal(persisted.authType, 'password');
+    assert.equal(persisted.privateKeyPath, '');
     assert.equal(persisted.encryptedPassword, 'dpapi:inline-N',
         'the secret the user just chose is kept, not the stale legacy one and not empty');
+});
+
+test('P4: staged inline password overrides stale legacy ciphertext on full Save without background clear', async () => {
+    const ctx = loadSshVm();
+    stubSshDisplay(ctx);
+    ctx.TabManager.sshProfiles = [{
+        id: 'p1', name: 'box', host: 'h1', username: 'u1', authType: 'key',
+        encryptedPassword: 'dpapi:legacy-L', privateKeyPath: 'C:/keys/id_ed25519',
+    }];
+    ctx.openSSHEdit(false, 'p1');
+    const g = id => ctx.document.getElementById(id);
+    g('ssh-edit-auth').value = '密码';
+    ctx.updateAuthFields();
+    g('ssh-edit-password').value = 'inline-N';
+    const saved = [];
+    ctx.closeOverlay = () => {};
+    ctx.renderSSHManagerInSettings = () => {};
+    ctx.ipcRenderer.invoke = (cmd, payload) => {
+        if (cmd === 'encrypt-password') return Promise.resolve({ encrypted: 'dpapi:inline-N' });
+        if (cmd === 'save-ssh-profiles') { saved.push(payload); return Promise.resolve({ ok: true }); }
+        return new Promise(() => {});
+    };
+
+    await ctx._savePasswordInline();
+    await flush();
+    assert.equal(saved.length, 0);
+    // Deliberately do NOT clear TabManager.sshProfiles[0].encryptedPassword:
+    // the normal path has no background clear, yet full Save must commit the
+    // newly staged password rather than stale dpapi:legacy-L.
+    await ctx.saveSSHEdit();
+    await flush();
+
+    assert.equal(saved.length, 1);
+    const persisted = saved[0].sshProfiles[0];
+    assert.equal(persisted.authType, 'password');
+    assert.equal(persisted.privateKeyPath, '');
+    assert.equal(persisted.encryptedPassword, 'dpapi:inline-N');
+});
+
+test('P3: a legacy hybrid profile with privateKeyPath opens in key mode and preserves the key on save', async () => {
+    const ctx = loadSshVm();
+    stubSshDisplay(ctx);
+    const hybrid = {
+        id: 'p1', name: 'legacy-key', host: 'h1', username: 'u1', authType: 'password',
+        encryptedPassword: '', privateKeyPath: 'C:/keys/id_ed25519', note: 'old',
+    };
+    ctx.TabManager.sshProfiles = [hybrid];
+    const { saved } = recordSaves(ctx);
+
+    ctx.openSSHEdit(false, 'p1');
+    assert.equal(ctx.document.getElementById('ssh-edit-auth').value, '密钥',
+        'non-empty privateKeyPath must open in key mode even if authType says password');
+    ctx.document.getElementById('ssh-edit-note').value = 'updated';
+    await ctx.saveSSHEdit();
+    await flush();
+
+    assert.equal(saved.length, 1);
+    const persisted = saved[0].sshProfiles[0];
+    assert.equal(persisted.authType, 'key');
+    assert.equal(persisted.privateKeyPath, 'C:/keys/id_ed25519');
+    assert.equal(persisted.encryptedPassword, '');
+    assert.equal(persisted.note, 'updated');
+
+    ctx.openSSHEditFromTemplate('p1');
+    assert.equal(ctx.document.getElementById('ssh-edit-auth').value, '密钥',
+        'creating from a hybrid template also defaults to key mode');
 });
 
 function queueBehindBlocker(ctx, profiles, clearPasswordFor = '') {

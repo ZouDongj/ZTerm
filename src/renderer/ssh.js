@@ -406,39 +406,50 @@ function selectSession(sessionId) {
 let _editingSSHId = null;
 let _sshEditGeneration = 0;
 
-// The backend persists the whole collection. Serialize every mutation and
-// derive its payload only when the preceding write has committed, so a save,
-// rename or deletion cannot republish another operation's stale collection.
-const _sshProfileMutations = [];
-let _sshProfileMutationActive = false;
+// The backend persists the whole collection (and background auth upgrades
+// rewrite a single profile in place). Serialize every profile write/upgrade
+// through one queue so a save, rename, deletion, or auth upgrade cannot
+// interleave and republish another operation's stale collection.
+const _sshProfileOps = [];
+let _sshProfileOpActive = false;
 
-function _mutateSSHProfiles(mutate) {
+function _serializeSSHProfileOp(run) {
     return new Promise((resolve, reject) => {
-        _sshProfileMutations.push({ mutate, resolve, reject });
-        _drainSSHProfileMutations();
+        _sshProfileOps.push({ run, resolve, reject });
+        _drainSSHProfileOps();
     });
 }
 
-function _drainSSHProfileMutations() {
-    if (_sshProfileMutationActive || !_sshProfileMutations.length) return;
-    _sshProfileMutationActive = true;
-    const task = _sshProfileMutations.shift();
-    const run = async () => {
+function _drainSSHProfileOps() {
+    if (_sshProfileOpActive || !_sshProfileOps.length) return;
+    _sshProfileOpActive = true;
+    const task = _sshProfileOps.shift();
+    const finish = (settle, value) => {
+        _sshProfileOpActive = false;
+        settle(value);
+        _drainSSHProfileOps();
+    };
+    // An idle queue dispatches synchronously; callers retain their immediate
+    // action semantics. Rejection releases the queue without changing memory.
+    let pending;
+    try {
+        pending = Promise.resolve(task.run());
+    } catch (error) {
+        finish(task.reject, error);
+        return;
+    }
+    pending.then(value => finish(task.resolve, value), error => finish(task.reject, error));
+}
+
+function _mutateSSHProfiles(mutate) {
+    return _serializeSSHProfileOp(async () => {
         const current = TabManager.sshProfiles || [];
-        const next = task.mutate(current);
+        const next = mutate(current);
         if (!next || next === current) return false;
         await ipcRenderer.invoke('save-ssh-profiles', { sshProfiles: next });
         TabManager.sshProfiles = next;
         return true;
-    };
-    const finish = (settle, value) => {
-        _sshProfileMutationActive = false;
-        settle(value);
-        _drainSSHProfileMutations();
-    };
-    // An idle queue dispatches synchronously; callers retain their immediate
-    // action semantics. Rejection releases the queue without changing memory.
-    run().then(value => finish(task.resolve, value), error => finish(task.reject, error));
+    });
 }
 
 // Per-container in-memory view state: search query + collapse choices.
@@ -783,6 +794,10 @@ let _sshTemplatePwd = '';
 // upgrade may clear the stored password while the dialog is open; a later save
 // must keep what the dialog displayed as saved instead of writing ''.
 let _sshOpenedPwd = '';
+// Ciphertext staged by an inline save on a key profile whose auth-mode switch
+// has not yet been committed by full Save. Takes precedence over any stale
+// legacy ciphertext left on the stored profile until full Save completes.
+let _sshStagedPwd = '';
 
 function _updatePwdBtnVisibility() {
     const inputEl = document.getElementById('ssh-edit-password');
@@ -802,7 +817,7 @@ function _updatePwdBtnVisibility() {
 // profile's (plain edit input, no cancel-back button).
 function _editingProfileHasPassword() {
     if (!_editingSSHId) return false;
-    if (_sshOpenedPwd) return true;
+    if (_sshStagedPwd || _sshOpenedPwd) return true;
     const p = (TabManager.sshProfiles || []).find(x => x.id === _editingSSHId);
     return !!(p && p.encryptedPassword);
 }
@@ -888,21 +903,35 @@ async function _savePasswordInline() {
             if (isCurrentEdit()) showToast('密码加密失败: ' + result.error, true);
             return;
         }
+        let stagedOnly = false;
         const changed = await _mutateSSHProfiles(current => {
             const idx = current.findIndex(p => p.id === profileId);
             if (idx < 0) return null;
+            // Never persist a password onto a stored key profile before the
+            // user commits the auth-mode switch via full Save — writing both
+            // privateKeyPath and encryptedPassword to disk breaks the single-
+            // credential invariant and lets a key reconnect drop the password.
+            if (current[idx].privateKeyPath) {
+                stagedOnly = true;
+                return null;
+            }
             const profiles = [...current];
             profiles[idx] = { ...profiles[idx], encryptedPassword: result.encrypted };
             return profiles;
         });
-        if (changed && isCurrentEdit()) {
-            // The dialog now owns this ciphertext: a background upgrade can
-            // clear the stored copy, and the next full save must still write
-            // the password the user just chose.
-            _sshOpenedPwd = result.encrypted;
+        if ((changed || stagedOnly) && isCurrentEdit()) {
+            // The dialog now owns this ciphertext: a staged key-profile switch
+            // keeps it in _sshStagedPwd so full Save overrides any stale legacy
+            // ciphertext still on disk; a persisted save updates _sshOpenedPwd.
+            if (stagedOnly) {
+                _sshStagedPwd = result.encrypted;
+            } else {
+                _sshStagedPwd = '';
+                _sshOpenedPwd = result.encrypted;
+            }
             _sshPwdDirty = false;
             _renderPasswordField('view');
-            showToast('密码已保存');
+            showToast(stagedOnly ? '密码已暂存，保存连接后生效' : '密码已保存');
         }
     } catch(e) {
         if (isCurrentEdit()) showToast('密码保存失败: ' + e.message, true);
@@ -926,7 +955,7 @@ function openSSHEditFromTemplate(profileId) {
     document.getElementById('ssh-edit-note').value = src.note || '';
     document.getElementById('ssh-edit-keypath').value = src.privateKeyPath || '';
     document.getElementById('ssh-edit-group').value = src.group || '';
-    document.getElementById('ssh-edit-auth').value = src.authType === 'key' ? '密钥' : '密码';
+    document.getElementById('ssh-edit-auth').value = (src.authType === 'key' || !!src.privateKeyPath) ? '密钥' : '密码';
     document.getElementById('ssh-edit-followcwd').classList.toggle('on', !!src.followCwd);
     document.getElementById('ssh-edit-clearonconnect').classList.toggle('on', src.clearOnConnect !== false);
     updateAuthFields();
@@ -1267,6 +1296,7 @@ function openSSHEdit(isNew, profileId) {
     _editingSSHId = isNew ? null : profileId;
     _sshTemplatePwd = '';
     _sshOpenedPwd = '';
+    _sshStagedPwd = '';
     document.getElementById('ssh-edit-title').textContent = isNew ? '添加 SSH 连接' : '编辑 SSH 连接';
 
     // Remove old custom dropdown wrappers
@@ -1393,7 +1423,7 @@ function openSSHEdit(isNew, profileId) {
             document.getElementById('ssh-edit-group').value = p.group || '';
             document.getElementById('ssh-edit-followcwd').classList.toggle('on', !!p.followCwd);
             document.getElementById('ssh-edit-clearonconnect').classList.toggle('on', p.clearOnConnect !== false);
-            if (p.authType === 'key') {
+            if (p.authType === 'key' || !!p.privateKeyPath) {
                 document.getElementById('ssh-edit-auth').value = '密钥';
             }
             updateAuthFields();
@@ -1731,10 +1761,11 @@ async function saveSSHEdit() {
     const editGeneration = _sshEditGeneration;
     const isCurrentEdit = () => _sshEditGeneration === editGeneration && _editingSSHId === profileId;
     const templatePassword = _sshTemplatePwd || '';
-    // Snapshot the dialog's saved ciphertext before queuing: the callback may
-    // run after the dialog was closed and reopened on another profile, and it
-    // must never read the new dialog's globals.
+    // Snapshot the dialog's saved/staged ciphertext before queuing: the
+    // callback may run after the dialog was closed and reopened on another
+    // profile, and it must never read the new dialog's globals.
     const openedPwd = _sshOpenedPwd;
+    const stagedPwd = _sshStagedPwd;
     const loginScripts = collectLoginScripts();
     const name = document.getElementById('ssh-edit-name').value.trim();
     const host = document.getElementById('ssh-edit-host').value.trim();
@@ -1777,10 +1808,12 @@ async function saveSSHEdit() {
                     // of keeping (and decrypting) a secret the profile does not use.
                     encryptedPassword: authType === 'key' ? ''
                         : (encryptedPassword !== undefined ? encryptedPassword
-                            // Keep the ciphertext the dialog showed as saved
-                            // (or the one an inline save just wrote): a
-                            // background upgrade may have cleared the profile.
-                            : (profileId ? ((current[idx].encryptedPassword || '') || openedPwd) : templatePassword)),
+                            // A dialog-staged inline password (from switching a
+                            // key profile to password mode) always overrides any
+                            // stale legacy ciphertext left on disk. Otherwise,
+                            // keep the stored ciphertext (or fall back to the
+                            // opened snapshot if a background clear emptied it).
+                            : (stagedPwd || (profileId ? ((current[idx].encryptedPassword || '') || openedPwd) : templatePassword))),
                     privateKeyPath: authType === 'key' ? privateKeyPath : '',
                     note, followCwd, clearOnConnect,
                     loginScripts,

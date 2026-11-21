@@ -57,16 +57,17 @@ test('C5: a successful ssh-connected event triggers the upgrade', async () => {
     assert.equal(ctx.TabManager.sshProfiles[0].encryptedPassword, 'dpapi:new');
 });
 
-test('C5: a password profile that names a key is treated as key auth', async () => {
-    const { ctx, tab } = seed({
+test('C5: a password profile that names a key is treated as key auth and normalized immutably', async () => {
+    const initial = {
         id: 'p1', authType: 'password', encryptedPassword: 'dpapi:old',
         privateKeyPath: 'C:/keys/id_ed25519',
-    });
+    };
+    const { ctx, tab } = seed(initial);
     const calls = [];
     ctx.ipcRenderer.invoke = (cmd, payload) => {
         if (cmd !== 'upgrade-ssh-profile-auth') return new Promise(() => {});
         calls.push(payload);
-        return Promise.resolve({ changed: true, encryptedPassword: '' });
+        return Promise.resolve({ changed: true, encryptedPassword: '', authType: 'key' });
     };
 
     ctx._upgradeStoredSshAuth(tab, null);
@@ -75,6 +76,12 @@ test('C5: a password profile that names a key is treated as key auth', async () 
     assert.equal(calls.length, 1, 'a key path makes the stored password dead weight');
     assert.equal(ctx.TabManager.sshProfiles[0].encryptedPassword, '',
         'the clear reply is applied');
+    assert.equal(ctx.TabManager.sshProfiles[0].authType, 'key',
+        'hybrid authType normalizes to key alongside clearing the password');
+    assert.notEqual(ctx.TabManager.sshProfiles[0], initial,
+        'profile object is replaced immutably rather than mutated in place');
+    assert.equal(initial.encryptedPassword, 'dpapi:old',
+        'prior snapshot reference is never mutated in place');
 });
 
 test('C5: a key label without a key path still authenticates by password', async () => {
@@ -267,4 +274,56 @@ test('C5: a clear reply cannot empty a password profile', async () => {
 
     assert.equal(ctx.TabManager.sshProfiles[0].encryptedPassword, 'bGVnYWN5',
         'only a key profile may lose its stored password');
+});
+
+test('C5: background auth upgrade serializes through _serializeSSHProfileOp with save-ssh-profiles', async () => {
+    const { readFileSync } = await import('node:fs');
+    const vm = await import('node:vm');
+    const ctx = loadVm();
+    // Load the real ssh.js serialization queue into the same VM context so
+    // _upgradeStoredSshAuth and _mutateSSHProfiles share the production queue.
+    const sshSrc = readFileSync(new URL('../src/renderer/ssh.js', import.meta.url), 'utf8');
+    vm.runInContext(sshSrc, ctx, { filename: 'ssh.js' });
+
+    const p1 = { id: 'p1', name: 'one', host: 'h1', encryptedPassword: 'bGVnYWN5', privateKeyPath: '' };
+    const p2 = { id: 'p2', name: 'two', host: 'h2', encryptedPassword: 'dpapi:p2', privateKeyPath: '' };
+    ctx.TabManager.sshProfiles = [p1, p2];
+    const tab = wiredTab(ctx, 't1', 'ssh_1', '');
+    tab.sshProfileId = 'p1';
+
+    const order = [];
+    const saved = [];
+    let releaseUpgrade;
+    const upgradeGate = new Promise(r => { releaseUpgrade = r; });
+    ctx.ipcRenderer.invoke = (cmd, payload) => {
+        order.push(cmd);
+        if (cmd === 'upgrade-ssh-profile-auth') {
+            return upgradeGate.then(() => ({ changed: true, encryptedPassword: 'dpapi:new-p1' }));
+        }
+        if (cmd === 'save-ssh-profiles') {
+            saved.push(payload.sshProfiles);
+            return Promise.resolve({ ok: true });
+        }
+        return new Promise(() => {});
+    };
+
+    // Start p1 upgrade, then enqueue an unrelated edit on p2 while p1 is in flight.
+    ctx._upgradeStoredSshAuth(tab, null);
+    const editP2 = ctx._mutateSSHProfiles(cur => cur.map(p => (
+        p.id === 'p2' ? { ...p, note: 'edited' } : p
+    )));
+    await flush();
+    assert.deepEqual(order, ['upgrade-ssh-profile-auth'],
+        'save-ssh-profiles must wait behind the in-flight upgrade');
+
+    releaseUpgrade();
+    await editP2;
+    await flush();
+
+    assert.deepEqual(order, ['upgrade-ssh-profile-auth', 'save-ssh-profiles']);
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0].find(p => p.id === 'p1').encryptedPassword, 'dpapi:new-p1',
+        'queued save sees the upgraded p1 ciphertext instead of overwriting disk with legacy');
+    assert.equal(saved[0].find(p => p.id === 'p2').note, 'edited');
+    assert.equal(p1.encryptedPassword, 'bGVnYWN5', 'original p1 object was never mutated in place');
 });

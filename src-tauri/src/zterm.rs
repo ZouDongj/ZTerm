@@ -2673,9 +2673,21 @@ async fn detect_shell(sftp: &russh_sftp::client::SftpSession, username: &str) ->
 /// Both shells keep their files in one fresh private directory
 /// (`/tmp/.zterm-<stamp>`), created by the caller with 0700: /tmp is
 /// world-writable, so a predictable or directly-created rc path could be
-/// symlinked or replaced by another local user.
+/// symlinked or replaced by another local user. Using a two-level directory
+/// `/tmp/.zterm-<stamp>/w` ensures the outer directory is locked to 0700
+/// before the inner `ZDOTDIR` / rc directory is created, eliminating the 1-RTT
+/// `umask 002/000` window where another local user could plant `.zwc` or
+/// `.zlogout` files inside `ZDOTDIR`.
 fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>, String)> {
-    let dir = format!("/tmp/.zterm-{}", stamp);
+    if stamp.is_empty()
+        || !stamp
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return None;
+    }
+    let outer = format!("/tmp/.zterm-{}", stamp);
+    let dir = format!("{}/w", outer);
     if shell.ends_with("/bash") {
         let rc_path = format!("{}/rc", dir);
         // bash --rcfile starts a NON-login interactive shell: it reads neither
@@ -2691,8 +2703,8 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
              PROMPT_COMMAND=\"_zt_cwd;${{PROMPT_COMMAND}}\"\n\
              export COLORTERM=truecolor\n\
              rm -f {}\n\
-             rmdir {} 2>/dev/null\n",
-            rc_path, dir
+             rmdir {} {} 2>/dev/null || :\n",
+            rc_path, dir, outer
         );
         Some((
             vec![(rc_path.clone(), rc.into_bytes())],
@@ -2719,14 +2731,19 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
              if [ -n \"$HISTFILE\" ] && [ \"${{HISTFILE#{dir}/}}\" != \"$HISTFILE\" ]; then export HISTFILE=\"$HOME/.zsh_history\"; fi\n"
         );
         // The temp dir is removed by .zlogin, the LAST file zsh reads: removing
-        // it in .zshrc would delete .zlogin before zsh gets to it. Cleanup
-        // removes exactly the four wrapper files by path and only removes the
-        // directory when empty, so a history file that still landed inside
-        // the temp dir survives instead of being deleted with it.
+        // it in .zshrc would delete .zlogin before zsh gets to it. Unset
+        // ZDOTDIR whenever it still points at our temporary wrapper directory
+        // (preserving any custom ZDOTDIR set in the user's own startup files)
+        // so logout (.zlogout) and child zsh processes never look in a removed
+        // /tmp path that another local user could recreate. Cleanup removes
+        // exactly the four wrapper files by path and only removes the inner
+        // and outer directories when empty, sparing any history file that still
+        // landed inside the temp dir.
         let zlogin = format!(
-            "[ -f ~/.zlogin ] && . ~/.zlogin\n\
+            "[ \"$ZDOTDIR\" = \"{dir}\" ] && unset ZDOTDIR\n\
+             [ -f ~/.zlogin ] && . ~/.zlogin\n\
              rm -f {dir}/.zshenv {dir}/.zprofile {dir}/.zshrc {dir}/.zlogin\n\
-             rmdir {dir} 2>/dev/null\n"
+             rmdir {dir} {outer} 2>/dev/null || :\n"
         );
         Some((
             vec![
@@ -2785,12 +2802,11 @@ impl CwdFollowUnavailable {
     }
 }
 
-/// Prepare followCwd RC wrapper via SFTP. Ok(exec) is the command that starts
-/// the wrapped shell (bash/zsh); the Err cause feeds the follow-unavailable
-/// report — the caller degrades to a plain shell, never fails the connection.
-/// Filled once the remote directory exists, so the caller can remove it even
-/// when the prepare future is cancelled before it returns.
-type WrapperSlot = Arc<Mutex<Option<(String, Vec<String>)>>>;
+/// Handle to the single bounded cleanup task spawned if `prepare_cwd_wrapper`
+/// is dropped mid-flight (cancellation or timeout). Storing the task handle
+/// lets `EstablishOutcome::Cancelled` await that same single cleanup before
+/// disconnecting instead of launching a duplicate concurrent cleanup.
+type WrapperSlot = Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>;
 
 async fn prepare_cwd_wrapper(
     sftp: Arc<russh_sftp::client::SftpSession>,
@@ -2807,64 +2823,79 @@ async fn prepare_cwd_wrapper(
         crate::execution_trust::nonce().map_err(|_| CwdFollowUnavailable::WrapperUploadFailed)?;
     let (files, exec) = cwd_wrapper_files(&shell, &stamp)
         .ok_or_else(|| CwdFollowUnavailable::ShellUnsupported(shell.clone()))?;
-    let dir = files
+    let inner_dir = files
         .first()
         .and_then(|(path, _)| path.rsplit_once('/').map(|(parent, _)| parent.to_string()))
         .ok_or(CwdFollowUnavailable::WrapperUploadFailed)?;
+    let outer_dir = inner_dir
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.to_string())
+        .ok_or(CwdFollowUnavailable::WrapperUploadFailed)?;
     let file_paths: Vec<String> = files.iter().map(|(path, _)| path.clone()).collect();
     // The guard covers cancellation and timeout: dropping this future before
-    // the function returns leaves the directory behind with nothing that would
-    // ever remove it. It is disarmed once the caller owns the paths.
+    // the function returns spawns one bounded cleanup task and publishes its
+    // handle into `slot`. It is disarmed once the caller owns the paths or an
+    // inline error runs bounded cleanup directly.
     let mut cleanup = CwdWrapperCleanup {
         sftp: Arc::clone(&sftp),
-        dir: dir.clone(),
-        files: file_paths.clone(),
+        dirs: Vec::new(),
+        files: Vec::new(),
+        cleanup_slot: Some(Arc::clone(&slot)),
         active: false,
     };
-    // create_dir fails when the path exists, so a collision (or a planted
-    // entry) aborts instead of reusing it.
-    if sftp.create_dir(&dir).await.is_err() {
+    // Step 1: atomically create the outer directory under /tmp; EEXIST fails
+    // closed if anything already exists there.
+    if sftp.create_dir(&outer_dir).await.is_err() {
         return Err(CwdFollowUnavailable::WrapperUploadFailed);
     }
+    cleanup.dirs = vec![outer_dir.clone()];
     cleanup.active = true;
-    // Publish the paths outside this future: a cancel right after the mkdir
-    // reply drops the guard and this future together, and the caller can only
-    // await a bounded cleanup for paths it can still see.
-    *slot.lock() = Some((dir.clone(), file_paths.clone()));
-    // create_dir used the server umask: 0755 with the common 022, but 0775 or
-    // 0777 with 002/000, so another local user could drop an entry during the
-    // one round trip before the mode below takes effect. `ls /tmp` can reveal
-    // the name, so secrecy is not a defense; the protection is the short
-    // window plus EXCLUDE on every wrapper file, which refuses to reuse or
-    // follow an entry planted at a wrapper path.
+    // Step 2: lock the outer directory to 0700 BEFORE creating the inner
+    // wrapper directory. Even on hosts with umask 002/000, no non-owner can
+    // traverse the locked outer directory once set_metadata succeeds.
     if sftp
-        .set_metadata(&dir, cwd_wrapper_dir_attributes())
+        .set_metadata(&outer_dir, cwd_wrapper_dir_attributes())
         .await
         .is_err()
     {
-        let _ = sftp.remove_dir(&dir).await;
+        cleanup_cwd_wrapper(Arc::clone(&sftp), vec![outer_dir], Vec::new()).await;
         cleanup.active = false;
         return Err(CwdFollowUnavailable::WrapperUploadFailed);
     }
-    // A read_dir sweep would need opendir + readdir + close (three round
-    // trips), so the residual window stays: with umask 002/000 the directory
-    // is briefly group- or world-writable, and a local user who learned the
-    // random name could plant an entry. Deploying into a private parent is the
-    // only way to remove the window entirely without extra round trips.
+    // Step 3: create the inner directory `w` inside the 0700-locked outer
+    // directory. If another user somehow planted `w` during the 1-RTT window
+    // before outer chmod, create_dir fails with EEXIST and aborts; any other
+    // planted file in `outer_dir` is ignored because ZDOTDIR/rcfile point only
+    // to `inner_dir`.
+    if sftp.create_dir(&inner_dir).await.is_err() {
+        cleanup_cwd_wrapper(Arc::clone(&sftp), vec![outer_dir], Vec::new()).await;
+        cleanup.active = false;
+        return Err(CwdFollowUnavailable::WrapperUploadFailed);
+    }
+    let dirs_deepest_first = vec![inner_dir.clone(), outer_dir.clone()];
+    cleanup.dirs = dirs_deepest_first.clone();
+    cleanup.files = file_paths.clone();
+    if sftp
+        .set_metadata(&inner_dir, cwd_wrapper_dir_attributes())
+        .await
+        .is_err()
+    {
+        cleanup_cwd_wrapper(Arc::clone(&sftp), dirs_deepest_first, Vec::new()).await;
+        cleanup.active = false;
+        return Err(CwdFollowUnavailable::WrapperUploadFailed);
+    }
     for (path, content) in &files {
         if sftp_write_private_file(&sftp, path, content).await.is_err() {
-            // Fail closed: leave no partial wrapper behind, then degrade to a
-            // plain shell on the same connection.
-            for created in &file_paths {
-                let _ = sftp.remove_file(created).await;
-            }
-            let _ = sftp.remove_dir(&dir).await;
+            // Fail closed: run bounded cleanup to remove any uploaded files
+            // and both directories, then degrade to a plain shell.
+            cleanup_cwd_wrapper(Arc::clone(&sftp), dirs_deepest_first, file_paths).await;
             cleanup.active = false;
             return Err(CwdFollowUnavailable::WrapperUploadFailed);
         }
     }
-    // Stays armed: the caller disarms it once the remote shell is running and
-    // owns deletion through its rc file.
+    // Preparation succeeded: detach the preparation-cancel slot so the wrapper
+    // guard owns the deployed paths independently from here on.
+    cleanup.cleanup_slot = None;
     Ok(CwdWrapper { exec, cleanup })
 }
 
@@ -2883,11 +2914,17 @@ impl CwdWrapper {
     }
 
     /// Stop guarding and hand the paths to an explicit cleanup.
-    fn take_cleanup(&mut self) -> (Arc<russh_sftp::client::SftpSession>, String, Vec<String>) {
+    fn take_cleanup(
+        &mut self,
+    ) -> (
+        Arc<russh_sftp::client::SftpSession>,
+        Vec<String>,
+        Vec<String>,
+    ) {
         self.cleanup.active = false;
         (
             Arc::clone(&self.cleanup.sftp),
-            std::mem::take(&mut self.cleanup.dir),
+            std::mem::take(&mut self.cleanup.dirs),
             std::mem::take(&mut self.cleanup.files),
         )
     }
@@ -2902,15 +2939,17 @@ impl CwdWrapper {
 /// between the exec reply and sourcing its rc leaves residue the shell owns.
 struct CwdWrapperCleanup {
     sftp: Arc<russh_sftp::client::SftpSession>,
-    dir: String,
+    /// Directories ordered deepest-first (`[inner, outer]`) for sequential rmdir.
+    dirs: Vec<String>,
     files: Vec<String>,
+    cleanup_slot: Option<WrapperSlot>,
     active: bool,
 }
 
 impl std::fmt::Debug for CwdWrapperCleanup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CwdWrapperCleanup")
-            .field("dir", &self.dir)
+            .field("dirs", &self.dirs)
             .field("files", &self.files)
             .field("active", &self.active)
             .finish()
@@ -2922,11 +2961,14 @@ impl Drop for CwdWrapperCleanup {
         if !self.active {
             return;
         }
-        spawn_cwd_wrapper_cleanup(
+        let handle = spawn_cwd_wrapper_cleanup(
             Arc::clone(&self.sftp),
-            std::mem::take(&mut self.dir),
+            std::mem::take(&mut self.dirs),
             std::mem::take(&mut self.files),
         );
+        if let Some(slot) = self.cleanup_slot.take() {
+            *slot.lock() = handle;
+        }
     }
 }
 
@@ -2934,8 +2976,8 @@ impl Drop for CwdWrapperCleanup {
 /// running, so remote file removal must not gate it.
 fn discard_cwd_wrapper(wrapper: &mut Option<CwdWrapper>) {
     if let Some(mut deployed) = wrapper.take() {
-        let (sftp, dir, files) = deployed.take_cleanup();
-        spawn_cwd_wrapper_cleanup(sftp, dir, files);
+        let (sftp, dirs, files) = deployed.take_cleanup();
+        spawn_cwd_wrapper_cleanup(sftp, dirs, files);
     }
 }
 
@@ -2943,8 +2985,8 @@ fn discard_cwd_wrapper(wrapper: &mut Option<CwdWrapper>) {
 /// never sources and the wrapper would otherwise stay on the host).
 async fn discard_cwd_wrapper_awaited(wrapper: &mut Option<CwdWrapper>) {
     if let Some(mut deployed) = wrapper.take() {
-        let (sftp, dir, files) = deployed.take_cleanup();
-        cleanup_cwd_wrapper(sftp, dir, files).await;
+        let (sftp, dirs, files) = deployed.take_cleanup();
+        cleanup_cwd_wrapper(sftp, dirs, files).await;
     }
 }
 
@@ -2968,12 +3010,11 @@ async fn settle_cwd_wrapper(wrapper: &mut Option<CwdWrapper>, rejected: bool, st
 /// (bounded) before closing the SFTP channel or let it run detached.
 async fn cleanup_cwd_wrapper(
     sftp: Arc<russh_sftp::client::SftpSession>,
-    dir: String,
+    dirs: Vec<String>,
     files: Vec<String>,
 ) {
     let _ = tokio::time::timeout(SSH_SHELL_CLEANUP_TIMEOUT, async move {
-        // Remove the files concurrently, then the directory: two round trips
-        // instead of one per file.
+        // Remove the files concurrently, then remove each directory deepest-first.
         let mut removals = tokio::task::JoinSet::new();
         for path in files {
             let sftp = Arc::clone(&sftp);
@@ -2982,7 +3023,9 @@ async fn cleanup_cwd_wrapper(
             });
         }
         while removals.join_next().await.is_some() {}
-        let _ = sftp.remove_dir(dir).await;
+        for dir in dirs {
+            let _ = sftp.remove_dir(dir).await;
+        }
     })
     .await;
 }
@@ -2991,11 +3034,11 @@ async fn cleanup_cwd_wrapper(
 /// teardown) the paths are skipped silently.
 fn spawn_cwd_wrapper_cleanup(
     sftp: Arc<russh_sftp::client::SftpSession>,
-    dir: String,
+    dirs: Vec<String>,
     files: Vec<String>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let runtime = tokio::runtime::Handle::try_current().ok()?;
-    Some(runtime.spawn(cleanup_cwd_wrapper(sftp, dir, files)))
+    Some(runtime.spawn(cleanup_cwd_wrapper(sftp, dirs, files)))
 }
 
 struct ShellStartup {
@@ -3625,13 +3668,14 @@ pub async fn ssh_connect(
                 );
             }
             EstablishOutcome::Cancelled => {
-                // The upload future is gone, so only the slot can name what it
-                // created. Bounded and awaited before the session closes.
-                if let Some(ref s) = sftp {
-                    let pending = wrapper_slot.lock().take();
-                    if let Some((dir, files)) = pending {
-                        cleanup_cwd_wrapper(Arc::clone(s), dir, files).await;
-                    }
+                // Dropping the cancelled prepare future already triggered
+                // CwdWrapperCleanup::drop, which spawned one bounded cleanup
+                // task and parked its handle in wrapper_slot. Await that same
+                // task before closing the transport so cleanup finishes cleanly
+                // without issuing duplicate SFTP removals.
+                let pending = wrapper_slot.lock().take();
+                if let Some(task) = pending {
+                    let _ = task.await;
                 }
                 let _ = handle
                     .disconnect(russh::Disconnect::ByApplication, "ZTerm cancelled", "")
@@ -3641,8 +3685,8 @@ pub async fn ssh_connect(
                 );
             }
         }
-        // The wrapper guard owns these paths from here on.
-        *wrapper_slot.lock() = None;
+        // Any detached timeout cleanup owns itself from here on.
+        let _ = wrapper_slot.lock().take();
     }
 
     let wrapper_rejected = std::sync::atomic::AtomicBool::new(false);
@@ -6511,12 +6555,15 @@ fn upgrade_ssh_profile_auth_in(
         .unwrap_or("");
     // A non-empty key path is exactly what makes credential_from_encrypted pick
     // publickey auth; authType alone is not enough because a legacy profile may
-    // still say "key" while authenticating with its password.
-    let next = if !key_path.is_empty() {
+    // still say "key" while authenticating with its password, or say "password"
+    // while carrying a privateKeyPath. Normalize authType to "key" alongside
+    // clearing the unused password so editing the profile afterwards never
+    // opens in password mode and drops the key path.
+    let (next, normalized_auth_type) = if !key_path.is_empty() {
         // Re-checked against the on-disk profile under the write lock: a reply
         // that arrives after the user switched to password auth must not clear
         // the ciphertext that auth now depends on.
-        String::new()
+        (String::new(), Some("key"))
     } else if expected.starts_with("dpapi:") {
         return Ok(json!({ "changed": false, "reason": "already-current" }));
     } else {
@@ -6525,11 +6572,18 @@ fn upgrade_ssh_profile_auth_in(
             None => return Ok(json!({ "changed": false, "reason": "decrypt-failed" })),
         };
         let sealed = dpapi_encrypt(&plaintext)?;
-        format!("dpapi:{}", base64_encode_bytes(&sealed))
+        (format!("dpapi:{}", base64_encode_bytes(&sealed)), None)
     };
     profile["encryptedPassword"] = json!(next);
+    if let Some(auth_type) = normalized_auth_type {
+        profile["authType"] = json!(auth_type);
+    }
     save_config_to(primary, anchor, &config)?;
-    Ok(json!({ "changed": true, "encryptedPassword": next }))
+    let mut reply = json!({ "changed": true, "encryptedPassword": next });
+    if let Some(auth_type) = normalized_auth_type {
+        reply["authType"] = json!(auth_type);
+    }
+    Ok(reply)
 }
 
 #[tauri::command]
@@ -9344,6 +9398,7 @@ mod tests {
         opens: Arc<Mutex<Vec<String>>>,
         mkdirs: Arc<Mutex<Vec<String>>>,
         setstats: Arc<Mutex<Vec<(String, SftpSetstat)>>>,
+        open_calls: Arc<Mutex<Vec<(String, russh_sftp::protocol::OpenFlags, Option<u32>)>>>,
         fail_all_setstats: Arc<Mutex<bool>>,
         open_suffixes: Arc<Mutex<Vec<String>>>,
         // Holds an OPEN request before the file is created, so a test can drop
@@ -9442,6 +9497,21 @@ mod tests {
         fn setstat_calls(&self) -> Vec<(String, SftpSetstat)> {
             self.setstats.lock().clone()
         }
+
+        fn record_open(
+            &self,
+            path: &str,
+            pflags: russh_sftp::protocol::OpenFlags,
+            permissions: Option<u32>,
+        ) {
+            self.open_calls
+                .lock()
+                .push((path.to_string(), pflags, permissions));
+        }
+
+        fn open_calls(&self) -> Vec<(String, russh_sftp::protocol::OpenFlags, Option<u32>)> {
+            self.open_calls.lock().clone()
+        }
     }
 
     struct TestSftpHandler {
@@ -9489,8 +9559,10 @@ mod tests {
             id: u32,
             filename: String,
             pflags: russh_sftp::protocol::OpenFlags,
-            _attrs: russh_sftp::protocol::FileAttributes,
+            attrs: russh_sftp::protocol::FileAttributes,
         ) -> Result<russh_sftp::protocol::Handle, Self::Error> {
+            self.failures
+                .record_open(&filename, pflags, attrs.permissions);
             if self.failures.blocks_before_open(&filename) {
                 // The request never reaches the filesystem: a dropped client
                 // future then leaves no open handle behind, and cleanup can
@@ -10035,7 +10107,8 @@ mod tests {
         let deployed = prepare_cwd_wrapper(Arc::clone(&sftp), "tester", fresh_wrapper_slot())
             .await
             .expect("wrapper deployment");
-        let wrapper_dir = deployed.cleanup.dir.clone();
+        let wrapper_dir = deployed.cleanup.dirs[1].clone();
+        assert!(root_path(&root, &deployed.cleanup.dirs[0]).exists());
         assert!(root_path(&root, &wrapper_dir).exists());
 
         let mut channel = fixture.handle.channel_open_session().await.unwrap();
@@ -10087,7 +10160,8 @@ mod tests {
         let deployed = prepare_cwd_wrapper(Arc::clone(&sftp), "tester", fresh_wrapper_slot())
             .await
             .expect("wrapper deployment");
-        let wrapper_dir = deployed.cleanup.dir.clone();
+        let wrapper_dir = deployed.cleanup.dirs[1].clone();
+        assert!(root_path(&root, &deployed.cleanup.dirs[0]).exists());
         assert!(root_path(&root, &wrapper_dir).exists());
 
         let mut channel = fixture.handle.channel_open_session().await.unwrap();
@@ -10127,7 +10201,7 @@ mod tests {
                 .await
                 .expect("wrapper deployment"),
         );
-        let wrapper_dir = wrapper.as_ref().unwrap().cleanup.dir.clone();
+        let wrapper_dir = wrapper.as_ref().unwrap().cleanup.dirs[1].clone();
 
         settle_cwd_wrapper(&mut wrapper, false, true).await;
         assert!(wrapper.is_none(), "a started shell owns the wrapper");
@@ -10152,7 +10226,7 @@ mod tests {
                 .await
                 .expect("wrapper deployment"),
         );
-        let wrapper_dir = wrapper.as_ref().unwrap().cleanup.dir.clone();
+        let wrapper_dir = wrapper.as_ref().unwrap().cleanup.dirs[1].clone();
 
         settle_cwd_wrapper(&mut wrapper, false, false).await;
         assert!(wrapper.is_none());
@@ -10173,7 +10247,7 @@ mod tests {
                 .await
                 .expect("wrapper deployment"),
         );
-        let wrapper_dir = wrapper.as_ref().unwrap().cleanup.dir.clone();
+        let wrapper_dir = wrapper.as_ref().unwrap().cleanup.dirs[1].clone();
 
         settle_cwd_wrapper(&mut wrapper, true, true).await;
         assert!(wrapper.is_none());
@@ -12382,7 +12456,7 @@ mod tests {
         let text = String::from_utf8_lossy(&zshrc.1);
         assert!(
             text.contains(
-                "[ -n \"$HISTFILE\" ] && [ \"${HISTFILE#/tmp/.zterm-t123/}\" != \"$HISTFILE\" ]"
+                "[ -n \"$HISTFILE\" ] && [ \"${HISTFILE#/tmp/.zterm-t123/w/}\" != \"$HISTFILE\" ]"
             ),
             "redirection must fire only for an HISTFILE inside the temp dir: {text}"
         );
@@ -12447,10 +12521,11 @@ mod tests {
 
     #[test]
     fn zsh_wrapper_zlogin_cleanup_spares_history_files() {
-        // .zlogin removes exactly the four wrapper files by path and only
-        // removes the directory when empty: a history file that still landed
-        // inside the temp dir survives the cleanup instead of being deleted
-        // with it.
+        // .zlogin unsets ZDOTDIR when it still points at our wrapper dir,
+        // removes exactly the four wrapper files by path, and only removes the
+        // inner and outer directories when empty: a history file that still
+        // landed inside the temp dir survives the cleanup instead of being
+        // deleted with it.
         let (files, _) = cwd_wrapper_files("/bin/zsh", "t123").expect("zsh wrapper");
         let zlogin = files.iter().find(|(p, _)| p.ends_with("/.zlogin")).unwrap();
         let text = String::from_utf8_lossy(&zlogin.1);
@@ -12458,26 +12533,49 @@ mod tests {
             !text.contains("rm -rf"),
             "recursive delete must be gone: {text}"
         );
+        assert!(
+            text.contains("[ \"$ZDOTDIR\" = \"/tmp/.zterm-t123/w\" ] && unset ZDOTDIR"),
+            ".zlogin must unset ZDOTDIR so logout and child shells never look in a removed /tmp path: {text}"
+        );
+        let unset_pos = text.find("unset ZDOTDIR").unwrap();
+        let user_zlogin_pos = text.find("[ -f ~/.zlogin ]").unwrap();
+        assert!(
+            unset_pos < user_zlogin_pos,
+            "ZDOTDIR must be unset before forwarding user ~/.zlogin: {text}"
+        );
         assert!(text.contains("rm -f "), "cleanup must remove files: {text}");
         for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
             assert!(
-                text.contains(&format!("/tmp/.zterm-t123/{name}")),
+                text.contains(&format!("/tmp/.zterm-t123/w/{name}")),
                 "must remove {name} by exact path: {text}"
             );
         }
         assert!(
-            text.contains("rmdir /tmp/.zterm-t123"),
-            "dir removal must require the dir to be empty: {text}"
+            text.contains("rmdir /tmp/.zterm-t123/w /tmp/.zterm-t123 2>/dev/null || :"),
+            "dir removal must require inner and outer dirs to be empty and preserve exit status: {text}"
         );
     }
 
     #[test]
     fn wrapper_files_live_in_one_private_directory() {
-        // Both shells keep every file in one unguessable directory: removing a
-        // predictable /tmp path and creating it again would let another local
-        // user pre-create a symlink or their own rc file.
+        // Both shells keep every file in one two-level unguessable directory
+        // (/tmp/.zterm-<stamp>/w): locking the outer dir to 0700 before
+        // creating `w` eliminates the umask 002/000 planting window.
         let stamp = "a".repeat(64);
-        let dir = format!("/tmp/.zterm-{stamp}");
+        let outer = format!("/tmp/.zterm-{stamp}");
+        let dir = format!("{outer}/w");
+
+        // Invalid stamps (empty, spaces, shell metacharacters, slashes) are refused.
+        for bad in ["", "a/b", "a b", "a;id", "a$(id)", "../x"] {
+            assert!(
+                cwd_wrapper_files("/bin/bash", bad).is_none(),
+                "must reject unsafe stamp {bad:?}"
+            );
+            assert!(
+                cwd_wrapper_files("/bin/zsh", bad).is_none(),
+                "must reject unsafe stamp {bad:?}"
+            );
+        }
 
         let (files, exec) = cwd_wrapper_files("/bin/bash", &stamp).expect("bash wrapper");
         assert_eq!(files.len(), 1);
@@ -12490,12 +12588,13 @@ mod tests {
             "rc cleanup: {rc}"
         );
         assert!(
-            rc.contains(&format!("rmdir {dir} 2>/dev/null")),
-            "bash cleanup must drop the private dir: {rc}"
+            rc.contains(&format!("rmdir {dir} {outer} 2>/dev/null || :")),
+            "bash cleanup must drop inner and outer private dirs without polluting $?: {rc}"
         );
 
-        let (files, _) = cwd_wrapper_files("/bin/zsh", &stamp).expect("zsh wrapper");
+        let (files, exec) = cwd_wrapper_files("/bin/zsh", &stamp).expect("zsh wrapper");
         assert_eq!(files.len(), 4);
+        assert_eq!(exec, format!("exec env ZDOTDIR={dir} zsh -il"));
         for (path, _) in &files {
             assert_eq!(
                 path.rsplit_once('/').map(|(parent, _)| parent),
@@ -12504,7 +12603,8 @@ mod tests {
             );
         }
         let zlogin = files.iter().find(|(p, _)| p.ends_with("/.zlogin")).unwrap();
-        assert!(String::from_utf8_lossy(&zlogin.1).contains(&format!("rmdir {dir}")));
+        assert!(String::from_utf8_lossy(&zlogin.1)
+            .contains(&format!("rmdir {dir} {outer} 2>/dev/null || :")));
     }
 
     #[test]
@@ -12567,23 +12667,26 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_cwd_wrapper_uploads_a_private_bash_wrapper() {
+        use russh_sftp::protocol::OpenFlags;
+
         let root = wrapper_test_root("wrapper-prep-ok");
         let (sftp, failures) = test_sftp_session(root.clone()).await;
 
         let mut deployed = prepare_cwd_wrapper(Arc::new(sftp), "tester", fresh_wrapper_slot())
             .await
             .expect("wrapper deployment");
+        assert_eq!(deployed.cleanup.dirs.len(), 2);
+        let inner_dir = &deployed.cleanup.dirs[0];
+        let outer_dir = &deployed.cleanup.dirs[1];
+        assert!(outer_dir.starts_with("/tmp/.zterm-"));
+        assert_eq!(inner_dir, &format!("{outer_dir}/w"));
+
         let mkdirs = failures.mkdir_calls();
-        assert_eq!(mkdirs.len(), 1);
-        assert_eq!(mkdirs[0], deployed.cleanup.dir);
-        assert!(deployed.cleanup.dir.starts_with("/tmp/.zterm-"));
-        assert_eq!(
-            deployed.cleanup.files,
-            vec![format!("{}/rc", deployed.cleanup.dir)]
-        );
+        assert_eq!(mkdirs, vec![outer_dir.clone(), inner_dir.clone()]);
+        assert_eq!(deployed.cleanup.files, vec![format!("{inner_dir}/rc")]);
         assert_eq!(
             deployed.exec,
-            format!("exec bash --rcfile {}/rc -i", deployed.cleanup.dir)
+            format!("exec bash --rcfile {inner_dir}/rc -i")
         );
 
         let on_disk =
@@ -12596,19 +12699,59 @@ mod tests {
         );
 
         let stat = failures.setstat_calls();
-        assert_eq!(stat.len(), 1, "one setstat for the directory");
-        assert_eq!(stat[0].0, deployed.cleanup.dir);
         assert_eq!(
-            stat[0].1,
-            SftpSetstat {
-                size: false,
-                uid: false,
-                gid: false,
-                permissions: Some(0o700),
-            }
+            stat.len(),
+            2,
+            "setstat locks both outer and inner directories"
         );
+        assert_eq!(stat[0].0, *outer_dir);
+        assert_eq!(stat[1].0, *inner_dir);
+        for (_, attrs) in &stat {
+            assert_eq!(
+                *attrs,
+                SftpSetstat {
+                    size: false,
+                    uid: false,
+                    gid: false,
+                    permissions: Some(0o700),
+                }
+            );
+        }
+
+        // Verify wire-level OPEN flags and 0600 permissions for the wrapper file.
+        let rc_opens: Vec<_> = failures
+            .open_calls()
+            .into_iter()
+            .filter(|(p, _, _)| p == &deployed.cleanup.files[0])
+            .collect();
+        assert_eq!(rc_opens.len(), 1);
+        assert!(rc_opens[0].1.contains(OpenFlags::EXCLUDE));
+        assert!(rc_opens[0].1.contains(OpenFlags::CREATE));
+        assert!(rc_opens[0].1.contains(OpenFlags::WRITE));
+        assert!(!rc_opens[0].1.contains(OpenFlags::TRUNCATE));
+        assert_eq!(rc_opens[0].2, Some(0o600));
 
         deployed.disarm();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn sftp_write_private_file_refuses_preexisting_target() {
+        let root = wrapper_test_root("wrapper-exclude-conflict");
+        let existing = root.join("tmp").join("planted-rc");
+        std::fs::write(&existing, b"attacker-owned").unwrap();
+        let (sftp, _failures) = test_sftp_session(root.clone()).await;
+
+        let res = sftp_write_private_file(&sftp, "/tmp/planted-rc", b"zterm-rc").await;
+        assert!(
+            res.is_err(),
+            "OpenFlags::EXCLUDE must reject a pre-existing file"
+        );
+        assert_eq!(
+            std::fs::read(&existing).unwrap(),
+            b"attacker-owned",
+            "planted file must not be overwritten"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -12641,7 +12784,11 @@ mod tests {
             .expect_err("rejected setstat must abort deployment");
         assert!(matches!(error, CwdFollowUnavailable::WrapperUploadFailed));
         let mkdirs = failures.mkdir_calls();
-        assert_eq!(mkdirs.len(), 1);
+        assert_eq!(
+            mkdirs.len(),
+            1,
+            "outer setstat fails before inner mkdir runs"
+        );
         assert!(
             !root_path(&root, &mkdirs[0]).exists(),
             "the private directory must not be left behind"
@@ -12667,10 +12814,14 @@ mod tests {
             .expect_err("failed upload must abort deployment");
         assert!(matches!(error, CwdFollowUnavailable::WrapperUploadFailed));
         let mkdirs = failures.mkdir_calls();
-        assert_eq!(mkdirs.len(), 1);
+        assert_eq!(
+            mkdirs.len(),
+            2,
+            "outer and inner dirs were created before upload"
+        );
         assert!(
             !root_path(&root, &mkdirs[0]).exists(),
-            "a partially uploaded wrapper must be removed"
+            "both inner and outer dirs of a partially uploaded wrapper must be removed"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -12689,10 +12840,11 @@ mod tests {
         // server creates it, so no open handle pins it on Windows.
         failures.block_before_open_with_suffix("/.zshrc");
 
+        let slot = fresh_wrapper_slot();
         let task = tokio::spawn(prepare_cwd_wrapper(
             Arc::new(sftp),
             "tester",
-            fresh_wrapper_slot(),
+            Arc::clone(&slot),
         ));
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while !failures.open_block_reached() {
@@ -12703,26 +12855,26 @@ mod tests {
         .expect("upload reached the blocked file");
 
         // Dropping the connection future (app exit, cancelled connect) drops
-        // the guard with it; the uploaded files and the directory must go away
-        // without the caller doing anything.
+        // the guard with it; the guard spawns one bounded cleanup task and
+        // parks its handle in `slot` so cancellation can await it cleanly.
         task.abort();
         let _ = task.await;
         failures.release_blocked_open();
 
+        let cleanup_task = slot
+            .lock()
+            .take()
+            .expect("drop guard must publish the single cleanup task handle");
+        cleanup_task.await.expect("cleanup task completed");
+
         let tmp = root.join("tmp");
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let clean = std::fs::read_dir(&tmp)
-                    .map(|mut entries| entries.next().is_none())
-                    .unwrap_or(true);
-                if clean {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the abandoned wrapper directory must be removed");
+        let clean = std::fs::read_dir(&tmp)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true);
+        assert!(
+            clean,
+            "the abandoned outer and inner wrapper directories must be removed"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -12838,16 +12990,23 @@ mod tests {
         let profile = dir.join("system profile");
         std::fs::write(&profile, b"printf '__ZT_PROFILE__\\n'\n").unwrap();
         std::fs::write(home.join(".bashrc"), b"printf '__ZT_BASHRC__\\n'\n").unwrap();
-        let rcfile = dir.join("generated rc");
+        let wrapper_outer = dir.join("wrapper-outer");
+        let wrapper_inner = wrapper_outer.join("w");
+        std::fs::create_dir_all(&wrapper_inner).expect("create isolated wrapper dirs");
+        let rcfile = wrapper_inner.join("rc");
 
-        // Only relocate the two external paths; execute the generated wrapper itself.
+        // Relocate external paths into the isolated fixture so the generated
+        // wrapper executes end-to-end without touching real /etc or /tmp.
         let (files, exec) = cwd_wrapper_files("/bin/bash", "e2e-test").expect("bash wrapper");
         assert_eq!(files.len(), 1);
         let (remote_path, rc_content) = &files[0];
+        let remote_outer = "/tmp/.zterm-e2e-test";
+        let remote_inner = "/tmp/.zterm-e2e-test/w";
         assert_eq!(exec, format!("exec bash --rcfile {remote_path} -i"));
         let rc = String::from_utf8(rc_content.clone()).expect("UTF-8 wrapper");
         let source_line = "[ -f /etc/profile ] && . /etc/profile\n";
         let cleanup_line = format!("rm -f {remote_path}\n");
+        let rmdir_line = format!("rmdir {remote_inner} {remote_outer} 2>/dev/null || :\n");
         assert_eq!(
             rc.matches(source_line).count(),
             1,
@@ -12858,6 +13017,7 @@ mod tests {
             1,
             "cleanup template changed"
         );
+        assert_eq!(rc.matches(&rmdir_line).count(), 1, "rmdir template changed");
         let quoted_profile = quote(&shell_path(&profile));
         let rc = rc
             .replace(
@@ -12867,8 +13027,19 @@ mod tests {
             .replace(
                 &cleanup_line,
                 &format!("rm -f {}\n", quote(&shell_path(&rcfile))),
+            )
+            .replace(
+                &rmdir_line,
+                &format!(
+                    "rmdir {} {} 2>/dev/null || :\n",
+                    quote(&shell_path(&wrapper_inner)),
+                    quote(&shell_path(&wrapper_outer))
+                ),
             );
-        assert!(!rc.contains("/etc/profile") && !rc.contains(remote_path));
+        assert!(
+            !rc.contains("/etc/profile") && !rc.contains("/tmp/.zterm-"),
+            "relocated wrapper must not reference host paths: {rc}"
+        );
         std::fs::write(&rcfile, rc).expect("write isolated wrapper");
 
         let stdout = dir.join("stdout");
@@ -12945,6 +13116,14 @@ mod tests {
             "wrapper must report the isolated cwd; output={text}"
         );
         assert!(!rcfile.exists(), "wrapper must remove its own fixture file");
+        assert!(
+            !wrapper_inner.exists(),
+            "wrapper must remove its inner fixture directory"
+        );
+        assert!(
+            !wrapper_outer.exists(),
+            "wrapper must remove its outer fixture directory"
+        );
     }
 
     #[test]
@@ -13829,6 +14008,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn upgrade_profile_auth_never_writes_while_config_saves_are_suppressed() {
         let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
         let dir = config_test_dir("upgrade-suppressed");
@@ -13877,8 +14057,14 @@ mod tests {
         let result = upgrade_ssh_profile_auth_in(&primary, &anchor, "p1", &undecryptable).unwrap();
         assert_eq!(result["changed"], json!(true));
         assert_eq!(result["encryptedPassword"], json!(""));
+        assert_eq!(result["authType"], json!("key"));
         let config = load_config_from(&primary, &anchor);
         assert_eq!(config["sshProfiles"][0]["encryptedPassword"], json!(""));
+        assert_eq!(
+            config["sshProfiles"][0]["authType"],
+            json!("key"),
+            "authType must normalize to key alongside clearing the unused password"
+        );
         assert_eq!(
             config["sshProfiles"][0]["privateKeyPath"],
             json!("C:/keys/old_id_ed25519"),
