@@ -6844,6 +6844,131 @@ async function main() {
       JSON.stringify(stripOv));
     await sleep(500); // let the staggered removals of the padding tabs settle
 
+    // 15.12 Adaptive tab width (Issue #45): when adaptiveTabWidth is enabled,
+    //     short titles stay visibly narrower than long titles even in overflow
+    //     (never equal-pinned to 100px), scroll arrows appear and nudge cleanly
+    //     without oscillation across repeated relayouts, and disabling the
+    //     setting restores default equal-width overflow cleanly.
+    const stripAdaptive = await cdp.eval(`(async () => {
+      const bar = document.getElementById('tabbar');
+      const vp = document.getElementById('tab-viewport');
+      const toggleEl = document.getElementById('toggle-adaptive-tab-width');
+      if (!bar || !vp) return { error: 'strip chrome missing' };
+      const hadAdaptive = Object.prototype.hasOwnProperty.call(_settingsConfig, 'adaptiveTabWidth');
+      const prevAdaptive = _settingsConfig.adaptiveTabWidth;
+      const defaultToggleOff = !!toggleEl && !toggleEl.classList.contains('on');
+      const created = [];
+      try {
+        const shortId = TabManager.createTab({ name: '1', type: 'local' });
+        const longId = TabManager.createTab({ name: 'E2E-ADAPTIVE-VERY-LONG-TAB-TITLE-FOR-OVERFLOW-CHECK', type: 'local' });
+        created.push(shortId, longId);
+        // Lock custom names so PowerShell OSC title updates cannot overwrite them mid-check.
+        for (const id of created) {
+          const t = TabManager.tabs.find(x => x.id === id);
+          if (t) t._customName = true;
+        }
+        // Keep the short tab active and the long tab in the background: proves
+        // the short active tab stays compact (<100px) while the long background
+        // tab stays wide (>shortW, never equal-pinned to 100px).
+        TabManager.switchTo(shortId);
+        _settingsConfig.adaptiveTabWidth = true;
+        applyChromeFlags();
+        TabManager.render();
+
+        const tabEls = [...vp.querySelectorAll('.tab')];
+        const totalContent = tabEls.reduce((acc, el) => acc + el.offsetWidth, 0) + 2 * Math.max(0, tabEls.length - 1);
+        const squeeze = Math.max(260, totalContent - 30);
+        bar.style.flex = '0 0 ' + squeeze + 'px';
+        TabManager._relayout(true);
+
+        const leftBtn = document.getElementById('tab-scroll-left');
+        const rightBtn = document.getElementById('tab-scroll-right');
+        const shown = (el) => !!el && getComputedStyle(el).display !== 'none';
+        const shortEl = vp.querySelector('.tab[data-tab="' + shortId + '"]');
+        const longEl = vp.querySelector('.tab[data-tab="' + longId + '"]');
+        const shortW1 = shortEl ? shortEl.offsetWidth : null;
+        const longW1 = longEl ? longEl.offsetWidth : null;
+        const inlineCleared = [...vp.querySelectorAll('.tab')].every(el => el.style.width === '');
+        const clsAdaptive = bar.classList.contains('tabbar-adaptive');
+        const clsOverflow1 = bar.classList.contains('tabbar-overflow');
+        const clsSharing1 = bar.classList.contains('tabbar-sharing');
+        const arrows1 = shown(leftBtn) && shown(rightBtn);
+
+        // Repeat relayout with scroll arrows visible to confirm zero oscillation.
+        TabManager._relayout(true);
+        const clsOverflow2 = bar.classList.contains('tabbar-overflow');
+        const shortW2 = shortEl ? shortEl.offsetWidth : null;
+        const longW2 = longEl ? longEl.offsetWidth : null;
+
+        vp.scrollLeft = 0;
+        const beforeNudge = vp.scrollLeft;
+        TabManager._nudgeTabStrip(1);
+        const afterNudge = vp.scrollLeft;
+
+        // Disable adaptive mode and confirm default equal-width overflow (100px) returns.
+        _settingsConfig.adaptiveTabWidth = false;
+        applyChromeFlags();
+        TabManager.render();
+        const eqSqueeze = Math.max(160, TabManager.tabs.length * 100 - 20);
+        bar.style.flex = '0 0 ' + eqSqueeze + 'px';
+        TabManager._relayout(true);
+        const longElEq = vp.querySelector('.tab[data-tab="' + longId + '"]');
+        const restoredEqual = {
+          adaptiveOff: !bar.classList.contains('tabbar-adaptive'),
+          overflow: bar.classList.contains('tabbar-overflow'),
+          longBgWidth: longElEq ? longElEq.offsetWidth : null,
+        };
+
+        return {
+          defaultToggleOff,
+          squeeze,
+          totalContent,
+          adaptive: {
+            clsAdaptive,
+            clsOverflow1,
+            clsOverflow2,
+            clsSharing1,
+            arrows1,
+            inlineCleared,
+            shortW1,
+            longW1,
+            shortW2,
+            longW2,
+            nudged: afterNudge > beforeNudge,
+          },
+          restoredEqual,
+        };
+      } finally {
+        if (hadAdaptive) _settingsConfig.adaptiveTabWidth = prevAdaptive;
+        else delete _settingsConfig.adaptiveTabWidth;
+        bar.style.flex = '';
+        applyChromeFlags();
+        TabManager.render();
+        TabManager._relayout(true);
+        for (const id of created) { try { TabManager.closeTab(id); } catch (e) {} }
+      }
+    })()`).catch((e) => ({ evalError: String((e && e.message) || e) }));
+    check('标签页自适应宽度（Issue #45）：短标题更窄且溢出不钉 100px、箭头可滚不振荡，关闭后恢复等宽模式',
+      !!stripAdaptive && stripAdaptive.defaultToggleOff === true &&
+      !!stripAdaptive.adaptive &&
+      stripAdaptive.adaptive.clsAdaptive === true &&
+      stripAdaptive.adaptive.clsOverflow1 === true &&
+      stripAdaptive.adaptive.clsOverflow2 === true &&
+      stripAdaptive.adaptive.clsSharing1 === false &&
+      stripAdaptive.adaptive.arrows1 === true &&
+      stripAdaptive.adaptive.inlineCleared === true &&
+      stripAdaptive.adaptive.shortW1 != null && stripAdaptive.adaptive.shortW1 >= 72 && stripAdaptive.adaptive.shortW1 < 100 &&
+      stripAdaptive.adaptive.longW1 != null && stripAdaptive.adaptive.longW1 > stripAdaptive.adaptive.shortW1 + 60 && stripAdaptive.adaptive.longW1 <= 240 &&
+      stripAdaptive.adaptive.shortW2 === stripAdaptive.adaptive.shortW1 &&
+      stripAdaptive.adaptive.longW2 === stripAdaptive.adaptive.longW1 &&
+      stripAdaptive.adaptive.nudged === true &&
+      !!stripAdaptive.restoredEqual &&
+      stripAdaptive.restoredEqual.adaptiveOff === true &&
+      stripAdaptive.restoredEqual.overflow === true &&
+      stripAdaptive.restoredEqual.longBgWidth === 100,
+      JSON.stringify(stripAdaptive));
+    await sleep(500); // let the staggered removals of the adaptive-check tabs settle
+
     // Cleanup: close this section's tabs (after the send path is restored, so
     // the pty-destroy traffic reaches the backends)
     await cdp.eval(`(() => { [${A}, ${B}, ${N}, ${C}, ${CC}, ${E}, ${F}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} }); return true; })()`).catch(() => null);

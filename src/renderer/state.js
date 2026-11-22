@@ -358,14 +358,17 @@ function toggleStatusbar() {
 // the terminal scheme's canvas color.
 function applyChromeFlags() {
     const win = document.querySelector('.window');
-    if (!win) return;
-    const noEdge = _settingsConfig.panelEdge === false;
-    win.classList.toggle('no-ring', _settingsConfig.paneRing !== true);
-    win.classList.toggle('no-edge', noEdge);
-    win.classList.toggle('dock-plain', _settingsConfig.sftpMaterial !== true);
-    // Dialogs/menus are siblings of .window (not descendants), so the surface
-    // edge switch must also sit on <body>; a .window-only class left the SSH
-    // edit panel's hairline visible after turning the switch off.
-    document.body.classList.toggle('no-edge', noEdge);
+    if (win) {
+        const noEdge = _settingsConfig.panelEdge === false;
+        win.classList.toggle('no-ring', _settingsConfig.paneRing !== true);
+        win.classList.toggle('no-edge', noEdge);
+        win.classList.toggle('dock-plain', _settingsConfig.sftpMaterial !== true);
+        // Dialogs/menus are siblings of .window (not descendants), so the surface
+        // edge switch must also sit on <body>; a .window-only class left the SSH
+        // edit panel's hairline visible after turning the switch off.
+        document.body.classList.toggle('no-edge', noEdge);
+    }
+    const bar = document.getElementById('tabbar');
+    if (bar) bar.classList.toggle('tabbar-adaptive', _settingsConfig.adaptiveTabWidth === true);
 }
 

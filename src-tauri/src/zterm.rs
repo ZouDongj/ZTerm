@@ -1319,7 +1319,8 @@ fn default_config() -> Value {
             "fontSize": 14,
             "fontWeight": "450",
             "fontWeightBold": "700",
-            "theme": "dark"
+            "theme": "dark",
+            "adaptiveTabWidth": false
         }
     })
 }
@@ -4677,14 +4678,18 @@ pub async fn save_last_tabs(args: Vec<Value>) -> Result<(), String> {
     .map_err(|e| format!("save last tabs task: {e}"))?
 }
 
+fn apply_appearance(config: &mut Value, appearance: Value) {
+    if let Value::Object(ref mut c) = config {
+        c.insert("appearance".into(), appearance);
+    }
+}
+
 #[tauri::command]
 pub fn save_appearance(args: Vec<Value>) -> Result<(), String> {
     let _config_guard = CONFIG_WRITE_LOCK.lock();
     let appearance = args.into_iter().next().unwrap_or(json!({}));
     let mut config = load_config();
-    if let Value::Object(ref mut c) = config {
-        c.insert("appearance".into(), appearance);
-    }
+    apply_appearance(&mut config, appearance);
     save_config(&config)
 }
 
@@ -8559,6 +8564,57 @@ mod tests {
         assert!(cfg["sshProfiles"].as_array().unwrap().is_empty());
         assert!(cfg["lastTabs"].as_array().unwrap().is_empty());
         assert_eq!(cfg["appearance"]["theme"], "dark");
+        assert_eq!(cfg["appearance"]["adaptiveTabWidth"], false);
+    }
+
+    #[test]
+    fn adaptive_tab_width_appearance_round_trip() {
+        let _corrupt_lock = CORRUPT_TEST_LOCK.lock().unwrap();
+        // Legacy configs lacking adaptiveTabWidth default to false.
+        let (legacy, corrupt) = sanitize_config(json!({
+            "appearance": { "fontSize": 16 }
+        }));
+        assert!(!corrupt);
+        assert_eq!(legacy["appearance"]["adaptiveTabWidth"], false);
+
+        // Explicit adaptiveTabWidth survives save_appearance -> disk -> reload.
+        let dir = config_test_dir("adaptive-tab-width");
+        let primary = dir.join("data").join("config.json");
+        let anchor = dir.join("anchor").join("config.json");
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+
+        let mut cfg = load_config_from(&primary, &anchor);
+        apply_appearance(
+            &mut cfg,
+            json!({
+                "theme": "dark",
+                "showStatusDot": true,
+                "adaptiveTabWidth": true,
+            }),
+        );
+        save_config_to(&primary, &anchor, &cfg).unwrap();
+
+        let reloaded = load_config_from(&primary, &anchor);
+        assert_eq!(reloaded["appearance"]["adaptiveTabWidth"], true);
+        assert_eq!(reloaded["appearance"]["theme"], "dark");
+
+        // Toggling back to false persists cleanly too.
+        let mut cfg_off = reloaded;
+        apply_appearance(
+            &mut cfg_off,
+            json!({
+                "theme": "dark",
+                "showStatusDot": true,
+                "adaptiveTabWidth": false,
+            }),
+        );
+        save_config_to(&primary, &anchor, &cfg_off).unwrap();
+
+        let reloaded_off = load_config_from(&primary, &anchor);
+        assert_eq!(reloaded_off["appearance"]["adaptiveTabWidth"], false);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
