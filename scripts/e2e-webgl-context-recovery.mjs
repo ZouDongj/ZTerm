@@ -37,6 +37,15 @@
 //      armFrameCapture(1) + snapshot().capture.held. Optional PNGs under
 //      ZTERM_E2E_SHOTS are saved for offline inspection only — the script
 //      itself asserts nothing visual.
+//   F. Native animation preference override: emulates a WebView2 page stuck on
+//      prefers-reduced-motion: reduce and verifies that the live native
+//      SPI_GETCLIENTAREAANIMATION state acquired at startup overrides it so
+//      cursor draws stay at 90ms.
+//   Phases E and F require a local console session with Windows client-area
+//   animations enabled. When ZTermReducedMotion reports source === 'native'
+//   with remoteSession === true or nativeAnimationsEnabled === false, each
+//   phase is reported as an explicit SKIPPED group while Phases A–D still run.
+//   Missing or fallback snapshots fail closed and never skip.
 //
 // Usage:
 //   node scripts/e2e-webgl-context-recovery.mjs [exe-path] [port]
@@ -66,6 +75,7 @@ import { Cdp } from './e2e-cdp.mjs';
 import { respawnDesktopProcess, runWithDesktopRetry } from './e2e-desktop-retry.mjs';
 import { runSupervisedScript } from './e2e-process-supervisor.mjs';
 import { createOwnedCleanupCoordinator } from './e2e-owned-cleanup.mjs';
+import { classifyAnimationPhaseSkip, formatSkipLine, formatSummaryLine } from './e2e-reduced-motion-skip.mjs';
 
 const SOURCE_EXE = resolve(process.argv[2] ?? 'src-tauri/target/release/zterm.exe');
 const PORT = Number(process.argv[3] ?? 9222);
@@ -73,9 +83,16 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DESKTOP_INDEX = backgroundDesktopIndex(process.env.ZTERM_E2E_DESKTOP ?? '2');
 
 const results = [];
+let skippedGroups = 0;
 function check(name, pass, detail) {
   results.push({ name, pass: pass === true, detail: detail ?? '' });
   console.log(`${pass === true ? '✔' : '✖'} ${name}${detail ? ` — ${detail}` : ''}`);
+}
+// A skipped group is not a pass: report it explicitly so the evidence never
+// claims animation coverage that could not be exercised in this environment.
+function skip(name, reason) {
+  skippedGroups += 1;
+  console.log(formatSkipLine(name, reason));
 }
 
 let sandbox = null;
@@ -607,6 +624,35 @@ function phaseEPsPromptSeen(value) {
   return /^PS .*?>/.test(phaseELastRow(value));
 }
 
+// Read the renderer's existing ZTermReducedMotion snapshot without triggering
+// an IPC refresh (used to prove main.js startup already acquired native state).
+async function readReducedMotionSnapshot(cdp) {
+  return cdp.eval(`(() => {
+    if (typeof ZTermReducedMotion !== 'object' || !ZTermReducedMotion || typeof ZTermReducedMotion.snapshot !== 'function') {
+      return null;
+    }
+    return ZTermReducedMotion.snapshot();
+  })()`).catch(() => {
+    if (cdp.failure) throw cdp.failure;
+    return null;
+  });
+}
+
+// Refresh the authoritative native Windows animation state via
+// ZTermReducedMotion.refresh(). Missing/error/fallback snapshots return null or
+// a non-native source so classifyAnimationPhaseSkip fails closed.
+async function readNativeReducedMotion(cdp) {
+  return cdp.eval(`(async () => {
+    if (typeof ZTermReducedMotion !== 'object' || !ZTermReducedMotion || typeof ZTermReducedMotion.refresh !== 'function') {
+      return null;
+    }
+    return await ZTermReducedMotion.refresh();
+  })()`).catch(() => {
+    if (cdp.failure) throw cdp.failure;
+    return null;
+  });
+}
+
 async function main() {
   if (!existsSync(SOURCE_EXE)) throw new Error(`exe 不存在: ${SOURCE_EXE}`);
   await requireBackgroundCapability(SOURCE_EXE);
@@ -874,6 +920,11 @@ async function main() {
       restoredOptions?.smooth === true && restoredOptions?.duration === 90 && restoredOptions?.liveBudget <= 8,
       JSON.stringify({ activeBAfterD, activeAAfterD, restoredOptions }));
 
+    // Capture ZTermReducedMotion.snapshot() BEFORE any E2E-driven refresh() so
+    // Phase F still proves main.js startup itself acquired the native state
+    // (rather than only observing state populated by Phase E's skip check).
+    const startupReducedMotion = await readReducedMotionSnapshot(cdp);
+
     // ── Phase E: real vim typing echo vs same-character navigation (issue #31) ──
     // On the alternate buffer the block caret's slide classification must
     // follow WRITE EVIDENCE, not the printable-input window: a keystroke that
@@ -886,209 +937,215 @@ async function main() {
     // starts the Git Bash discovered via get-local-shells (HOME pointing into
     // the sandbox so no user config is touched), bash runs --noprofile
     // --norc, and vim runs -u NONE -i NONE -n.
-    const phaseE = { vimRunning: false, bashRunning: false, focusPinned: false, previousStyle: null };
-    try {
-      const shells = await cdp.eval(`(async () => (await ipcRenderer.invoke('get-local-shells')) || [])()`);
-      const gitBash = shells.find(s => s?.id === 'gitbash' && typeof s.command === 'string');
-      if (!gitBash) throw new Error('Phase E found no Git Bash through get-local-shells: ' + JSON.stringify(shells.map(s => s?.id)));
-      // MSYS layout: <root>\bin\bash.exe ships vim at <root>\usr\bin\vim.exe.
-      const msysVim = resolve(dirname(gitBash.command), '..', 'usr', 'bin', 'vim.exe');
-      if (!existsSync(msysVim)) throw new Error(`Phase E found no MSYS vim next to ${gitBash.command}`);
-      const vimHome = join(sandbox.directory, 'phase-e-vim-home');
-      const psLiteral = value => {
-        if (typeof value !== 'string' || value.includes("'")) throw new Error(`Phase E cannot quote a path for PowerShell: ${value}`);
-        return value;
-      };
-      mkdirSync(vimHome, { recursive: true });
+    const phaseEMotion = await readNativeReducedMotion(cdp);
+    const phaseESkip = classifyAnimationPhaseSkip(phaseEMotion);
+    if (phaseESkip.skip) {
+      skip('E: nvim/WebGL animation evidence (issue #31)', phaseESkip.reason);
+    } else {
+      const phaseE = { vimRunning: false, bashRunning: false, focusPinned: false, previousStyle: null };
+      try {
+        const shells = await cdp.eval(`(async () => (await ipcRenderer.invoke('get-local-shells')) || [])()`);
+        const gitBash = shells.find(s => s?.id === 'gitbash' && typeof s.command === 'string');
+        if (!gitBash) throw new Error('Phase E found no Git Bash through get-local-shells: ' + JSON.stringify(shells.map(s => s?.id)));
+        // MSYS layout: <root>\bin\bash.exe ships vim at <root>\usr\bin\vim.exe.
+        const msysVim = resolve(dirname(gitBash.command), '..', 'usr', 'bin', 'vim.exe');
+        if (!existsSync(msysVim)) throw new Error(`Phase E found no MSYS vim next to ${gitBash.command}`);
+        const vimHome = join(sandbox.directory, 'phase-e-vim-home');
+        const psLiteral = value => {
+          if (typeof value !== 'string' || value.includes("'")) throw new Error(`Phase E cannot quote a path for PowerShell: ${value}`);
+          return value;
+        };
+        mkdirSync(vimHome, { recursive: true });
 
-      // Start bash from the OWNED local PowerShell through the real input
-      // path. Interactive mode provides the readiness prompt without reading
-      // profiles; TERM=xterm keeps vim on the alternate buffer with full cursor
-      // control even though the seeded PTY environment sets no TERM.
-      await phaseESendKeys(cdp, tabA, `$env:HOME='${psLiteral(vimHome)}'; $env:TERM='xterm'; & '${psLiteral(gitBash.command)}' --noprofile --norc -i\r`);
-      const bashPrompt = await phaseEPoll(cdp, phaseEScreenExpr(tabA), phaseEBashPromptSeen, 20000);
-      phaseE.bashRunning = bashPrompt.done;
-      check('E: MSYS bash started from the owned PowerShell (Git Bash via get-local-shells, HOME inside the sandbox)',
-        bashPrompt.done === true,
-        `bash=${gitBash.command} vim=${msysVim} HOME=${vimHome} lastRows=${JSON.stringify((bashPrompt.value?.rows || []).slice(-2))}`);
+        // Start bash from the OWNED local PowerShell through the real input
+        // path. Interactive mode provides the readiness prompt without reading
+        // profiles; TERM=xterm keeps vim on the alternate buffer with full cursor
+        // control even though the seeded PTY environment sets no TERM.
+        await phaseESendKeys(cdp, tabA, `$env:HOME='${psLiteral(vimHome)}'; $env:TERM='xterm'; & '${psLiteral(gitBash.command)}' --noprofile --norc -i\r`);
+        const bashPrompt = await phaseEPoll(cdp, phaseEScreenExpr(tabA), phaseEBashPromptSeen, 20000);
+        phaseE.bashRunning = bashPrompt.done;
+        check('E: MSYS bash started from the owned PowerShell (Git Bash via get-local-shells, HOME inside the sandbox)',
+          bashPrompt.done === true,
+          `bash=${gitBash.command} vim=${msysVim} HOME=${vimHome} lastRows=${JSON.stringify((bashPrompt.value?.rows || []).slice(-2))}`);
 
-      // The alternate buffer is vim's UI-ready marker; keys sent after it are
-      // queued by the PTY and processed in order, so the staging below is
-      // deterministic without scraping the modeline (compatible-mode vim
-      // shows no -- INSERT -- marker; staging is proven from buffer cells).
-      await phaseESendKeys(cdp, tabA, '/usr/bin/vim -u NONE -i NONE -n\r');
-      const vimUp = await phaseEPoll(cdp, phaseEScreenExpr(tabA), v => v?.type === 'alternate', 20000);
-      phaseE.vimRunning = vimUp.done;
-      check('E: vim -u NONE -i NONE -n took over the alternate buffer', vimUp.done === true, JSON.stringify(vimUp.value));
-      if (!bashPrompt.done || !vimUp.done) throw new Error('Phase E could not stage bash+vim in the owned local tab');
-      await sleep(400);
+        // The alternate buffer is vim's UI-ready marker; keys sent after it are
+        // queued by the PTY and processed in order, so the staging below is
+        // deterministic without scraping the modeline (compatible-mode vim
+        // shows no -- INSERT -- marker; staging is proven from buffer cells).
+        await phaseESendKeys(cdp, tabA, '/usr/bin/vim -u NONE -i NONE -n\r');
+        const vimUp = await phaseEPoll(cdp, phaseEScreenExpr(tabA), v => v?.type === 'alternate', 20000);
+        phaseE.vimRunning = vimUp.done;
+        check('E: vim -u NONE -i NONE -n took over the alternate buffer', vimUp.done === true, JSON.stringify(vimUp.value));
+        if (!bashPrompt.done || !vimUp.done) throw new Error('Phase E could not stage bash+vim in the owned local tab');
+        await sleep(400);
 
-      // The background desktop host never receives OS focus, so the focused
-      // bit is pinned on the REAL terminal's browser service the same way
-      // scripts/e2e-webgl-atlas.mjs documents it (synthetic service focus —
-      // not an OS focus or IME test), and the caret is forced to the block
-      // style the echo classification is defined for. Both are undone in the
-      // phase cleanup.
-      const armedE = await cdp.eval(`(() => {
-        const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(tabA)});
-        if (!tab || !tab.term || !tab._smoothCursor?._adapter) return { ok: false };
-        const adapter = tab._smoothCursor._adapter;
-        const previousStyle = tab.term.options.cursorStyle;
-        adapter.setCursorStyle('block');
-        tab.term.textarea?.focus();
-        const svc = tab.term._core?._coreBrowserService;
-        const docFocused = document.hasFocus();
-        let pinned = false;
-        if (svc && svc.isFocused !== true) {
-          Object.defineProperty(svc, 'isFocused', { configurable: true, get: () => true });
-          pinned = true;
+        // The background desktop host never receives OS focus, so the focused
+        // bit is pinned on the REAL terminal's browser service the same way
+        // scripts/e2e-webgl-atlas.mjs documents it (synthetic service focus —
+        // not an OS focus or IME test), and the caret is forced to the block
+        // style the echo classification is defined for. Both are undone in the
+        // phase cleanup.
+        const armedE = await cdp.eval(`(() => {
+          const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(tabA)});
+          if (!tab || !tab.term || !tab._smoothCursor?._adapter) return { ok: false };
+          const adapter = tab._smoothCursor._adapter;
+          const previousStyle = tab.term.options.cursorStyle;
+          adapter.setCursorStyle('block');
+          tab.term.textarea?.focus();
+          const svc = tab.term._core?._coreBrowserService;
+          const docFocused = document.hasFocus();
+          let pinned = false;
+          if (svc && svc.isFocused !== true) {
+            Object.defineProperty(svc, 'isFocused', { configurable: true, get: () => true });
+            pinned = true;
+          }
+          return { ok: true, previousStyle, docFocused, pinned, serviceFocused: svc?.isFocused === true };
+        })()`);
+        if (armedE?.ok !== true) throw new Error('Phase E could not arm the block caret: ' + JSON.stringify(armedE));
+        phaseE.focusPinned = armedE.pinned === true;
+        phaseE.previousStyle = armedE.previousStyle || null;
+        const preE = await phaseEReadSnapshot(cdp, tabA);
+        check('E: block caret armed on the WebGL adapter (smooth on, reduced motion off, DPR recorded)',
+          preE?.bufferType === 'alternate' && preE?.adapter === true && preE?.rendererIsWebgl === true
+            && preE?.cursorStyle === 'block' && preE?.smooth === true && preE?.reducedMotion === false,
+          JSON.stringify({ state: preE, focus: armedE }));
+        if (preE?.adapter !== true || preE?.rendererIsWebgl !== true || preE?.smooth !== true || preE?.reducedMotion !== false) {
+          throw new Error('Phase E precondition failed: ' + JSON.stringify({ state: preE, focus: armedE }));
         }
-        return { ok: true, previousStyle, docFocused, pinned, serviceFocused: svc?.isFocused === true };
-      })()`);
-      if (armedE?.ok !== true) throw new Error('Phase E could not arm the block caret: ' + JSON.stringify(armedE));
-      phaseE.focusPinned = armedE.pinned === true;
-      phaseE.previousStyle = armedE.previousStyle || null;
-      const preE = await phaseEReadSnapshot(cdp, tabA);
-      check('E: block caret armed on the WebGL adapter (smooth on, reduced motion off, DPR recorded)',
-        preE?.bufferType === 'alternate' && preE?.adapter === true && preE?.rendererIsWebgl === true
-          && preE?.cursorStyle === 'block' && preE?.smooth === true && preE?.reducedMotion === false,
-        JSON.stringify({ state: preE, focus: armedE }));
-      if (preE?.adapter !== true || preE?.rendererIsWebgl !== true || preE?.smooth !== true || preE?.reducedMotion !== false) {
-        throw new Error('Phase E precondition failed: ' + JSON.stringify({ state: preE, focus: armedE }));
-      }
 
-      // Insert mode: vim is guaranteed to be in normal mode here (the first
-      // key it receives after startup), and the PTY queues the rest in order.
-      await phaseESendKeys(cdp, tabA, 'i');
+        // Insert mode: vim is guaranteed to be in normal mode here (the first
+        // key it receives after startup), and the PTY queues the rest in order.
+        await phaseESendKeys(cdp, tabA, 'i');
 
-      // Direct printable input 1: 'a'. The first animated frame must be the
-      // plain echo slide, and the character must land at column 0 (insert at
-      // the caret — if the staging ever fell back to normal-mode append, the
-      // cell read exposes it instead of misreporting a regression).
-      const beforeA = await phaseEReadSnapshot(cdp, tabA);
-      const frameA = await phaseECaptureFirstFrame(cdp, tabA, 'a');
-      if (frameA.ok === true) await phaseESaveShot(cdp, 'webgl-recovery-phase-e-typing-echo.png');
-      await phaseEReleaseFrame(cdp, tabA);
-      const echoA = await phaseEPoll(cdp, phaseEScreenExpr(tabA), v => v?.type === 'alternate' && v?.cursorX === 1, 6000);
-      const typedA = await cdp.eval(phaseETypedLineExpr(tabA)).catch(() => null);
-      check('E: typed \'a\' echoes — first animated frame is base+rectangle and echoSlides increments',
-        frameA.ok === true && frameA.snapshot?.bufferType === 'alternate'
-          && frameA.snapshot?.drawPassStatus === 'base+rectangle'
-          && frameA.snapshot?.echoSlides === beforeA.echoSlides + 1
-          && frameA.snapshot?.capture?.records?.length === 1
-          && frameA.snapshot?.capture?.records?.[0]?.visual?.x < frameA.snapshot?.capture?.records?.[0]?.target?.x
-          && echoA.done === true && typedA === 'a',
-        `before=${beforeA.echoSlides} cursor=${JSON.stringify(echoA.value && { x: echoA.value.cursorX })} typed=${JSON.stringify(typedA)} frame=${JSON.stringify(frameA.snapshot ?? frameA)}`);
-      if (frameA.ok !== true || typedA !== 'a') throw new Error('Phase E typing staging failed: ' + JSON.stringify({ frame: frameA, typed: typedA }));
+        // Direct printable input 1: 'a'. The first animated frame must be the
+        // plain echo slide, and the character must land at column 0 (insert at
+        // the caret — if the staging ever fell back to normal-mode append, the
+        // cell read exposes it instead of misreporting a regression).
+        const beforeA = await phaseEReadSnapshot(cdp, tabA);
+        const frameA = await phaseECaptureFirstFrame(cdp, tabA, 'a');
+        if (frameA.ok === true) await phaseESaveShot(cdp, 'webgl-recovery-phase-e-typing-echo.png');
+        await phaseEReleaseFrame(cdp, tabA);
+        const echoA = await phaseEPoll(cdp, phaseEScreenExpr(tabA), v => v?.type === 'alternate' && v?.cursorX === 1, 6000);
+        const typedA = await cdp.eval(phaseETypedLineExpr(tabA)).catch(() => null);
+        check('E: typed \'a\' echoes — first animated frame is base+rectangle and echoSlides increments',
+          frameA.ok === true && frameA.snapshot?.bufferType === 'alternate'
+            && frameA.snapshot?.drawPassStatus === 'base+rectangle'
+            && frameA.snapshot?.echoSlides === beforeA.echoSlides + 1
+            && frameA.snapshot?.capture?.records?.length === 1
+            && frameA.snapshot?.capture?.records?.[0]?.visual?.x < frameA.snapshot?.capture?.records?.[0]?.target?.x
+            && echoA.done === true && typedA === 'a',
+          `before=${beforeA.echoSlides} cursor=${JSON.stringify(echoA.value && { x: echoA.value.cursorX })} typed=${JSON.stringify(typedA)} frame=${JSON.stringify(frameA.snapshot ?? frameA)}`);
+        if (frameA.ok !== true || typedA !== 'a') throw new Error('Phase E typing staging failed: ' + JSON.stringify({ frame: frameA, typed: typedA }));
 
-      // Direct printable input 2: 'f'.
-      const beforeF = await phaseEReadSnapshot(cdp, tabA);
-      const frameF = await phaseECaptureFirstFrame(cdp, tabA, 'f');
-      await phaseEReleaseFrame(cdp, tabA);
-      check('E: typed \'f\' echoes — first animated frame is base+rectangle and echoSlides increments',
-        frameF.ok === true && frameF.snapshot?.bufferType === 'alternate'
-          && frameF.snapshot?.drawPassStatus === 'base+rectangle'
-          && frameF.snapshot?.echoSlides === beforeF.echoSlides + 1
-          && frameF.snapshot?.capture?.records?.length === 1
-          && frameF.snapshot?.capture?.records?.[0]?.visual?.x < frameF.snapshot?.capture?.records?.[0]?.target?.x,
-        `before=${beforeF.echoSlides} frame=${JSON.stringify(frameF.snapshot ?? frameF)}`);
+        // Direct printable input 2: 'f'.
+        const beforeF = await phaseEReadSnapshot(cdp, tabA);
+        const frameF = await phaseECaptureFirstFrame(cdp, tabA, 'f');
+        await phaseEReleaseFrame(cdp, tabA);
+        check('E: typed \'f\' echoes — first animated frame is base+rectangle and echoSlides increments',
+          frameF.ok === true && frameF.snapshot?.bufferType === 'alternate'
+            && frameF.snapshot?.drawPassStatus === 'base+rectangle'
+            && frameF.snapshot?.echoSlides === beforeF.echoSlides + 1
+            && frameF.snapshot?.capture?.records?.length === 1
+            && frameF.snapshot?.capture?.records?.[0]?.visual?.x < frameF.snapshot?.capture?.records?.[0]?.target?.x,
+          `before=${beforeF.echoSlides} frame=${JSON.stringify(frameF.snapshot ?? frameF)}`);
 
-      // Burst: both characters in ONE input event — a single noteInput call
-      // with the window warm, pinning the plain classification of a burst's
-      // leading frame plus the final caret column of the echoed text.
-      const beforeBurst = await phaseEReadSnapshot(cdp, tabA);
-      const frameBurst = await phaseECaptureFirstFrame(cdp, tabA, 'fa');
-      await phaseEReleaseFrame(cdp, tabA);
-      const echoBurst = await phaseEPoll(cdp, phaseEScreenExpr(tabA), v => v?.type === 'alternate' && v?.cursorX === 4, 6000);
-      const typedBurst = await cdp.eval(phaseETypedLineExpr(tabA)).catch(() => null);
-      check('E: typed burst \'fa\' — first animated frame stays base+rectangle and \'affa\' lands with the caret at column 4',
-        frameBurst.ok === true && frameBurst.snapshot?.drawPassStatus === 'base+rectangle'
-          && frameBurst.snapshot?.echoSlides > beforeBurst.echoSlides
-          && frameBurst.snapshot?.capture?.records?.[0]?.target?.x - frameBurst.snapshot?.capture?.records?.[0]?.visual?.x > 1
-          && echoBurst.done === true && typedBurst === 'affa',
-        `before=${beforeBurst.echoSlides} typed=${JSON.stringify(typedBurst)} cursor=${JSON.stringify(echoBurst.value && { x: echoBurst.value.cursorX })} frame=${JSON.stringify(frameBurst.snapshot ?? frameBurst)}`);
-      if (typedBurst !== 'affa') throw new Error('Phase E navigation staging failed (typed=' + JSON.stringify(typedBurst) + ')');
+        // Burst: both characters in ONE input event — a single noteInput call
+        // with the window warm, pinning the plain classification of a burst's
+        // leading frame plus the final caret column of the echoed text.
+        const beforeBurst = await phaseEReadSnapshot(cdp, tabA);
+        const frameBurst = await phaseECaptureFirstFrame(cdp, tabA, 'fa');
+        await phaseEReleaseFrame(cdp, tabA);
+        const echoBurst = await phaseEPoll(cdp, phaseEScreenExpr(tabA), v => v?.type === 'alternate' && v?.cursorX === 4, 6000);
+        const typedBurst = await cdp.eval(phaseETypedLineExpr(tabA)).catch(() => null);
+        check('E: typed burst \'fa\' — first animated frame stays base+rectangle and \'affa\' lands with the caret at column 4',
+          frameBurst.ok === true && frameBurst.snapshot?.drawPassStatus === 'base+rectangle'
+            && frameBurst.snapshot?.echoSlides > beforeBurst.echoSlides
+            && frameBurst.snapshot?.capture?.records?.[0]?.target?.x - frameBurst.snapshot?.capture?.records?.[0]?.visual?.x > 1
+            && echoBurst.done === true && typedBurst === 'affa',
+          `before=${beforeBurst.echoSlides} typed=${JSON.stringify(typedBurst)} cursor=${JSON.stringify(echoBurst.value && { x: echoBurst.value.cursorX })} frame=${JSON.stringify(frameBurst.snapshot ?? frameBurst)}`);
+        if (typedBurst !== 'affa') throw new Error('Phase E navigation staging failed (typed=' + JSON.stringify(typedBurst) + ')');
 
-      // Navigation staging: Esc is non-printable input — the real path clears
-      // the echo credits and write evidence — then `hh` walks the caret onto
-      // the FIRST of the two adjacent 'f' cells just typed. `l` then slides
-      // f→f: a printable byte, typed right after the echo, whose vacated cell
-      // was NOT written — the exact misclassification risk of issue #31.
-      await phaseESendKeys(cdp, tabA, '\x1b');
-      const normalMode = await phaseEPoll(cdp, phaseEScreenExpr(tabA),
-        v => v?.type === 'alternate' && v?.cursorX === 3, 8000);
-      await phaseESendKeys(cdp, tabA, 'hh');
-      const onF = await phaseEPoll(cdp, phaseEScreenExpr(tabA),
-        v => v?.type === 'alternate' && v?.cursorX === 1, 8000);
-      const beforeNav = await phaseEReadSnapshot(cdp, tabA);
-      const frameNav = await phaseECaptureFirstFrame(cdp, tabA, 'l');
-      if (frameNav.ok === true) await phaseESaveShot(cdp, 'webgl-recovery-phase-e-navigation-glyph.png');
-      await phaseEReleaseFrame(cdp, tabA);
-      const navLanded = await phaseEPoll(cdp, phaseEScreenExpr(tabA),
-        v => v?.type === 'alternate' && v?.cursorX === 2, 6000);
-      check('E: navigation \'l\' onto the existing \'f\' — first moving frame stays base+rectangle+glyph and echoSlides does not increment',
-        normalMode.done === true && onF.done === true
-          && frameNav.ok === true && frameNav.snapshot?.bufferType === 'alternate'
-          && frameNav.snapshot?.drawPassStatus === 'base+rectangle+glyph'
-          && frameNav.snapshot?.echoSlides === beforeNav.echoSlides
-          && frameNav.snapshot?.capture?.records?.length === 1
-          && frameNav.snapshot?.capture?.records?.[0]?.visual?.x < frameNav.snapshot?.capture?.records?.[0]?.target?.x
-          && navLanded.done === true,
-        `staging=${JSON.stringify({ esc: normalMode.done, onF: onF.done, typed: typedBurst })} before=${beforeNav.echoSlides} cursor=${JSON.stringify(navLanded.value && { x: navLanded.value.cursorX })} frame=${JSON.stringify(frameNav.snapshot ?? frameNav)}`);
+        // Navigation staging: Esc is non-printable input — the real path clears
+        // the echo credits and write evidence — then `hh` walks the caret onto
+        // the FIRST of the two adjacent 'f' cells just typed. `l` then slides
+        // f→f: a printable byte, typed right after the echo, whose vacated cell
+        // was NOT written — the exact misclassification risk of issue #31.
+        await phaseESendKeys(cdp, tabA, '\x1b');
+        const normalMode = await phaseEPoll(cdp, phaseEScreenExpr(tabA),
+          v => v?.type === 'alternate' && v?.cursorX === 3, 8000);
+        await phaseESendKeys(cdp, tabA, 'hh');
+        const onF = await phaseEPoll(cdp, phaseEScreenExpr(tabA),
+          v => v?.type === 'alternate' && v?.cursorX === 1, 8000);
+        const beforeNav = await phaseEReadSnapshot(cdp, tabA);
+        const frameNav = await phaseECaptureFirstFrame(cdp, tabA, 'l');
+        if (frameNav.ok === true) await phaseESaveShot(cdp, 'webgl-recovery-phase-e-navigation-glyph.png');
+        await phaseEReleaseFrame(cdp, tabA);
+        const navLanded = await phaseEPoll(cdp, phaseEScreenExpr(tabA),
+          v => v?.type === 'alternate' && v?.cursorX === 2, 6000);
+        check('E: navigation \'l\' onto the existing \'f\' — first moving frame stays base+rectangle+glyph and echoSlides does not increment',
+          normalMode.done === true && onF.done === true
+            && frameNav.ok === true && frameNav.snapshot?.bufferType === 'alternate'
+            && frameNav.snapshot?.drawPassStatus === 'base+rectangle+glyph'
+            && frameNav.snapshot?.echoSlides === beforeNav.echoSlides
+            && frameNav.snapshot?.capture?.records?.length === 1
+            && frameNav.snapshot?.capture?.records?.[0]?.visual?.x < frameNav.snapshot?.capture?.records?.[0]?.target?.x
+            && navLanded.done === true,
+          `staging=${JSON.stringify({ esc: normalMode.done, onF: onF.done, typed: typedBurst })} before=${beforeNav.echoSlides} cursor=${JSON.stringify(navLanded.value && { x: navLanded.value.cursorX })} frame=${JSON.stringify(frameNav.snapshot ?? frameNav)}`);
 
-      // Clean exit through the same real input path: :q! drops vim back into
-      // bash, `exit` drops bash back into the owned PowerShell prompt. The
-      // PowerShell prompt as the LAST screen row proves both children exited.
-      await phaseECancelCapture(cdp, tabA).catch(() => null);
-      await phaseESendKeys(cdp, tabA, '\x1b:q!\r');
-      const vimQuit = await phaseEPoll(cdp, phaseEScreenExpr(tabA), v => v?.type === 'normal', 8000);
-      phaseE.vimRunning = !vimQuit.done;
-      let psBack = { done: false, value: null };
-      if (vimQuit.done) {
-        await phaseESendKeys(cdp, tabA, 'exit\r');
-        psBack = await phaseEPoll(cdp, phaseEScreenExpr(tabA), phaseEPsPromptSeen, 8000);
-        phaseE.bashRunning = !psBack.done;
-      }
-      check('E: vim and bash exited cleanly and the PowerShell prompt returned',
-        vimQuit.done === true && psBack.done === true,
-        `vimQuit=${vimQuit.done} lastRows=${JSON.stringify((psBack.value?.rows || []).slice(-2))}`);
-    } finally {
-      // Guarded cleanup — never throws past the phase. A pending frame
-      // capture must not outlive it (a held frame parks the animation), a
-      // leftover vim/bash must not outlive the tab's PowerShell session, and
-      // the focus/style pins must come off even when a check failed mid-run.
-      try { await phaseECancelCapture(cdp, tabA); } catch (e) { console.error('[e2e] Phase E capture cleanup failed: ' + e.message); }
-      if (phaseE.vimRunning) {
-        try {
-          await phaseESendKeys(cdp, tabA, '\x1b:q!\r');
-          const quit = await phaseEPoll(cdp, phaseEScreenExpr(tabA), v => v?.type === 'normal', 6000);
-          phaseE.vimRunning = !quit.done;
-        } catch (e) { console.error('[e2e] Phase E vim exit failed: ' + e.message); }
-      }
-      if (phaseE.bashRunning) {
-        try {
+        // Clean exit through the same real input path: :q! drops vim back into
+        // bash, `exit` drops bash back into the owned PowerShell prompt. The
+        // PowerShell prompt as the LAST screen row proves both children exited.
+        await phaseECancelCapture(cdp, tabA).catch(() => null);
+        await phaseESendKeys(cdp, tabA, '\x1b:q!\r');
+        const vimQuit = await phaseEPoll(cdp, phaseEScreenExpr(tabA), v => v?.type === 'normal', 8000);
+        phaseE.vimRunning = !vimQuit.done;
+        let psBack = { done: false, value: null };
+        if (vimQuit.done) {
           await phaseESendKeys(cdp, tabA, 'exit\r');
-          const back = await phaseEPoll(cdp, phaseEScreenExpr(tabA), phaseEPsPromptSeen, 6000);
-          phaseE.bashRunning = !back.done;
-        } catch (e) { console.error('[e2e] Phase E bash exit failed: ' + e.message); }
-      }
-      if (phaseE.focusPinned) {
-        try {
-          await cdp.eval(`(() => {
-            const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(tabA)});
-            try { delete tab?.term?._core?._coreBrowserService?.isFocused; } catch (e) {}
-            return true;
-          })()`);
-        } catch (e) { console.error('[e2e] Phase E focus unpin failed: ' + e.message); }
-      }
-      if (phaseE.previousStyle) {
-        try {
-          await cdp.eval(`(() => {
-            const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(tabA)});
-            try { tab?._smoothCursor?._adapter?.setCursorStyle?.(${JSON.stringify(phaseE.previousStyle)}); } catch (e) {}
-            return true;
-          })()`);
-        } catch (e) { console.error('[e2e] Phase E cursor style restore failed: ' + e.message); }
+          psBack = await phaseEPoll(cdp, phaseEScreenExpr(tabA), phaseEPsPromptSeen, 8000);
+          phaseE.bashRunning = !psBack.done;
+        }
+        check('E: vim and bash exited cleanly and the PowerShell prompt returned',
+          vimQuit.done === true && psBack.done === true,
+          `vimQuit=${vimQuit.done} lastRows=${JSON.stringify((psBack.value?.rows || []).slice(-2))}`);
+      } finally {
+        // Guarded cleanup — never throws past the phase. A pending frame
+        // capture must not outlive it (a held frame parks the animation), a
+        // leftover vim/bash must not outlive the tab's PowerShell session, and
+        // the focus/style pins must come off even when a check failed mid-run.
+        try { await phaseECancelCapture(cdp, tabA); } catch (e) { console.error('[e2e] Phase E capture cleanup failed: ' + e.message); }
+        if (phaseE.vimRunning) {
+          try {
+            await phaseESendKeys(cdp, tabA, '\x1b:q!\r');
+            const quit = await phaseEPoll(cdp, phaseEScreenExpr(tabA), v => v?.type === 'normal', 6000);
+            phaseE.vimRunning = !quit.done;
+          } catch (e) { console.error('[e2e] Phase E vim exit failed: ' + e.message); }
+        }
+        if (phaseE.bashRunning) {
+          try {
+            await phaseESendKeys(cdp, tabA, 'exit\r');
+            const back = await phaseEPoll(cdp, phaseEScreenExpr(tabA), phaseEPsPromptSeen, 6000);
+            phaseE.bashRunning = !back.done;
+          } catch (e) { console.error('[e2e] Phase E bash exit failed: ' + e.message); }
+        }
+        if (phaseE.focusPinned) {
+          try {
+            await cdp.eval(`(() => {
+              const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(tabA)});
+              try { delete tab?.term?._core?._coreBrowserService?.isFocused; } catch (e) {}
+              return true;
+            })()`);
+          } catch (e) { console.error('[e2e] Phase E focus unpin failed: ' + e.message); }
+        }
+        if (phaseE.previousStyle) {
+          try {
+            await cdp.eval(`(() => {
+              const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(tabA)});
+              try { tab?._smoothCursor?._adapter?.setCursorStyle?.(${JSON.stringify(phaseE.previousStyle)}); } catch (e) {}
+              return true;
+            })()`);
+          } catch (e) { console.error('[e2e] Phase E cursor style restore failed: ' + e.message); }
+        }
       }
     }
 
@@ -1098,65 +1155,76 @@ async function main() {
     // local console). Verifies both that main.js startup ALREADY acquired the
     // authoritative native state (before any manual refresh) AND that an active
     // cursor draw pass under emulated reduce=true stays at 90ms.
-    try {
-      await cdp.send('Emulation.setEmulatedMedia', {
-        features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
-      });
-      const phaseF = await cdp.eval(`(async () => {
-        const beforeRefresh = ZTermReducedMotion.snapshot();
-        const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(tabA)});
-        const adapter = tab?._smoothCursor?._adapter ?? null;
-        const beforePasses = adapter?.snapshot?.()?.counters?.cursorDrawPasses ?? null;
-        const refreshed = await ZTermReducedMotion.refresh();
-        const svc = tab?.term?._core?._coreBrowserService;
-        let pinned = false;
-        if (svc && svc.isFocused !== true) {
-          Object.defineProperty(svc, 'isFocused', { configurable: true, get: () => true });
-          pinned = true;
+    const phaseFMotion = await readNativeReducedMotion(cdp);
+    const phaseFSkip = classifyAnimationPhaseSkip(phaseFMotion);
+    if (phaseFSkip.skip) {
+      skip('F: native animation preference override', phaseFSkip.reason);
+    } else {
+      let emulatedMediaSet = false;
+      try {
+        await cdp.send('Emulation.setEmulatedMedia', {
+          features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
+        });
+        emulatedMediaSet = true;
+        const phaseF = await cdp.eval(`(async () => {
+          const beforeRefresh = ZTermReducedMotion.snapshot();
+          const tab = TabManager.tabs.find(t => t.id === ${JSON.stringify(tabA)});
+          const adapter = tab?._smoothCursor?._adapter ?? null;
+          const beforePasses = adapter?.snapshot?.()?.counters?.cursorDrawPasses ?? null;
+          const refreshed = await ZTermReducedMotion.refresh();
+          const svc = tab?.term?._core?._coreBrowserService;
+          let pinned = false;
+          if (svc && svc.isFocused !== true) {
+            Object.defineProperty(svc, 'isFocused', { configurable: true, get: () => true });
+            pinned = true;
+          }
+          try {
+            tab?.term?.refresh?.(0, (tab?.term?.rows || 1) - 1);
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const adapterSnap = adapter?.snapshot?.() ?? null;
+            return {
+              pageMatches: matchMedia('(prefers-reduced-motion: reduce)').matches,
+              beforeRefresh,
+              rm: refreshed,
+              beforePasses,
+              afterPasses: adapterSnap?.counters?.cursorDrawPasses ?? null,
+              adapterReducedMotion: adapterSnap?.reducedMotion ?? null,
+              motionDuration: adapterSnap?.motionDuration ?? null,
+            };
+          } finally {
+            if (pinned) { try { delete svc.isFocused; } catch (e) {} }
+          }
+        })()`);
+        // Host precondition: Phase F asserts the live native value, so it needs a
+        // local console session with Windows "Animation effects" enabled. Report
+        // a violated precondition as its own failing check so it is never
+        // mistaken for a product regression.
+        check('F: host precondition (local console, Windows animation effects on)',
+          phaseF?.rm?.nativeAnimationsEnabled === true && phaseF?.rm?.remoteSession === false,
+          `nativeAnimationsEnabled=${phaseF?.rm?.nativeAnimationsEnabled} remoteSession=${phaseF?.rm?.remoteSession}`);
+        check('F: native SPI_GETCLIENTAREAANIMATION overrides page prefers-reduced-motion: reduce',
+          phaseF?.pageMatches === true
+            && startupReducedMotion?.source === 'native'
+            && phaseF?.beforeRefresh?.source === 'native'
+            && phaseF?.beforeRefresh?.nativeAnimationsEnabled === true
+            && phaseF?.beforeRefresh?.pageReducedMotion === true
+            && phaseF?.beforeRefresh?.reducedMotion === false
+            && phaseF?.rm?.source === 'native'
+            && phaseF?.rm?.nativeAnimationsEnabled === true
+            && typeof phaseF?.rm?.remoteSession === 'boolean'
+            && phaseF?.rm?.pageReducedMotion === true
+            && phaseF?.rm?.reducedMotion === false
+            && typeof phaseF?.beforePasses === 'number'
+            && typeof phaseF?.afterPasses === 'number'
+            && phaseF.afterPasses > phaseF.beforePasses
+            && phaseF?.adapterReducedMotion === false
+            && phaseF?.motionDuration === 90,
+          JSON.stringify({ startupReducedMotion, ...(phaseF && typeof phaseF === 'object' ? phaseF : { phaseF }) }));
+      } finally {
+        if (emulatedMediaSet) {
+          await cdp.send('Emulation.setEmulatedMedia', { features: [] }).catch(() => null);
         }
-        try {
-          tab?.term?.refresh?.(0, (tab?.term?.rows || 1) - 1);
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          const adapterSnap = adapter?.snapshot?.() ?? null;
-          return {
-            pageMatches: matchMedia('(prefers-reduced-motion: reduce)').matches,
-            beforeRefresh,
-            rm: refreshed,
-            beforePasses,
-            afterPasses: adapterSnap?.counters?.cursorDrawPasses ?? null,
-            adapterReducedMotion: adapterSnap?.reducedMotion ?? null,
-            motionDuration: adapterSnap?.motionDuration ?? null,
-          };
-        } finally {
-          if (pinned) { try { delete svc.isFocused; } catch (e) {} }
-        }
-      })()`);
-      // Host precondition: Phase F asserts the live native value, so it needs a
-      // local console session with Windows "Animation effects" enabled. Report
-      // a violated precondition as its own failing check so it is never
-      // mistaken for a product regression.
-      check('F: host precondition (local console, Windows animation effects on)',
-        phaseF?.rm?.nativeAnimationsEnabled === true && phaseF?.rm?.remoteSession === false,
-        `nativeAnimationsEnabled=${phaseF?.rm?.nativeAnimationsEnabled} remoteSession=${phaseF?.rm?.remoteSession}`);
-      check('F: native SPI_GETCLIENTAREAANIMATION overrides page prefers-reduced-motion: reduce',
-        phaseF?.pageMatches === true
-          && phaseF?.beforeRefresh?.source === 'native'
-          && phaseF?.beforeRefresh?.nativeAnimationsEnabled === true
-          && phaseF?.beforeRefresh?.pageReducedMotion === true
-          && phaseF?.beforeRefresh?.reducedMotion === false
-          && phaseF?.rm?.source === 'native'
-          && phaseF?.rm?.nativeAnimationsEnabled === true
-          && typeof phaseF?.rm?.remoteSession === 'boolean'
-          && phaseF?.rm?.pageReducedMotion === true
-          && phaseF?.rm?.reducedMotion === false
-          && typeof phaseF?.beforePasses === 'number'
-          && typeof phaseF?.afterPasses === 'number'
-          && phaseF.afterPasses > phaseF.beforePasses
-          && phaseF?.adapterReducedMotion === false
-          && phaseF?.motionDuration === 90,
-        JSON.stringify(phaseF));
-    } finally {
-      await cdp.send('Emulation.setEmulatedMedia', { features: [] }).catch(() => null);
+      }
     }
   } finally {
     cdp.close();
@@ -1166,7 +1234,7 @@ async function main() {
 
   if (backgroundFailure) throw backgroundFailure;
   const failed = results.filter((r) => !r.pass);
-  console.log(`\n${results.length - failed.length}/${results.length} 项通过`);
+  console.log(`\n${formatSummaryLine(results.length - failed.length, results.length, skippedGroups)}`);
   if (failed.length > 0) {
     console.log('失败项:');
     for (const f of failed) console.log(`  - ${f.name}${f.detail ? ` (${f.detail})` : ''}`);
