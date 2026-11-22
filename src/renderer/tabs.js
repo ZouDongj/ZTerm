@@ -1042,21 +1042,30 @@ const TabManager = {
         } else if (tab && tab.splitRoot) {
             const split = document.getElementById('split_' + id);
             if (split) { split.style.display = 'flex'; this._layoutTime = Date.now(); this._layoutSplit(tab); }
-            if (typeof _attachWebglRenderer === 'function') getAllPanes(tab).forEach(p => { if (p.term) _attachWebglRenderer(p, p.term); });
-            const focused = getAllPanes(tab).find(p => p.focused);
+            const panes = getAllPanes(tab);
+            if (typeof _attachWebglRenderer === 'function') panes.forEach(p => { if (p.term) _attachWebglRenderer(p, p.term); });
+            // Re-sync every visible pane's viewport geometry & DOM scrollTop
+            // immediately on show so hidden-tab output never leaves a truncated
+            // scroll area or stale scrollTop === 0 before the 250ms settle.
+            if (typeof _syncTerminalViewport === 'function') panes.forEach(p => { if (p.term) _syncTerminalViewport(p.term); });
+            const focused = panes.find(p => p.focused);
+            if (panes.some(p => p.term && p.fitAddon)) setTimeout(() => {
+                if (this.activeId !== tab.id || !tab.splitRoot) return;
+                const livePanes = getAllPanes(tab);
+                if (typeof _sftpAnimating !== 'undefined' && _sftpAnimating) {
+                    if (typeof _syncTerminalViewport === 'function') livePanes.forEach(p => { if (p.term) _syncTerminalViewport(p.term); });
+                    return;
+                }
+                // Fit and sync every visible pane after the split settles (not
+                // just the focused one), keeping the same-frame WebGL flush.
+                livePanes.forEach(p => {
+                    if (!p.term || !p.fitAddon) return;
+                    const body = document.getElementById('pane-body_' + p.id);
+                    if (typeof _fitTermSync === 'function') _fitTermSync(p.term, p.fitAddon, body);
+                    else _fitWithScroll(p.term, p.fitAddon, body);
+                });
+            }, 250);
             if (focused && focused.term) {
-                // Re-check at fire time: a reconnect/close inside the 250ms
-                // window nulls the pane's terminal, and reading it through
-                // the scheduling-time guard would throw.
-                if (focused.fitAddon) setTimeout(() => {
-                    if (!focused.term) return;
-                    // Same-frame flush variant (see the non-split branch):
-                    // fit() clears the WebGL bitmap synchronously and the
-                    // debounced repaint would composite one cleared frame.
-                    const body = document.getElementById('pane-body_' + focused.id);
-                    if (typeof _fitTermSync === 'function') _fitTermSync(focused.term, focused.fitAddon, body);
-                    else _fitWithScroll(focused.term, focused.fitAddon, body);
-                }, 250);
                 // Fire-time validated: the pane may be closed/disposed, the
                 // tab switched away, or a newer focus intent (overlay/search
                 // input) active when the timer runs.
@@ -1069,7 +1078,13 @@ const TabManager = {
                 // Attach the GPU renderer before the fit so the (restored,
                 // never-fitted) grid jump repaints through it atomically.
                 if (tab && tab.term && typeof _attachWebglRenderer === 'function') _attachWebglRenderer(tab, tab.term);
+                // Repair xterm's viewport geometry and scrollTop immediately on
+                // show: display:none zeroes offsetHeight (shrinking the scroll
+                // area by a full page during background output) and resets DOM
+                // scrollTop to 0 without firing a scroll event.
+                if (tab && tab.term && typeof _syncTerminalViewport === 'function') _syncTerminalViewport(tab.term);
                 if (tab && tab.fitAddon) setTimeout(() => {
+                    if (this.activeId !== id || !tab.term) return;
                     // A running dock open/close animation owns the wrap width
                     // (and the terminal already took its predicted final
                     // grid): fitting against the mid-transition width here
@@ -1077,7 +1092,10 @@ const TabManager = {
                     // pass performs the authoritative fit afterwards. (typeof
                     // guard: _sftpAnimating lives in sftp.js, which some test
                     // harnesses never load.)
-                    if (typeof _sftpAnimating !== 'undefined' && _sftpAnimating) return;
+                    if (typeof _sftpAnimating !== 'undefined' && _sftpAnimating) {
+                        if (typeof _syncTerminalViewport === 'function') _syncTerminalViewport(tab.term);
+                        return;
+                    }
                     // _fitTermSync over _fitWithScroll: fit() clears the WebGL
                     // bitmap synchronously; the same-frame flush keeps the
                     // clear+repaint atomic (no blank frame on activation).
@@ -2328,6 +2346,11 @@ const TabManager = {
         });
         this._layoutTime = Date.now();
         this._layoutSplit(tab);
+        // Reparenting existing term.element nodes into fresh pane bodies resets
+        // DOM scrollTop to 0; restore viewport sync immediately while active.
+        if (tab.id === this.activeId && typeof _syncTerminalViewport === 'function') {
+            allPanes.forEach(p => { if (p.term) _syncTerminalViewport(p.term); });
+        }
         // Enter animation for newly created panes
         enterIds.forEach(id => {
             const newEl = rootEl.querySelector('.split-pane[data-pane="' + id + '"]');
@@ -2898,6 +2921,11 @@ const TabManager = {
         }
         this._maximizing = true;
         this._layoutSplit(tab);
+        // Unmaximizing reveals sibling panes that were display:none; sync all
+        // visible panes immediately so their scroll area and scrollTop recover.
+        if (this.activeId === tab.id && typeof _syncTerminalViewport === 'function') {
+            getAllPanes(tab).forEach(p => { if (p.term) _syncTerminalViewport(p.term); });
+        }
         const pane = findPane(tab, tab._maximizedPaneId || paneId);
         if (pane && pane.term && pane.fitAddon) {
             const priorFocus = document.activeElement || null;
@@ -2910,13 +2938,32 @@ const TabManager = {
                 if (pane.tabId && pane.term?.cols && pane.term?.rows) {
                     ipcRenderer.send('pty-resize', { tabId: pane.tabId, cols: pane.term.cols, rows: pane.term.rows });
                 }
+                // After unmaximizing, settle and sync all sibling panes that
+                // returned from display:none.
+                if (!tab._maximizedPaneId && tab.splitRoot) {
+                    getAllPanes(tab).forEach(p => {
+                        if (p === pane || !p.term) return;
+                        const sb = document.getElementById('pane-body_' + p.id);
+                        if (sb && p.fitAddon) {
+                            if (typeof _fitTermSync === 'function') _fitTermSync(p.term, p.fitAddon, sb);
+                            else _fitWithScroll(p.term, p.fitAddon, sb);
+                        } else if (typeof _syncTerminalViewport === 'function') {
+                            _syncTerminalViewport(p.term);
+                        }
+                    });
+                }
                 // Fire-time validated focus only: a close/switch inside the
                 // 220ms window makes this pane's focus stale — the fit and
                 // the explicit resize above still complete.
                 _focusTerminalIfCurrent(pane.term, priorFocus);
             }, 220);
         } else {
-            setTimeout(() => { this._maximizing = false; }, 220);
+            setTimeout(() => {
+                this._maximizing = false;
+                if (this.activeId === tab.id && tab.splitRoot && typeof _syncTerminalViewport === 'function') {
+                    getAllPanes(tab).forEach(p => { if (p.term) _syncTerminalViewport(p.term); });
+                }
+            }, 220);
         }
     },
 
@@ -3027,6 +3074,7 @@ const TabManager = {
             document.getElementById('main-area').appendChild(w);
             if (st.term) {
                 wInner.appendChild(st.term.element);
+                if (typeof _syncTerminalViewport === 'function') _syncTerminalViewport(st.term);
                 setupWrapResizeObserver(w, st);
                 if (st.fitAddon) setTimeout(() => {
                     _fitWithScroll(st.term, st.fitAddon, wInner);
@@ -3044,6 +3092,7 @@ const TabManager = {
         document.getElementById('main-area').appendChild(nw);
         if (nt.term) {
             nInner.appendChild(nt.term.element);
+            if (typeof _syncTerminalViewport === 'function') _syncTerminalViewport(nt.term);
             setupWrapResizeObserver(nw, nt);
             if (nt.fitAddon) setTimeout(() => {
                 _fitWithScroll(nt.term, nt.fitAddon, nInner);
@@ -3185,6 +3234,7 @@ const TabManager = {
                         document.getElementById('main-area').appendChild(w);
                         if (sourceTab.term) {
                             wInner.appendChild(sourceTab.term.element);
+                            if (typeof _syncTerminalViewport === 'function') _syncTerminalViewport(sourceTab.term);
                             setupWrapResizeObserver(w, sourceTab);
                             if (sourceTab.fitAddon) setTimeout(() => {
                                 _fitWithScroll(sourceTab.term, sourceTab.fitAddon, wInner);
@@ -3424,6 +3474,7 @@ const TabManager = {
         document.getElementById('main-area').appendChild(w);
         if (tab.term) {
             wInner.appendChild(tab.term.element);
+            if (typeof _syncTerminalViewport === 'function') _syncTerminalViewport(tab.term);
             setupWrapResizeObserver(w, tab);
             if (tab.fitAddon) setTimeout(() => {
                 _fitWithScroll(tab.term, tab.fitAddon, wInner);

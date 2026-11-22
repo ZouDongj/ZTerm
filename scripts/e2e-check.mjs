@@ -7204,7 +7204,189 @@ async function main() {
       [${SP26}, ${BG26}, ${FG26}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} });
       return true;
     })()`).catch(() => null);
-    await sleep(600); // let the staggered tab removals settle before section 14
+    await sleep(600); // let the staggered tab removals settle before section 13.10
+
+    // 13.10 Issue #46: hidden-tab background output viewport/scrollTop sync.
+    // Verifies both reported symptoms in real Chromium/WebView2 DOM:
+    //   a) background output on a display:none tab followed by switchTo keeps
+    //      viewportY === baseY, rebuilds .xterm-scroll-area to full buffer
+    //      height, and wheel-down stays at bottom (zero jump up);
+    //   b) wheel-up into long output then wheel-down returns to exact baseY
+    //      (latest page reachable, isUserScrolling === false);
+    //   c) an intentionally scrolled-up tab preserves viewportY across
+    //      switch-away + background output + switch-back and still wheels to
+    //      exact bottom afterward.
+    let i46A = null, i46B = null;
+    try {
+      i46A = await cdp.eval(`TabManager.createTab({ name: 'E2E-I46-A', type: 'local' })`);
+      i46B = await cdp.eval(`TabManager.createTab({ name: 'E2E-I46-B', type: 'local' })`);
+      const A46 = JSON.stringify(i46A), B46 = JSON.stringify(i46B);
+      await waitForValue(cdp, `(() => {
+        const a = TabManager.tabs.find(x => x.id === ${A46});
+        const b = TabManager.tabs.find(x => x.id === ${B46});
+        return !!(a && a.term && a.term.rows > 0 && a.tabId && b && b.term && b.tabId);
+      })()`, true, 15000);
+      await waitForValue(cdp, `(() => {
+        const a = TabManager.tabs.find(x => x.id === ${A46});
+        const l0 = a?.term?.buffer?.active?.getLine(0)?.translateToString(true) || '';
+        return l0.length > 0;
+      })()`, true, 15000);
+      await sleep(400); // let PowerShell's startup banner finish before writing test lines
+
+      const i46Res = await cdp.eval(`(async () => {
+        const waitFrames = (n = 3) => new Promise(resolve => {
+          const step = () => { if (--n <= 0) resolve(); else requestAnimationFrame(step); };
+          requestAnimationFrame(step);
+        });
+        const waitMs = (ms) => new Promise(r => setTimeout(r, ms));
+        const writeDone = (term, lines, prefix) => new Promise(resolve => {
+          let buf = '';
+          for (let i = 0; i < lines; i++) buf += prefix + '-' + i + '\\r\\n';
+          term.write(buf, resolve);
+        });
+        const wheelSteps = async (term, count, deltaY) => {
+          for (let i = 0; i < count; i++) {
+            term.element.dispatchEvent(new WheelEvent('wheel', {
+              deltaY, deltaMode: 0, bubbles: true, cancelable: true,
+            }));
+            await waitFrames(2);
+          }
+        };
+
+        const tabA = TabManager.tabs.find(x => x.id === ${A46});
+        if (!tabA || !tabA.term) return { ok: false, reason: 'missing-tabA' };
+        TabManager.switchTo(${A46});
+        await waitMs(120);
+        await waitFrames(3);
+
+        // Seed initial visible output, then switch to Tab B so Tab A is display:none.
+        await writeDone(tabA.term, 80, 'I46-INIT');
+        await waitFrames(3);
+        const initBaseY = tabA.term.buffer.active.baseY;
+
+        TabManager.switchTo(${B46});
+        await waitMs(80);
+        await waitFrames(3);
+
+        // Stream 400 background lines while Tab A is hidden so xterm's hidden
+        // Viewport._innerRefresh() runs under display:none.
+        await writeDone(tabA.term, 400, 'I46-BG');
+        await waitFrames(4);
+        const hiddenRecordedH = tabA.term._core.viewport._lastRecordedViewportHeight;
+
+        // Switch back to Tab A and let activation + 10ms fit settle.
+        TabManager.switchTo(${A46});
+        await waitMs(120);
+        await waitFrames(3);
+
+        const vp = tabA.term._core.viewport;
+        const vpEl = vp._viewportElement;
+        const rowH = vp._currentRowHeight;
+        const baseY1 = tabA.term.buffer.active.baseY;
+        const afterSwitch = {
+          baseY: baseY1,
+          viewportY: tabA.term.buffer.active.viewportY,
+          scrollTop: vpEl.scrollTop,
+          maxScrollTop: vpEl.scrollHeight - vpEl.clientHeight,
+          expectedBottomTop: baseY1 * rowH,
+          rowH,
+          scrollAreaFull: (vpEl.scrollHeight - vpEl.clientHeight) >= (baseY1 * rowH - rowH * 0.5),
+          hiddenRecordedH,
+          initBaseY,
+        };
+
+        // Symptom 1: wheel DOWN right after returning to Tab A must stay at bottom (zero jump up).
+        await wheelSteps(tabA.term, 3, 120);
+        const afterWheelDown = {
+          baseY: tabA.term.buffer.active.baseY,
+          viewportY: tabA.term.buffer.active.viewportY,
+          isUserScrolling: tabA.term._core._bufferService.isUserScrolling,
+        };
+
+        // Symptom 2: wheel UP into long output, then wheel DOWN must reach exact baseY.
+        await wheelSteps(tabA.term, 15, -120);
+        const afterWheelUp = {
+          viewportY: tabA.term.buffer.active.viewportY,
+          baseY: tabA.term.buffer.active.baseY,
+        };
+        await wheelSteps(tabA.term, 20, 240);
+        const afterReturnBottom = {
+          viewportY: tabA.term.buffer.active.viewportY,
+          baseY: tabA.term.buffer.active.baseY,
+          isUserScrolling: tabA.term._core._bufferService.isUserScrolling,
+        };
+
+        // Scrolled-up preservation across switch away + background output + switch back.
+        await wheelSteps(tabA.term, 12, -120);
+        const savedY = tabA.term.buffer.active.viewportY;
+        const baseBeforePreserve = tabA.term.buffer.active.baseY;
+
+        TabManager.switchTo(${B46});
+        await waitMs(80);
+        await waitFrames(3);
+        await writeDone(tabA.term, 200, 'I46-PRESERVE');
+        await waitFrames(4);
+
+        TabManager.switchTo(${A46});
+        await waitMs(120);
+        await waitFrames(3);
+        const preserved = {
+          savedY,
+          baseBeforePreserve,
+          viewportY: tabA.term.buffer.active.viewportY,
+          baseY: tabA.term.buffer.active.baseY,
+          scrollTop: vpEl.scrollTop,
+          expectedScrollTop: savedY * vp._currentRowHeight,
+          rowH: vp._currentRowHeight,
+        };
+
+        // Scrolling DOWN from preserved scrolled-up position reaches the new exact baseY.
+        await wheelSteps(tabA.term, 45, 240);
+        const afterPreservedDown = {
+          viewportY: tabA.term.buffer.active.viewportY,
+          baseY: tabA.term.buffer.active.baseY,
+          isUserScrolling: tabA.term._core._bufferService.isUserScrolling,
+        };
+
+        return {
+          ok: true,
+          afterSwitch,
+          afterWheelDown,
+          afterWheelUp,
+          afterReturnBottom,
+          preserved,
+          afterPreservedDown,
+        };
+      })()`).catch((e) => ({ evalError: String((e && e.message) || e) }));
+
+      check('issue46：后台长输出切回后滚动区完整、下滚不跳顶，上翻再下翻可到达最新页（#46）',
+        !!i46Res && i46Res.ok === true &&
+        i46Res.afterSwitch.baseY >= i46Res.afterSwitch.initBaseY + 350 &&
+        i46Res.afterSwitch.viewportY === i46Res.afterSwitch.baseY &&
+        i46Res.afterSwitch.scrollAreaFull === true &&
+        i46Res.afterWheelDown.viewportY === i46Res.afterWheelDown.baseY &&
+        i46Res.afterWheelDown.isUserScrolling === false &&
+        i46Res.afterWheelUp.viewportY < i46Res.afterWheelUp.baseY - 15 &&
+        i46Res.afterReturnBottom.viewportY === i46Res.afterReturnBottom.baseY &&
+        i46Res.afterReturnBottom.isUserScrolling === false,
+        JSON.stringify(i46Res));
+
+      check('issue46：已上滚的历史浏览位置在切 tab + 后台输出后保留不强拉到底，且下滚可回最新页（#46）',
+        !!i46Res && i46Res.ok === true &&
+        i46Res.preserved.savedY > 0 &&
+        i46Res.preserved.savedY < i46Res.preserved.baseBeforePreserve - 10 &&
+        i46Res.preserved.viewportY === i46Res.preserved.savedY &&
+        Math.abs(i46Res.preserved.scrollTop - i46Res.preserved.expectedScrollTop) <= i46Res.preserved.rowH &&
+        i46Res.afterPreservedDown.viewportY === i46Res.afterPreservedDown.baseY &&
+        i46Res.afterPreservedDown.isUserScrolling === false,
+        JSON.stringify(i46Res && { preserved: i46Res.preserved, afterPreservedDown: i46Res.afterPreservedDown }));
+    } finally {
+      const cleanupIds = [i46A, i46B].filter(Boolean);
+      if (cleanupIds.length) {
+        await cdp.eval(`(() => { ${JSON.stringify(cleanupIds)}.forEach(id => { try { TabManager.closeTab(id); } catch (e) {} }); return true; })()`).catch(() => null);
+        await sleep(600);
+      }
+    }
 
     // 14. Window state restore: write the window field into config → restart →
     // verify maximized/size restore
