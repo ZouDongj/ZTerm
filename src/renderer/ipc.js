@@ -98,7 +98,7 @@ function _writeSnapshotChanged(before, after) {
 }
 
 function _backgroundOutputSnapshot(tab, owner, data, ink, options) {
-    if (!tab || tab.id === TabManager.activeId || tab._bgUnread) return null;
+    if (!tab || tab.id === TabManager.activeId || tab._bgUnread || owner?._bgUnreadPendingVisit === true) return null;
     if (typeof data !== 'string' || !data || !owner?.term) return null;
     const term = owner.term;
     const report = ink?.writes || null;
@@ -122,7 +122,7 @@ function _backgroundOutputParsed(unread) {
         ? _resolveTermOwner(unread.term)
         : (unread.owner.term === unread.term ? { tab: unread.owner, owner: unread.owner } : null);
     if (!resolved || resolved.owner.tabId !== unread.backendId) return;
-    if (resolved.tab.id === TabManager.activeId || resolved.tab._bgUnread) return;
+    if (resolved.tab.id === TabManager.activeId || resolved.tab._bgUnread || resolved.owner._bgUnreadPendingVisit === true) return;
     if (typeof TabManager.markBackgroundOutput !== 'function') return;
     if (unread.conservative) {
         TabManager.markBackgroundOutput(resolved.tab, resolved.owner);
@@ -212,7 +212,7 @@ function _inkFeed(owner, tab, pane, data) {
     if (!liveTerm) return null;
     const adapter = (pane || tab)?._smoothCursor?._adapter;
     const port = adapter?.softwareCaretPort;
-    const trackUnread = tab && tab.id !== TabManager.activeId && !tab._bgUnread;
+    const trackUnread = tab && tab.id !== TabManager.activeId && !tab._bgUnread && owner._bgUnreadPendingVisit !== true;
     if (!port && !trackUnread && !owner._inkObserver) return null;
     // Adapter identity changes on WebGL context loss / renderer rebuild —
     // the observer's port closure would feed a disposed adapter. Recreate
@@ -443,8 +443,12 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError, executionO
                     _resetCaretState(pane);
                     // Fresh local generation: a successful claim is live for
                     // input again; a failed spawn is correctly represented as
-                    // a failed session (paste stays cancelled).
+                    // a failed session (paste stays cancelled). Sessions that
+                    // start in the background stay green through their initial
+                    // shell banner/prompt until the user visits the tab once.
                     pane._sessionFailed = !!spawnError;
+                    pane._bgUnread = false;
+                    pane._bgUnreadPendingVisit = tab.id !== TabManager.activeId;
                     wireTerminalToPane(tab, pane);
                     if (spawnError && pane.term) pane.term.write('\r\n\x1b[31m[ZTerm] 启动失败: ' + spawnError + '\x1b[0m\r\n');
                     // Sync fit + report the size immediately: the local pty starts at 80x24, so this shortens the window before it reaches the real size
@@ -455,6 +459,7 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError, executionO
                     // keeps its initial gray dot while every pane header
                     // already reads green (P3-13).
                     _aggregateSplitConnected(tab);
+                    TabManager._reaggregateBackgroundUnread?.(tab);
                     TabManager.render();
                     return;
                 }
@@ -463,8 +468,11 @@ ipcRenderer.on('pty-created', (event, { tabId, requestId, spawnError, executionO
                 delete tab._ptyRequestId;
                 _resetCaretState(tab); // see the split branch above
                 // Same generation rule as the pane claim: success is live,
-                // a failed spawn stays failed.
+                // a failed spawn stays failed; background bring-up waits for
+                // the first user visit before arming unread notifications.
                 tab._sessionFailed = !!spawnError;
+                tab._bgUnread = false;
+                tab._bgUnreadPendingVisit = tab.id !== TabManager.activeId;
                 if (!tab.term) {
                     wireTerminal(tab, tabId);
                     if (spawnError && tab.term) tab.term.write('\r\n\x1b[31m[ZTerm] 启动失败: ' + spawnError + '\x1b[0m\r\n');
@@ -566,14 +574,19 @@ function _applySshConnecting(attemptId, tabId) {
     // Legacy events without an attempt token skip the registry guard (the
     // real producer always sends attemptId; pass 1 routed by backend id).
     if (_sshAttempts && attemptId && !_sshAttempts.beginClaim(attemptId, tabId)) return true;
+    const pendingVisit = tab.id !== TabManager.activeId;
     if (pane) {
         if (globalThis.ZTermDiagnostics?.enabled) globalThis.ZTermDiagnostics.reset(pane);
         pane.tabId = tabId;
         // A fresh connect attempt is a NEW session generation: any
-        // failure marker from a previous generation no longer applies.
+        // failure or stale unread marker from a previous generation no longer
+        // applies, and background connections wait for the user's first visit.
         pane._sessionFailed = false;
         pane._sshConnecting = true;
         pane._sshErrored = false;
+        pane._bgUnread = false;
+        pane._bgUnreadPendingVisit = pendingVisit;
+        TabManager._reaggregateBackgroundUnread?.(tab);
         // In preserve mode (clearOnConnect=false) the terminal already exists: do not rebuild it, or the preserved content would be replaced with an empty terminal
         if (!pane.term) wireTerminalToPane(tab, pane);
         if (pane.term) {
@@ -591,6 +604,8 @@ function _applySshConnecting(attemptId, tabId) {
     tab._sessionFailed = false; // new generation — see the pane branch
     tab._sshConnecting = true;
     tab._sshErrored = false;
+    tab._bgUnread = false;
+    tab._bgUnreadPendingVisit = pendingVisit;
     if (!tab.term) wireTerminal(tab, tabId);
     if (tab.term) tab.term.write('\x1b[33mConnecting to ' + (tab.host || tab.name) + '...\x1b[0m\r\n');
     _syncFitAndReportSize(tab, null);
@@ -606,11 +621,17 @@ function _applySshConnected(attemptId, tabId) {
     const firstApplication = !_sshAttempts || !attemptId || _sshAttempts.finishUi(attemptId, 'ok');
     if (firstApplication) {
         // First terminal application (either channel): full connected UI.
+        // Background connections (startup restore, background reconnect, or
+        // switching away during handshake) stay idle green through their
+        // initial MOTD/prompt until the user visits the tab once.
         _resetCaretFilterById(tabId);
+        const pendingVisit = tab.id !== TabManager.activeId;
         if (pane) {
             // The budget belongs to the pane that failed; a sibling's success
             // must not re-arm another pane's handshake retries.
             pane._sshRetried = 0;
+            pane._bgUnread = false;
+            pane._bgUnreadPendingVisit = pendingVisit;
             if (!pane.term) wireTerminalToPane(tab, pane);
             if (pane.term) pane.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
             tab.connected = true;
@@ -621,12 +642,15 @@ function _applySshConnected(attemptId, tabId) {
             // Aggregated AFTER the pane state lands: this pane is live, so the
             // tab reads connected (uniform with the disconnect paths).
             _aggregateSplitConnected(tab);
+            TabManager._reaggregateBackgroundUnread?.(tab);
         } else {
             tab._sshRetried = 0; // the tab itself owns this (non-split) session
             tab.connected = true;
             tab._sessionFailed = false; // live again — see the split branch
             tab._sshConnecting = false;
             tab._sshErrored = false;
+            tab._bgUnread = false;
+            tab._bgUnreadPendingVisit = pendingVisit;
             if (!tab.term) wireTerminal(tab, tabId);
             if (tab.term) tab.term.write('\r\n\x1b[32m[SSH Connected]\x1b[0m\r\n');
         }
