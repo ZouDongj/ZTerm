@@ -781,8 +781,10 @@ function _renderUpdateFailed(err) {
 function _restoreUpdateTargetFromState(st) {
     if (!st || typeof st.tag !== 'string' || !st.tag.trim()) return;
     const tag = st.tag.trim();
-    window.__updateTag = tag;
-    window.__updateUrl = updateReleasePageUrl(`https://github.com/ZouDongj/ZTerm/releases/tag/${tag}`);
+    const candidateUrl = `https://github.com/ZouDongj/ZTerm/releases/tag/${tag}`;
+    const safeUrl = updateReleasePageUrl(candidateUrl);
+    window.__updateTag = safeUrl === candidateUrl ? tag : null;
+    window.__updateUrl = safeUrl;
 }
 
 function _startUpdatePoll() {
@@ -922,6 +924,7 @@ async function startUpdateDownload() {
     try {
         const st = await ipcRenderer.invoke('download-update', { tag: window.__updateTag || '' });
         _stopUpdatePoll();
+        _restoreUpdateTargetFromState(st);
         if (st && st.phase === 'ready') {
             _renderUpdateReady(st.tag);
             _toastUpdateReadyOnce(st.tag);

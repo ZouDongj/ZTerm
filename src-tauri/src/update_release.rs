@@ -2589,9 +2589,9 @@ mod tests {
         .unwrap()
         .is_empty());
 
-        // Non-empty feed with zero recognizable ZTerm release hrefs (Opus N1:
-        // renamed repo, relative hrefs, or malformed-only entries) returns Err
-        // so callers fall back to RELEASES_LIST_API instead of reporting none.
+        // Non-empty feed with zero recognizable ZTerm release hrefs (renamed
+        // repo, relative hrefs, or malformed-only entries) returns Err so
+        // callers fall back to RELEASES_LIST_API instead of reporting none.
         let wrong_repo = atom_feed_with_entries(&[
             r#"  <entry><link rel="alternate" href="https://github.com/Other/ZTerm/releases/tag/v1.2.5"/></entry>"#,
         ]);
@@ -2623,8 +2623,8 @@ mod tests {
             );
         }
 
-        // Opus N2: truncated <content> containing many repeated unclosed tags
-        // fails linearly at EOF without quadratic rescanning.
+        // Truncated <content> containing many repeated unclosed tags fails
+        // linearly at EOF without quadratic rescanning.
         let mut hostile_divs = String::from("<feed><entry><content>");
         for _ in 0..10_000 {
             hostile_divs.push_str("<div ");
@@ -2751,7 +2751,7 @@ mod tests {
             ]
         );
 
-        // Opus N1: non-empty Atom feed with 0 valid ZTerm hrefs falls back to RELEASES_LIST_API.
+        // Non-empty Atom feed with 0 valid ZTerm hrefs falls back to RELEASES_LIST_API.
         let unmatched = FakeHttp::new();
         let unmatched_xml = atom_feed_with_entries(&[
             r#"  <entry><link rel="alternate" href="https://github.com/Other/ZTerm/releases/tag/v1.2.5"/></entry>"#,

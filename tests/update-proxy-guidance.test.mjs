@@ -150,11 +150,13 @@ test('_syncUpdateCardFromState restores prerelease tag/URL and sanitizes invalid
     assert.equal(elements['btn-update-apply'].textContent, '重启并安装 开发版 v1.2.5-dev.4');
     assert.equal(elements['update-check-desc'].textContent, '开发版 v1.2.5-dev.4 已下载完成，随时可安装');
 
-    // Invalid st.tag is sanitized by updateReleasePageUrl to the safe latest fallback.
-    win.__updateTag = null;
+    // Invalid st.tag is sanitized by updateReleasePageUrl to the safe latest fallback
+    // and clears window.__updateTag so a retry does not send an invalid tag.
+    win.__updateTag = 'v1.2.5-dev.4';
     win.__updateUrl = null;
     currentState = { phase: 'failed', tag: '../evil?x=1', error: '[connect] refused' };
     await cardCtx._syncUpdateCardFromState();
+    assert.equal(win.__updateTag, null);
     assert.equal(win.__updateUrl, 'https://github.com/ZouDongj/ZTerm/releases/latest');
 
     // Idle state leaves tag/URL untouched.
