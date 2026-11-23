@@ -7,15 +7,19 @@
 //!   `/releases/latest` (redirect primary, `/releases/latest` API fallback) and
 //!   reject pre-releases across every path.
 //! - Pre-release builds (`UpdateChannel::Prerelease`, e.g. `1.2.5-dev.3`)
-//!   resolve the highest valid SemVer tag across all published non-draft
-//!   releases (both stable and pre-release) from `releases.atom` (primary) with
-//!   `/releases?per_page=30` API fallback. Once a pre-release build upgrades to
-//!   a stable version, it automatically runs on `UpdateChannel::Stable`.
+//!   collect candidate tags from `releases.atom` (quota-free) and confirm any
+//!   newer candidate as a published non-draft GitHub Release via the releases
+//!   API (or a verified `expanded_assets` installer when the API is limited),
+//!   falling back to `/releases?per_page=30` when the top candidate is a plain
+//!   git tag/draft or the feed is unavailable. Once a pre-release build
+//!   upgrades to a stable version, it automatically runs on
+//!   `UpdateChannel::Stable`.
 //!
 //! The API is kept as the primary source for installer asset metadata. When the
-//! API is limited or unavailable, the release's `expanded_assets` HTML page
-//! carries the same asset names and mandatory SHA-256 digests without
-//! authentication and is used as a best-effort fallback.
+//! API is limited or unavailable (but not 404, which indicates a plain git tag
+//! or draft), the release's `expanded_assets` HTML page carries the same asset
+//! names and mandatory SHA-256 digests without authentication and is used as a
+//! best-effort fallback.
 
 use std::cmp::Ordering;
 
@@ -38,8 +42,9 @@ pub enum UpdateChannel {
     /// Stable builds only: excludes pre-releases across tag, API, and asset
     /// resolution paths.
     Stable,
-    /// Pre-release builds: considers all published non-draft releases (both
-    /// stable and pre-release) and selects the highest valid SemVer tag.
+    /// Pre-release builds: considers published non-draft GitHub Releases (both
+    /// stable and pre-release, excluding plain git tags and drafts) and selects
+    /// the highest valid SemVer tag.
     Prerelease,
 }
 
@@ -137,15 +142,28 @@ pub struct SetupAsset {
 /// Result of looking up one tag's installer. `limited` is set only when the
 /// API was rate-limited and the HTML fallback also failed to provide an
 /// asset; `rejected` is set when the release is explicitly refused by channel
-/// policy (draft on any channel, or pre-release on the stable channel); `error`
-/// preserves transport or HTTP failures (or channel rejection detail) when
-/// neither source returned a usable 200 response.
+/// policy (draft on any channel, or pre-release on the stable channel);
+/// `not_found` is set when the release tag API returned HTTP 404 (plain git
+/// tag or anonymous draft), skipping the `expanded_assets` HTML fallback;
+/// `error` preserves transport or HTTP failures (or channel rejection detail)
+/// when neither source returned a usable 200 response.
 #[derive(Debug, Clone, Default)]
 pub struct AssetResolution {
     pub asset: Option<SetupAsset>,
     pub limited: Option<RateLimit>,
     pub rejected: bool,
+    pub not_found: bool,
     pub error: Option<String>,
+}
+
+/// Outcome of resolving the latest eligible release for `current` on a channel.
+/// When `newer` is `true`, `asset` carries the installer resolution obtained
+/// while confirming the release.
+#[derive(Debug, Clone)]
+pub struct ResolvedLatestUpdate {
+    pub tag: String,
+    pub newer: bool,
+    pub asset: Option<AssetResolution>,
 }
 
 /// A rate-limit signal extracted from response headers and body. The detail
@@ -251,19 +269,48 @@ pub fn tag_from_location(location: &str) -> Option<String> {
 /// where the HTML page is unavailable.
 #[cfg(test)]
 pub fn resolve_latest_tag(http: &dyn ReleaseHttp) -> Result<Option<String>, String> {
-    resolve_latest_tag_for_channel(http, UpdateChannel::Stable)
+    resolve_latest_stable_tag(http)
 }
 
-/// Resolve the latest eligible release tag for `channel` without spending API
-/// quota on the primary path.
-pub fn resolve_latest_tag_for_channel(
+/// Resolve the latest eligible published release (and, when newer than
+/// `current`, its installer asset) for `channel`.
+pub fn resolve_latest_update_for_channel(
     http: &dyn ReleaseHttp,
+    current: &str,
     channel: UpdateChannel,
-) -> Result<Option<String>, String> {
+) -> Result<Option<ResolvedLatestUpdate>, String> {
     match channel {
-        UpdateChannel::Stable => resolve_latest_stable_tag(http),
-        UpdateChannel::Prerelease => resolve_latest_prerelease_tag(http),
+        UpdateChannel::Stable => resolve_latest_stable_update(http, current),
+        UpdateChannel::Prerelease => resolve_latest_prerelease_update(http, current),
     }
+}
+
+fn resolve_latest_stable_update(
+    http: &dyn ReleaseHttp,
+    current: &str,
+) -> Result<Option<ResolvedLatestUpdate>, String> {
+    let Some(tag) = resolve_latest_stable_tag(http)? else {
+        return Ok(None);
+    };
+    if !is_valid_tag(&tag) {
+        return Err(format!("update check failed: invalid release tag '{tag}'"));
+    }
+    if !is_stable_tag(&tag) {
+        return Err(format!(
+            "update check failed: release '{tag}' is a pre-release; stable channel only"
+        ));
+    }
+    let newer = version_newer_checked(current, &tag)?;
+    let asset = if newer {
+        Some(resolve_release_asset_for_channel(
+            http,
+            &tag,
+            UpdateChannel::Stable,
+        ))
+    } else {
+        None
+    };
+    Ok(Some(ResolvedLatestUpdate { tag, newer, asset }))
 }
 
 fn resolve_latest_stable_tag(http: &dyn ReleaseHttp) -> Result<Option<String>, String> {
@@ -327,20 +374,38 @@ fn resolve_latest_stable_tag(http: &dyn ReleaseHttp) -> Result<Option<String>, S
     }
 }
 
-/// Resolve the highest valid SemVer tag across published non-draft releases
-/// (both stable and pre-release) for the pre-release channel. The public
-/// `releases.atom` feed is probed first (zero API quota); non-200, malformed,
-/// or transport failures fall back to the paginated releases API.
-fn resolve_latest_prerelease_tag(http: &dyn ReleaseHttp) -> Result<Option<String>, String> {
+/// Resolve the highest valid SemVer published non-draft release (both stable
+/// and pre-release) for the pre-release channel.
+///
+/// GitHub's `releases.atom` feed includes plain git tags alongside published
+/// releases, so Atom entries are treated strictly as candidate tags (zero API
+/// quota when already up to date). Any candidate newer than `current` must be
+/// confirmed as a published non-draft GitHub Release via `/releases/tags/{tag}`
+/// (reusing that response for asset metadata), via `/releases?per_page=30` when
+/// the top candidate is a plain git tag or draft (404 / `draft: true`), or via
+/// a verified `expanded_assets` setup installer when the API is unavailable.
+fn resolve_latest_prerelease_update(
+    http: &dyn ReleaseHttp,
+    current: &str,
+) -> Result<Option<ResolvedLatestUpdate>, String> {
+    let current_ver =
+        parse_semver(current).map_err(|e| format!("invalid current version '{current}': {e}"))?;
+
     let mut feed_rate: Option<RateLimit> = None;
     let mut feed_error: Option<String> = None;
-    match http.get(RELEASES_ATOM_FEED, &atom_headers(), Preset::Check) {
+    let atom_candidates = match http.get(RELEASES_ATOM_FEED, &atom_headers(), Preset::Check) {
         Ok(response) if response.status == 200 => match std::str::from_utf8(&response.body) {
-            Ok(xml) => match parse_releases_atom_latest_tag(xml) {
-                Ok(tag) => return Ok(tag),
-                Err(reason) => feed_error = Some(reason),
+            Ok(xml) => match parse_releases_atom_candidate_tags(xml) {
+                Ok(candidates) => Some(candidates),
+                Err(reason) => {
+                    feed_error = Some(reason);
+                    None
+                }
             },
-            Err(_) => feed_error = Some("Atom feed is not valid UTF-8".to_string()),
+            Err(_) => {
+                feed_error = Some("Atom feed is not valid UTF-8".to_string());
+                None
+            }
         },
         Ok(response) => {
             if let Some(rate) = rate_limit_for(&response) {
@@ -350,16 +415,135 @@ fn resolve_latest_prerelease_tag(http: &dyn ReleaseHttp) -> Result<Option<String
                 // error from the API fallback remains the first bracketed tag.
                 feed_error = Some(format!("HTTP status {}", response.status));
             }
+            None
         }
         Err(error) => {
             feed_error = Some(format!("[{}] {}", error.tag, error.detail));
+            None
+        }
+    };
+
+    if let Some(candidates) = atom_candidates {
+        let Some(top) = candidates.first() else {
+            return Ok(None);
+        };
+        if !version_newer_checked(current, top)? {
+            return Ok(Some(ResolvedLatestUpdate {
+                tag: top.clone(),
+                newer: false,
+                asset: None,
+            }));
+        }
+        let newer_candidates: Vec<String> = candidates
+            .into_iter()
+            .filter(|tag| parse_semver(tag).is_ok_and(|ver| ver > current_ver))
+            .collect();
+        let top = &newer_candidates[0];
+        let api_url = format!("https://api.github.com/repos/{REPO}/releases/tags/{top}");
+        let mut top_not_published = false;
+        let mut api_limited: Option<RateLimit> = None;
+        let mut api_error: Option<String> = None;
+
+        match http.get(&api_url, &json_headers(), Preset::Check) {
+            Ok(response) if response.status == 200 => {
+                match asset_from_release_json(&response.body, top, UpdateChannel::Prerelease) {
+                    ApiAsset::Found(asset) => {
+                        return Ok(Some(ResolvedLatestUpdate {
+                            tag: top.clone(),
+                            newer: true,
+                            asset: Some(AssetResolution {
+                                asset: Some(asset),
+                                ..Default::default()
+                            }),
+                        }));
+                    }
+                    ApiAsset::NoUsableAsset => {
+                        let resolution =
+                            resolve_expanded_assets_fallback(http, top, true, None, None);
+                        return Ok(Some(ResolvedLatestUpdate {
+                            tag: top.clone(),
+                            newer: true,
+                            asset: Some(resolution),
+                        }));
+                    }
+                    ApiAsset::RejectedRelease(_) => {
+                        top_not_published = true;
+                    }
+                    ApiAsset::InvalidResponse => {
+                        api_error = Some("release metadata response is invalid".to_string());
+                    }
+                }
+            }
+            Ok(response) if response.status == 404 => {
+                top_not_published = true;
+            }
+            Ok(response) => {
+                api_limited = rate_limit_for(&response);
+                if api_limited.is_none() {
+                    api_error = Some(format!("[http]: status {}", response.status));
+                }
+            }
+            Err(error) => {
+                api_error = Some(format!("[{}]: {}", error.tag, error.detail));
+            }
+        }
+
+        if top_not_published {
+            let list_err = match http.get(RELEASES_LIST_API, &json_headers(), Preset::Check) {
+                Ok(response) if response.status == 404 => return Ok(None),
+                Ok(response) if response.status == 200 => {
+                    return resolve_prerelease_from_list_json(http, &response.body, &current_ver);
+                }
+                Ok(response) => {
+                    if let Some(rate) = rate_limit_for(&response) {
+                        rate_limit_error("update check failed", &rate)
+                    } else {
+                        format!("update check failed [http]: status {}", response.status)
+                    }
+                }
+                Err(error) => format!("update check failed [{}]: {}", error.tag, error.detail),
+            };
+            if let Ok(Some(found)) = probe_verified_expanded_asset(http, &newer_candidates[1..]) {
+                return Ok(Some(found));
+            }
+            return Err(list_err);
+        }
+
+        match probe_verified_expanded_asset(http, &newer_candidates) {
+            Ok(Some(found)) => return Ok(Some(found)),
+            Ok(None) => {
+                if let Some(rate) = api_limited {
+                    return Err(rate_limit_error("update check failed", &rate));
+                }
+                if let Some(err) = api_error {
+                    return if err.starts_with('[') {
+                        Err(format!("update check failed {err}"))
+                    } else {
+                        Err(format!("update check failed: {err}"))
+                    };
+                }
+                return Err("update check failed: unable to confirm published release".to_string());
+            }
+            Err((html_limited, html_error)) => {
+                if let Some(rate) = html_limited.or(api_limited) {
+                    return Err(rate_limit_error("update check failed", &rate));
+                }
+                if let Some(err) = html_error.or(api_error) {
+                    return if err.starts_with('[') {
+                        Err(format!("update check failed {err}"))
+                    } else {
+                        Err(format!("update check failed: {err}"))
+                    };
+                }
+                return Err("update check failed: unable to confirm published release".to_string());
+            }
         }
     }
 
     match http.get(RELEASES_LIST_API, &json_headers(), Preset::Check) {
         Ok(response) if response.status == 404 => Ok(None),
         Ok(response) if response.status == 200 => {
-            latest_tag_from_releases_list_json(&response.body)
+            resolve_prerelease_from_list_json(http, &response.body, &current_ver)
         }
         Ok(response) => {
             if let Some(rate) = rate_limit_for(&response) {
@@ -386,6 +570,56 @@ fn resolve_latest_prerelease_tag(http: &dyn ReleaseHttp) -> Result<Option<String
                 )),
             }
         }
+    }
+}
+
+/// Probe `expanded_assets/{tag}` across descending candidate tags without
+/// spending API quota. Only a candidate returning HTTP 200 with a verified x64
+/// setup asset (including SHA-256) proves a published release; plain git tags
+/// (which return 200 with source archives only) are skipped.
+fn probe_verified_expanded_asset(
+    http: &dyn ReleaseHttp,
+    candidates: &[String],
+) -> Result<Option<ResolvedLatestUpdate>, (Option<RateLimit>, Option<String>)> {
+    let mut html_limited: Option<RateLimit> = None;
+    let mut html_error: Option<String> = None;
+    for candidate in candidates {
+        let expanded_url =
+            format!("https://github.com/{REPO}/releases/expanded_assets/{candidate}");
+        match http.get(&expanded_url, &html_headers(), Preset::Check) {
+            Ok(response) if response.status == 200 => {
+                let html = String::from_utf8_lossy(&response.body);
+                if let Ok(asset) = parse_expanded_assets(&html, candidate) {
+                    return Ok(Some(ResolvedLatestUpdate {
+                        tag: candidate.clone(),
+                        newer: true,
+                        asset: Some(AssetResolution {
+                            asset: Some(asset),
+                            ..Default::default()
+                        }),
+                    }));
+                }
+            }
+            Ok(response) => {
+                if let Some(rate) = rate_limit_for(&response) {
+                    if html_limited.is_none() {
+                        html_limited = Some(rate);
+                    }
+                } else if html_error.is_none() {
+                    html_error = Some(format!("[http]: status {}", response.status));
+                }
+            }
+            Err(error) => {
+                if html_error.is_none() {
+                    html_error = Some(format!("[{}]: {}", error.tag, error.detail));
+                }
+            }
+        }
+    }
+    if html_limited.is_some() || html_error.is_some() {
+        Err((html_limited, html_error))
+    } else {
+        Ok(None)
     }
 }
 
@@ -472,7 +706,13 @@ fn skip_element_body(bytes: &[u8], i: &mut usize, tag_name: &[u8]) -> Result<(),
             if bytes[after_slash..].starts_with(tag_name) {
                 let mut j = after_slash + tag_name.len();
                 skip_ascii_ws(bytes, &mut j);
-                if j < bytes.len() && bytes[j] == b'>' {
+                if j >= bytes.len() {
+                    return Err(format!(
+                        "unterminated </{}> closing tag in Atom feed",
+                        String::from_utf8_lossy(tag_name)
+                    ));
+                }
+                if bytes[j] == b'>' {
                     *i = j + 1;
                     if depth == 0 {
                         return Ok(());
@@ -490,6 +730,7 @@ fn skip_element_body(bytes: &[u8], i: &mut usize, tag_name: &[u8]) -> Result<(),
             {
                 let mut j = after_name;
                 let mut quote: Option<u8> = None;
+                let mut closed = false;
                 while j < bytes.len() {
                     let b = bytes[j];
                     if let Some(q) = quote {
@@ -504,9 +745,16 @@ fn skip_element_body(bytes: &[u8], i: &mut usize, tag_name: &[u8]) -> Result<(),
                         if !self_closing {
                             depth += 1;
                         }
+                        closed = true;
                         break;
                     }
                     j += 1;
+                }
+                if !closed {
+                    return Err(format!(
+                        "unterminated <{}> start tag in Atom feed",
+                        String::from_utf8_lossy(tag_name)
+                    ));
                 }
             }
         }
@@ -517,21 +765,27 @@ fn skip_element_body(bytes: &[u8], i: &mut usize, tag_name: &[u8]) -> Result<(),
     ))
 }
 
-/// Parse GitHub's `releases.atom` feed and return the highest valid SemVer tag
-/// referenced by a direct `<entry>/<link rel="alternate" href="..."/>`.
-/// Returns `Ok(None)` when the feed is structurally valid Atom with no valid
-/// SemVer entries; returns `Err` when the document is malformed or non-Atom so
-/// callers fall back to the JSON API.
-pub fn parse_releases_atom_latest_tag(xml: &str) -> Result<Option<String>, String> {
+/// Parse GitHub's `releases.atom` feed into a descending SemVer-sorted,
+/// deduplicated list of candidate tags referenced by direct
+/// `<entry>/<link rel="alternate" href="..."/>` elements.
+///
+/// GitHub's `releases.atom` includes plain git tags alongside published
+/// releases, so callers must treat the returned tags as candidates rather than
+/// proof of a published release. Returns `Ok(Vec::new())` only for a valid
+/// `<feed>` with zero `<entry>` elements; returns `Err` for malformed/non-Atom
+/// documents or non-empty feeds with zero recognizable repository tag links so
+/// callers fall back to `RELEASES_LIST_API`.
+pub fn parse_releases_atom_candidate_tags(xml: &str) -> Result<Vec<String>, String> {
     const MAX_XML_DEPTH: usize = 64;
     let xml = xml.strip_prefix('\u{FEFF}').unwrap_or(xml);
     let bytes = xml.as_bytes();
     let mut i: usize = 0;
     let mut stack: Vec<&str> = Vec::new();
     let mut saw_closed_feed = false;
+    let mut entry_count: usize = 0;
     let mut entry_tag: Option<String> = None;
     let mut entry_ambiguous = false;
-    let mut best: Option<(SemVer, String)> = None;
+    let mut candidates: Vec<(SemVer, String)> = Vec::new();
 
     while let Some(rel) = bytes[i..].iter().position(|&b| b == b'<') {
         i += rel + 1;
@@ -616,13 +870,7 @@ pub fn parse_releases_atom_latest_tag(xml: &str) -> Result<Option<String>, Strin
                 if !entry_ambiguous {
                     if let Some(tag) = entry_tag.take() {
                         if let Ok(ver) = parse_semver(&tag) {
-                            let is_newer = match &best {
-                                None => true,
-                                Some((best_ver, _)) => ver > *best_ver,
-                            };
-                            if is_newer {
-                                best = Some((ver, tag));
-                            }
+                            candidates.push((ver, tag));
                         }
                     }
                 }
@@ -734,6 +982,8 @@ pub fn parse_releases_atom_latest_tag(xml: &str) -> Result<Option<String>, Strin
         if self_closing {
             if stack.is_empty() && tag_name == "feed" {
                 saw_closed_feed = true;
+            } else if stack.as_slice() == ["feed"] && tag_name == "entry" {
+                entry_count += 1;
             }
             continue;
         }
@@ -748,6 +998,7 @@ pub fn parse_releases_atom_latest_tag(xml: &str) -> Result<Option<String>, Strin
             return Err("Atom feed nesting too deep".to_string());
         }
         if stack.as_slice() == ["feed"] && tag_name == "entry" {
+            entry_count += 1;
             entry_tag = None;
             entry_ambiguous = false;
         }
@@ -757,16 +1008,33 @@ pub fn parse_releases_atom_latest_tag(xml: &str) -> Result<Option<String>, Strin
     if !saw_closed_feed || !stack.is_empty() {
         return Err("incomplete Atom feed".to_string());
     }
-    Ok(best.map(|(_, tag)| tag))
+    if entry_count == 0 {
+        return Ok(Vec::new());
+    }
+    if candidates.is_empty() {
+        return Err("Atom feed entries contain no valid release tag links".to_string());
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut tags: Vec<String> = Vec::with_capacity(candidates.len());
+    for (_, tag) in candidates {
+        if !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    Ok(tags)
 }
 
-fn latest_tag_from_releases_list_json(body: &[u8]) -> Result<Option<String>, String> {
+fn resolve_prerelease_from_list_json(
+    http: &dyn ReleaseHttp,
+    body: &[u8],
+    current_ver: &SemVer,
+) -> Result<Option<ResolvedLatestUpdate>, String> {
     let value: Value =
         serde_json::from_slice(body).map_err(|e| format!("releases response is not JSON: {e}"))?;
     let releases = value
         .as_array()
         .ok_or_else(|| "releases response is not a JSON array".to_string())?;
-    let mut best: Option<(SemVer, String)> = None;
+    let mut best: Option<(SemVer, String, &Value)> = None;
     for release in releases {
         if release
             .get("draft")
@@ -786,13 +1054,50 @@ fn latest_tag_from_releases_list_json(body: &[u8]) -> Result<Option<String>, Str
         };
         let is_newer = match &best {
             None => true,
-            Some((best_ver, _)) => ver > *best_ver,
+            Some((best_ver, _, _)) => ver > *best_ver,
         };
         if is_newer {
-            best = Some((ver, tag.to_string()));
+            best = Some((ver, tag.to_string(), release));
         }
     }
-    Ok(best.map(|(_, tag)| tag))
+    let Some((best_ver, best_tag, best_release)) = best else {
+        return Ok(None);
+    };
+    if best_ver <= *current_ver {
+        return Ok(Some(ResolvedLatestUpdate {
+            tag: best_tag,
+            newer: false,
+            asset: None,
+        }));
+    }
+    let resolution =
+        match asset_from_release_value(best_release, &best_tag, UpdateChannel::Prerelease) {
+            ApiAsset::Found(asset) => AssetResolution {
+                asset: Some(asset),
+                ..Default::default()
+            },
+            ApiAsset::RejectedRelease(RejectionReason::Draft) => AssetResolution {
+                rejected: true,
+                error: Some("release is a draft".to_string()),
+                ..Default::default()
+            },
+            ApiAsset::RejectedRelease(RejectionReason::StableChannelOnly) => AssetResolution {
+                rejected: true,
+                error: Some("release is a pre-release or draft; stable channel only".to_string()),
+                ..Default::default()
+            },
+            ApiAsset::NoUsableAsset => {
+                resolve_expanded_assets_fallback(http, &best_tag, true, None, None)
+            }
+            ApiAsset::InvalidResponse => {
+                resolve_expanded_assets_fallback(http, &best_tag, false, None, None)
+            }
+        };
+    Ok(Some(ResolvedLatestUpdate {
+        tag: best_tag,
+        newer: true,
+        asset: Some(resolution),
+    }))
 }
 
 fn stable_tag_from_release_json(body: &[u8]) -> Result<String, String> {
@@ -856,8 +1161,10 @@ pub fn resolve_release_asset(http: &dyn ReleaseHttp, tag: &str) -> AssetResoluti
 
 /// Fetch the installer metadata for `tag` under `channel`'s policy. Drafts are
 /// rejected on every channel; pre-releases are rejected on `Stable` and allowed
-/// on `Prerelease`. The API is tried first, with `expanded_assets` HTML (and
-/// its mandatory SHA-256 verification) as the fallback.
+/// on `Prerelease`. An API HTTP 404 (plain git tag or anonymous draft) stops
+/// immediately with `not_found: true` instead of falling back to
+/// `expanded_assets` HTML. Other API failures fall back to `expanded_assets`
+/// HTML (with mandatory SHA-256 verification).
 pub fn resolve_release_asset_for_channel(
     http: &dyn ReleaseHttp,
     tag: &str,
@@ -868,6 +1175,7 @@ pub fn resolve_release_asset_for_channel(
             asset: None,
             limited: None,
             rejected: false,
+            not_found: false,
             error: Some(format!("invalid release tag '{tag}'")),
         };
     }
@@ -876,6 +1184,7 @@ pub fn resolve_release_asset_for_channel(
             asset: None,
             limited: None,
             rejected: true,
+            not_found: false,
             error: Some("release is a pre-release; stable channel only".to_string()),
         };
     }
@@ -889,9 +1198,7 @@ pub fn resolve_release_asset_for_channel(
                 ApiAsset::Found(asset) => {
                     return AssetResolution {
                         asset: Some(asset),
-                        limited: None,
-                        rejected: false,
-                        error: None,
+                        ..Default::default()
                     };
                 }
                 ApiAsset::RejectedRelease(reason) => {
@@ -905,6 +1212,7 @@ pub fn resolve_release_asset_for_channel(
                         asset: None,
                         limited: None,
                         rejected: true,
+                        not_found: false,
                         error: Some(message),
                     };
                 }
@@ -913,6 +1221,18 @@ pub fn resolve_release_asset_for_channel(
                 }
                 ApiAsset::InvalidResponse => {}
             }
+        }
+        Ok(response) if response.status == 404 => {
+            // Anonymous GitHub API returns 404 for both plain git tags and
+            // draft releases, whereas `expanded_assets/{tag}` returns 200 with
+            // source archives for plain git tags. Stop immediately here.
+            return AssetResolution {
+                asset: None,
+                limited: None,
+                rejected: false,
+                not_found: true,
+                error: Some("[http]: status 404".to_string()),
+            };
         }
         Ok(response) => {
             api_limited = rate_limit_for(&response);
@@ -925,6 +1245,16 @@ pub fn resolve_release_asset_for_channel(
         }
     }
 
+    resolve_expanded_assets_fallback(http, tag, api_ok, api_limited, api_error)
+}
+
+fn resolve_expanded_assets_fallback(
+    http: &dyn ReleaseHttp,
+    tag: &str,
+    api_ok: bool,
+    api_limited: Option<RateLimit>,
+    api_error: Option<String>,
+) -> AssetResolution {
     let expanded_url = format!("https://github.com/{REPO}/releases/expanded_assets/{tag}");
     let mut html_ok = false;
     let mut html_limited: Option<RateLimit> = None;
@@ -936,9 +1266,7 @@ pub fn resolve_release_asset_for_channel(
             if let Ok(asset) = parse_expanded_assets(&html, tag) {
                 return AssetResolution {
                     asset: Some(asset),
-                    limited: None,
-                    rejected: false,
-                    error: None,
+                    ..Default::default()
                 };
             }
         }
@@ -954,12 +1282,7 @@ pub fn resolve_release_asset_for_channel(
     }
 
     if html_ok || api_ok {
-        return AssetResolution {
-            asset: None,
-            limited: None,
-            rejected: false,
-            error: None,
-        };
+        return AssetResolution::default();
     }
     let limited = html_limited.or(api_limited);
     let error = if limited.is_some() {
@@ -971,14 +1294,12 @@ pub fn resolve_release_asset_for_channel(
         asset: None,
         limited,
         rejected: false,
+        not_found: false,
         error,
     }
 }
 
-fn asset_from_release_json(body: &[u8], tag: &str, channel: UpdateChannel) -> ApiAsset {
-    let Ok(release) = serde_json::from_slice::<Value>(body) else {
-        return ApiAsset::InvalidResponse;
-    };
+fn asset_from_release_value(release: &Value, tag: &str, channel: UpdateChannel) -> ApiAsset {
     let Some(release_tag) = release.get("tag_name").and_then(Value::as_str) else {
         return ApiAsset::InvalidResponse;
     };
@@ -1012,6 +1333,13 @@ fn asset_from_release_json(body: &[u8], tag: &str, channel: UpdateChannel) -> Ap
         Ok(asset) => ApiAsset::Found(asset),
         Err(_) => ApiAsset::NoUsableAsset,
     }
+}
+
+fn asset_from_release_json(body: &[u8], tag: &str, channel: UpdateChannel) -> ApiAsset {
+    let Ok(release) = serde_json::from_slice::<Value>(body) else {
+        return ApiAsset::InvalidResponse;
+    };
+    asset_from_release_value(&release, tag, channel)
 }
 
 fn strip_tag_prefix(value: &str) -> &str {
@@ -2177,7 +2505,7 @@ mod tests {
     }
 
     #[test]
-    fn atom_feed_picks_semver_maximum_and_ignores_content_and_malformed_tags() {
+    fn atom_feed_returns_sorted_deduped_candidates_and_ignores_content_and_malformed_tags() {
         let e1 = atom_entry(
             "v1.2.5-dev.3",
             r#"&lt;p&gt;中文发布说明 &lt;link rel="alternate" href="https://github.com/ZouDongj/ZTerm/releases/tag/v9.9.9"/&gt;&lt;/p&gt;"#,
@@ -2187,6 +2515,7 @@ mod tests {
             "v1.2.5-dev.4",
             r#"<p>See <br> <link rel="alternate" href="https://github.com/ZouDongj/ZTerm/releases/tag/v9.9.8"/></p><![CDATA[</content><link rel="alternate" href="https://github.com/ZouDongj/ZTerm/releases/tag/v9.9.7"/>]]>"#,
         );
+        let e2_dup = atom_entry("v1.2.5-dev.4", "duplicate entry");
         let e3 = atom_entry("v1.2.4", "stable release");
         let e4 = atom_entry("v1.2.5-dev.2", "older dev release");
         let e_bad_zero = atom_entry("v1.2.5-dev.04", "malformed leading zero");
@@ -2201,6 +2530,7 @@ mod tests {
         let xml = atom_feed_with_entries(&[
             &e1,
             &e2,
+            &e2_dup,
             &e3,
             &e4,
             &e_bad_zero,
@@ -2210,13 +2540,13 @@ mod tests {
             comment_spoof,
         ]);
         assert_eq!(
-            parse_releases_atom_latest_tag(&xml).unwrap().as_deref(),
-            Some("v1.2.5-dev.4")
+            parse_releases_atom_candidate_tags(&xml).unwrap(),
+            vec!["v1.2.5-dev.4", "v1.2.5-dev.3", "v1.2.5-dev.2", "v1.2.4"]
         );
     }
 
     #[test]
-    fn atom_feed_handles_attribute_variations_and_rejects_malformed_docs() {
+    fn atom_feed_handles_attribute_variations_and_rejects_malformed_or_unmatched_docs() {
         // Reversed attributes, single quotes, omitted rel (defaults to alternate),
         // explicit closing </link>, '>' inside another attribute, and UTF-8 BOM.
         let xml = "\u{FEFF}<?xml version='1.0' encoding='UTF-8'?>\
@@ -2235,31 +2565,46 @@ mod tests {
   </entry>\
 </feed>";
         assert_eq!(
-            parse_releases_atom_latest_tag(xml).unwrap().as_deref(),
-            Some("v1.2.6-dev.1")
+            parse_releases_atom_candidate_tags(xml).unwrap(),
+            vec!["v1.2.6-dev.1", "v1.2.5"]
         );
 
-        // Conflicting alternate release links inside one entry are treated as ambiguous.
+        // Conflicting alternate release links inside the sole entry produce 0
+        // valid candidates from a non-empty feed -> Err (falls back to API).
         let ambiguous = atom_feed_with_entries(&[r#"  <entry>
     <link rel="alternate" href="https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.5-dev.4"/>
     <link rel="alternate" href="https://github.com/ZouDongj/ZTerm/releases/tag/v9.9.9"/>
   </entry>"#]);
-        assert_eq!(parse_releases_atom_latest_tag(&ambiguous).unwrap(), None);
+        assert!(parse_releases_atom_candidate_tags(&ambiguous).is_err());
 
-        // Valid empty feed or feed with only malformed tags yields Ok(None).
-        assert_eq!(
-            parse_releases_atom_latest_tag("<feed xmlns=\"http://www.w3.org/2005/Atom\"></feed>")
-                .unwrap(),
-            None
-        );
-        assert_eq!(
-            parse_releases_atom_latest_tag("<feed xmlns=\"http://www.w3.org/2005/Atom\"/>")
-                .unwrap(),
-            None
-        );
+        // Legitimate empty feed with zero entries yields Ok(empty).
+        assert!(parse_releases_atom_candidate_tags(
+            "<feed xmlns=\"http://www.w3.org/2005/Atom\"></feed>"
+        )
+        .unwrap()
+        .is_empty());
+        assert!(parse_releases_atom_candidate_tags(
+            "<feed xmlns=\"http://www.w3.org/2005/Atom\"/>"
+        )
+        .unwrap()
+        .is_empty());
+
+        // Non-empty feed with zero recognizable ZTerm release hrefs (Opus N1:
+        // renamed repo, relative hrefs, or malformed-only entries) returns Err
+        // so callers fall back to RELEASES_LIST_API instead of reporting none.
+        let wrong_repo = atom_feed_with_entries(&[
+            r#"  <entry><link rel="alternate" href="https://github.com/Other/ZTerm/releases/tag/v1.2.5"/></entry>"#,
+        ]);
+        assert!(parse_releases_atom_candidate_tags(&wrong_repo).is_err());
+
+        let relative_only = atom_feed_with_entries(&[
+            r#"  <entry><link rel="alternate" href="/ZouDongj/ZTerm/releases/tag/v1.2.5"/></entry>"#,
+        ]);
+        assert!(parse_releases_atom_candidate_tags(&relative_only).is_err());
+
         let only_bad =
             atom_feed_with_entries(&[&atom_entry("v1.2.5-dev.04", ""), &atom_entry("v1.2.5-", "")]);
-        assert_eq!(parse_releases_atom_latest_tag(&only_bad).unwrap(), None);
+        assert!(parse_releases_atom_candidate_tags(&only_bad).is_err());
 
         // Non-Atom or truncated XML returns Err so callers fall back to the JSON API.
         for bad in [
@@ -2273,57 +2618,156 @@ mod tests {
             "<feed></wrong>",
         ] {
             assert!(
-                parse_releases_atom_latest_tag(bad).is_err(),
+                parse_releases_atom_candidate_tags(bad).is_err(),
                 "expected Err for malformed feed: {bad}"
             );
         }
+
+        // Opus N2: truncated <content> containing many repeated unclosed tags
+        // fails linearly at EOF without quadratic rescanning.
+        let mut hostile_divs = String::from("<feed><entry><content>");
+        for _ in 0..10_000 {
+            hostile_divs.push_str("<div ");
+        }
+        assert!(parse_releases_atom_candidate_tags(&hostile_divs).is_err());
+
+        let mut hostile_nested = String::from("<feed><entry><content>");
+        for _ in 0..10_000 {
+            hostile_nested.push_str("<content a=\"x");
+        }
+        assert!(parse_releases_atom_candidate_tags(&hostile_nested).is_err());
     }
 
     #[test]
-    fn prerelease_channel_uses_atom_without_api_and_selects_semver_maximum() {
-        let http = FakeHttp::new();
+    fn prerelease_channel_uses_atom_without_api_when_up_to_date_and_confirms_newer_candidate() {
+        let sha = "c".repeat(64);
+
+        // Already up to date: Atom alone answers with 0 API calls.
+        let up_to_date = FakeHttp::new();
+        let xml = atom_feed_with_entries(&[
+            &atom_entry("v1.2.5-dev.3", "current dev"),
+            &atom_entry("v1.2.4", "older stable"),
+        ]);
+        up_to_date.on_get(RELEASES_ATOM_FEED, FakeReply::response(200, &xml));
+        let resolved = resolve_latest_update_for_channel(
+            &up_to_date,
+            "1.2.5-dev.3",
+            UpdateChannel::Prerelease,
+        )
+        .unwrap()
+        .expect("up to date");
+        assert_eq!(resolved.tag, "v1.2.5-dev.3");
+        assert!(!resolved.newer);
+        assert!(resolved.asset.is_none());
+        assert_eq!(
+            up_to_date.calls(),
+            vec![(true, RELEASES_ATOM_FEED.to_string())]
+        );
+
+        // Newer candidate is confirmed via tags/{top} and its asset is reused.
+        let newer = FakeHttp::new();
         let xml = atom_feed_with_entries(&[
             &atom_entry("v1.2.5", "stable"),
             &atom_entry("v1.2.6-dev.1", "next dev"),
             &atom_entry("v1.2.5-dev.3", "current dev"),
         ]);
-        http.on_get(RELEASES_ATOM_FEED, FakeReply::response(200, &xml));
-        assert_eq!(
-            resolve_latest_tag_for_channel(&http, UpdateChannel::Prerelease)
-                .unwrap()
-                .as_deref(),
-            Some("v1.2.6-dev.1")
+        newer.on_get(RELEASES_ATOM_FEED, FakeReply::response(200, &xml));
+        newer.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.6-dev.1",
+            FakeReply::response(
+                200,
+                &format!(
+                    r#"{{"tag_name":"v1.2.6-dev.1","prerelease":true,"draft":false,"assets":[{{"name":"ZTerm_1.2.6-dev.1_x64-setup.exe","size":42,"digest":"sha256:{sha}","browser_download_url":"https://github.com/ZouDongj/ZTerm/releases/download/v1.2.6-dev.1/ZTerm_1.2.6-dev.1_x64-setup.exe"}}]}}"#
+                ),
+            ),
         );
-        assert_eq!(http.calls(), vec![(true, RELEASES_ATOM_FEED.to_string())]);
+        let resolved =
+            resolve_latest_update_for_channel(&newer, "1.2.5-dev.3", UpdateChannel::Prerelease)
+                .unwrap()
+                .expect("newer dev");
+        assert_eq!(resolved.tag, "v1.2.6-dev.1");
+        assert!(resolved.newer);
+        assert_eq!(
+            resolved.asset.unwrap().asset.unwrap().name,
+            "ZTerm_1.2.6-dev.1_x64-setup.exe"
+        );
+        assert_eq!(
+            newer.calls(),
+            vec![
+                (true, RELEASES_ATOM_FEED.to_string()),
+                (
+                    true,
+                    "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.6-dev.1"
+                        .to_string()
+                ),
+            ]
+        );
     }
 
     #[test]
-    fn prerelease_channel_falls_back_to_releases_list_api_and_skips_drafts_and_malformed() {
+    fn prerelease_channel_falls_back_to_releases_list_api_on_unparseable_or_unmatched_atom() {
+        let sha = "e".repeat(64);
+        let list_json = json!([
+            { "tag_name": "v9.9.9", "draft": true, "prerelease": false, "assets": [] },
+            { "tag_name": "v1.2.5-dev.04", "draft": false, "prerelease": true, "assets": [] },
+            { "tag_name": "v1.2.5-", "draft": false, "prerelease": true, "assets": [] },
+            { "tag_name": "v1.2.5", "draft": false, "prerelease": false, "assets": [] },
+            {
+                "tag_name": "v1.2.6-dev.1",
+                "draft": false,
+                "prerelease": true,
+                "assets": [{
+                    "name": "ZTerm_1.2.6-dev.1_x64-setup.exe",
+                    "size": 77,
+                    "digest": format!("sha256:{sha}"),
+                    "browser_download_url": "https://github.com/ZouDongj/ZTerm/releases/download/v1.2.6-dev.1/ZTerm_1.2.6-dev.1_x64-setup.exe"
+                }]
+            },
+            { "tag_name": "v1.2.4", "draft": false, "prerelease": false, "assets": [] }
+        ]);
+
+        // Captive portal HTML 200 falls back to RELEASES_LIST_API and reuses its asset.
         let http = FakeHttp::new();
         http.on_get(
             RELEASES_ATOM_FEED,
             FakeReply::response(200, "<html>captive portal</html>"),
         );
-        let list_json = json!([
-            { "tag_name": "v9.9.9", "draft": true, "prerelease": false },
-            { "tag_name": "v1.2.5-dev.04", "draft": false, "prerelease": true },
-            { "tag_name": "v1.2.5-", "draft": false, "prerelease": true },
-            { "tag_name": "v1.2.5", "draft": false, "prerelease": false },
-            { "tag_name": "v1.2.6-dev.1", "draft": false, "prerelease": true },
-            { "tag_name": "v1.2.4", "draft": false, "prerelease": false }
-        ]);
         http.on_get(
             RELEASES_LIST_API,
             FakeReply::response(200, &list_json.to_string()),
         );
-        assert_eq!(
-            resolve_latest_tag_for_channel(&http, UpdateChannel::Prerelease)
+        let resolved =
+            resolve_latest_update_for_channel(&http, "1.2.5-dev.3", UpdateChannel::Prerelease)
                 .unwrap()
-                .as_deref(),
-            Some("v1.2.6-dev.1")
-        );
+                .expect("fallback release");
+        assert_eq!(resolved.tag, "v1.2.6-dev.1");
+        assert!(resolved.newer);
+        assert_eq!(resolved.asset.unwrap().asset.unwrap().size, 77);
         assert_eq!(
             http.calls(),
+            vec![
+                (true, RELEASES_ATOM_FEED.to_string()),
+                (true, RELEASES_LIST_API.to_string()),
+            ]
+        );
+
+        // Opus N1: non-empty Atom feed with 0 valid ZTerm hrefs falls back to RELEASES_LIST_API.
+        let unmatched = FakeHttp::new();
+        let unmatched_xml = atom_feed_with_entries(&[
+            r#"  <entry><link rel="alternate" href="https://github.com/Other/ZTerm/releases/tag/v1.2.5"/></entry>"#,
+        ]);
+        unmatched.on_get(RELEASES_ATOM_FEED, FakeReply::response(200, &unmatched_xml));
+        unmatched.on_get(
+            RELEASES_LIST_API,
+            FakeReply::response(200, &list_json.to_string()),
+        );
+        let resolved =
+            resolve_latest_update_for_channel(&unmatched, "1.2.5-dev.3", UpdateChannel::Prerelease)
+                .unwrap()
+                .expect("unmatched atom fallback");
+        assert_eq!(resolved.tag, "v1.2.6-dev.1");
+        assert_eq!(
+            unmatched.calls(),
             vec![
                 (true, RELEASES_ATOM_FEED.to_string()),
                 (true, RELEASES_LIST_API.to_string()),
@@ -2340,19 +2784,182 @@ mod tests {
                 r#"[{"tag_name":"v1.2.5-dev.4","draft":true,"prerelease":true}]"#,
             ),
         );
-        assert_eq!(
-            resolve_latest_tag_for_channel(&drafts_only, UpdateChannel::Prerelease).unwrap(),
-            None
-        );
+        assert!(resolve_latest_update_for_channel(
+            &drafts_only,
+            "1.2.5-dev.3",
+            UpdateChannel::Prerelease,
+        )
+        .unwrap()
+        .is_none());
 
         // API 404 reports no release.
         let not_found = FakeHttp::new();
         not_found.on_get(RELEASES_ATOM_FEED, FakeReply::response(404, ""));
         not_found.on_get(RELEASES_LIST_API, FakeReply::response(404, ""));
-        assert_eq!(
-            resolve_latest_tag_for_channel(&not_found, UpdateChannel::Prerelease).unwrap(),
-            None
+        assert!(resolve_latest_update_for_channel(
+            &not_found,
+            "1.2.5-dev.3",
+            UpdateChannel::Prerelease,
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn prerelease_channel_skips_plain_tags_on_404_and_rate_limit_fallback() {
+        let sha = "d".repeat(64);
+        let atom = atom_feed_with_entries(&[
+            &atom_entry("v1.2.6-dev.1", "plain git tag with no release"),
+            &atom_entry("v1.2.5", "published release"),
+        ]);
+
+        // 1. tags/v1.2.6-dev.1 returns 404 -> skip expanded_assets for v1.2.6-dev.1,
+        // fall back to RELEASES_LIST_API, and select v1.2.5 with its asset.
+        let plain_tag_404 = FakeHttp::new();
+        plain_tag_404.on_get(RELEASES_ATOM_FEED, FakeReply::response(200, &atom));
+        plain_tag_404.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.6-dev.1",
+            FakeReply::response(404, r#"{"message":"Not Found"}"#),
         );
+        let list_json = json!([
+            {
+                "tag_name": "v1.2.5",
+                "draft": false,
+                "prerelease": false,
+                "assets": [{
+                    "name": "ZTerm_1.2.5_x64-setup.exe",
+                    "size": 88,
+                    "digest": format!("sha256:{sha}"),
+                    "browser_download_url": "https://github.com/ZouDongj/ZTerm/releases/download/v1.2.5/ZTerm_1.2.5_x64-setup.exe"
+                }]
+            },
+            { "tag_name": "v1.2.5-dev.3", "draft": false, "prerelease": true, "assets": [] }
+        ]);
+        plain_tag_404.on_get(
+            RELEASES_LIST_API,
+            FakeReply::response(200, &list_json.to_string()),
+        );
+        let resolved = resolve_latest_update_for_channel(
+            &plain_tag_404,
+            "1.2.5-dev.3",
+            UpdateChannel::Prerelease,
+        )
+        .unwrap()
+        .expect("published v1.2.5");
+        assert_eq!(resolved.tag, "v1.2.5");
+        assert!(resolved.newer);
+        assert_eq!(resolved.asset.unwrap().asset.unwrap().size, 88);
+        assert!(
+            !plain_tag_404
+                .calls()
+                .iter()
+                .any(|(_, url)| url.contains("expanded_assets/v1.2.6-dev.1")),
+            "404 on tags/v1.2.6-dev.1 must not probe expanded_assets"
+        );
+
+        // 2. API rate-limited (403) on tags/v1.2.6-dev.1 -> expanded_assets/v1.2.6-dev.1
+        // returns source archives only (plain tag), expanded_assets/v1.2.5 has verified
+        // setup exe + SHA-256 -> skips unconfirmed plain tag and selects v1.2.5.
+        let rate_limited_skip = FakeHttp::new();
+        rate_limited_skip.on_get(RELEASES_ATOM_FEED, FakeReply::response(200, &atom));
+        rate_limited_skip.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.6-dev.1",
+            FakeReply::with_headers(
+                403,
+                r#"{"message":"API rate limit exceeded"}"#,
+                headers(None, None, Some("1730000000"), Some("0")),
+            ),
+        );
+        rate_limited_skip.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.6-dev.1",
+            FakeReply::response(
+                200,
+                r#"<ul><li><a href="/ZouDongj/ZTerm/archive/refs/tags/v1.2.6-dev.1.zip">Source code (zip)</a></li></ul>"#,
+            ),
+        );
+        rate_limited_skip.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.5",
+            FakeReply::response(
+                200,
+                &format!(
+                    r#"<ul><li><a href="/ZouDongj/ZTerm/releases/download/v1.2.5/ZTerm_1.2.5_x64-setup.exe">x</a>sha256:{sha}</li></ul>"#
+                ),
+            ),
+        );
+        let resolved = resolve_latest_update_for_channel(
+            &rate_limited_skip,
+            "1.2.5-dev.3",
+            UpdateChannel::Prerelease,
+        )
+        .unwrap()
+        .expect("verified expanded asset");
+        assert_eq!(resolved.tag, "v1.2.5");
+        assert!(resolved.newer);
+        assert_eq!(resolved.asset.unwrap().asset.unwrap().sha256, sha);
+
+        // 3. API 403 rate-limit + expanded_assets 429 across all candidates ->
+        // returns Err containing rate-limit (never offers an unconfirmed plain tag).
+        let both_limited = FakeHttp::new();
+        both_limited.on_get(RELEASES_ATOM_FEED, FakeReply::response(200, &atom));
+        both_limited.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.6-dev.1",
+            FakeReply::with_headers(
+                403,
+                r#"{"message":"API rate limit exceeded"}"#,
+                headers(None, None, Some("1730000000"), Some("0")),
+            ),
+        );
+        both_limited.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.6-dev.1",
+            FakeReply::with_headers(429, "", headers(None, Some("90"), None, None)),
+        );
+        both_limited.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.5",
+            FakeReply::with_headers(429, "", headers(None, Some("90"), None, None)),
+        );
+        let err = resolve_latest_update_for_channel(
+            &both_limited,
+            "1.2.5-dev.3",
+            UpdateChannel::Prerelease,
+        )
+        .unwrap_err();
+        assert!(err.contains("rate-limit:"), "{err}");
+        assert!(err.contains("retry_in=90"), "{err}");
+
+        // 4. tags/v1.2.6-dev.1 404 + RELEASES_LIST_API 403 rate-limit -> recovers
+        // remaining candidate v1.2.5 via verified expanded_assets.
+        let list_limited_recover = FakeHttp::new();
+        list_limited_recover.on_get(RELEASES_ATOM_FEED, FakeReply::response(200, &atom));
+        list_limited_recover.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.6-dev.1",
+            FakeReply::response(404, ""),
+        );
+        list_limited_recover.on_get(
+            RELEASES_LIST_API,
+            FakeReply::with_headers(
+                403,
+                r#"{"message":"API rate limit exceeded"}"#,
+                headers(None, None, Some("1730000000"), Some("0")),
+            ),
+        );
+        list_limited_recover.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.5",
+            FakeReply::response(
+                200,
+                &format!(
+                    r#"<ul><li><a href="/ZouDongj/ZTerm/releases/download/v1.2.5/ZTerm_1.2.5_x64-setup.exe">x</a>sha256:{sha}</li></ul>"#
+                ),
+            ),
+        );
+        let resolved = resolve_latest_update_for_channel(
+            &list_limited_recover,
+            "1.2.5-dev.3",
+            UpdateChannel::Prerelease,
+        )
+        .unwrap()
+        .expect("recovered via expanded_assets");
+        assert_eq!(resolved.tag, "v1.2.5");
+        assert!(resolved.newer);
     }
 
     #[test]
@@ -2367,8 +2974,12 @@ mod tests {
             RELEASES_LIST_API,
             FakeReply::fail("connect", "WinHttpSendRequest: 0x80072EFD"),
         );
-        let err =
-            resolve_latest_tag_for_channel(&dead_proxy, UpdateChannel::Prerelease).unwrap_err();
+        let err = resolve_latest_update_for_channel(
+            &dead_proxy,
+            "1.2.5-dev.3",
+            UpdateChannel::Prerelease,
+        )
+        .unwrap_err();
         assert!(err.contains("[connect]"), "{err}");
 
         // Atom 502 followed by API [connect] keeps [connect] as the only bracketed tag.
@@ -2378,7 +2989,9 @@ mod tests {
             RELEASES_LIST_API,
             FakeReply::fail("connect", "connection refused"),
         );
-        let err = resolve_latest_tag_for_channel(&mixed, UpdateChannel::Prerelease).unwrap_err();
+        let err =
+            resolve_latest_update_for_channel(&mixed, "1.2.5-dev.3", UpdateChannel::Prerelease)
+                .unwrap_err();
         assert!(err.contains("[connect]"), "{err}");
         assert!(!err.contains("[http]"), "{err}");
 
@@ -2393,8 +3006,12 @@ mod tests {
                 headers(None, None, Some("1730000000"), Some("0")),
             ),
         );
-        let err =
-            resolve_latest_tag_for_channel(&api_limited, UpdateChannel::Prerelease).unwrap_err();
+        let err = resolve_latest_update_for_channel(
+            &api_limited,
+            "1.2.5-dev.3",
+            UpdateChannel::Prerelease,
+        )
+        .unwrap_err();
         assert!(err.contains("rate-limit:"), "{err}");
         assert!(err.contains("reset_at=1730000000"), "{err}");
 
@@ -2408,14 +3025,18 @@ mod tests {
             RELEASES_LIST_API,
             FakeReply::fail("connect", "connection refused"),
         );
-        let err =
-            resolve_latest_tag_for_channel(&feed_limited, UpdateChannel::Prerelease).unwrap_err();
+        let err = resolve_latest_update_for_channel(
+            &feed_limited,
+            "1.2.5-dev.3",
+            UpdateChannel::Prerelease,
+        )
+        .unwrap_err();
         assert!(err.contains("rate-limit:"), "{err}");
         assert!(err.contains("retry_in=75"), "{err}");
     }
 
     #[test]
-    fn prerelease_asset_lookup_accepts_prerelease_rejects_draft_and_uses_html_fallback() {
+    fn prerelease_asset_lookup_accepts_prerelease_rejects_draft_and_404_and_uses_html_fallback() {
         let sha = "f".repeat(64);
         // Accepts API 200 with prerelease:true and draft:false.
         let ok_http = FakeHttp::new();
@@ -2434,6 +3055,35 @@ mod tests {
         assert_eq!(asset.name, "ZTerm_1.2.5-dev.4_x64-setup.exe");
         assert_eq!(asset.sha256, sha);
         assert_eq!(ok_http.calls().len(), 1);
+
+        // API 404 (plain git tag or anonymous draft) stops immediately without HTML fallback.
+        let not_found_http = FakeHttp::new();
+        not_found_http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.6-dev.1",
+            FakeReply::response(404, r#"{"message":"Not Found"}"#),
+        );
+        not_found_http.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.6-dev.1",
+            FakeReply::response(
+                200,
+                &format!(
+                    r#"<li><a href="/ZouDongj/ZTerm/releases/download/v1.2.6-dev.1/ZTerm_1.2.6-dev.1_x64-setup.exe">x</a>sha256:{sha}</li>"#
+                ),
+            ),
+        );
+        let res = resolve_release_asset_for_channel(
+            &not_found_http,
+            "v1.2.6-dev.1",
+            UpdateChannel::Prerelease,
+        );
+        assert!(res.asset.is_none());
+        assert!(res.not_found);
+        assert_eq!(res.error.as_deref(), Some("[http]: status 404"));
+        assert_eq!(
+            not_found_http.calls().len(),
+            1,
+            "API 404 must stop before expanded_assets fallback"
+        );
 
         // Rejects draft:true on prerelease channel without falling back to HTML.
         let draft_http = FakeHttp::new();

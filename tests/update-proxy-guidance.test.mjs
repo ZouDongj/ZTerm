@@ -89,3 +89,79 @@ test('prerelease feed and API fallback connect errors keep connection guidance',
     assert.match(feedHttpThenApiConnect, /无法连接更新服务器/);
     assert.doesNotMatch(feedHttpThenApiConnect, /更新服务器返回错误/);
 });
+
+test('_syncUpdateCardFromState restores prerelease tag/URL and sanitizes invalid st.tag', async () => {
+    const utilsSource = readFileSync(new URL('../src/renderer/update-utils.js', import.meta.url), 'utf8');
+    const startMarker = '// ── In-app update download (about page state machine) ──';
+    const endMarker = '// Update check (about page): check -> download -> ready -> restart & install.';
+    const startIdx = source.indexOf(startMarker);
+    const endIdx = source.indexOf(endMarker);
+    assert.ok(startIdx >= 0 && endIdx > startIdx, 'extract real update card state machine from shortcuts.js');
+
+    const makeEl = () => ({ textContent: '', style: { display: 'none', color: '' }, disabled: false, offsetParent: {}, querySelector: () => ({ textContent: '' }) });
+    const elements = {
+        'update-check-desc': makeEl(),
+        'btn-update-download': makeEl(),
+        'btn-update-apply': makeEl(),
+        'btn-check-update': makeEl(),
+        'update-release-notes': makeEl(),
+    };
+    const notesLink = { textContent: '' };
+    elements['update-release-notes'].querySelector = () => notesLink;
+
+    let currentState = null;
+    const win = { __updateUrl: null, __updateTag: null };
+    const cardCtx = vm.createContext({
+        window: win,
+        document: { getElementById: (id) => elements[id] || null },
+        ipcRenderer: { invoke: async (cmd) => (cmd === 'update-download-state' ? currentState : null) },
+        showToast: () => {},
+        setInterval: () => 1,
+        clearInterval: () => {},
+        URL,
+    });
+    vm.runInContext(utilsSource, cardCtx);
+    vm.runInContext(source.slice(startIdx, endIdx), cardCtx);
+
+    // Failed prerelease download: restores tag and exact release tag URL on reopen.
+    currentState = { phase: 'failed', tag: 'v1.2.5-dev.4', error: '[connect] refused' };
+    await cardCtx._syncUpdateCardFromState();
+    assert.equal(win.__updateTag, 'v1.2.5-dev.4');
+    assert.equal(win.__updateUrl, 'https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.5-dev.4');
+    assert.equal(elements['btn-update-download'].textContent, '重试下载');
+    assert.equal(notesLink.textContent, '打开发行页');
+
+    // Downloading prerelease: restores tag/URL and renders dev label.
+    win.__updateTag = null;
+    win.__updateUrl = null;
+    currentState = { phase: 'downloading', tag: 'v1.2.5-dev.4', downloaded: 50, total: 100 };
+    await cardCtx._syncUpdateCardFromState();
+    assert.equal(win.__updateTag, 'v1.2.5-dev.4');
+    assert.equal(win.__updateUrl, 'https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.5-dev.4');
+    assert.equal(elements['update-check-desc'].textContent, '正在下载 开发版 v1.2.5-dev.4 安装包…');
+
+    // Ready prerelease: restores tag/URL and renders dev apply button/description.
+    win.__updateTag = null;
+    win.__updateUrl = null;
+    currentState = { phase: 'ready', tag: 'v1.2.5-dev.4' };
+    await cardCtx._syncUpdateCardFromState();
+    assert.equal(win.__updateTag, 'v1.2.5-dev.4');
+    assert.equal(win.__updateUrl, 'https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.5-dev.4');
+    assert.equal(elements['btn-update-apply'].textContent, '重启并安装 开发版 v1.2.5-dev.4');
+    assert.equal(elements['update-check-desc'].textContent, '开发版 v1.2.5-dev.4 已下载完成，随时可安装');
+
+    // Invalid st.tag is sanitized by updateReleasePageUrl to the safe latest fallback.
+    win.__updateTag = null;
+    win.__updateUrl = null;
+    currentState = { phase: 'failed', tag: '../evil?x=1', error: '[connect] refused' };
+    await cardCtx._syncUpdateCardFromState();
+    assert.equal(win.__updateUrl, 'https://github.com/ZouDongj/ZTerm/releases/latest');
+
+    // Idle state leaves tag/URL untouched.
+    win.__updateTag = null;
+    win.__updateUrl = null;
+    currentState = { phase: 'idle', tag: 'v1.2.5-dev.4' };
+    await cardCtx._syncUpdateCardFromState();
+    assert.equal(win.__updateTag, null);
+    assert.equal(win.__updateUrl, null);
+});

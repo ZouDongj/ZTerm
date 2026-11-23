@@ -778,6 +778,13 @@ function _renderUpdateFailed(err) {
     _setUpdateDesc('下载失败：' + _friendlyUpdateError(err), 'rgba(220,120,120,0.9)');
 }
 
+function _restoreUpdateTargetFromState(st) {
+    if (!st || typeof st.tag !== 'string' || !st.tag.trim()) return;
+    const tag = st.tag.trim();
+    window.__updateTag = tag;
+    window.__updateUrl = updateReleasePageUrl(`https://github.com/ZouDongj/ZTerm/releases/tag/${tag}`);
+}
+
 function _startUpdatePoll() {
     _stopUpdatePoll();
     _updatePollTimer = setInterval(async () => {
@@ -789,12 +796,15 @@ function _startUpdatePoll() {
             const st = await ipcRenderer.invoke('update-download-state');
             if (!st) return;
             if (st.phase === 'downloading') {
+                _restoreUpdateTargetFromState(st);
                 _renderUpdateDownloading(st);
             } else if (st.phase === 'ready') {
+                _restoreUpdateTargetFromState(st);
                 _stopUpdatePoll();
                 _renderUpdateReady(st.tag);
                 _toastUpdateReadyOnce(st.tag);
             } else if (st.phase === 'failed') {
+                _restoreUpdateTargetFromState(st);
                 _stopUpdatePoll();
                 _renderUpdateFailed(st.error);
             }
@@ -807,11 +817,14 @@ async function _syncUpdateCardFromState() {
         const st = await ipcRenderer.invoke('update-download-state');
         if (!st || !st.phase) return;
         if (st.phase === 'downloading') {
+            _restoreUpdateTargetFromState(st);
             _renderUpdateDownloading(st);
             _startUpdatePoll();
         } else if (st.phase === 'ready') {
+            _restoreUpdateTargetFromState(st);
             _renderUpdateReady(st.tag);
         } else if (st.phase === 'failed') {
+            _restoreUpdateTargetFromState(st);
             _renderUpdateFailed(st.error);
         }
     } catch(e) {}
