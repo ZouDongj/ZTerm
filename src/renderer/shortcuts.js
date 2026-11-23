@@ -709,17 +709,18 @@ function _renderUpdateDownloading(st) {
         else if (st.downloaded > 0) pct = ' ' + (st.downloaded / 1048576).toFixed(1) + 'MB';
         dl.textContent = '下载中' + pct;
     }
-    _setUpdateDesc('正在下载 ' + (st.tag || '') + ' 安装包…');
+    _setUpdateDesc('正在下载 ' + formatUpdateTagLabel(st.tag) + ' 安装包…');
 }
 
-function _renderUpdateReady(tag) {
+function _renderUpdateReady(tag, isPrerelease) {
     const dl = document.getElementById('btn-update-download');
     const apply = document.getElementById('btn-update-apply');
     const check = document.getElementById('btn-check-update');
+    const label = formatUpdateTagLabel(tag, isPrerelease);
     if (dl) dl.style.display = 'none';
     if (check) { check.disabled = false; check.textContent = '检查更新'; }
-    if (apply) { apply.style.display = ''; apply.disabled = false; apply.textContent = '重启并安装 ' + (tag || ''); }
-    _setUpdateDesc((tag || '新版本') + ' 已下载完成，随时可安装', 'rgba(120,200,120,0.9)');
+    if (apply) { apply.style.display = ''; apply.disabled = false; apply.textContent = '重启并安装 ' + label; }
+    _setUpdateDesc((label || '新版本') + ' 已下载完成，随时可安装', 'rgba(120,200,120,0.9)');
 }
 
 // Map the backend's stable error tag ([timeout]/[resolve]/[connect]/[http])
@@ -830,7 +831,7 @@ async function checkForUpdates() {
     try {
         const r = await ipcRenderer.invoke('check-update');
         if (r && r.none) {
-            desc.textContent = '没有可用的稳定版本';
+            desc.textContent = r.channel === 'prerelease' ? '没有可用的发布版本' : '没有可用的稳定版本';
             if (dl) dl.style.display = 'none';
             if (apply) apply.style.display = 'none';
             window.__updateUrl = null;
@@ -847,9 +848,9 @@ async function checkForUpdates() {
             if (r.ready) {
                 // Verified installer already on disk from an earlier
                 // download (survives restarts): skip straight to apply.
-                _renderUpdateReady(r.tag);
+                _renderUpdateReady(r.tag, isUpdatePrerelease(r));
             } else {
-                desc.textContent = `发现新版本 ${r.latest}（当前 ${r.current}）`;
+                desc.textContent = formatUpdateFoundDesc(r);
                 desc.style.color = 'rgba(120,200,120,0.9)';
                 if (apply) apply.style.display = 'none';
                 if (r.download_available === false) {
@@ -865,7 +866,7 @@ async function checkForUpdates() {
                 } else if (dl) {
                     dl.style.display = '';
                     dl.disabled = false;
-                    dl.textContent = '下载更新';
+                    dl.textContent = formatUpdateDownloadButton(r);
                 }
             }
         } else if (r) {

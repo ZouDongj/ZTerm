@@ -13,11 +13,14 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::update_release::{
-    is_stable_tag, is_valid_tag, rate_limit_error, resolve_latest_tag, resolve_release_asset,
-    version_newer_checked, ReleaseHttp, SetupAsset, WinHttpRelease,
+    is_stable_tag, is_valid_tag, rate_limit_error, resolve_latest_tag_for_channel,
+    resolve_release_asset_for_channel, version_newer_checked, ReleaseHttp, SetupAsset,
+    UpdateChannel, WinHttpRelease,
 };
 #[cfg(test)]
-use crate::update_release::{select_setup_asset, version_newer};
+use crate::update_release::{
+    resolve_latest_tag, resolve_release_asset, select_setup_asset, version_newer,
+};
 
 #[path = "native_trace.rs"]
 mod native_trace;
@@ -5481,33 +5484,43 @@ pub async fn check_update(args: Vec<Value>) -> Result<Value, String> {
 }
 
 fn check_update_with(http: &dyn ReleaseHttp, current: &str) -> Result<Value, String> {
-    let Some(tag) = resolve_latest_tag(http)? else {
-        // The repo has no published stable release yet — a state, not a failure.
+    let channel = UpdateChannel::for_version(current);
+    let Some(tag) = resolve_latest_tag_for_channel(http, channel)? else {
+        // The repo has no published release on this channel yet — a state, not a failure.
         return Ok(json!({
             "current": current,
             "latest": Value::Null,
             "none": true,
+            "channel": channel.as_str(),
         }));
     };
-    if !is_stable_tag(&tag) {
+    if !is_valid_tag(&tag) {
+        return Err(format!("update check failed: invalid release tag '{tag}'"));
+    }
+    if channel == UpdateChannel::Stable && !is_stable_tag(&tag) {
         return Err(format!(
             "update check failed: release '{tag}' is a pre-release; stable channel only"
         ));
     }
     let latest = tag.trim_start_matches(['v', 'V']).to_string();
+    let is_prerelease = !is_stable_tag(&tag);
     let newer = version_newer_checked(current, &tag)?;
     // Installer reuse across restarts: when a verified setup exe for this
     // release is already in the download dir, report ready so the UI can jump
     // straight to "restart & install". A release without a usable x64 asset
     // still reports newer (the manual release page remains reachable), while an
-    // explicit stable-channel rejection fails closed.
+    // explicit channel-policy rejection (draft, or pre-release on stable) fails
+    // closed.
     let mut rate_limited = false;
     let mut asset_error: Option<String> = None;
     let info = if newer {
-        let resolution = resolve_release_asset(http, &tag);
+        let resolution = resolve_release_asset_for_channel(http, &tag, channel);
         if resolution.rejected {
-            let reason = resolution.error.unwrap_or_else(|| {
-                "release is a pre-release or draft; stable channel only".to_string()
+            let reason = resolution.error.unwrap_or_else(|| match channel {
+                UpdateChannel::Stable => {
+                    "release is a pre-release or draft; stable channel only".to_string()
+                }
+                UpdateChannel::Prerelease => "release is a draft".to_string(),
             });
             return Err(format!("update check failed: {reason}"));
         }
@@ -5534,6 +5547,8 @@ fn check_update_with(http: &dyn ReleaseHttp, current: &str) -> Result<Value, Str
         "tag": tag,
         "url": format!("https://github.com/ZouDongj/ZTerm/releases/tag/{tag}"),
         "newer": newer,
+        "isPrerelease": is_prerelease,
+        "channel": channel.as_str(),
         "asset_name": info.name,
         "asset_size": info.size,
         "ready": info.ready,
@@ -5915,15 +5930,17 @@ fn download_setup_exe(url: &str, name: &str, size_hint: u64, sha256: &str) -> Re
     Ok(())
 }
 
-/// Validate that `tag` is a syntactically clean, stable release tag strictly
-/// newer than `current`. Enforcing all three invariants up front prevents an
-/// IPC caller from inducing a downgrade or pulling a pre-release tag even when
-/// the GitHub API is rate-limited and falls back to expanded-assets HTML.
+/// Validate that `tag` is a syntactically clean release tag allowed by
+/// `current`'s update channel and strictly newer than `current`. Enforcing
+/// these invariants up front prevents an IPC caller from inducing a downgrade
+/// or pulling a pre-release tag onto a stable build even when the GitHub API
+/// is rate-limited and falls back to expanded-assets HTML.
 fn validate_upgrade_tag(current: &str, tag: &str) -> Result<(), String> {
     if !is_valid_tag(tag) {
         return Err(format!("update: invalid release tag '{tag}'"));
     }
-    if !is_stable_tag(tag) {
+    let channel = UpdateChannel::for_version(current);
+    if channel == UpdateChannel::Stable && !is_stable_tag(tag) {
         return Err(format!(
             "update: release '{tag}' is a pre-release; stable channel only"
         ));
@@ -5937,22 +5954,26 @@ fn validate_upgrade_tag(current: &str, tag: &str) -> Result<(), String> {
 }
 
 /// Select the installer for `want_tag` without trusting renderer-supplied
-/// URLs or digests. An empty tag resolves the latest stable release; a
-/// non-empty tag is validated and looked up directly. Both paths require the
-/// resolved tag to be a stable release strictly newer than `current`.
+/// URLs or digests. An empty tag resolves the latest eligible release for
+/// `current`'s update channel; a non-empty tag is validated and looked up
+/// directly. Both paths require the resolved tag to satisfy the channel policy
+/// and be strictly newer than `current`.
 fn resolve_update_asset_for(
     http: &dyn ReleaseHttp,
     current: &str,
     want_tag: &str,
 ) -> Result<(String, SetupAsset), String> {
+    let channel = UpdateChannel::for_version(current);
     let tag = if want_tag.is_empty() {
-        resolve_latest_tag(http)?
-            .ok_or_else(|| "update: no stable release available".to_string())?
+        resolve_latest_tag_for_channel(http, channel)?.ok_or_else(|| match channel {
+            UpdateChannel::Stable => "update: no stable release available".to_string(),
+            UpdateChannel::Prerelease => "update: no release available".to_string(),
+        })?
     } else {
         want_tag.to_string()
     };
     validate_upgrade_tag(current, &tag)?;
-    let resolution = resolve_release_asset(http, &tag);
+    let resolution = resolve_release_asset_for_channel(http, &tag, channel);
     match resolution.asset {
         Some(asset) => Ok((tag, asset)),
         None => {
@@ -6109,8 +6130,8 @@ pub async fn download_update(args: Vec<Value>) -> Result<Value, String> {
     run_download_update_task_on(&UPDATE_DL, attempt, move || {
         // Resolve the asset for the exact tag selected by the check instead of
         // trusting URLs or digests passed from the renderer. An empty tag is
-        // only possible for direct command callers; resolve the latest stable
-        // release in that case.
+        // only possible for direct command callers; resolve the latest eligible
+        // release for the current channel in that case.
         let proxy = update_proxy_choice().map_err(|e| format!("update: {e}"))?;
         let http = WinHttpRelease { proxy };
         let (tag, asset) = resolve_update_asset_for(&http, current, &want_tag)?;
@@ -14294,23 +14315,35 @@ mod tests {
         }));
     }
 
+    fn atom_feed_for_tags(tags: &[&str]) -> String {
+        let mut out = String::from(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Release notes from ZTerm</title>
+"#,
+        );
+        for tag in tags {
+            out.push_str(&format!(
+                r#"  <entry>
+    <link rel="alternate" type="text/html" href="https://github.com/ZouDongj/ZTerm/releases/tag/{tag}"/>
+    <title>ZTerm {tag}</title>
+    <content type="html">Release {tag}</content>
+  </entry>
+"#
+            ));
+        }
+        out.push_str("</feed>");
+        out
+    }
+
     #[test]
     fn check_update_treats_a_prerelease_build_as_older_than_the_same_stable_core() {
-        use crate::update_release::test_support::{headers, FakeHttp, FakeReply};
-        use crate::update_release::RELEASES_LATEST_PAGE;
+        use crate::update_release::test_support::{FakeHttp, FakeReply};
+        use crate::update_release::RELEASES_ATOM_FEED;
         let http = FakeHttp::new();
-        http.on_no_redirect(
-            RELEASES_LATEST_PAGE,
-            FakeReply::with_headers(
-                302,
-                "",
-                headers(
-                    Some("https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.5"),
-                    None,
-                    None,
-                    None,
-                ),
-            ),
+        http.on_get(
+            RELEASES_ATOM_FEED,
+            FakeReply::response(200, &atom_feed_for_tags(&["v1.2.5", "v1.2.5-dev.1"])),
         );
         let release = json!({
             "tag_name": "v1.2.5",
@@ -14329,7 +14362,281 @@ mod tests {
         );
         let value = check_update_with(&http, "1.2.5-dev.1").expect("check");
         assert_eq!(value["newer"], true);
+        assert_eq!(value["latest"], "1.2.5");
+        assert_eq!(value["isPrerelease"], false);
+        assert_eq!(value["channel"], "prerelease");
         assert_eq!(value["download_available"], true);
+    }
+
+    #[test]
+    fn check_update_prerelease_channel_acceptance_matrix() {
+        use crate::update_release::test_support::{headers, FakeHttp, FakeReply};
+        use crate::update_release::{RELEASES_ATOM_FEED, RELEASES_LATEST_PAGE, RELEASES_LIST_API};
+        let sha = "e".repeat(64);
+
+        // 1. 1.2.5-dev.3 + v1.2.5-dev.4 -> offers 1.2.5-dev.4 (isPrerelease: true).
+        let dev_upgrade = FakeHttp::new();
+        dev_upgrade.on_get(
+            RELEASES_ATOM_FEED,
+            FakeReply::response(
+                200,
+                &atom_feed_for_tags(&["v1.2.5-dev.4", "v1.2.5-dev.3", "v1.2.4"]),
+            ),
+        );
+        let dev4_release = json!({
+            "tag_name": "v1.2.5-dev.4",
+            "draft": false,
+            "prerelease": true,
+            "assets": [gh_asset_for_tag(
+                "v1.2.5-dev.4",
+                "ZTerm_1.2.5-dev.4_x64-setup.exe",
+                42,
+                Some(&format!("sha256:{sha}")),
+            )],
+        });
+        dev_upgrade.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.5-dev.4",
+            FakeReply::response(200, &dev4_release.to_string()),
+        );
+        let v = check_update_with(&dev_upgrade, "1.2.5-dev.3").expect("dev upgrade");
+        assert_eq!(v["newer"], true);
+        assert_eq!(v["latest"], "1.2.5-dev.4");
+        assert_eq!(v["tag"], "v1.2.5-dev.4");
+        assert_eq!(v["isPrerelease"], true);
+        assert_eq!(v["channel"], "prerelease");
+        assert_eq!(
+            v["url"],
+            "https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.5-dev.4"
+        );
+        assert_eq!(v["download_available"], true);
+        assert!(!dev_upgrade
+            .calls()
+            .iter()
+            .any(|(_, url)| url == RELEASES_LATEST_PAGE));
+
+        // 2. 1.2.5-dev.3 + v1.2.4 and dev.1..dev.3 -> up to date (no asset lookup).
+        let up_to_date = FakeHttp::new();
+        up_to_date.on_get(
+            RELEASES_ATOM_FEED,
+            FakeReply::response(
+                200,
+                &atom_feed_for_tags(&["v1.2.5-dev.3", "v1.2.5-dev.2", "v1.2.5-dev.1", "v1.2.4"]),
+            ),
+        );
+        let v = check_update_with(&up_to_date, "1.2.5-dev.3").expect("up to date");
+        assert_eq!(v["newer"], false);
+        assert_eq!(v["latest"], "1.2.5-dev.3");
+        assert_eq!(v["isPrerelease"], true);
+        assert_eq!(up_to_date.calls().len(), 1);
+
+        // 3. 1.2.5-dev.3 + v1.2.5 -> offers 1.2.5 (isPrerelease: false, graduates to stable).
+        let graduate = FakeHttp::new();
+        graduate.on_get(
+            RELEASES_ATOM_FEED,
+            FakeReply::response(200, &atom_feed_for_tags(&["v1.2.5", "v1.2.5-dev.3"])),
+        );
+        let stable_125 = json!({
+            "tag_name": "v1.2.5",
+            "draft": false,
+            "prerelease": false,
+            "assets": [gh_asset_for_tag(
+                "v1.2.5",
+                "ZTerm_1.2.5_x64-setup.exe",
+                42,
+                Some(&format!("sha256:{sha}")),
+            )],
+        });
+        graduate.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.5",
+            FakeReply::response(200, &stable_125.to_string()),
+        );
+        let v = check_update_with(&graduate, "1.2.5-dev.3").expect("graduate");
+        assert_eq!(v["newer"], true);
+        assert_eq!(v["latest"], "1.2.5");
+        assert_eq!(v["isPrerelease"], false);
+        assert_eq!(v["download_available"], true);
+
+        // 4. 1.2.5-dev.3 + v1.2.5 and v1.2.6-dev.1 -> offers 1.2.6-dev.1 (SemVer max).
+        let next_cycle = FakeHttp::new();
+        next_cycle.on_get(
+            RELEASES_ATOM_FEED,
+            FakeReply::response(200, &atom_feed_for_tags(&["v1.2.5", "v1.2.6-dev.1"])),
+        );
+        let dev_126 = json!({
+            "tag_name": "v1.2.6-dev.1",
+            "draft": false,
+            "prerelease": true,
+            "assets": [gh_asset_for_tag(
+                "v1.2.6-dev.1",
+                "ZTerm_1.2.6-dev.1_x64-setup.exe",
+                42,
+                Some(&format!("sha256:{sha}")),
+            )],
+        });
+        next_cycle.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.6-dev.1",
+            FakeReply::response(200, &dev_126.to_string()),
+        );
+        let v = check_update_with(&next_cycle, "1.2.5-dev.3").expect("next cycle");
+        assert_eq!(v["newer"], true);
+        assert_eq!(v["latest"], "1.2.6-dev.1");
+        assert_eq!(v["isPrerelease"], true);
+        assert_eq!(v["download_available"], true);
+
+        // 5. 1.2.4 (stable) stays on /releases/latest and never sees v1.2.5-dev.4.
+        let stable_only = FakeHttp::new();
+        stable_only.on_no_redirect(
+            RELEASES_LATEST_PAGE,
+            FakeReply::with_headers(
+                302,
+                "",
+                headers(
+                    Some("https://github.com/ZouDongj/ZTerm/releases/tag/v1.2.4"),
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        );
+        let v = check_update_with(&stable_only, "1.2.4").expect("stable stays stable");
+        assert_eq!(v["newer"], false);
+        assert_eq!(v["latest"], "1.2.4");
+        assert_eq!(v["isPrerelease"], false);
+        assert_eq!(v["channel"], "stable");
+        assert_eq!(
+            stable_only.calls(),
+            vec![(false, RELEASES_LATEST_PAGE.to_string())]
+        );
+
+        // 6. Draft release on prerelease channel fails closed during asset resolution.
+        let draft_check = FakeHttp::new();
+        draft_check.on_get(
+            RELEASES_ATOM_FEED,
+            FakeReply::response(200, &atom_feed_for_tags(&["v1.2.5-dev.4"])),
+        );
+        draft_check.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.5-dev.4",
+            FakeReply::response(
+                200,
+                &format!(
+                    r#"{{"tag_name":"v1.2.5-dev.4","draft":true,"prerelease":true,"assets":[{{"name":"ZTerm_1.2.5-dev.4_x64-setup.exe","size":42,"digest":"sha256:{sha}","browser_download_url":"https://github.com/ZouDongj/ZTerm/releases/download/v1.2.5-dev.4/ZTerm_1.2.5-dev.4_x64-setup.exe"}}]}}"#
+                ),
+            ),
+        );
+        let err = check_update_with(&draft_check, "1.2.5-dev.3").unwrap_err();
+        assert!(err.contains("draft"), "{err}");
+
+        // 7. Feed with only malformed tags reports none:true cleanly.
+        let bad_tags = FakeHttp::new();
+        bad_tags.on_get(
+            RELEASES_ATOM_FEED,
+            FakeReply::response(200, &atom_feed_for_tags(&["v1.2.5-dev.04", "v1.2.5-"])),
+        );
+        let v = check_update_with(&bad_tags, "1.2.5-dev.3").expect("malformed ignored");
+        assert_eq!(v["none"], true);
+        assert_eq!(v["channel"], "prerelease");
+
+        // 8. Dead proxy on a 1.2.5-dev.3 build preserves [connect] for E2E proxy check.
+        let dead_proxy = FakeHttp::new();
+        dead_proxy.on_get(
+            RELEASES_ATOM_FEED,
+            FakeReply::fail("connect", "WinHttpSendRequest: 0x80072EFD"),
+        );
+        dead_proxy.on_get(
+            RELEASES_LIST_API,
+            FakeReply::fail("connect", "WinHttpSendRequest: 0x80072EFD"),
+        );
+        let err = check_update_with(&dead_proxy, "1.2.5-dev.3").unwrap_err();
+        assert!(err.contains("[connect]"), "{err}");
+    }
+
+    #[test]
+    fn download_asset_resolution_prerelease_channel_rules() {
+        use crate::update_release::test_support::{headers, FakeHttp, FakeReply};
+        use crate::update_release::RELEASES_ATOM_FEED;
+        let sha = "a".repeat(64);
+
+        // Stable build 1.2.4 rejects direct download of v1.2.5-dev.4 before network.
+        let stable_http = FakeHttp::new();
+        let err = resolve_update_asset_for(&stable_http, "1.2.4", "v1.2.5-dev.4").unwrap_err();
+        assert!(err.contains("pre-release"), "{err}");
+        assert!(stable_http.calls().is_empty());
+
+        // Prerelease build 1.2.5-dev.3 rejects downgrades, equal, and malformed tags before network.
+        let bad_http = FakeHttp::new();
+        for stale in ["v1.2.5-dev.3", "v1.2.5-dev.2", "v1.2.4"] {
+            let err = resolve_update_asset_for(&bad_http, "1.2.5-dev.3", stale).unwrap_err();
+            assert!(err.contains("not newer"), "{stale}: {err}");
+        }
+        for bad in ["v1.2.5-dev.04", "v1.2.5-"] {
+            let err = resolve_update_asset_for(&bad_http, "1.2.5-dev.3", bad).unwrap_err();
+            assert!(err.contains("invalid release tag"), "{bad}: {err}");
+        }
+        assert!(bad_http.calls().is_empty());
+
+        // Prerelease build 1.2.5-dev.3 can download a strictly newer prerelease (including HTML fallback).
+        let dl_http = FakeHttp::new();
+        dl_http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.5-dev.4",
+            FakeReply::with_headers(
+                403,
+                r#"{"message":"API rate limit exceeded"}"#,
+                headers(None, None, Some("1730000000"), Some("0")),
+            ),
+        );
+        dl_http.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.5-dev.4",
+            FakeReply::response(
+                200,
+                &format!(
+                    r#"<li><a href="/ZouDongj/ZTerm/releases/download/v1.2.5-dev.4/ZTerm_1.2.5-dev.4_x64-setup.exe">x</a>sha256:{sha}</li>"#
+                ),
+            ),
+        );
+        let (tag, asset) =
+            resolve_update_asset_for(&dl_http, "1.2.5-dev.3", "v1.2.5-dev.4").expect("dev4");
+        assert_eq!(tag, "v1.2.5-dev.4");
+        assert_eq!(asset.name, "ZTerm_1.2.5-dev.4_x64-setup.exe");
+        assert_eq!(asset.sha256, sha);
+
+        // Empty want_tag on 1.2.5-dev.3 resolves via Atom feed.
+        let empty_http = FakeHttp::new();
+        empty_http.on_get(
+            RELEASES_ATOM_FEED,
+            FakeReply::response(200, &atom_feed_for_tags(&["v1.2.5-dev.4", "v1.2.5-dev.3"])),
+        );
+        let dev4_json = json!({
+            "tag_name": "v1.2.5-dev.4",
+            "draft": false,
+            "prerelease": true,
+            "assets": [gh_asset_for_tag(
+                "v1.2.5-dev.4",
+                "ZTerm_1.2.5-dev.4_x64-setup.exe",
+                42,
+                Some(&format!("sha256:{sha}")),
+            )],
+        });
+        empty_http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.5-dev.4",
+            FakeReply::response(200, &dev4_json.to_string()),
+        );
+        let (tag, _) = resolve_update_asset_for(&empty_http, "1.2.5-dev.3", "").expect("empty tag");
+        assert_eq!(tag, "v1.2.5-dev.4");
+
+        // Prerelease build 1.2.5-dev.3 still rejects draft:true during download.
+        let draft_http = FakeHttp::new();
+        draft_http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.5-dev.4",
+            FakeReply::response(
+                200,
+                &format!(
+                    r#"{{"tag_name":"v1.2.5-dev.4","draft":true,"prerelease":true,"assets":[{{"name":"ZTerm_1.2.5-dev.4_x64-setup.exe","size":42,"digest":"sha256:{sha}","browser_download_url":"https://github.com/ZouDongj/ZTerm/releases/download/v1.2.5-dev.4/ZTerm_1.2.5-dev.4_x64-setup.exe"}}]}}"#
+                ),
+            ),
+        );
+        let err = resolve_update_asset_for(&draft_http, "1.2.5-dev.3", "v1.2.5-dev.4").unwrap_err();
+        assert!(err.contains("draft"), "{err}");
+        assert_eq!(draft_http.calls().len(), 1);
     }
 
     #[test]

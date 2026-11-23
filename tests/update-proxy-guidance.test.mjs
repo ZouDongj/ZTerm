@@ -75,3 +75,17 @@ test('proxy validation errors take precedence over a rate-limit substring', () =
     assert.match(message, /仅支持 HTTP 代理/);
     assert.doesNotMatch(message, /请求过于频繁/);
 });
+
+test('prerelease feed and API fallback connect errors keep connection guidance', () => {
+    const bothConnect = context._friendlyUpdateError(
+        'update check failed: releases feed [connect] WinHttpSendRequest: 0x80072EFD; API [connect]: WinHttpSendRequest: 0x80072EFD'
+    );
+    assert.match(bothConnect, /无法连接更新服务器/);
+    assert.match(bothConnect, /\[connect\]/);
+
+    const feedHttpThenApiConnect = context._friendlyUpdateError(
+        'update check failed: releases feed HTTP status 502; API [connect]: connection refused'
+    );
+    assert.match(feedHttpThenApiConnect, /无法连接更新服务器/);
+    assert.doesNotMatch(feedHttpThenApiConnect, /更新服务器返回错误/);
+});
