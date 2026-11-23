@@ -938,6 +938,10 @@ const TabManager = {
             command: isSSH ? '' : (command || 'powershell.exe'),
             args: isSSH ? [] : (args || []),
             connected: !isSSH,
+            // Restored background tabs stay green through their initial
+            // shell/MOTD bring-up until the user visits them once; switchTo
+            // on the first restored tab clears it immediately.
+            _bgUnreadPendingVisit: true,
         };
         if (isSSH && sshOpts) {
             Object.assign(tab, {
@@ -1126,10 +1130,10 @@ const TabManager = {
         if (tab.splitRoot) {
             const panes = getAllPanes(tab);
             const backendOwner = panes.find(p => p === owner || (owner?.tabId && p.tabId === owner.tabId));
-            if (!backendOwner) return;
+            if (!backendOwner || backendOwner._bgUnreadPendingVisit === true) return;
             backendOwner._bgUnread = true;
         } else {
-            if (owner && owner !== tab) return;
+            if ((owner && owner !== tab) || tab._bgUnreadPendingVisit === true) return;
             tab._bgUnread = true;
         }
         this._reaggregateBackgroundUnread(tab);
@@ -1140,8 +1144,14 @@ const TabManager = {
         let unread = tab.splitRoot
             ? getAllPanes(tab).some(p => p._bgUnread === true)
             : tab._bgUnread === true;
-        if (tab.id === this.activeId && unread) {
-            if (tab.splitRoot) getAllPanes(tab).forEach(p => { p._bgUnread = false; });
+        if (tab.id === this.activeId) {
+            if (tab.splitRoot) {
+                getAllPanes(tab).forEach(p => {
+                    p._bgUnread = false;
+                    p._bgUnreadPendingVisit = false;
+                });
+            }
+            tab._bgUnreadPendingVisit = false;
             unread = false;
         }
         tab._bgUnread = unread;
@@ -1157,13 +1167,20 @@ const TabManager = {
         }
     },
 
-    // Consume every owner's marker on activation and restore the idle dot in
-    // place (switchTo keeps the strip node; no full render).
+    // Consume every owner's marker on activation, arm unread tracking for the
+    // now-visited session(s), and restore the idle dot in place (switchTo keeps
+    // the strip node; no full render).
     _consumeBackgroundUnread(id) {
         const tab = this.tabs.find(t => t.id === id);
         if (!tab) return;
-        if (tab.splitRoot) getAllPanes(tab).forEach(p => { p._bgUnread = false; });
+        if (tab.splitRoot) {
+            getAllPanes(tab).forEach(p => {
+                p._bgUnread = false;
+                p._bgUnreadPendingVisit = false;
+            });
+        }
         tab._bgUnread = false;
+        tab._bgUnreadPendingVisit = false;
         const icon = this._tabIconEl(id);
         if (icon && icon.classList.contains('bg-unread')) {
             icon.classList.remove('bg-unread');
@@ -1523,6 +1540,8 @@ const TabManager = {
         tab._reconnectPending = true;
         tab._sshConnecting = true;
         tab._sshErrored = false;
+        tab._bgUnread = false;
+        tab._bgUnreadPendingVisit = tab.id !== this.activeId;
         tab._sshReconnectNotice = true;
         if (typeof showToast === 'function') showToast('正在重连: ' + this._tabDisplayName(tab));
 
@@ -1612,6 +1631,9 @@ const TabManager = {
         pane._reconnectPending = true;
         pane._sshConnecting = true;
         pane._sshErrored = false;
+        pane._bgUnread = false;
+        pane._bgUnreadPendingVisit = tab.id !== this.activeId;
+        this._reaggregateBackgroundUnread(tab);
         tab._sshReconnectNotice = true;
         if (typeof showToast === 'function') showToast('正在重连: ' + (pane._sshHost || pane.name || tab.name));
         // The old session is discarded below: the SFTP panel must not stay
@@ -2052,6 +2074,7 @@ const TabManager = {
         tab._contentBuffer = '';
         tab._altScreen = owner?._altScreen === true;
         tab._bgUnread = owner?._bgUnread === true;
+        tab._bgUnreadPendingVisit = owner?._bgUnreadPendingVisit === true;
     },
 
     _newPaneData(tab, srcPane) {
@@ -2111,6 +2134,7 @@ const TabManager = {
             existing.tabId = tab.tabId;
             existing._altScreen = tab._altScreen === true;
             existing._bgUnread = tab._bgUnread === true;
+            existing._bgUnreadPendingVisit = tab._bgUnreadPendingVisit === true;
             existing.focused = false;
             // An in-flight SSH attempt follows its session onto the pane
             // (identity transfer; migrations never create attempts).
@@ -2781,6 +2805,7 @@ const TabManager = {
         pane.requestId = null;
         pane._pendingAttempt = null;
         pane._bgUnread = false;
+        pane._bgUnreadPendingVisit = false;
         this._reaggregateBackgroundUnread(tab);
         // A pane committed to close can never reconnect: drop the pending
         // flag too, or a lone survivor check below would read this dying
@@ -3292,6 +3317,7 @@ const TabManager = {
             fp.tabId = targetTab.tabId;
             fp._altScreen = targetTab._altScreen === true;
             fp._bgUnread = targetTab._bgUnread === true;
+            fp._bgUnreadPendingVisit = targetTab._bgUnreadPendingVisit === true;
             fp.focused = false;
             // Same transfer rule as the first-split promotion: the target's
             // existing session keeps its liveness marker on the fp pane.
@@ -3343,6 +3369,7 @@ const TabManager = {
             ...(manualName ? { _manualName: true } : {}),
             _altScreen: movedOwner._altScreen === true,
             _bgUnread: movedOwner._bgUnread === true,
+            _bgUnreadPendingVisit: movedOwner._bgUnreadPendingVisit === true,
             connected: mconn,
             // Known-failed liveness marker travels with the moved session
             // (ipc.js owns its lifecycle; see the ssh-error/pty-exit handlers)
@@ -4309,6 +4336,7 @@ const TabManager = {
         if (!tab.splitRoot) {
             // Degraded (empty tree): restore as a normal single-terminal tab and start the backend
             tab.connected = tabData.type !== 'ssh'; // same initial state as createTabSilent
+            tab._bgUnreadPendingVisit = true;
             const { wrap: w, inner: wInner } = createTermWrap(tab);
             document.getElementById('main-area').appendChild(w);
             if (tabData.type === 'ssh' && tabData.host) {
@@ -4331,6 +4359,7 @@ const TabManager = {
         // Register credentials (SSH) and start the backend for each pane
         const panes = getAllPanes(tab);
         panes.forEach(p => {
+            p._bgUnreadPendingVisit = true;
             if (p.type === 'ssh' && p._sshHost) {
                 const prof = (this.sshProfiles || []).find(x => x.id === p._sshProfileId);
                 // Credential registration is async; spawn the backend when it completes

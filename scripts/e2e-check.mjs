@@ -7196,12 +7196,63 @@ async function main() {
       const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
       if (shot?.data) writeFileSync(join(shotDir, 'issue26-split-pane-aggregated.png'), Buffer.from(shot.data, 'base64'));
     }
+    // Restored/silent background bring-up: a tab created silently in the
+    // background (same path as session restore) stays idle green through its
+    // real PowerShell banner & prompt, and arms unread tracking once visited.
+    const i26Silent = await cdp.eval(`(() => {
+      TabManager.switchTo(${FG26});
+      const id = TabManager.createTabSilent('E2E-I26-SILENT', 'powershell.exe', 'local');
+      TabManager.render();
+      return id;
+    })()`);
+    const SIL26 = JSON.stringify(i26Silent);
+    const i26SilentPrompt = await waitForValue(cdp, `(() => {
+      const t = TabManager.tabs.find(x => x.id === ${SIL26});
+      if (!t || !t.term || !t.tabId) return false;
+      const b = t.term.buffer.active;
+      const l = (b.getLine(b.baseY + b.cursorY)?.translateToString(true) || '').trim();
+      return /PS .*>$/.test(l);
+    })()`, true, 20000);
+    const i26SilentState = await cdp.eval(`(() => {
+      const t = TabManager.tabs.find(x => x.id === ${SIL26});
+      const el = document.querySelector('.tab[data-tab="' + ${SIL26} + '"] .tab-icon');
+      return { activeId: TabManager.activeId, pendingVisit: t?._bgUnreadPendingVisit === true, unread: t?._bgUnread === true, cls: el?.className || '' };
+    })()`);
+    const i26SilentArmedSent = await cdp.eval(`(() => {
+      TabManager.switchTo(${SIL26});
+      const t = TabManager.tabs.find(x => x.id === ${SIL26});
+      const armedAfterVisit = t?._bgUnreadPendingVisit === false;
+      if (!t || !t.tabId) return { armedAfterVisit, sent: false, activeBack: false };
+      ipcRenderer.send('pty-input', { tabId: t.tabId, data: "Start-Sleep -Milliseconds 500; Write-Output 'I26-ARMED-OK'\\r" });
+      TabManager.switchTo(${FG26});
+      return { armedAfterVisit, sent: true, activeBack: TabManager.activeId === ${FG26} };
+    })()`);
+    const i26SilentMarked = await waitForValue(cdp, `(() => {
+      const t = TabManager.tabs.find(x => x.id === ${SIL26});
+      const el = document.querySelector('.tab[data-tab="' + ${SIL26} + '"] .tab-icon');
+      return (t && t._bgUnread === true && el && el.classList.contains('bg-unread')) ? el.className : '';
+    })()`, 'tab-icon bg-unread', 15000);
+    const i26SilentArmedSeen = await waitForValue(cdp, `(() => {
+      const t = TabManager.tabs.find(x => x.id === ${SIL26});
+      const b = t?.term?.buffer?.active;
+      if (!b) return false;
+      for (let y = b.length - 1; y >= Math.max(0, b.length - 40); y--) {
+        if ((b.getLine(y)?.translateToString(true) || '').includes('I26-ARMED-OK')) return true;
+      }
+      return false;
+    })()`, true, 15000);
+    check('issue26：后台恢复的未查看标签在初始横幅/提示符输出后保持绿灯，首次访问后再武装未读蓝灯',
+      i26SilentPrompt === true && i26SilentState.activeId === i26Fg
+        && i26SilentState.pendingVisit === true && i26SilentState.unread === false && i26SilentState.cls === 'tab-icon connected'
+        && i26SilentArmedSent.armedAfterVisit === true && i26SilentArmedSent.sent === true && i26SilentArmedSent.activeBack === true
+        && i26SilentMarked === 'tab-icon bg-unread' && i26SilentArmedSeen === true,
+      JSON.stringify({ prompt: i26SilentPrompt, silent: i26SilentState, visit: i26SilentArmedSent, marked: i26SilentMarked, seen: i26SilentArmedSeen }));
     // Tidy: restore the real render (section 14+ depends on it), close this
     // section's tabs so later sections see a clean strip.
     await cdp.eval(`(() => {
       if (window.__e2eI26) { TabManager.render = window.__e2eI26.origRender; delete window.__e2eI26; }
       delete window.__e2eI26SpEl;
-      [${SP26}, ${BG26}, ${FG26}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} });
+      [${SIL26}, ${SP26}, ${BG26}, ${FG26}].forEach(id => { try { TabManager.closeTab(id); } catch (e) {} });
       return true;
     })()`).catch(() => null);
     await sleep(600); // let the staggered tab removals settle before section 13.10

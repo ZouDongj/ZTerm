@@ -847,3 +847,327 @@ for (const [name, setup, update, expectedUnread, expectedLines] of [
         assert.equal(bg._bgUnread, expectedUnread);
     });
 }
+
+test('restored background SSH tabs stay green through connect and MOTD until first visit', async t => {
+    const ctx = loadVm();
+    outputFixture(ctx);
+    useHeadlessTerminalFactory(ctx);
+    ctx._sshConnectWithCredentials = () => {};
+
+    const firstId = ctx.TabManager.createTabSilent('SSH-1', '', 'ssh', { host: 'h1', port: 22, user: 'u' });
+    const bgId = ctx.TabManager.createTabSilent('SSH-2', '', 'ssh', { host: 'h2', port: 22, user: 'u' });
+    const first = ctx.TabManager.tabs.find(x => x.id === firstId);
+    const bg = ctx.TabManager.tabs.find(x => x.id === bgId);
+    assert.equal(first._bgUnreadPendingVisit, true, 'restored tabs start awaiting first visit');
+    assert.equal(bg._bgUnreadPendingVisit, true, 'background restored tab starts awaiting first visit');
+
+    ctx.TabManager.switchTo(firstId);
+    ctx.TabManager.render();
+    stageDots(ctx);
+    assert.equal(first._bgUnreadPendingVisit, false, 'activating the first restored tab clears its gate');
+    assert.equal(bg._bgUnreadPendingVisit, true, 'unvisited background tab keeps its gate');
+    assert.equal(dotOf(ctx, bgId).className, 'tab-icon disconnected', 'disconnected before connect');
+
+    const bgAttempt = ctx.sshAttempts.createAttempt(bg);
+    ctx.__emit('ssh-connecting', { tabId: 'ssh_bg_1', attemptId: bgAttempt });
+    stageDots(ctx);
+    assert.equal(bg._sshConnecting, true);
+    assert.equal(bg._bgUnreadPendingVisit, true);
+    assert.match(markupOf(ctx, bgId), /tab-icon connecting/, 'yellow spinner while connecting');
+
+    ctx.__emit('ssh-connected', { tabId: 'ssh_bg_1', attemptId: bgAttempt });
+    stageDots(ctx);
+    const term = bg.term;
+    t.after(() => term.dispose());
+    assert.equal(bg.connected, true);
+    assert.equal(bg._bgUnread, false);
+    assert.equal(bg._bgUnreadPendingVisit, true);
+    assert.match(markupOf(ctx, bgId), /tab-icon connected/, 'idle green once connected');
+
+    let reads = 0;
+    const buffer = term.buffer.active;
+    const origGetLine = buffer.getLine.bind(buffer);
+    buffer.getLine = idx => { reads++; return origGetLine(idx); };
+
+    ctx.__emit('pty-output', { tabId: 'ssh_bg_1', data: 'Last login: Mon Nov 23 10:00:00\r\nuser@h2:~$ ' });
+    await settled(term);
+    assert.equal(bg._bgUnread, false, 'initial MOTD and prompt do not trigger blue unread');
+    assert.equal(reads, 0, 'unvisited background tab skips unread buffer reads');
+    assert.match(markupOf(ctx, bgId), /tab-icon connected/, 'dot stays idle green after MOTD');
+
+    // Visiting the tab once arms unread notifications for subsequent background output.
+    ctx.TabManager.switchTo(bgId);
+    assert.equal(bg._bgUnreadPendingVisit, false, 'visiting arms the session');
+    ctx.TabManager.switchTo(firstId);
+    stageDots(ctx);
+
+    ctx.__emit('pty-output', { tabId: 'ssh_bg_1', data: 'build finished\r\n' });
+    await settled(term);
+    assert.equal(bg._bgUnread, true, 'output after first visit marks unread');
+    assert.equal(dotOf(ctx, bgId).className, 'tab-icon bg-unread', 'live dot flips to accent blue');
+});
+
+test('restored background local tab stays green through startup banner until visited', async t => {
+    const ctx = loadVm();
+    outputFixture(ctx);
+    useHeadlessTerminalFactory(ctx);
+
+    const firstId = ctx.TabManager.createTabSilent('Local-1', 'powershell.exe', 'local');
+    const bgId = ctx.TabManager.createTabSilent('Local-2', 'powershell.exe', 'local');
+    const bg = ctx.TabManager.tabs.find(x => x.id === bgId);
+    ctx.TabManager.switchTo(firstId);
+    ctx.TabManager.render();
+    stageDots(ctx);
+
+    ctx.__emit('pty-created', { tabId: 'local_bg_1', requestId: bgId });
+    const term = bg.term;
+    t.after(() => term.dispose());
+    assert.equal(bg._bgUnreadPendingVisit, true, 'background pty-created keeps pending-visit gate');
+
+    ctx.__emit('pty-output', { tabId: 'local_bg_1', data: 'Windows PowerShell\r\nPS C:\\> ' });
+    await settled(term);
+    assert.equal(bg._bgUnread, false, 'initial local shell banner stays green');
+    assert.equal(dotOf(ctx, bgId).className, 'tab-icon connected');
+
+    ctx.TabManager.switchTo(bgId);
+    ctx.TabManager.switchTo(firstId);
+    ctx.__emit('pty-output', { tabId: 'local_bg_1', data: 'real background output\r\n' });
+    await settled(term);
+    assert.equal(bg._bgUnread, true, 'background output marks unread after first visit');
+    assert.equal(dotOf(ctx, bgId).className, 'tab-icon bg-unread');
+});
+
+test('switching away before ssh-connected keeps initial MOTD green; active connect arms immediately', async t => {
+    const ctx = loadVm();
+    outputFixture(ctx);
+    useHeadlessTerminalFactory(ctx);
+
+    const other = wiredTab(ctx, 't_other', 'local_other', '');
+    const bgSsh = { id: 't_away', name: 'Away', type: 'ssh', host: 'h', port: 22, user: 'u', connected: false };
+    const fgSsh = { id: 't_stay', name: 'Stay', type: 'ssh', host: 'h', port: 22, user: 'u', connected: false };
+    ctx.TabManager.tabs.push(bgSsh, fgSsh);
+
+    // User opens bgSsh (active during connecting), then switches away before ssh-connected arrives.
+    ctx.TabManager.switchTo(bgSsh.id);
+    const awayAttempt = ctx.sshAttempts.createAttempt(bgSsh);
+    ctx.__emit('ssh-connecting', { tabId: 'ssh_away', attemptId: awayAttempt });
+    ctx.TabManager.switchTo(other.id);
+    ctx.__emit('ssh-connected', { tabId: 'ssh_away', attemptId: awayAttempt });
+    t.after(() => bgSsh.term?.dispose());
+    assert.equal(bgSsh._bgUnreadPendingVisit, true, 'connecting in background sets pending-visit gate');
+    ctx.__emit('pty-output', { tabId: 'ssh_away', data: 'Welcome to host\r\n$ ' });
+    await settled(bgSsh.term);
+    assert.equal(bgSsh._bgUnread, false, 'MOTD after switching away mid-handshake stays green');
+
+    // User stays on fgSsh when ssh-connected arrives, then switches away -> already armed.
+    ctx.TabManager.switchTo(fgSsh.id);
+    const stayAttempt = ctx.sshAttempts.createAttempt(fgSsh);
+    ctx.__emit('ssh-connecting', { tabId: 'ssh_stay', attemptId: stayAttempt });
+    ctx.__emit('ssh-connected', { tabId: 'ssh_stay', attemptId: stayAttempt });
+    t.after(() => fgSsh.term?.dispose());
+    assert.equal(fgSsh._bgUnreadPendingVisit, false, 'connecting while active arms immediately');
+    ctx.TabManager.switchTo(other.id);
+    ctx.__emit('pty-output', { tabId: 'ssh_stay', data: 'task done\r\n' });
+    await settled(fgSsh.term);
+    assert.equal(fgSsh._bgUnread, true, 'subsequent output marks unread without another visit');
+});
+
+test('background SSH reconnect resets unread and stays green through reconnect MOTD until visited', async t => {
+    const ctx = loadVm();
+    outputFixture(ctx);
+    useHeadlessTerminalFactory(ctx);
+
+    const active = wiredTab(ctx, 't_active', 'local_active', '');
+    const bg = wiredTab(ctx, 't_ssh', 'ssh_old', '', { type: 'ssh', host: 'h1', port: 22, user: 'u' });
+    installParser(bg);
+    t.after(() => bg.term?.dispose());
+    ctx.TabManager.activeId = active.id;
+    ctx.TabManager.render();
+    stageDots(ctx);
+
+    // Armed tab marks unread first, then disconnects and reconnects in the background.
+    ctx.__emit('pty-output', { tabId: 'ssh_old', data: 'old output\r\n' });
+    await settled(bg.term);
+    assert.equal(bg._bgUnread, true);
+
+    ctx.__emit('ssh-disconnected', { tabId: 'ssh_old' });
+    const attempt = ctx.sshAttempts.createAttempt(bg);
+    ctx.__emit('ssh-connecting', { tabId: 'ssh_new', attemptId: attempt });
+    assert.equal(bg._bgUnread, false, 'new generation clears stale unread marker');
+    assert.equal(bg._bgUnreadPendingVisit, true);
+
+    ctx.__emit('ssh-connected', { tabId: 'ssh_new', attemptId: attempt });
+    assert.equal(bg._bgUnread, false);
+    assert.equal(bg._bgUnreadPendingVisit, true);
+    assert.match(markupOf(ctx, bg.id), /tab-icon connected/, 'reconnected background tab shows green');
+
+    ctx.__emit('pty-output', { tabId: 'ssh_new', data: 'Last login: reconnected\r\n$ ' });
+    await settled(bg.term);
+    assert.equal(bg._bgUnread, false, 'reconnect MOTD stays green');
+
+    ctx.TabManager.switchTo(bg.id);
+    ctx.TabManager.switchTo(active.id);
+    ctx.__emit('pty-output', { tabId: 'ssh_new', data: 'post-visit output\r\n' });
+    await settled(bg.term);
+    assert.equal(bg._bgUnread, true, 'armed again after visiting the reconnected tab');
+});
+
+test('split tab tracks pending-visit per pane without muting armed siblings or dropping sibling unread', async t => {
+    const ctx = loadVm();
+    outputFixture(ctx);
+    useHeadlessTerminalFactory(ctx);
+
+    const active = wiredTab(ctx, 't_active', 'local_active', '');
+    const { tab, p1, p2 } = wiredSplitTab(ctx, 't_sp', 'ssh_p1', '', 'ssh_p2', '');
+    p1.type = 'ssh';
+    p2.type = 'ssh';
+    p2._sshHost = 'h2';
+    installParser(p1);
+    installParser(p2);
+    t.after(() => { p1.term?.dispose(); p2.term?.dispose(); });
+    ctx.TabManager.activeId = active.id;
+    ctx.TabManager.render();
+    stageDots(ctx);
+
+    // p2 reconnects in the background while p1 stays live and armed.
+    const attempt = ctx.sshAttempts.createAttempt(p2);
+    ctx.__emit('ssh-connecting', { tabId: 'ssh_p2_new', attemptId: attempt });
+    ctx.__emit('ssh-connected', { tabId: 'ssh_p2_new', attemptId: attempt });
+    assert.equal(p2._bgUnreadPendingVisit, true);
+    assert.ok(!p1._bgUnreadPendingVisit);
+
+    // p2's reconnect MOTD stays silent.
+    ctx.__emit('pty-output', { tabId: 'ssh_p2_new', data: 'Last login on p2\r\n$ ' });
+    await settled(p2.term);
+    assert.equal(p2._bgUnread, false);
+    assert.equal(tab._bgUnread, false);
+
+    // Armed sibling p1 still triggers unread for the split tab.
+    ctx.__emit('pty-output', { tabId: 'ssh_p1', data: 'p1 finished\r\n' });
+    await settled(p1.term);
+    assert.equal(p1._bgUnread, true);
+    assert.equal(tab._bgUnread, true);
+
+    // Another background reconnect on p2 preserves p1's unread marker on the split tab.
+    const attempt2 = ctx.sshAttempts.createAttempt(p2);
+    ctx.__emit('ssh-connecting', { tabId: 'ssh_p2_new2', attemptId: attempt2 });
+    ctx.__emit('ssh-connected', { tabId: 'ssh_p2_new2', attemptId: attempt2 });
+    assert.equal(p1._bgUnread, true);
+    assert.equal(tab._bgUnread, true, 'reconnecting p2 must not wipe armed sibling p1 unread');
+
+    // Visiting the split tab clears unread and arms all panes.
+    ctx.TabManager.switchTo(tab.id);
+    assert.equal(p1._bgUnread, false);
+    assert.equal(p2._bgUnreadPendingVisit, false);
+    assert.equal(tab._bgUnread, false);
+});
+
+test('restored split tab keeps all panes muted until visited, and collapse preserves pending-visit', async t => {
+    const ctx = loadVm();
+    outputFixture(ctx);
+    vm.runInContext(source('tab-serialize.js'), ctx);
+    useHeadlessTerminalFactory(ctx);
+    ctx._sshConnectWithCredentials = () => {};
+
+    const active = wiredTab(ctx, 't_active', 'local_active', '');
+    ctx.TabManager.activeId = active.id;
+
+    const restored = ctx.TabManager._restoreSplitTab({
+        name: 'Split-SSH',
+        type: 'ssh',
+        host: 'h1',
+        splitRoot: {
+            orientation: 'h',
+            ratios: [0.5, 0.5],
+            children: [
+                { paneType: 'ssh', name: 'p1', sshHost: 'h1', sshPort: 22, sshUser: 'u' },
+                { paneType: 'ssh', name: 'p2', sshHost: 'h2', sshPort: 22, sshUser: 'u' },
+            ],
+        },
+    });
+    const [p1, p2] = ctx.getAllPanes(restored);
+    assert.equal(p1.type, 'ssh');
+    assert.equal(p2.type, 'ssh');
+    assert.equal(p1._bgUnreadPendingVisit, true);
+    assert.equal(p2._bgUnreadPendingVisit, true);
+
+    // Collapsing p1 out (e.g., closing p1 while tab is still unvisited) keeps p2's pending-visit gate on the collapsed tab.
+    p2.tabId = 'ssh_p2_live';
+    installParser(p2);
+    p2.term._core.element = ctx.document.createElement('div');
+    t.after(() => p2.term?.dispose());
+    restored.splitRoot.children = [p2];
+    restored.splitRoot.ratios = [1];
+    ctx.TabManager._exitSplit(restored);
+    assert.equal(restored._bgUnreadPendingVisit, true, 'surviving unvisited pane carries its gate onto the collapsed tab');
+
+    ctx.__emit('pty-output', { tabId: 'ssh_p2_live', data: 'delayed MOTD\r\n$ ' });
+    await settled(restored.term);
+    assert.equal(restored._bgUnread, false, 'collapsed unvisited tab stays green through delayed MOTD');
+});
+
+test('dragging an unvisited background tab into the active tab immediately arms the visible dropped pane', async t => {
+    const ctx = loadVm();
+    outputFixture(ctx);
+    useHeadlessTerminalFactory(ctx);
+
+    const active = wiredTab(ctx, 't_active', 'local_active', '');
+    const bg = wiredTab(ctx, 't_bg', 'ssh_bg', '', { type: 'ssh', host: 'h2', port: 22, user: 'u' });
+    bg._bgUnreadPendingVisit = true;
+    installParser(active);
+    installParser(bg);
+    active.term._core.element = ctx.document.createElement('div');
+    bg.term._core.element = ctx.document.createElement('div');
+    t.after(() => { active.term?.dispose(); bg.term?.dispose(); });
+
+    const other = wiredTab(ctx, 't_other', 'local_other', '');
+    ctx.TabManager.activeId = active.id;
+    ctx.TabManager.render();
+    stageDots(ctx);
+
+    // Drag unvisited bg directly onto the already-active tab (no switchTo fires).
+    ctx.TabManager._moveTerminalToTab(bg.id, active.id, 'r');
+    const panes = ctx.getAllPanes(active);
+    const dropped = panes.find(p => p.tabId === 'ssh_bg');
+    assert.ok(dropped, 'dropped pane is mounted in the active split');
+    assert.equal(dropped._bgUnreadPendingVisit, false, 'dropping into the active visible tab clears pending-visit immediately');
+
+    // Leaving the split tab and receiving output on the dropped pane marks unread immediately.
+    ctx.TabManager.switchTo(other.id);
+    stageDots(ctx);
+    ctx.__emit('pty-output', { tabId: 'ssh_bg', data: 'dropped pane output\r\n' });
+    await settled(dropped.term);
+    assert.equal(dropped._bgUnread, true);
+    assert.equal(active._bgUnread, true, 'output on the dropped pane marks the split tab unread');
+});
+
+test('buffered ptyBuffers replay stays muted while pending-visit is active, and reconnectTab clears stale unread immediately', async t => {
+    const ctx = loadVm();
+    outputFixture(ctx);
+    useHeadlessTerminalFactory(ctx);
+    ctx._sshConnectWithCredentials = () => {};
+
+    const active = wiredTab(ctx, 't_active', 'local_active', '');
+    const bg = { id: 't_buf', name: 'BufSSH', type: 'ssh', host: 'h', port: 22, user: 'u',
+        connected: true, tabId: 'ssh_buf', term: null, _bgUnreadPendingVisit: true };
+    ctx.TabManager.tabs.push(bg);
+    ctx.TabManager.activeId = active.id;
+
+    // Early bytes arrive before wireTerminal mounts the terminal.
+    ctx.__emit('pty-output', { tabId: 'ssh_buf', data: 'Last login buffered\r\n$ ' });
+    ctx.wireTerminal(bg, 'ssh_buf');
+    t.after(() => bg.term?.dispose());
+    await settled(bg.term);
+    assert.equal(bg._bgUnread, undefined, 'buffered MOTD replay stays muted while unvisited');
+
+    // Once visited and marked unread, calling reconnectTab in the background clears _bgUnread immediately.
+    ctx.TabManager.switchTo(bg.id);
+    ctx.TabManager.switchTo(active.id);
+    ctx.__emit('pty-output', { tabId: 'ssh_buf', data: 'armed output\r\n' });
+    await settled(bg.term);
+    assert.equal(bg._bgUnread, true);
+
+    ctx.TabManager.reconnectTab(bg.id);
+    assert.equal(bg._bgUnread, false, 'reconnectTab clears stale unread before handshake');
+    assert.equal(bg._bgUnreadPendingVisit, true, 'background reconnectTab arms pending-visit gate');
+});
