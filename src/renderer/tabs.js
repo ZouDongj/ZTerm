@@ -1144,8 +1144,14 @@ const TabManager = {
         let unread = tab.splitRoot
             ? getAllPanes(tab).some(p => p._bgUnread === true)
             : tab._bgUnread === true;
-        if (tab.id === this.activeId && unread) {
-            if (tab.splitRoot) getAllPanes(tab).forEach(p => { p._bgUnread = false; });
+        if (tab.id === this.activeId) {
+            if (tab.splitRoot) {
+                getAllPanes(tab).forEach(p => {
+                    p._bgUnread = false;
+                    p._bgUnreadPendingVisit = false;
+                });
+            }
+            tab._bgUnreadPendingVisit = false;
             unread = false;
         }
         tab._bgUnread = unread;

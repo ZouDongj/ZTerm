@@ -7206,7 +7206,7 @@ async function main() {
       return id;
     })()`);
     const SIL26 = JSON.stringify(i26Silent);
-    await waitForValue(cdp, `(() => {
+    const i26SilentPrompt = await waitForValue(cdp, `(() => {
       const t = TabManager.tabs.find(x => x.id === ${SIL26});
       if (!t || !t.term || !t.tabId) return false;
       const b = t.term.buffer.active;
@@ -7222,20 +7222,31 @@ async function main() {
       TabManager.switchTo(${SIL26});
       const t = TabManager.tabs.find(x => x.id === ${SIL26});
       const armedAfterVisit = t?._bgUnreadPendingVisit === false;
+      if (!t || !t.tabId) return { armedAfterVisit, sent: false, activeBack: false };
       ipcRenderer.send('pty-input', { tabId: t.tabId, data: "Start-Sleep -Milliseconds 500; Write-Output 'I26-ARMED-OK'\\r" });
       TabManager.switchTo(${FG26});
-      return { armedAfterVisit, activeBack: TabManager.activeId === ${FG26} };
+      return { armedAfterVisit, sent: true, activeBack: TabManager.activeId === ${FG26} };
     })()`);
     const i26SilentMarked = await waitForValue(cdp, `(() => {
       const t = TabManager.tabs.find(x => x.id === ${SIL26});
       const el = document.querySelector('.tab[data-tab="' + ${SIL26} + '"] .tab-icon');
       return (t && t._bgUnread === true && el && el.classList.contains('bg-unread')) ? el.className : '';
     })()`, 'tab-icon bg-unread', 15000);
+    const i26SilentArmedSeen = await waitForValue(cdp, `(() => {
+      const t = TabManager.tabs.find(x => x.id === ${SIL26});
+      const b = t?.term?.buffer?.active;
+      if (!b) return false;
+      for (let y = b.length - 1; y >= Math.max(0, b.length - 40); y--) {
+        if ((b.getLine(y)?.translateToString(true) || '').includes('I26-ARMED-OK')) return true;
+      }
+      return false;
+    })()`, true, 15000);
     check('issue26：后台恢复的未查看标签在初始横幅/提示符输出后保持绿灯，首次访问后再武装未读蓝灯',
-      i26SilentState.pendingVisit === true && i26SilentState.unread === false && i26SilentState.cls === 'tab-icon connected'
-        && i26SilentArmedSent.armedAfterVisit === true && i26SilentArmedSent.activeBack === true
-        && i26SilentMarked === 'tab-icon bg-unread',
-      JSON.stringify({ silent: i26SilentState, visit: i26SilentArmedSent, marked: i26SilentMarked }));
+      i26SilentPrompt === true && i26SilentState.activeId === i26Fg
+        && i26SilentState.pendingVisit === true && i26SilentState.unread === false && i26SilentState.cls === 'tab-icon connected'
+        && i26SilentArmedSent.armedAfterVisit === true && i26SilentArmedSent.sent === true && i26SilentArmedSent.activeBack === true
+        && i26SilentMarked === 'tab-icon bg-unread' && i26SilentArmedSeen === true,
+      JSON.stringify({ prompt: i26SilentPrompt, silent: i26SilentState, visit: i26SilentArmedSent, marked: i26SilentMarked, seen: i26SilentArmedSeen }));
     // Tidy: restore the real render (section 14+ depends on it), close this
     // section's tabs so later sections see a clean strip.
     await cdp.eval(`(() => {
