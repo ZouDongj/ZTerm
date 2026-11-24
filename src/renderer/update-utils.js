@@ -46,6 +46,54 @@ function updateReleasePageUrl(url) {
     return parsed.href;
 }
 
+// True when a version or tag string carries a SemVer pre-release suffix
+// (e.g. "1.2.5-dev.4", "v1.2.5-rc.1+build.2"). Build metadata after "+" is
+// stripped first so "+build-1" is not mistaken for a pre-release suffix.
+function isPrereleaseVersion(version) {
+    if (typeof version !== 'string') return false;
+    const trimmed = version.trim();
+    if (!trimmed) return false;
+    const withoutBuild = trimmed.split('+')[0];
+    return /^v?\d+(?:\.\d+){0,2}-[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*$/i.test(withoutBuild);
+}
+
+// True when a check-update payload represents a pre-release build.
+function isUpdatePrerelease(result) {
+    if (!result || typeof result !== 'object') return false;
+    if (result.isPrerelease === true) return true;
+    return isPrereleaseVersion(result.latest) || isPrereleaseVersion(result.tag);
+}
+
+// Display label for a version or release tag: prefixes pre-releases with the
+// dev-build label while keeping stable releases unchanged.
+function formatUpdateTagLabel(tag, isPrerelease) {
+    const clean = typeof tag === 'string' ? tag.trim() : '';
+    const pre = isPrerelease === true || isPrereleaseVersion(clean);
+    if (!clean) return pre ? '开发版' : '';
+    return pre ? `开发版 ${clean}` : clean;
+}
+
+// Status description shown when a newer release is discovered.
+function formatUpdateFoundDesc(result) {
+    const latest = result && result.latest != null ? String(result.latest) : '';
+    const current = result && result.current != null ? String(result.current) : '';
+    const label = formatUpdateTagLabel(latest, isUpdatePrerelease(result));
+    return `发现新版本 ${label}（当前 ${current}）`;
+}
+
+// Download button text for a discovered release.
+function formatUpdateDownloadButton(result) {
+    return isUpdatePrerelease(result) ? '下载开发版' : '下载更新';
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { countUpdateBlockers, updateReleasePageUrl };
+    module.exports = {
+        countUpdateBlockers,
+        updateReleasePageUrl,
+        isPrereleaseVersion,
+        isUpdatePrerelease,
+        formatUpdateTagLabel,
+        formatUpdateFoundDesc,
+        formatUpdateDownloadButton,
+    };
 }
