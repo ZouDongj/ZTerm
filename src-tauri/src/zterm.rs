@@ -2892,12 +2892,13 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
         // own ZDOTDIR) and prevents child processes (tmux, screen, etc.) from
         // inheriting /tmp.
         //
-        // Register _zt_cwd and COLORTERM under an interactive guard before
-        // forwarding ~/.zshenv so user startup files (and any custom ZDOTDIR
-        // they configure) already see them. Known limitation: if the user's
-        // ~/.zshrc overwrites precmd_functions=(...) wholesale instead of
-        // appending via precmd_functions+=(...) or add-zsh-hook, _zt_cwd will
-        // be cleared.
+        // Register _zt_cwd on both precmd_functions and chpwd_functions (plus
+        // COLORTERM) under an interactive guard before forwarding ~/.zshenv so
+        // user startup files (and any custom ZDOTDIR they configure) already see
+        // them. Also registering on chpwd_functions keeps directory tracking
+        // working across `cd` even if ~/.zshrc overwrites precmd_functions=(...)
+        // wholesale; normal shells emit one extra OSC 7 per `cd`, which the
+        // Rust OSC 7 parser deduplicates by value.
         let zshenv = format!(
             concat!(
                 "[ \"$ZDOTDIR\" = \"{dir}\" ] && unset ZDOTDIR\n",
@@ -2906,6 +2907,7 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
                 "if [[ -o interactive ]]; then\n",
                 "  _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"${{PWD//\\%/%25}}\"; }}\n",
                 "  precmd_functions+=(_zt_cwd)\n",
+                "  chpwd_functions+=(_zt_cwd)\n",
                 "  export COLORTERM=truecolor\n",
                 "fi\n",
                 "[ -f ~/.zshenv ] && . ~/.zshenv\n",
@@ -13242,6 +13244,9 @@ mod tests {
         let hook_pos = text
             .find("precmd_functions+=(_zt_cwd)\n")
             .expect("precmd_functions registration");
+        let chpwd_pos = text
+            .find("chpwd_functions+=(_zt_cwd)\n")
+            .expect("chpwd_functions registration");
         let colorterm_pos = text
             .find("export COLORTERM=truecolor\n")
             .expect("COLORTERM export");
@@ -13265,7 +13270,14 @@ mod tests {
             def_pos < hook_pos,
             "_zt_cwd defined before precmd_functions+=: {text}"
         );
-        assert!(hook_pos < colorterm_pos, "hook before COLORTERM: {text}");
+        assert!(
+            hook_pos < chpwd_pos,
+            "precmd_functions+= before chpwd_functions+=: {text}"
+        );
+        assert!(
+            chpwd_pos < colorterm_pos,
+            "chpwd_functions+= before COLORTERM: {text}"
+        );
         assert!(
             colorterm_pos < fi_pos,
             "COLORTERM inside interactive guard: {text}"
