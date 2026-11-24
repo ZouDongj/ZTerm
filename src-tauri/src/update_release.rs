@@ -143,8 +143,9 @@ pub struct SetupAsset {
 /// API was rate-limited and the HTML fallback also failed to provide an
 /// asset; `rejected` is set when the release is explicitly refused by channel
 /// policy (draft on any channel, or pre-release on the stable channel);
-/// `not_found` is set when the release tag API returned HTTP 404 (plain git
-/// tag or anonymous draft), skipping the `expanded_assets` HTML fallback;
+/// `not_found` is set on the pre-release channel when the release tag API
+/// returned HTTP 404 (plain git tag or anonymous draft), skipping the
+/// `expanded_assets` HTML fallback;
 /// `error` preserves transport or HTTP failures (or channel rejection detail)
 /// when neither source returned a usable 200 response.
 #[derive(Debug, Clone, Default)]
@@ -1161,10 +1162,11 @@ pub fn resolve_release_asset(http: &dyn ReleaseHttp, tag: &str) -> AssetResoluti
 
 /// Fetch the installer metadata for `tag` under `channel`'s policy. Drafts are
 /// rejected on every channel; pre-releases are rejected on `Stable` and allowed
-/// on `Prerelease`. An API HTTP 404 (plain git tag or anonymous draft) stops
-/// immediately with `not_found: true` instead of falling back to
-/// `expanded_assets` HTML. Other API failures fall back to `expanded_assets`
-/// HTML (with mandatory SHA-256 verification).
+/// on `Prerelease`. On `Prerelease`, an API HTTP 404 (plain git tag or
+/// anonymous draft) stops immediately with `not_found: true` instead of falling
+/// back to `expanded_assets` HTML; `Stable` preserves the baseline fallback to
+/// `expanded_assets` HTML (with mandatory SHA-256 verification) because stable
+/// tags come from `/releases/latest`.
 pub fn resolve_release_asset_for_channel(
     http: &dyn ReleaseHttp,
     tag: &str,
@@ -1222,10 +1224,13 @@ pub fn resolve_release_asset_for_channel(
                 ApiAsset::InvalidResponse => {}
             }
         }
-        Ok(response) if response.status == 404 => {
-            // Anonymous GitHub API returns 404 for both plain git tags and
-            // draft releases, whereas `expanded_assets/{tag}` returns 200 with
-            // source archives for plain git tags. Stop immediately here.
+        Ok(response) if response.status == 404 && channel == UpdateChannel::Prerelease => {
+            // On the pre-release channel, anonymous GitHub API returns 404 for
+            // both plain git tags and draft releases, whereas
+            // `expanded_assets/{tag}` returns 200 with source archives for
+            // plain git tags. Stop immediately here. Stable tags come from
+            // `/releases/latest` (already a published release), so the stable
+            // channel keeps its baseline fallback to `expanded_assets`.
             return AssetResolution {
                 asset: None,
                 limited: None,
@@ -3082,8 +3087,33 @@ mod tests {
         assert_eq!(
             not_found_http.calls().len(),
             1,
-            "API 404 must stop before expanded_assets fallback"
+            "API 404 must stop before expanded_assets fallback on prerelease channel"
         );
+
+        // Stable channel preserves the baseline expanded_assets fallback on API 404.
+        let stable_404_http = FakeHttp::new();
+        stable_404_http.on_get(
+            "https://api.github.com/repos/ZouDongj/ZTerm/releases/tags/v1.2.4",
+            FakeReply::response(404, r#"{"message":"Not Found"}"#),
+        );
+        stable_404_http.on_get(
+            "https://github.com/ZouDongj/ZTerm/releases/expanded_assets/v1.2.4",
+            FakeReply::response(
+                200,
+                &format!(
+                    r#"<li><a href="/ZouDongj/ZTerm/releases/download/v1.2.4/ZTerm_1.2.4_x64-setup.exe">x</a>sha256:{sha}</li>"#
+                ),
+            ),
+        );
+        let stable_res =
+            resolve_release_asset_for_channel(&stable_404_http, "v1.2.4", UpdateChannel::Stable);
+        let stable_asset = stable_res
+            .asset
+            .expect("stable channel keeps expanded_assets fallback on API 404");
+        assert_eq!(stable_asset.name, "ZTerm_1.2.4_x64-setup.exe");
+        assert_eq!(stable_asset.sha256, sha);
+        assert!(!stable_res.not_found);
+        assert_eq!(stable_404_http.calls().len(), 2);
 
         // Rejects draft:true on prerelease channel without falling back to HTML.
         let draft_http = FakeHttp::new();
