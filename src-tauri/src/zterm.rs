@@ -2836,8 +2836,8 @@ async fn detect_shell(sftp: &russh_sftp::client::SftpSession, username: &str) ->
 /// symlinked or replaced by another local user. Using a two-level directory
 /// `/tmp/.zterm-<stamp>/w` ensures the outer directory is locked to 0700
 /// before the inner `ZDOTDIR` / rc directory is created, eliminating the 1-RTT
-/// `umask 002/000` window where another local user could plant `.zwc` or
-/// `.zlogout` files inside `ZDOTDIR`.
+/// `umask 002/000` window where another local user could plant `.zshenv.zwc`
+/// or sibling startup files inside `ZDOTDIR`.
 fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>, String)> {
     if stamp.is_empty()
         || !stamp
@@ -2852,79 +2852,71 @@ fn cwd_wrapper_files(shell: &str, stamp: &str) -> Option<(Vec<(String, Vec<u8>)>
         let rc_path = format!("{}/rc", dir);
         // bash --rcfile starts a NON-login interactive shell: it reads neither
         // /etc/profile (RHEL/CentOS keep their PATH setup in /etc/profile.d/*.sh,
-        // sourced from there) nor ~/.bashrc. Source /etc/profile first, then the
-        // first existing user login profile, with ~/.bashrc as the final fallback
-        // (when no login profile exists, the || chain would otherwise fail as a
-        // whole and leave even ~/.bashrc unread).
+        // sourced from there) nor the user's login profile / ~/.bashrc. Source
+        // /etc/profile first, then use if/elif to source only the first existing
+        // user login profile (matching bash login semantics: a non-zero exit
+        // status from ~/.bash_profile must not fall through to ~/.bash_login or
+        // ~/.profile), with ~/.bashrc as the final fallback when no login
+        // profile exists.
         let rc = format!(
-            "[ -f /etc/profile ] && . /etc/profile\n\
-             {{ [ -f ~/.bash_profile ] && . ~/.bash_profile; }} || {{ [ -f ~/.bash_login ] && . ~/.bash_login; }} || {{ [ -f ~/.profile ] && . ~/.profile; }} || {{ [ -f ~/.bashrc ] && . ~/.bashrc; }}\n\
-             _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"${{PWD//\\%/%25}}\"; }}\n\
-             PROMPT_COMMAND=\"_zt_cwd;${{PROMPT_COMMAND}}\"\n\
-             export COLORTERM=truecolor\n\
-             rm -f {}\n\
-             rmdir {} {} 2>/dev/null || :\n",
-            rc_path, dir, outer
+            concat!(
+                "[ -f /etc/profile ] && . /etc/profile\n",
+                "if [ -f ~/.bash_profile ]; then . ~/.bash_profile\n",
+                "elif [ -f ~/.bash_login ]; then . ~/.bash_login\n",
+                "elif [ -f ~/.profile ]; then . ~/.profile\n",
+                "elif [ -f ~/.bashrc ]; then . ~/.bashrc\n",
+                "fi\n",
+                "_zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"${{PWD//\\%/%25}}\"; }}\n",
+                "PROMPT_COMMAND=\"_zt_cwd;${{PROMPT_COMMAND}}\"\n",
+                "export COLORTERM=truecolor\n",
+                "rm -f {rc_path}\n",
+                "rmdir {dir} {outer} 2>/dev/null || :\n",
+            ),
+            rc_path = rc_path,
+            dir = dir,
+            outer = outer,
         );
         Some((
             vec![(rc_path.clone(), rc.into_bytes())],
             format!("exec bash --rcfile {} -i", rc_path),
         ))
     } else if shell.ends_with("/zsh") {
-        // ZDOTDIR redirects EVERY zsh startup file, so the wrapper set must
-        // forward all four in read order — .zshenv (always read first: nvm/
-        // pyenv/cargo/homebrew PATH setup commonly lives there) and .zlogin
-        // (read last for login shells) too, or they are silently skipped.
-        // Systems whose /etc/zshrc derives HISTFILE from ZDOTDIR (macOS:
-        // HISTFILE=$ZDOTDIR/.zsh_history) would point history into the temp
-        // dir, and the cleanup below would delete the whole session's history.
-        // After the user's own .zshrc has run: an HISTFILE still sitting
-        // inside the temp dir is the system-derived one and is redirected to
-        // the real home; one the user set elsewhere is left alone, and an
-        // unset HISTFILE stays unset (a user who disabled history keeps it
-        // disabled — nothing is lost by not saving).
-        let zshrc = format!(
-            "[ -f ~/.zshrc ] && . ~/.zshrc\n\
-             _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"${{PWD//\\%/%25}}\"; }}\n\
-             precmd_functions+=(_zt_cwd)\n\
-             export COLORTERM=truecolor\n\
-             if [ -n \"$HISTFILE\" ] && [ \"${{HISTFILE#{dir}/}}\" != \"$HISTFILE\" ]; then export HISTFILE=\"$HOME/.zsh_history\"; fi\n"
-        );
-        // Unexport ZDOTDIR immediately before forwarding ~/.zshenv so child
-        // processes or daemons started during startup (e.g. tmux, screen,
-        // emacs --daemon) never inherit the temporary /tmp path, while zsh
-        // itself still reads the unexported shell parameter to source our
-        // wrapper .zprofile, .zshrc, and .zlogin. Redirecting stdout/stderr
-        // suppresses output under default NO_TYPESET_SILENT.
+        // Single-file .zshenv bootstrap: unset ZDOTDIR and remove the temporary
+        // wrapper immediately before any user startup file runs. Leaving
+        // ZDOTDIR pointed at /tmp across .zprofile/.zshrc/.zlogin breaks users
+        // who set a custom ZDOTDIR in ~/.zshenv, causes compinit to write
+        // .zcompdump into /tmp (failing rmdir and leaking the directory), and
+        // makes macOS /etc/zshrc or frameworks like prezto/zim derive HISTFILE
+        // inside /tmp. Unsetting ZDOTDIR up front lets zsh natively read
+        // .zprofile, .zshrc, .zlogin, and .zlogout from $HOME (or the user's
+        // own ZDOTDIR) and prevents child processes (tmux, screen, etc.) from
+        // inheriting /tmp.
+        //
+        // Register _zt_cwd on both precmd_functions and chpwd_functions (plus
+        // COLORTERM) under an interactive guard before forwarding ~/.zshenv so
+        // user startup files (and any custom ZDOTDIR they configure) already see
+        // them. Also registering on chpwd_functions keeps directory tracking
+        // working across `cd` even if ~/.zshrc overwrites precmd_functions=(...)
+        // wholesale; normal shells emit one extra OSC 7 per `cd`, which the
+        // Rust OSC 7 parser deduplicates by value.
         let zshenv = format!(
-            "[ \"$ZDOTDIR\" = \"{dir}\" ] && typeset +x ZDOTDIR >/dev/null 2>&1\n\
-             [ -f ~/.zshenv ] && . ~/.zshenv\n"
-        );
-        // The temp dir is removed by .zlogin, the LAST file zsh reads: removing
-        // it in .zshrc would delete .zlogin before zsh gets to it. Unset the
-        // remaining unexported ZDOTDIR parameter whenever it still points at
-        // our temporary wrapper directory (preserving any custom ZDOTDIR set in
-        // the user's own startup files) so logout (.zlogout) never looks in a
-        // removed /tmp path that another local user could recreate. Cleanup
-        // removes exactly the four wrapper files by path and only removes the
-        // inner and outer directories when empty, sparing any history file that
-        // still landed inside the temp dir.
-        let zlogin = format!(
-            "[ \"$ZDOTDIR\" = \"{dir}\" ] && unset ZDOTDIR\n\
-             [ -f ~/.zlogin ] && . ~/.zlogin\n\
-             rm -f {dir}/.zshenv {dir}/.zprofile {dir}/.zshrc {dir}/.zlogin\n\
-             rmdir {dir} {outer} 2>/dev/null || :\n"
+            concat!(
+                "[ \"$ZDOTDIR\" = \"{dir}\" ] && unset ZDOTDIR\n",
+                "rm -f {dir}/.zshenv\n",
+                "rmdir {dir} {outer} 2>/dev/null || :\n",
+                "if [[ -o interactive ]]; then\n",
+                "  _zt_cwd() {{ printf '\\033]7;file://%s%s\\033\\\\' \"$HOSTNAME\" \"${{PWD//\\%/%25}}\"; }}\n",
+                "  precmd_functions+=(_zt_cwd)\n",
+                "  chpwd_functions+=(_zt_cwd)\n",
+                "  export COLORTERM=truecolor\n",
+                "fi\n",
+                "[ -f ~/.zshenv ] && . ~/.zshenv\n",
+            ),
+            dir = dir,
+            outer = outer,
         );
         Some((
-            vec![
-                (format!("{}/.zshenv", dir), zshenv.into_bytes()),
-                (
-                    format!("{}/.zprofile", dir),
-                    b"[ -f ~/.zprofile ] && . ~/.zprofile\n".to_vec(),
-                ),
-                (format!("{}/.zshrc", dir), zshrc.into_bytes()),
-                (format!("{}/.zlogin", dir), zlogin.into_bytes()),
-            ],
+            vec![(format!("{}/.zshenv", dir), zshenv.into_bytes())],
             format!("exec env ZDOTDIR={} zsh -il", dir),
         ))
     } else {
@@ -13027,11 +13019,12 @@ mod tests {
         );
 
         let (files, _) = cwd_wrapper_files("/bin/zsh", "t").expect("zsh wrapper");
-        let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
-        let text = String::from_utf8_lossy(&zshrc.1);
+        assert_eq!(files.len(), 1);
+        let zshenv = files.iter().find(|(p, _)| p.ends_with("/.zshenv")).unwrap();
+        let text = String::from_utf8_lossy(&zshenv.1);
         assert!(
             text.contains("\"${PWD//\\%/%25}\""),
-            "zsh .zshrc must escape %: {text}"
+            "zsh .zshenv must escape %: {text}"
         );
     }
 
@@ -13206,74 +13199,148 @@ mod tests {
     }
 
     #[test]
-    fn zsh_wrapper_forwards_the_full_startup_file_set() {
-        // ZDOTDIR redirects every zsh startup file: the wrapper must forward
-        // all four in read order, or the redirected ones (e.g. .zshenv with the
-        // user's nvm/pyenv/cargo PATH) are silently skipped.
+    fn zsh_wrapper_uses_single_file_zshenv_bootstrap() {
+        // Zsh deploys only a single .zshenv file. It immediately unsets
+        // ZDOTDIR and removes the temporary wrapper before any user startup
+        // file runs, then registers _zt_cwd and COLORTERM under an interactive
+        // guard and forwards ~/.zshenv so zsh reads .zprofile/.zshrc/.zlogin/
+        // .zlogout natively from $HOME or the user's own ZDOTDIR.
         let (files, exec) = cwd_wrapper_files("/bin/zsh", "t").expect("zsh wrapper");
-        assert!(exec.contains("zsh -il"));
+        assert_eq!(exec, "exec env ZDOTDIR=/tmp/.zterm-t/w zsh -il");
         let names: Vec<&str> = files
             .iter()
             .map(|(p, _)| p.rsplit('/').next().unwrap())
             .collect();
-        assert_eq!(names, [".zshenv", ".zprofile", ".zshrc", ".zlogin"]);
-        for (path, content) in &files {
-            let name = path.rsplit('/').next().unwrap();
-            let text = String::from_utf8_lossy(content);
+        assert_eq!(names, [".zshenv"]);
+        let text = String::from_utf8_lossy(&files[0].1);
+        assert!(
+            !text.contains("rm -rf"),
+            "recursive delete must be gone: {text}"
+        );
+        assert!(
+            !text.contains("typeset +x"),
+            "must unset ZDOTDIR rather than only unexporting it: {text}"
+        );
+        for forbidden in [".zprofile", ".zshrc", ".zlogin"] {
             assert!(
-                text.contains(&format!("~/{name}")),
-                "{name} must forward to the real ~/{name}: {text}"
+                !text.contains(forbidden),
+                "single-file bootstrap must not reference {forbidden}: {text}"
             );
         }
-        // The temp dir is removed by the LAST file zsh reads (.zlogin) —
-        // removing it in .zshrc would delete .zlogin before zsh gets to it.
-        let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
-        assert!(!String::from_utf8_lossy(&zshrc.1).contains("rm -rf"));
-        let zlogin = files.iter().find(|(p, _)| p.ends_with("/.zlogin")).unwrap();
-        assert!(String::from_utf8_lossy(&zlogin.1).contains("rmdir"));
+
+        let unset_pos = text
+            .find("[ \"$ZDOTDIR\" = \"/tmp/.zterm-t/w\" ] && unset ZDOTDIR\n")
+            .expect("unset ZDOTDIR line");
+        let rm_pos = text
+            .find("rm -f /tmp/.zterm-t/w/.zshenv\n")
+            .expect("rm -f .zshenv line");
+        let rmdir_pos = text
+            .find("rmdir /tmp/.zterm-t/w /tmp/.zterm-t 2>/dev/null || :\n")
+            .expect("rmdir line");
+        let interactive_pos = text
+            .find("if [[ -o interactive ]]; then\n")
+            .expect("interactive guard");
+        let def_pos = text.find("_zt_cwd() {").expect("_zt_cwd definition");
+        let hook_pos = text
+            .find("precmd_functions+=(_zt_cwd)\n")
+            .expect("precmd_functions registration");
+        let chpwd_pos = text
+            .find("chpwd_functions+=(_zt_cwd)\n")
+            .expect("chpwd_functions registration");
+        let colorterm_pos = text
+            .find("export COLORTERM=truecolor\n")
+            .expect("COLORTERM export");
+        let fi_pos = text.find("\nfi\n").expect("closing fi");
+        let user_zshenv_pos = text
+            .find("[ -f ~/.zshenv ] && . ~/.zshenv\n")
+            .expect("forward ~/.zshenv");
+
+        assert_eq!(unset_pos, 0, "unset ZDOTDIR must be first: {text}");
+        assert!(unset_pos < rm_pos, "unset before rm -f: {text}");
+        assert!(rm_pos < rmdir_pos, "rm -f before rmdir: {text}");
+        assert!(
+            rmdir_pos < interactive_pos,
+            "cleanup before interactive guard: {text}"
+        );
+        assert!(
+            interactive_pos < def_pos,
+            "_zt_cwd inside interactive guard: {text}"
+        );
+        assert!(
+            def_pos < hook_pos,
+            "_zt_cwd defined before precmd_functions+=: {text}"
+        );
+        assert!(
+            hook_pos < chpwd_pos,
+            "precmd_functions+= before chpwd_functions+=: {text}"
+        );
+        assert!(
+            chpwd_pos < colorterm_pos,
+            "chpwd_functions+= before COLORTERM: {text}"
+        );
+        assert!(
+            colorterm_pos < fi_pos,
+            "COLORTERM inside interactive guard: {text}"
+        );
+        assert!(
+            fi_pos < user_zshenv_pos,
+            "interactive setup must precede forwarding ~/.zshenv: {text}"
+        );
     }
 
     #[test]
-    fn zsh_wrapper_redirects_tempdir_histfile_to_real_home() {
-        // macOS /etc/zshrc derives HISTFILE from ZDOTDIR, so with ZDOTDIR on
-        // the temp wrapper dir the whole session's history would be written
-        // there and deleted by the cleanup. The wrapper must re-point an
-        // HISTFILE still sitting inside the temp dir at the real home.
+    fn zsh_wrapper_unsets_zdotdir_without_histfile_rewrite_hack() {
+        // Unsetting ZDOTDIR before user startup files lets macOS /etc/zshrc,
+        // compinit (.zcompdump), and frameworks like prezto/zim
+        // (HISTFILE="${ZDOTDIR:-$HOME}/.zhistory") resolve against $HOME or
+        // the user's own ZDOTDIR natively, with no HISTFILE rewrite hack.
         let (files, _) = cwd_wrapper_files("/bin/zsh", "t123").expect("zsh wrapper");
-        let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
-        let text = String::from_utf8_lossy(&zshrc.1);
+        assert_eq!(files.len(), 1);
+        let text = String::from_utf8_lossy(&files[0].1);
         assert!(
-            text.contains(
-                "[ -n \"$HISTFILE\" ] && [ \"${HISTFILE#/tmp/.zterm-t123/w/}\" != \"$HISTFILE\" ]"
-            ),
-            "redirection must fire only for an HISTFILE inside the temp dir: {text}"
+            !text.contains("HISTFILE"),
+            "wrapper must not rewrite HISTFILE: {text}"
         );
         assert!(
-            text.contains("export HISTFILE=\"$HOME/.zsh_history\""),
-            "must export the real-home history file: {text}"
+            !text.contains(".zsh_history"),
+            "wrapper must not force .zsh_history: {text}"
         );
-        // An HISTFILE the user set elsewhere keeps its value (guard only
-        // matches the temp-dir prefix); an unset HISTFILE stays unset.
+        let unset_pos = text
+            .find("[ \"$ZDOTDIR\" = \"/tmp/.zterm-t123/w\" ] && unset ZDOTDIR")
+            .expect("unset ZDOTDIR");
+        let user_zshenv_pos = text
+            .find("[ -f ~/.zshenv ] && . ~/.zshenv")
+            .expect("forward ~/.zshenv");
+        assert!(
+            unset_pos < user_zshenv_pos,
+            "ZDOTDIR must be unset before user startup files run: {text}"
+        );
     }
 
     #[test]
     fn truecolor_is_advertised_on_every_remote_shell_path() {
         // xterm.js renders 24-bit color, so every way a remote shell can
         // start must see COLORTERM=truecolor: the bash rc wrapper and the zsh
-        // ZDOTDIR wrapper. Shells with no wrapper (fish & co.) rely on the
+        // .zshenv bootstrap. Shells with no wrapper (fish & co.) rely on the
         // SSH set_env instead (not covered here — needs a live channel).
-        // Placed after profile sourcing so the advertisement wins over stale
-        // inherited values.
         let (files, _) = cwd_wrapper_files("/bin/bash", "t").expect("bash wrapper");
         let rc = String::from_utf8_lossy(&files[0].1);
         assert!(rc.contains("export COLORTERM=truecolor"), "bash rc: {rc}");
 
         let (files, _) = cwd_wrapper_files("/bin/zsh", "t").expect("zsh wrapper");
-        let zshrc = files.iter().find(|(p, _)| p.ends_with("/.zshrc")).unwrap();
-        let text = String::from_utf8_lossy(&zshrc.1);
+        assert_eq!(files.len(), 1);
+        let zshenv = files.iter().find(|(p, _)| p.ends_with("/.zshenv")).unwrap();
+        let text = String::from_utf8_lossy(&zshenv.1);
+        let guard_start = text
+            .find("if [[ -o interactive ]]; then")
+            .expect("interactive guard");
+        let color_pos = text
+            .find("export COLORTERM=truecolor")
+            .expect("zsh COLORTERM export");
+        let guard_end = text.find("\nfi\n").expect("closing fi");
         assert!(
-            text.contains("export COLORTERM=truecolor"),
-            "zsh .zshrc: {text}"
+            guard_start < color_pos && color_pos < guard_end,
+            "zsh COLORTERM must be exported inside the interactive guard: {text}"
         );
     }
 
@@ -13308,64 +13375,62 @@ mod tests {
     }
 
     #[test]
-    fn zsh_wrapper_zlogin_cleanup_spares_history_files() {
-        // .zlogin unsets ZDOTDIR when it still points at our wrapper dir,
-        // removes exactly the four wrapper files by path, and only removes the
-        // inner and outer directories when empty: a history file that still
-        // landed inside the temp dir survives the cleanup instead of being
-        // deleted with it.
+    fn zsh_wrapper_zshenv_cleans_up_before_user_startup() {
+        // .zshenv unsets ZDOTDIR, removes itself by exact path, and removes
+        // both empty temporary directories BEFORE forwarding ~/.zshenv. Even
+        // if ~/.zshenv overrides ZDOTDIR or execs another program, nothing
+        // leaks in /tmp, and compinit never writes .zcompdump into /tmp.
         let (files, _) = cwd_wrapper_files("/bin/zsh", "t123").expect("zsh wrapper");
-        let zlogin = files.iter().find(|(p, _)| p.ends_with("/.zlogin")).unwrap();
-        let text = String::from_utf8_lossy(&zlogin.1);
+        assert_eq!(files.len(), 1);
+        let zshenv = files.iter().find(|(p, _)| p.ends_with("/.zshenv")).unwrap();
+        let text = String::from_utf8_lossy(&zshenv.1);
         assert!(
             !text.contains("rm -rf"),
             "recursive delete must be gone: {text}"
         );
+        let unset_pos = text
+            .find("[ \"$ZDOTDIR\" = \"/tmp/.zterm-t123/w\" ] && unset ZDOTDIR")
+            .expect(".zshenv must unset ZDOTDIR");
+        let rm_pos = text
+            .find("rm -f /tmp/.zterm-t123/w/.zshenv\n")
+            .expect(".zshenv must remove itself by exact path");
+        let rmdir_pos = text
+            .find("rmdir /tmp/.zterm-t123/w /tmp/.zterm-t123 2>/dev/null || :")
+            .expect("dir removal must require inner and outer dirs to be empty and preserve exit status");
+        let user_zshenv_pos = text
+            .find("[ -f ~/.zshenv ] && . ~/.zshenv")
+            .expect(".zshenv must forward user ~/.zshenv");
+        assert!(unset_pos < rm_pos, "unset before rm -f: {text}");
+        assert!(rm_pos < rmdir_pos, "rm -f before rmdir: {text}");
         assert!(
-            text.contains("[ \"$ZDOTDIR\" = \"/tmp/.zterm-t123/w\" ] && unset ZDOTDIR"),
-            ".zlogin must unset ZDOTDIR so logout and child shells never look in a removed /tmp path: {text}"
-        );
-        let unset_pos = text.find("unset ZDOTDIR").unwrap();
-        let user_zlogin_pos = text.find("[ -f ~/.zlogin ]").unwrap();
-        assert!(
-            unset_pos < user_zlogin_pos,
-            "ZDOTDIR must be unset before forwarding user ~/.zlogin: {text}"
-        );
-        assert!(text.contains("rm -f "), "cleanup must remove files: {text}");
-        for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
-            assert!(
-                text.contains(&format!("/tmp/.zterm-t123/w/{name}")),
-                "must remove {name} by exact path: {text}"
-            );
-        }
-        assert!(
-            text.contains("rmdir /tmp/.zterm-t123/w /tmp/.zterm-t123 2>/dev/null || :"),
-            "dir removal must require inner and outer dirs to be empty and preserve exit status: {text}"
+            rmdir_pos < user_zshenv_pos,
+            "temp dir cleanup must finish before forwarding user ~/.zshenv: {text}"
         );
     }
 
     #[test]
-    fn zsh_wrapper_zshenv_unexports_zdotdir_before_user_startup() {
-        // Processes forked from ~/.zshenv, ~/.zprofile, or ~/.zshrc (such as
-        // tmux autostart) would inherit exported ZDOTDIR pointing into /tmp if
-        // we waited until .zlogin to unset it. Unexporting ZDOTDIR on line 1 of
-        // the wrapper .zshenv keeps it in the shell's own parameter table so
-        // zsh still reads wrapper .zprofile/.zshrc/.zlogin while children never
-        // inherit the temporary /tmp path.
+    fn zsh_wrapper_zshenv_unsets_zdotdir_before_user_startup() {
+        // Line 1 of the wrapper .zshenv fully unsets ZDOTDIR (removing it from
+        // both the shell parameter table and exported environment) before any
+        // user startup file runs, so child processes (tmux, screen) never
+        // inherit /tmp and custom ZDOTDIR overrides in ~/.zshenv work natively.
         let (files, _) = cwd_wrapper_files("/bin/zsh", "t123").expect("zsh wrapper");
         let zshenv = files.iter().find(|(p, _)| p.ends_with("/.zshenv")).unwrap();
         let text = String::from_utf8_lossy(&zshenv.1);
         let first_line = text.lines().next().expect("non-empty .zshenv");
         assert_eq!(
-            first_line,
-            "[ \"$ZDOTDIR\" = \"/tmp/.zterm-t123/w\" ] && typeset +x ZDOTDIR >/dev/null 2>&1",
-            ".zshenv must unexport ZDOTDIR silently on line 1: {text}"
+            first_line, "[ \"$ZDOTDIR\" = \"/tmp/.zterm-t123/w\" ] && unset ZDOTDIR",
+            ".zshenv must unset ZDOTDIR on line 1: {text}"
         );
-        let unexport_pos = text.find("typeset +x ZDOTDIR").unwrap();
+        assert!(
+            !text.contains("typeset +x"),
+            "unset supersedes typeset +x: {text}"
+        );
+        let unset_pos = text.find("unset ZDOTDIR").unwrap();
         let user_zshenv_pos = text.find("[ -f ~/.zshenv ]").unwrap();
         assert!(
-            unexport_pos < user_zshenv_pos,
-            "ZDOTDIR must be unexported before forwarding user ~/.zshenv: {text}"
+            unset_pos < user_zshenv_pos,
+            "ZDOTDIR must be unset before forwarding user ~/.zshenv: {text}"
         );
     }
 
@@ -13406,18 +13471,19 @@ mod tests {
         );
 
         let (files, exec) = cwd_wrapper_files("/bin/zsh", &stamp).expect("zsh wrapper");
-        assert_eq!(files.len(), 4);
+        assert_eq!(files.len(), 1);
+        let zshenv_path = format!("{dir}/.zshenv");
+        assert_eq!(files[0].0, zshenv_path);
         assert_eq!(exec, format!("exec env ZDOTDIR={dir} zsh -il"));
-        for (path, _) in &files {
-            assert_eq!(
-                path.rsplit_once('/').map(|(parent, _)| parent),
-                Some(dir.as_str()),
-                "{path} must sit directly in {dir}"
-            );
-        }
-        let zlogin = files.iter().find(|(p, _)| p.ends_with("/.zlogin")).unwrap();
-        assert!(String::from_utf8_lossy(&zlogin.1)
-            .contains(&format!("rmdir {dir} {outer} 2>/dev/null || :")));
+        let zshenv = String::from_utf8_lossy(&files[0].1);
+        assert!(
+            zshenv.contains(&format!("rm -f {zshenv_path}\n")),
+            "zshenv cleanup: {zshenv}"
+        );
+        assert!(
+            zshenv.contains(&format!("rmdir {dir} {outer} 2>/dev/null || :")),
+            "zsh cleanup must drop inner and outer private dirs without polluting $?: {zshenv}"
+        );
     }
 
     #[test]
@@ -13549,6 +13615,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepare_cwd_wrapper_uploads_a_private_zsh_wrapper() {
+        use russh_sftp::protocol::OpenFlags;
+
+        let root = wrapper_test_root("wrapper-prep-zsh-ok");
+        std::fs::write(
+            root.join("etc").join("passwd"),
+            "tester:x:1000:1000::/home/tester:/bin/zsh\n",
+        )
+        .unwrap();
+        let (sftp, failures) = test_sftp_session(root.clone()).await;
+
+        let mut deployed = prepare_cwd_wrapper(Arc::new(sftp), "tester", fresh_wrapper_slot())
+            .await
+            .expect("zsh wrapper deployment");
+        assert_eq!(deployed.cleanup.dirs.len(), 2);
+        let inner_dir = &deployed.cleanup.dirs[0];
+        let outer_dir = &deployed.cleanup.dirs[1];
+        assert!(outer_dir.starts_with("/tmp/.zterm-"));
+        assert_eq!(inner_dir, &format!("{outer_dir}/w"));
+
+        let mkdirs = failures.mkdir_calls();
+        assert_eq!(mkdirs, vec![outer_dir.clone(), inner_dir.clone()]);
+        assert_eq!(
+            deployed.cleanup.files,
+            vec![format!("{inner_dir}/.zshenv")],
+            "zsh wrapper must deploy only .zshenv"
+        );
+        assert_eq!(
+            deployed.exec,
+            format!("exec env ZDOTDIR={inner_dir} zsh -il")
+        );
+
+        let entries: Vec<_> = std::fs::read_dir(root_path(&root, inner_dir))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec![".zshenv"]);
+
+        let on_disk =
+            std::fs::read_to_string(root_path(&root, &deployed.cleanup.files[0])).unwrap();
+        assert!(on_disk.contains("unset ZDOTDIR"), "zshenv: {on_disk}");
+        assert!(on_disk.contains("_zt_cwd"), "zshenv: {on_disk}");
+
+        let stat = failures.setstat_calls();
+        assert_eq!(stat.len(), 2);
+        assert_eq!(stat[0].0, *outer_dir);
+        assert_eq!(stat[1].0, *inner_dir);
+        for (_, attrs) in &stat {
+            assert_eq!(
+                *attrs,
+                SftpSetstat {
+                    size: false,
+                    uid: false,
+                    gid: false,
+                    permissions: Some(0o700),
+                }
+            );
+        }
+
+        let zshenv_opens: Vec<_> = failures
+            .open_calls()
+            .into_iter()
+            .filter(|(p, _, _)| p == &deployed.cleanup.files[0])
+            .collect();
+        assert_eq!(zshenv_opens.len(), 1);
+        assert!(zshenv_opens[0].1.contains(OpenFlags::EXCLUDE));
+        assert!(zshenv_opens[0].1.contains(OpenFlags::CREATE));
+        assert!(zshenv_opens[0].1.contains(OpenFlags::WRITE));
+        assert!(!zshenv_opens[0].1.contains(OpenFlags::TRUNCATE));
+        assert_eq!(zshenv_opens[0].2, Some(0o600));
+
+        deployed.disarm();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
     async fn sftp_write_private_file_refuses_preexisting_target() {
         let root = wrapper_test_root("wrapper-exclude-conflict");
         let existing = root.join("tmp").join("planted-rc");
@@ -13619,8 +13761,9 @@ mod tests {
         )
         .unwrap();
         let (sftp, failures) = test_sftp_session(root.clone()).await;
-        // .zshenv and .zprofile are uploaded before this one fails.
-        failures.fail_opens_with_suffix("/.zshrc");
+        // The server creates .zshenv on disk before returning an SFTP failure,
+        // simulating a lost reply after creation.
+        failures.fail_opens_with_suffix("/.zshenv");
 
         let error = prepare_cwd_wrapper(Arc::new(sftp), "tester", fresh_wrapper_slot())
             .await
@@ -13649,9 +13792,9 @@ mod tests {
         )
         .unwrap();
         let (sftp, failures) = test_sftp_session(root.clone()).await;
-        // .zshenv and .zprofile upload first; block the third file before the
-        // server creates it, so no open handle pins it on Windows.
-        failures.block_before_open_with_suffix("/.zshrc");
+        // Block .zshenv before the server creates it, so both directories exist
+        // while no open handle pins the file on Windows.
+        failures.block_before_open_with_suffix("/.zshenv");
 
         let slot = fresh_wrapper_slot();
         let task = tokio::spawn(prepare_cwd_wrapper(
@@ -13693,22 +13836,49 @@ mod tests {
     }
 
     #[test]
-    fn bash_wrapper_sources_system_profile_and_bashrc_fallback() {
+    fn bash_wrapper_sources_system_profile_and_if_elif_login_chain() {
         // bash --rcfile is a non-login shell: /etc/profile (RHEL/CentOS
-        // /etc/profile.d/*.sh) must be sourced explicitly, and ~/.bashrc is the
-        // fallback when none of the login profiles exists (otherwise the || chain
-        // fails as a whole and not even ~/.bashrc is read).
+        // /etc/profile.d/*.sh) must be sourced explicitly, followed by an
+        // if/elif chain that sources ONLY the first existing login profile
+        // (matching bash login semantics so a non-zero exit status from
+        // ~/.bash_profile never falls through to ~/.bash_login or ~/.profile),
+        // with ~/.bashrc as the final fallback when no login profile exists.
         let (files, _) = cwd_wrapper_files("/bin/bash", "t").expect("bash wrapper");
         let rc = String::from_utf8_lossy(&files[0].1);
-        assert!(rc.contains("[ -f /etc/profile ] && . /etc/profile"));
+        let etc_pos = rc
+            .find("[ -f /etc/profile ] && . /etc/profile\n")
+            .expect("must source /etc/profile");
+        let chain = concat!(
+            "if [ -f ~/.bash_profile ]; then . ~/.bash_profile\n",
+            "elif [ -f ~/.bash_login ]; then . ~/.bash_login\n",
+            "elif [ -f ~/.profile ]; then . ~/.profile\n",
+            "elif [ -f ~/.bashrc ]; then . ~/.bashrc\n",
+            "fi\n",
+        );
+        let chain_pos = rc
+            .find(chain)
+            .expect("must use if/elif chain for login profiles and ~/.bashrc fallback");
         assert!(
-            rc.contains("|| { [ -f ~/.bashrc ] && . ~/.bashrc; }"),
-            "rc must fall back to ~/.bashrc: {rc}"
+            etc_pos < chain_pos,
+            "/etc/profile must precede user profile chain: {rc}"
+        );
+        assert!(
+            !rc.contains("|| { [ -f ~/.bash_login ]")
+                && !rc.contains("|| { [ -f ~/.profile ]")
+                && !rc.contains("|| { [ -f ~/.bashrc ]"),
+            "must not use || fallthrough between login profiles: {rc}"
+        );
+        let cwd_pos = rc.find("_zt_cwd()").expect("_zt_cwd definition");
+        assert!(
+            chain_pos + chain.len() <= cwd_pos,
+            "profile chain must finish before _zt_cwd setup: {rc}"
         );
     }
 
-    #[test]
-    fn bash_rc_wrapper_end_to_end() {
+    fn run_bash_rc_wrapper_fixture(
+        tag: &str,
+        home_files: &[(&str, &str)],
+    ) -> Option<(String, String)> {
         use std::io::Write;
         use std::path::{Path, PathBuf};
         use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -13772,7 +13942,7 @@ mod tests {
         let bash = candidates.iter().map(Path::new).find(|path| path.is_file());
         let Some(bash) = bash else {
             eprintln!("skip: no supported native bash on this machine");
-            return;
+            return None;
         };
 
         let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -13791,7 +13961,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = root.join(format!("bash-wrapper-{}-{nonce}", std::process::id()));
+        let dir = root.join(format!("bash-wrapper-{tag}-{}-{nonce}", std::process::id()));
         std::fs::create_dir(&dir).expect("create unique fixture directory");
         let scratch = Scratch {
             root,
@@ -13802,7 +13972,9 @@ mod tests {
         std::fs::create_dir(&home).expect("create isolated home");
         let profile = dir.join("system profile");
         std::fs::write(&profile, b"printf '__ZT_PROFILE__\\n'\n").unwrap();
-        std::fs::write(home.join(".bashrc"), b"printf '__ZT_BASHRC__\\n'\n").unwrap();
+        for (name, content) in home_files {
+            std::fs::write(home.join(name), content.as_bytes()).unwrap();
+        }
         let wrapper_outer = dir.join("wrapper-outer");
         let wrapper_inner = wrapper_outer.join("w");
         std::fs::create_dir_all(&wrapper_inner).expect("create isolated wrapper dirs");
@@ -13915,17 +14087,13 @@ mod tests {
             "fixture system profile was not sourced"
         );
         assert!(
-            text.contains("__ZT_BASHRC__"),
-            "fixture user bashrc was not sourced"
-        );
-        assert!(
             text.contains("__ZT_COLOR__truecolor"),
             "wrapper environment was not applied"
         );
+        let expected_home = shell_path(&home);
         let cwd = parse_osc7_cwd(&text).expect("wrapper did not emit a parseable OSC 7 cwd");
         assert_eq!(
-            cwd,
-            shell_path(&home),
+            cwd, expected_home,
             "wrapper must report the isolated cwd; output={text}"
         );
         assert!(!rcfile.exists(), "wrapper must remove its own fixture file");
@@ -13937,6 +14105,84 @@ mod tests {
             !wrapper_outer.exists(),
             "wrapper must remove its outer fixture directory"
         );
+        Some((text, expected_home))
+    }
+
+    #[test]
+    fn bash_rc_wrapper_end_to_end() {
+        let Some((text, _)) = run_bash_rc_wrapper_fixture(
+            "bashrc-fallback",
+            &[(".bashrc", "printf '__ZT_BASHRC__\\n'\n")],
+        ) else {
+            return;
+        };
+        assert!(
+            text.contains("__ZT_BASHRC__"),
+            "fixture user bashrc was not sourced"
+        );
+    }
+
+    #[test]
+    fn bash_rc_wrapper_does_not_fall_through_on_nonzero_login_profile() {
+        // When ~/.bash_profile exists and its last command exits non-zero
+        // (e.g. `[ -f x ] && . x` with missing `x`), bash must NOT fall through
+        // to ~/.bash_login, ~/.profile, or ~/.bashrc.
+        let Some((text, _)) = run_bash_rc_wrapper_fixture(
+            "bash-profile-nonzero",
+            &[
+                (
+                    ".bash_profile",
+                    "printf '__ZT_BASH_PROFILE__\\n'\n[ -f \"$HOME/.missing_helper\" ] && . \"$HOME/.missing_helper\"\n",
+                ),
+                (".bash_login", "printf '__ZT_BASH_LOGIN__\\n'\n"),
+                (".profile", "printf '__ZT_USER_PROFILE__\\n'\n"),
+                (".bashrc", "printf '__ZT_BASHRC__\\n'\n"),
+            ],
+        ) else {
+            return;
+        };
+        assert!(
+            text.contains("__ZT_BASH_PROFILE__"),
+            "~/.bash_profile must be sourced: {text}"
+        );
+        assert!(
+            !text.contains("__ZT_BASH_LOGIN__"),
+            "non-zero ~/.bash_profile must not fall through to ~/.bash_login: {text}"
+        );
+        assert!(
+            !text.contains("__ZT_USER_PROFILE__"),
+            "non-zero ~/.bash_profile must not fall through to ~/.profile: {text}"
+        );
+        assert!(
+            !text.contains("__ZT_BASHRC__"),
+            "non-zero ~/.bash_profile must not fall through to ~/.bashrc: {text}"
+        );
+
+        let Some((text, _)) = run_bash_rc_wrapper_fixture(
+            "bash-login-nonzero",
+            &[
+                (".bash_login", "printf '__ZT_BASH_LOGIN__\\n'\nfalse\n"),
+                (".profile", "printf '__ZT_USER_PROFILE__\\n'\n"),
+                (".bashrc", "printf '__ZT_BASHRC__\\n'\n"),
+            ],
+        ) else {
+            return;
+        };
+        assert!(text.contains("__ZT_BASH_LOGIN__"));
+        assert!(!text.contains("__ZT_USER_PROFILE__"));
+        assert!(!text.contains("__ZT_BASHRC__"));
+
+        let Some((text, _)) = run_bash_rc_wrapper_fixture(
+            "profile-nonzero",
+            &[
+                (".profile", "printf '__ZT_USER_PROFILE__\\n'\nfalse\n"),
+                (".bashrc", "printf '__ZT_BASHRC__\\n'\n"),
+            ],
+        ) else {
+            return;
+        };
+        assert!(text.contains("__ZT_USER_PROFILE__"));
+        assert!(!text.contains("__ZT_BASHRC__"));
     }
 
     #[test]
