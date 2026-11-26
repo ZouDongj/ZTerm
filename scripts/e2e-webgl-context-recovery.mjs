@@ -959,14 +959,17 @@ async function main() {
 
         // Start bash from the OWNED local PowerShell through the real input
         // path. Interactive mode provides the readiness prompt without reading
-        // profiles; TERM=xterm keeps vim on the alternate buffer with full cursor
-        // control even though the seeded PTY environment sets no TERM.
-        await phaseESendKeys(cdp, tabA, `$env:HOME='${psLiteral(vimHome)}'; $env:TERM='xterm'; & '${psLiteral(gitBash.command)}' --noprofile --norc -i\r`);
+        // profiles; clear inherited shell prompt/rc variables (e.g. a Git Bash
+        // parent's PS1 referencing __git_ps1) so bash emits its built-in
+        // `bash-<ver>$` prompt deterministically; TERM=xterm keeps vim on the
+        // alternate buffer with full cursor control even though the seeded PTY
+        // environment sets no TERM.
+        await phaseESendKeys(cdp, tabA, `$env:PS1=$null; $env:PROMPT_COMMAND=$null; $env:MSYS2_PS1=$null; $env:BASH_ENV=$null; $env:ENV=$null; $env:HOME='${psLiteral(vimHome)}'; $env:TERM='xterm'; & '${psLiteral(gitBash.command)}' --noprofile --norc -i\r`);
         const bashPrompt = await phaseEPoll(cdp, phaseEScreenExpr(tabA), phaseEBashPromptSeen, 20000);
         phaseE.bashRunning = bashPrompt.done;
         check('E: MSYS bash started from the owned PowerShell (Git Bash via get-local-shells, HOME inside the sandbox)',
           bashPrompt.done === true,
-          `bash=${gitBash.command} vim=${msysVim} HOME=${vimHome} lastRows=${JSON.stringify((bashPrompt.value?.rows || []).slice(-2))}`);
+          `bash=${gitBash.command} vim=${msysVim} HOME=${vimHome} lastRows=${JSON.stringify((bashPrompt.value?.rows || []).filter(Boolean).slice(-2))}`);
 
         // The alternate buffer is vim's UI-ready marker; keys sent after it are
         // queued by the PTY and processed in order, so the staging below is

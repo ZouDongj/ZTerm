@@ -264,4 +264,9 @@ test('e2e-webgl-context-recovery wires native ZTermReducedMotion skip checks for
   // Ensure the Phase E/F skip gate never falls back to raw matchMedia.
   const phaseEMatch = src.slice(src.indexOf('const startupReducedMotion'), src.indexOf('// ── Phase F:'));
   assert.doesNotMatch(phaseEMatch, /matchMedia\(/);
+  // Phase E clears inherited shell prompt/rc env vars before invoking interactive
+  // bash --noprofile --norc so an ambient Git Bash PS1 cannot mask bash-<ver>$.
+  for (const envVar of ['PS1', 'PROMPT_COMMAND', 'MSYS2_PS1', 'BASH_ENV', 'ENV']) {
+    assert.ok(phaseEMatch.includes(`$env:${envVar}=$null;`), `Phase E must clear inherited ${envVar}`);
+  }
 });
