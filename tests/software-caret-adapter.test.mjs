@@ -420,7 +420,7 @@ test('perceivedCaretCell: null until the adapter owns the caret, then the publis
   assert.equal(f.adapter.perceivedCaretCell(), null, 'invalidation revokes the perceived cell');
 });
 
-test('a published software caret re-anchors the idle textarea without a cursorMove', () => {
+test('a published software caret re-anchors the idle textarea without a cursorMove', async () => {
   const f = fixture();
   const core = f.terminal._core;
   core.textarea = { style: {} };
@@ -434,6 +434,7 @@ test('a published software caret re-anchors the idle textarea without a cursorMo
   core._compositionHelper = { isComposing: false, updateCompositionElements() {} };
   assert.equal(imeAnchor.patchTerminal({ _core: core }, {
     perceivedCaret: () => f.adapter.perceivedCaretCell(),
+    hiddenSettleMs: 15,
   }), true);
 
   const p = f.adapter.softwareCaretPort;
@@ -456,7 +457,10 @@ test('a published software caret re-anchors the idle textarea without a cursorMo
   core._compositionHelper.isComposing = false;
 
   p.invalidate('scroll');
-  assert.equal(core.textarea.style.left, 'stock', 'revoke returns to stock protocol anchoring');
+  assert.equal(core.textarea.style.left, '70px', 'transient hidden revoke waits out the settle window');
+  assert.equal(stockSyncs, 0);
+  await new Promise(r => setTimeout(r, 25));
+  assert.equal(core.textarea.style.left, 'stock', 'settled revoke returns to stock protocol anchoring');
   assert.equal(stockSyncs, 1);
 });
 

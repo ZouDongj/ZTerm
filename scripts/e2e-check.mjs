@@ -1280,34 +1280,106 @@ async function main() {
       moonProbe.active === 'zterm6' && moonProbe.w0 === 2 && moonProbe.w1 === 0 && moonProbe.c2 === 'a' && moonProbe.cx === 4,
       JSON.stringify(moonProbe));
 
-    // IME anchor: while the protocol cursor is visible the textarea follows it
-    // natively; while hidden with no software cursor, fall back to native
-    // protocol anchoring (during input the protocol cursor tracks the
-    // insertion point exactly — freezing the anchor would pin it to the
-    // textarea's default DOM position or a just-overwritten stale caret cell,
-    // stranding the candidate window top-left or letting pinyin overwrite
-    // committed text); while hidden with a software cursor (the app-drawn
-    // caret the user actually sees) whose position is known, the anchor must
-    // land on the software cursor cell — kimi never shows the protocol cursor
-    // for a whole session, so the no-caret native fallback is the worst-case
-    // baseline. The check also pins the patch's internal anchors
-    // (_core/_syncTextArea/isCursorHidden) as present.
+    // IME anchor: verify zero CSS transition lag on the helper textarea,
+    // immediate visible-cursor tracking (style + getBoundingClientRect),
+    // transient-hide debounce vs settled hidden fallback, active-composition
+    // lock across split ?25l repaints, idle textarea.value cleanup, viewport
+    // scroll offset (ybase + y - ydisp), perceived-caret priority, and idle
+    // no-reflow guard.
     const imeProbe = await cdp.eval(`(async () => {
       const pane = getAllPanes(TabManager.getActive())[0];
       const term = pane?.term;
       if (!term?.textarea) return { ok: false, why: 'no-term' };
       term.textarea.focus();
       const write = s => new Promise(r => term.write(s, r));
-      const pos = () => ({ left: term.textarea.style.left, top: term.textarea.style.top });
+      const sleep = ms => new Promise(r => setTimeout(r, ms));
       const core = term._core;
       const cell = core?._renderService?.dimensions?.css?.cell;
+      const screenEl = core?.screenElement;
       const px = (x, y) => cell ? { left: (x * cell.width) + 'px', top: (y * cell.height) + 'px' } : null;
+      const pos = () => ({ left: term.textarea.style.left, top: term.textarea.style.top });
+      const rectPos = () => {
+        const sr = screenEl.getBoundingClientRect();
+        const tr = term.textarea.getBoundingClientRect();
+        return { left: (tr.left - sr.left) + 'px', top: (tr.top - sr.top) + 'px', width: tr.width };
+      };
+      const taTransition = getComputedStyle(term.textarea).transitionDuration;
+      const cvTransition = core?._compositionView ? getComputedStyle(core._compositionView).transitionDuration : null;
+
       await write('\\u001b[?25h\\u001b[10;10H');
       const p1 = pos();
+      const r1 = rectPos();
+      // Transient hide (split ?25l repaint): must hold (9,9) immediately, then
+      // settle to (39,19) only after the hidden settle window elapses.
       await write('\\u001b[?25l\\u001b[20;40H');
-      const p2 = pos();
+      const p2Immediate = pos();
+      await sleep(85);
+      const p2Settled = pos();
+      // Visible re-show: immediate style AND bounding rect update (zero transition lag).
       await write('\\u001b[?25h\\u001b[12;12H');
       const p3 = pos();
+      const r3 = rectPos();
+
+      // Active composition: a split ?25l chunk moving the hidden cursor to (3,2)
+      // must keep both compositionView and textarea locked at (11,11). Include
+      // the realistic Chromium keydown(229) commit keystroke right before
+      // compositionend so the idle textarea.value cleanup path is genuinely tested.
+      const helper = core?._compositionHelper;
+      const view = core?._compositionView;
+      let compLocked = null;
+      let compCleanup = null;
+      if (helper && view) {
+        try {
+          term.textarea.value = '历史残留中文';
+          term.textarea.scrollLeft = 40;
+          helper.keydown({ keyCode: 229 });
+          helper.compositionstart();
+          helper.compositionupdate({ data: 'nihao' });
+          await write('\\u001b[?25l\\u001b[3;4H');
+          helper.updateCompositionElements(true);
+          compLocked = {
+            ta: pos(),
+            taRect: rectPos(),
+            cv: { left: view.style.left, top: view.style.top },
+          };
+          // Realistic keyboard candidate-commit keystroke while composing.
+          helper.keydown({ keyCode: 229 });
+          helper.compositionend();
+          const widthAfterEnd = parseFloat(term.textarea.style.width);
+          await sleep(50);
+          compCleanup = {
+            widthAfterEnd,
+            cellWidth: cell?.width || 0,
+            valueAfterEnd: term.textarea.value,
+            scrollLeftAfterEnd: term.textarea.scrollLeft,
+          };
+        } finally {
+          if (helper.isComposing) helper.compositionend();
+          await write('\\u001b[?25h');
+        }
+      }
+
+      // Viewport scroll offset (ydisp !== ybase with cursor still in viewport),
+      // exercising the suppressScrollEvent=true path used by wheel/scrollbar scroll.
+      let scrollOffset = null;
+      if (cell) {
+        const scrollFill = Math.max(40, (term.rows || 24) + 10);
+        const targetRow1 = Math.max(1, Math.min(10, (term.rows || 24) - 5));
+        await write('\\r\\n'.repeat(scrollFill) + '\\u001b[' + targetRow1 + ';10H');
+        core._bufferService.scrollLines(-4, true);
+        const b = term.buffer.active;
+        const expectedRow = b.baseY + b.cursorY - b.viewportY;
+        scrollOffset = {
+          baseY: b.baseY,
+          viewportY: b.viewportY,
+          cursorY: b.cursorY,
+          expected: px(b.cursorX, expectedRow),
+          actual: pos(),
+          rect: rectPos(),
+        };
+        term.scrollToBottom();
+      }
+
       // Software-cursor branch: temporarily swap the provider for a fixed cell
       // (simulating an adapter that has taken over), hide-CUP elsewhere — the
       // textarea must anchor at the software cursor cell, not the protocol park position.
@@ -1318,11 +1390,6 @@ async function main() {
         core.__imeAnchorPerceivedCaret = () => ({ x: 15, y: 5, width: 1 });
         await write('\\u001b[?25l\\u001b[22;30H');
         p4 = pos();
-        // Idle render: stock updateCompositionElements returns before layout
-        // while not composing. Without that guard every onRender re-reads a
-        // 0x0 idle composition view and rewrites the textarea to 1px.
-        const helper = core._compositionHelper;
-        const view = core._compositionView;
         try {
           if (helper && view && typeof view.getBoundingClientRect === 'function') {
             const prevRect = view.getBoundingClientRect;
@@ -1349,21 +1416,37 @@ async function main() {
           await write('\\u001b[?25h');
         }
       }
-      return { ok: true, p1, p2, p3, p4, idle,
+      return { ok: true, taTransition, cvTransition, p1, r1, p2Immediate, p2Settled, p3, r3,
+        compLocked, compCleanup, scrollOffset, p4, idle,
         e1: px(9, 9), e2: px(39, 19), e3: px(11, 11), e4: px(15, 5),
         hiddenKnown: typeof core?.coreService?.isCursorHidden === 'boolean' };
     })()`);
     // Numeric compare with an epsilon: at fractional devicePixelRatio (e.g. a
     // 175% monitor) the expected cell math is a long float while the browser
     // serializes style.top to a few decimals — string equality only holds at
-    // integer CSS px (DPR 1.0). 0.01px covers serialization noise and is far
-    // below one cell.
-    const nearPx = (a, b) => Math.abs(parseFloat(a) - parseFloat(b)) <= 0.01;
-    check('IME 锚点：可见跟随、隐藏无软件光标回退协议锚定、有软件光标位优先',
+    // integer CSS px (DPR 1.0). Layout rects snap to device pixels (<= 1px).
+    const nearPx = (a, b, eps = 0.01) => Math.abs(parseFloat(a) - parseFloat(b)) <= eps;
+    check('IME 锚点：无 CSS 过渡延迟、瞬态隐藏防抖、组合锁定、滚屏偏移与清理',
       imeProbe.hiddenKnown === true
+        && imeProbe.taTransition === '0s' && imeProbe.cvTransition === '0s'
         && nearPx(imeProbe.p1.left, imeProbe.e1.left) && nearPx(imeProbe.p1.top, imeProbe.e1.top)
-        && nearPx(imeProbe.p2.left, imeProbe.e2.left) && nearPx(imeProbe.p2.top, imeProbe.e2.top)
+        && nearPx(imeProbe.r1.left, imeProbe.e1.left, 1.0) && nearPx(imeProbe.r1.top, imeProbe.e1.top, 1.0)
+        && nearPx(imeProbe.p2Immediate.left, imeProbe.e1.left) && nearPx(imeProbe.p2Immediate.top, imeProbe.e1.top)
+        && nearPx(imeProbe.p2Settled.left, imeProbe.e2.left) && nearPx(imeProbe.p2Settled.top, imeProbe.e2.top)
         && nearPx(imeProbe.p3.left, imeProbe.e3.left) && nearPx(imeProbe.p3.top, imeProbe.e3.top)
+        && nearPx(imeProbe.r3.left, imeProbe.e3.left, 1.0) && nearPx(imeProbe.r3.top, imeProbe.e3.top, 1.0)
+        && imeProbe.compLocked !== null
+        && nearPx(imeProbe.compLocked.ta.left, imeProbe.e3.left) && nearPx(imeProbe.compLocked.ta.top, imeProbe.e3.top)
+        && nearPx(imeProbe.compLocked.taRect.left, imeProbe.e3.left, 1.0) && nearPx(imeProbe.compLocked.taRect.top, imeProbe.e3.top, 1.0)
+        && nearPx(imeProbe.compLocked.cv.left, imeProbe.e3.left) && nearPx(imeProbe.compLocked.cv.top, imeProbe.e3.top)
+        && imeProbe.compCleanup !== null
+        && imeProbe.compCleanup.widthAfterEnd >= imeProbe.compCleanup.cellWidth - 0.1
+        && imeProbe.compCleanup.valueAfterEnd === ''
+        && imeProbe.compCleanup.scrollLeftAfterEnd === 0
+        && imeProbe.scrollOffset !== null
+        && imeProbe.scrollOffset.viewportY < imeProbe.scrollOffset.baseY
+        && nearPx(imeProbe.scrollOffset.actual.top, imeProbe.scrollOffset.expected.top)
+        && nearPx(imeProbe.scrollOffset.rect.top, imeProbe.scrollOffset.expected.top, 1.0)
         && imeProbe.p4 !== null && nearPx(imeProbe.p4.left, imeProbe.e4.left) && nearPx(imeProbe.p4.top, imeProbe.e4.top)
         && imeProbe.idle !== null && imeProbe.idle.composing === false
         && imeProbe.idle.rects === 0
