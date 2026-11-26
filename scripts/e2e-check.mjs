@@ -1304,6 +1304,7 @@ async function main() {
         return { left: (tr.left - sr.left) + 'px', top: (tr.top - sr.top) + 'px', width: tr.width };
       };
       const taTransition = getComputedStyle(term.textarea).transitionDuration;
+      const taOutline = getComputedStyle(term.textarea).outlineStyle;
       const cvTransition = core?._compositionView ? getComputedStyle(core._compositionView).transitionDuration : null;
 
       await write('\\u001b[?25h\\u001b[10;10H');
@@ -1416,7 +1417,7 @@ async function main() {
           await write('\\u001b[?25h');
         }
       }
-      return { ok: true, taTransition, cvTransition, p1, r1, p2Immediate, p2Settled, p3, r3,
+      return { ok: true, taTransition, taOutline, cvTransition, p1, r1, p2Immediate, p2Settled, p3, r3,
         compLocked, compCleanup, scrollOffset, p4, idle,
         e1: px(9, 9), e2: px(39, 19), e3: px(11, 11), e4: px(15, 5),
         hiddenKnown: typeof core?.coreService?.isCursorHidden === 'boolean' };
@@ -1428,7 +1429,7 @@ async function main() {
     const nearPx = (a, b, eps = 0.01) => Math.abs(parseFloat(a) - parseFloat(b)) <= eps;
     check('IME 锚点：无 CSS 过渡延迟、瞬态隐藏防抖、组合锁定、滚屏偏移与清理',
       imeProbe.hiddenKnown === true
-        && imeProbe.taTransition === '0s' && imeProbe.cvTransition === '0s'
+        && imeProbe.taTransition === '0s' && imeProbe.taOutline === 'none' && imeProbe.cvTransition === '0s'
         && nearPx(imeProbe.p1.left, imeProbe.e1.left) && nearPx(imeProbe.p1.top, imeProbe.e1.top)
         && nearPx(imeProbe.r1.left, imeProbe.e1.left, 1.0) && nearPx(imeProbe.r1.top, imeProbe.e1.top, 1.0)
         && nearPx(imeProbe.p2Immediate.left, imeProbe.e1.left) && nearPx(imeProbe.p2Immediate.top, imeProbe.e1.top)

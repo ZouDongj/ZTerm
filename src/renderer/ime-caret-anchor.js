@@ -140,7 +140,6 @@
         textarea.style.lineHeight = height + 'px';
         textarea.style.zIndex = '-5';
         syncTextareaFont(core, textarea);
-        if (!textarea.value && textarea.scrollLeft) textarea.scrollLeft = 0;
         return true;
     }
 
@@ -171,7 +170,6 @@
         textarea.style.height = Math.max(targetHeight, 1) + 'px';
         textarea.style.lineHeight = targetHeight + 'px';
         syncTextareaFont(core, textarea);
-        if (!textarea.value && textarea.scrollLeft) textarea.scrollLeft = 0;
         return true;
     }
 
@@ -181,6 +179,7 @@
             hasAnchored: false,
             lastCell: null,
             lastSource: 'none', // 'visible' | 'perceived' | 'hidden' | 'none'
+            lastScrollOffset: null,
             hiddenSettleMs,
             hiddenTimer: null,
             pendingHidden: false,
@@ -270,13 +269,28 @@
         core._syncTextArea();
     }
 
+    function currentScrollOffset(core) {
+        const buf = core.buffer || core._bufferService?.buffer;
+        if (!buf || !Number.isInteger(buf.ybase) || !Number.isInteger(buf.ydisp)) return null;
+        return buf.ybase - buf.ydisp;
+    }
+
     function subscribeLifecycleEvents(term, core, coreService, state) {
         if (!state.scrollSubscribed) {
             const onScroll = typeof term?.onScroll === 'function'
                 ? term.onScroll
                 : (typeof core.onScroll === 'function' ? core.onScroll : null);
             if (onScroll) {
-                const sub = onScroll(() => resyncViewportAnchor(core, state));
+                const sub = onScroll(() => {
+                    if (state.disposed) return;
+                    // BufferService.scroll() emits onScroll once per line during
+                    // streaming output. Cursor row changes are already synced by
+                    // onCursorMove; only resync here when ybase - ydisp changed.
+                    const off = currentScrollOffset(core);
+                    if (off !== null && off === state.lastScrollOffset) return;
+                    state.lastScrollOffset = off;
+                    resyncViewportAnchor(core, state);
+                });
                 if (sub) state.disposables.push(sub);
                 state.scrollSubscribed = true;
             }
@@ -292,7 +306,11 @@
                 const before = buf ? buf.ydisp : null;
                 const res = origScrollLines.apply(this, arguments);
                 if (!state.disposed && suppressScrollEvent && buf && buf.ydisp !== before) {
-                    resyncViewportAnchor(core, state);
+                    const off = currentScrollOffset(core);
+                    if (off === null || off !== state.lastScrollOffset) {
+                        state.lastScrollOffset = off;
+                        resyncViewportAnchor(core, state);
+                    }
                 }
                 return res;
             };
@@ -327,6 +345,7 @@
                 state.hasAnchored = false;
                 state.lastCell = null;
                 state.lastSource = 'none';
+                state.lastScrollOffset = null;
                 // Defer resync past the current parse() call: ESC[?1049h fires
                 // onBufferActivate mid-chunk before trailing ESC[?25l / CUP in
                 // the same chunk have parsed. If onCursorMove anchors at the end
@@ -471,7 +490,8 @@
                 }
                 const res = origKeydown(e);
                 // Non-229 keydown finalizing composition synchronously via
-                // _finalizeComposition(false) must also restore idle cell geometry.
+                // _finalizeComposition(false) must also restore idle cell geometry
+                // and schedule hidden-cursor settle if the cursor moved during composition.
                 if (!state.disposed && wasComposing && !helper.isComposing) {
                     cancelCompositionTimer(state);
                     if (state.hasAnchored && state.lastCell) {
@@ -479,7 +499,7 @@
                         state.lastCell = clamped;
                         anchorTextareaAt(core, clamped);
                     }
-                    if (!coreService.isCursorHidden || readPerceivedCaret(core)) core._syncTextArea();
+                    core._syncTextArea();
                 }
                 return res;
             };
@@ -517,13 +537,15 @@
                 origEnd();
                 if (state.disposed) return;
                 // Restore normal 1-cell idle geometry immediately (e.g. cancelling
-                // a composition with Esc would otherwise leave width at 1px).
+                // a composition with Esc would otherwise leave width at 1px) and
+                // let _syncTextArea schedule hidden-cursor settle for any cursor
+                // movement that occurred while composition held the anchor.
                 if (state.hasAnchored && state.lastCell) {
                     const clamped = clampCell(core, state.lastCell);
                     state.lastCell = clamped;
                     anchorTextareaAt(core, clamped);
                 }
-                if (!coreService.isCursorHidden || readPerceivedCaret(core)) core._syncTextArea();
+                core._syncTextArea();
 
                 // Safely clear dead historical textarea.value after xterm's own
                 // _finalizeComposition setTimeout(0) has delivered the commit,

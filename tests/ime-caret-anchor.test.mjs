@@ -210,16 +210,21 @@ function fakeTerm({
     };
 }
 
-test('app.css excludes .xterm-helper-textarea from global textarea transitions and focus rings', () => {
+test('app.css excludes .xterm-helper-textarea via zero-specificity :where() without overriding form focus rings', () => {
     const css = readFileSync(new URL('../src/renderer/app.css', import.meta.url), 'utf8');
     // No bare textarea or [tabindex] focus-visible selector leaks onto helper textarea.
     assert.doesNotMatch(css, /button,input,select,textarea,/);
     assert.doesNotMatch(css, /select:focus-visible,input:focus-visible,textarea:focus-visible,/);
     assert.doesNotMatch(css, /\[tabindex\]:focus-visible/);
     assert.doesNotMatch(css, /^textarea\{font-family:inherit\}/m);
-    assert.match(css, /\[tabindex\]:not\(\.xterm-helper-textarea\):focus-visible/);
-    // Explicit defensive isolation rule on xterm helper elements.
-    assert.match(css, /\.xterm \.xterm-helper-textarea[\s\S]*?transition:\s*none/);
+    // Use :where(:not(.xterm-helper-textarea)) so global rules keep (0,1,1) specificity
+    // and never override earlier (0,2,1) rules such as .form-group textarea:focus-visible.
+    assert.match(css, /^textarea:where\(:not\(\.xterm-helper-textarea\)\)\{font-family:inherit\}/m);
+    assert.match(css, /textarea:where\(:not\(\.xterm-helper-textarea\)\):focus-visible/);
+    assert.match(css, /\[tabindex\]:where\(:not\(\.xterm-helper-textarea\)\):focus-visible/);
+    assert.match(css, /button,input,select,textarea:where\(:not\(\.xterm-helper-textarea\)\),/);
+    // Explicit defensive isolation rule on xterm helper elements (including outline:none).
+    assert.match(css, /\.xterm \.xterm-helper-textarea[\s\S]*?transition:\s*none[\s\S]*?outline:\s*none/);
     assert.match(css, /\.xterm \.composition-view[\s\S]*?transition:\s*none/);
 });
 
@@ -900,6 +905,118 @@ test('real vendored xterm parser & CompositionHelper: wheel scroll, split ?25l..
     moveSub.dispose();
     dataSub.dispose();
     term.dispose();
+});
+
+test('real bundled xterm: streaming scrollback keeps _syncTextArea O(chunks) and never reads textarea.scrollLeft', async () => {
+    const term = new BundledTerminal({ cols: 80, rows: 24, scrollback: 1000 });
+    const core = term._core;
+    let scrollLeftReads = 0;
+    let scrollLeftVal = 0;
+    const ta = {
+        style: {},
+        value: '',
+        selectionStart: 0,
+        selectionEnd: 0,
+        get scrollLeft() { scrollLeftReads += 1; return scrollLeftVal; },
+        set scrollLeft(v) { scrollLeftVal = v; },
+    };
+    const cv = {
+        style: {},
+        textContent: '',
+        classList: { add() {}, remove() {} },
+        getBoundingClientRect() { return { width: 0, height: 0 }; },
+    };
+    core.textarea = ta;
+    core._compositionView = cv;
+    core._renderService = {
+        hasRenderer() { return true; },
+        dimensions: { css: { cell: { width: 8, height: 18 } } },
+        onDimensionsChange: () => ({ dispose() {} }),
+        refreshRows() {},
+        clear() {},
+    };
+    core._compositionHelper = {
+        isComposing: false,
+        updateCompositionElements() {},
+    };
+    assert.equal(api.patchTerminal(term, { hiddenSettleMs: 30 }), true);
+
+    let syncCalls = 0;
+    const origPatchedSync = core._syncTextArea;
+    core._syncTextArea = function () {
+        syncCalls += 1;
+        return origPatchedSync.apply(this, arguments);
+    };
+    const moveSub = core.onCursorMove(() => core._syncTextArea());
+    const write = s => new Promise(r => term.write(s, r));
+
+    // Stream 500 scrolling lines across 5 chunks while pinned at the bottom
+    // (ybase === ydisp throughout). onScroll fires per line, but _syncTextArea
+    // must stay O(chunks), not O(lines).
+    const chunk = 'scroll-output-line\r\n'.repeat(100);
+    for (let i = 0; i < 5; i += 1) {
+        await write(chunk);
+    }
+    assert.ok(core.buffer.ybase >= 400, 'scrollback must have grown');
+    assert.ok(syncCalls <= 12, `expected O(chunks) _syncTextArea calls, got ${syncCalls}`);
+    assert.equal(scrollLeftReads, 0, 'idle anchoring must never read textarea.scrollLeft');
+
+    // Place cursor mid-screen and verify wheel scroll up / return to bottom
+    // still updates textarea.style.top when ybase - ydisp changes.
+    await write('\x1b[10;15H');
+    assert.equal(ta.style.top, (9 * 18) + 'px');
+    core._bufferService.scrollLines(-4, true);
+    assert.equal(ta.style.top, (13 * 18) + 'px', 'wheel scroll up shifts viewport anchor down');
+    core._bufferService.scrollLines(4, false);
+    assert.equal(ta.style.top, (9 * 18) + 'px', 'scrolling back to bottom restores anchor');
+
+    // Composition anchoring must also perform zero scrollLeft reads.
+    core._compositionHelper.isComposing = true;
+    core._compositionHelper.updateCompositionElements(true);
+    assert.equal(scrollLeftReads, 0, 'composition anchoring must never read textarea.scrollLeft');
+
+    moveSub.dispose();
+    term.dispose();
+});
+
+test('hidden cursor without perceived caret settles cursor advances that arrived during cancelled composition', async () => {
+    const { term, core } = fakeTerm({ withBuffer: true, x: 6, y: 9, rows: 24, cols: 80 });
+    assert.equal(api.patchTerminal(term, { hiddenSettleMs: 30 }), true);
+    core.coreService.isCursorHidden = true;
+    // Cold-start anchor at (6, 9).
+    core._syncTextArea();
+    assert.equal(core.textarea.style.left, (6 * 8) + 'px');
+    assert.equal(core.textarea.style.top, (9 * 18) + 'px');
+
+    // Start composition; echo from previous word arrives mid-composition moving
+    // hidden cursor to (8, 9). Anchor stays locked at (6, 9) while composing.
+    core._compositionHelper.compositionstart();
+    core.buffer.x = 8;
+    core.buffer.y = 9;
+    core._syncTextArea();
+    core._compositionHelper.updateCompositionElements(true);
+    assert.equal(core.textarea.style.left, (6 * 8) + 'px');
+
+    // User cancels composition (compositionend) with no further output.
+    // Immediately stays at (6, 9) (no instant jump on transient split), then
+    // settles to (8, 9) once hiddenSettleMs elapses.
+    core._compositionHelper.compositionend();
+    assert.equal(core.textarea.style.left, (6 * 8) + 'px', 'immediate restore holds pre-cancel cell');
+    await new Promise(r => setTimeout(r, 60));
+    assert.equal(core.textarea.style.left, (8 * 8) + 'px', 'settled anchor catches up to (8, 9)');
+    assert.equal(core.textarea.style.top, (9 * 18) + 'px');
+
+    // Same for non-229 keydown finalizing composition synchronously.
+    core._compositionHelper.compositionstart();
+    core.buffer.x = 12;
+    core.buffer.y = 9;
+    core._syncTextArea();
+    core._compositionHelper.keydown({ keyCode: 27 });
+    assert.equal(core.textarea.style.left, (8 * 8) + 'px');
+    await new Promise(r => setTimeout(r, 60));
+    assert.equal(core.textarea.style.left, (12 * 8) + 'px', 'non-229 exit settles to (12, 9)');
+
+    core.dispose();
 });
 
 test('no helper and no onWillOpen: loud false, no throw', () => {
