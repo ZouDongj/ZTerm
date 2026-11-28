@@ -30,7 +30,7 @@
 }
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
 /* Form controls do not inherit fonts by default (textarea falls back to UA monospace); make them follow the UI font */
-textarea{font-family:inherit}
+textarea:where(:not(.xterm-helper-textarea)){font-family:inherit}
 html{background:#0b0e14}
 html,body{margin:0;padding:0;overflow:hidden;width:100vw;height:100vh}
 body{
@@ -304,6 +304,9 @@ body.hide-statusbar .main{margin-bottom:12px}
 .pane-body .xterm .xterm-viewport{right:0 !important}
 .xterm-decoration-overview-ruler{display:none !important}
 .xterm-link{text-decoration:underline;cursor:pointer}
+/* IME anchor surfaces: position and size updates must commit synchronously on the
+   same layout pass so Windows TSF never tracks a CSS transition mid-flight. */
+.xterm .xterm-helper-textarea,.xterm .composition-view{transition:none;box-shadow:none;outline:none}
 
 /* ── Split panes (absolute positioning — Tabby model) ── */
 .split-root{position:relative;width:100%;height:100%;overflow:hidden;padding:0;background:transparent}
@@ -1158,8 +1161,8 @@ body.menu-open #btn-add-tab:hover,body.menu-open #btn-menu:hover{background:none
    hover = white 6% wash; selection = accent tonal 16%; keyboard focus =
    2px accent ring; pressed = slightly darker; disabled = dimmed + inert. */
 button:focus-visible,.tab:focus-visible,.menu-item:focus-visible,
-select:focus-visible,input:focus-visible,textarea:focus-visible,
-[tabindex]:focus-visible,.toggle-switch:focus-visible{
+select:focus-visible,input:focus-visible,textarea:where(:not(.xterm-helper-textarea)):focus-visible,
+[tabindex]:where(:not(.xterm-helper-textarea)):focus-visible,.toggle-switch:focus-visible{
   outline:none;
   box-shadow:0 0 0 2px rgba(var(--accent-rgb),0.5);
 }
@@ -1187,7 +1190,7 @@ button:disabled,.menu-item.disabled,.shortcut-edit-btn:disabled{
 .ss-row,.dd-option,.dd-trigger,
 .auth-tab,.panel-tab,.form-section-add,.shortcut-edit-btn,
 #btn-menu,#btn-add-tab,.win-ctrl,
-button,input,select,textarea,
+button,input,select,textarea:where(:not(.xterm-helper-textarea)),
 .settings-card-control input,.settings-card-control select,
 .form-group input,.form-group select,.form-group textarea{
   transition-duration:var(--motion-hover);
