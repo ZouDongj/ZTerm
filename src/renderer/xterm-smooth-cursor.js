@@ -790,10 +790,17 @@
               // verify post-parse continuity instead of prematurely wiping
               // warmup or trust before xterm parses the new caret cell.
               if (!(cell.source === 'post-parse' && postParse?.hasPendingIntents?.())) {
-                if (sw.active) revokeSoftware('cell-overwritten');
-                else postParse?.syncExternalAnchor(null);
-                sw.runStreak = 0;
-                sw.pending = null;
+                if (sw.active) {
+                  revokeSoftware('cell-overwritten');
+                } else {
+                  postParse?.syncExternalAnchor(null);
+                  const isPostParse = sw.published?.source === 'post-parse';
+                  const hadWarmupIme = isPostParse && sw.published?.causalPrintable === true;
+                  if (isPostParse) sw.published = null;
+                  sw.runStreak = 0;
+                  sw.pending = null;
+                  if (hadWarmupIme) syncIdleTextarea();
+                }
               }
             }
           }
@@ -807,10 +814,16 @@
         noteChunkWrites(info);
         if (postParse && info?.buffer) {
           postParse.reset('buffer-switch');
+          if (sw.published?.source === 'post-parse') revokeSoftware('buffer-switch');
           return;
+        }
+        if (postParse && info?.scroll && sw.published?.source === 'post-parse') {
+          revokeSoftware('invalidate:scroll');
         }
         if (postParse && renderer._coreService?.isCursorHidden === true && postParse.hasPendingIntents()) {
           postParse.beforeChunkWrite(info, postParseReader());
+        } else if (postParse && info?.scroll) {
+          postParse.reset('scroll');
         }
       },
       // xterm parsed through chunk `seq` (term.write callback): publish the
@@ -826,7 +839,16 @@
         // fields alive) — accepting it would push the watermark ahead of the
         // real parse front and break the checkpoint binding.
         if (typeof seq === 'number' && seq > sw.watermark && seq <= sw.enqueued) sw.watermark = seq;
+        if (postParse && renderer._coreService?.isCursorHidden !== true) {
+          postParse.onCursorVisible();
+          if (sw.published?.source === 'post-parse') {
+            revokeSoftware('protocol-visible');
+          }
+        }
         if (sw.enqueued > sw.watermark) return;
+        const wasWarmupIme = !sw.active
+          && sw.published?.source === 'post-parse'
+          && sw.published?.causalPrintable === true;
         let publishedChanged = false;
         let hadPreParse = false;
         if (sw.pending && sw.pending.chunkSeq <= sw.watermark && sw.candidateGeneration === sw.generation) {
@@ -844,7 +866,9 @@
             snapBeforeNextDraw = true; // source switch never flies from the protocol anchor
             instrumentation.softwareCaret = { active: true, since: clock() };
           }
-          postParse?.syncExternalAnchor(sw.published, sw.bufferType, sw.generation, sw.active);
+          if (renderer._coreService?.isCursorHidden === true) {
+            postParse?.syncExternalAnchor(sw.published, sw.bufferType, sw.generation, sw.active);
+          }
         }
         if (postParse) {
           if (sw.published && sw.bufferType !== null && sw.bufferType !== terminal.buffer.active.type) {
@@ -855,11 +879,7 @@
           if (hadPreParse) {
             postParse.onPreParseHit();
           } else if (renderer._coreService?.isCursorHidden !== true) {
-            postParse.onCursorVisible();
-            if (sw.published?.source === 'post-parse') {
-              revokeSoftware('protocol-visible');
-              return;
-            }
+            // Visible protocol cursor was already cleared above; skip post-parse scans.
           } else if (postParse.hasPendingIntents()) {
             const reader = postParseReader();
             const cand = postParse.onParsed({ seq: sw.watermark, hadPreParseCandidate: false, reader });
@@ -879,8 +899,9 @@
                     syncIdleTextarea();
                     scheduleContinuation();
                   }
-                } else if (cand.resumedFromSplit) {
+                } else if (cand.resumedFromSplit || cand.sessionReattach) {
                   sw.runStreak = Math.max(2, sw.runStreak + 1);
+                  if (cand.sessionReattach) snapBeforeNextDraw = true;
                 } else {
                   sw.runStreak += 1;
                 }
@@ -901,10 +922,29 @@
                 sw.bufferType = prevBufferType;
                 postParse.syncExternalAnchor(sw.published, sw.bufferType, sw.generation, sw.active);
               }
+            } else if (!sw.active && sw.published?.source === 'post-parse'
+              && sw.published?.causalPrintable === true && !softwareCellMatches(sw.published)) {
+              // Warmup cell was overwritten while a non-matching intent is still
+              // fresh (e.g. cold-start Arrow key): resync idle textarea to stock
+              // without dropping anchor/runStreak so split-frame warmup survives.
+              syncIdleTextarea();
+            }
+          } else if (sw.published?.source === 'post-parse' && !softwareCellMatches(sw.published)) {
+            if (sw.active) {
+              revokeSoftware('cell-overwritten');
+            } else {
+              const hadWarmupIme = sw.published.causalPrintable === true;
+              sw.published = null;
+              sw.runStreak = 0;
+              postParse.syncExternalAnchor(null);
+              if (hadWarmupIme) syncIdleTextarea();
             }
           }
         }
-        if (sw.active && publishedChanged) syncIdleTextarea();
+        const warmupImeAnchor = !sw.active
+          && sw.published?.source === 'post-parse'
+          && sw.published?.causalPrintable === true;
+        if (publishedChanged && (sw.active || warmupImeAnchor || wasWarmupIme)) syncIdleTextarea();
         if (sw.active) scheduleContinuation();
       },
       invalidate(reason) {
@@ -961,6 +1001,12 @@
         sw.pending = null;
         sw.runStreak = 0;
         postParse?.clearCycle();
+        if (!sw.active && sw.published?.source === 'post-parse') {
+          const hadWarmupIme = sw.published.causalPrintable === true;
+          sw.published = null;
+          postParse?.syncExternalAnchor(null);
+          if (hadWarmupIme) syncIdleTextarea();
+        }
       },
     };
 
@@ -1624,6 +1670,7 @@
         if (postInput?.barrier && !sw.active && sw.published?.source === 'post-parse') {
           sw.runStreak = 0;
           sw.published = null;
+          syncIdleTextarea();
         }
         let enqueued = 0;
         for (const segment of segmentInputEvent(data)) {
@@ -1694,12 +1741,27 @@
       },
       // The viewport-relative 0-based cell the user currently perceives as
       // the caret: the trusted software descriptor when the adapter owns the
-      // cursor, else null (a visible protocol cursor is stock-anchored by
-      // xterm itself). Consumed by the IME caret anchor (ime-caret-anchor.js):
-      // agent TUIs hide the protocol cursor for whole sessions, so the IME
-      // candidate window must follow THIS position, not the hidden park.
+      // cursor, or a causally verified post-parse printable warmup cell while
+      // the protocol cursor is hidden at the bottom viewport (so IME anchors
+      // accurately on the first committed word before WebGL visual takeover
+      // engages on step 2), else null (a visible protocol cursor is stock-
+      // anchored by xterm itself). Consumed by the IME caret anchor
+      // (ime-caret-anchor.js): agent TUIs hide the protocol cursor for whole
+      // sessions, so the IME candidate window must follow THIS position, not
+      // the hidden park.
       perceivedCaretCell() {
-        if (disposed || !sw.active || !sw.published) return null;
+        if (disposed || !sw.published) return null;
+        if (!sw.active) {
+          if (sw.published.source !== 'post-parse'
+            || sw.published.causalPrintable !== true
+            || sw.candidateGeneration !== sw.generation
+            || renderer._coreService?.isCursorHidden !== true
+            || !softwareCellMatches(sw.published)) {
+            return null;
+          }
+          const active = terminal.buffer?.active;
+          if (active && active.viewportY !== active.baseY) return null;
+        }
         const x = sw.published.x;
         const y = sw.published.y;
         if (!(x >= 0 && x < terminal.cols && y >= 0 && y < terminal.rows)) return null;

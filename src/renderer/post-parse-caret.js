@@ -30,6 +30,7 @@
   const MAX_INTENTS = 16;
   const INTENT_TTL_MS = 1200;
   const MAX_PASTE_TEXT_LEN = 32;
+  const MAX_INPUT_CLASSIFY_LEN = 256;
   const MAX_DIRTY_ROWS = 6;
   const MAX_CHUNK_CELL_WRITES = 4096;
 
@@ -80,6 +81,9 @@
   // (and any mid-string ESC poisons the remainder of the chunk).
   function classifyInputData(data) {
     if (typeof data !== 'string' || data.length === 0) return [];
+    // Fast-fail oversized chunks (e.g. large non-bracketed pastes) before
+    // iterating codepoints; max valid 32-char bracketed paste is <= 76 UTF-16 units.
+    if (data.length > MAX_INPUT_CLASSIFY_LEN) return [{ kind: 'barrier' }];
     if (data.startsWith(PASTE_BEGIN)) {
       const end = data.indexOf(PASTE_END, PASTE_BEGIN.length);
       if (end < 0 || end + PASTE_END.length !== data.length) return [{ kind: 'barrier' }];
@@ -259,6 +263,21 @@
     return true;
   }
 
+  // Blank-equivalence check for navigation only: unwritten/erased cells
+  // ('\u0000') and explicit spaces (' ') are visually identical blanks, so
+  // moving onto a never-written end-of-line caret cell ('\u0000' -> ' ') or
+  // off an end-of-line caret cell under EL (' ' -> '\u0000') does not count as
+  // a text mutation.
+  function rowBlankEquivalentEqual(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) {
+      if (a[i] === b[i]) continue;
+      if ((a[i] === '\u0000' || a[i] === ' ') && (b[i] === '\u0000' || b[i] === ' ')) continue;
+      return false;
+    }
+    return true;
+  }
+
   function spanCellsDiffer(preCells, postCells, startX, width) {
     if (!preCells || !postCells) return false;
     const end = Math.min(preCells.length, postCells.length, startX + width);
@@ -304,6 +323,11 @@
     let baseline = null; // { bufferType, generation, rows: Map<y, { cells, scan }> }
     // Per-parse-cycle dirty-row tracking. Cleared after every onParsed.
     let cycle = null; // { bufferType, generation, preCursorY, dirtyRows: Set, disqualified }
+    // Session-level proof that this hidden-cursor buffer already earned active
+    // software-caret ownership via the standard 2-step warmup. Preserved across
+    // Enter/scroll/resize so subsequent messages re-engage on keystroke 1 with
+    // causal printable proof; cleared on ?25h, buffer switch, DECOM, or reset.
+    let sessionProven = null; // { style, fg, bg, bufferType }
 
     function pruneIntents(now) {
       while (intents.length > 0 && now - intents[0].at > intentTtlMs) intents.shift();
@@ -351,6 +375,7 @@
       splitRevoked = null;
       baseline = null;
       cycle = null;
+      sessionProven = null;
     }
 
     // Rebase coordinate generation without dropping pending intents or active
@@ -370,6 +395,9 @@
       splitRevoked = null;
       baseline = null;
       cycle = null;
+      if (reason !== 'scroll' && reason !== 'resize' && reason !== 'observer:resize') {
+        sessionProven = null;
+      }
       return reason;
     }
 
@@ -411,10 +439,21 @@
         generation,
         trusted: trusted === true,
       };
+      if (trusted === true && desc.style && bufferType) {
+        sessionProven = {
+          style: desc.style,
+          fg: desc.fg ?? null,
+          bg: desc.bg ?? null,
+          bufferType,
+        };
+      }
     }
 
     function noteRevoke(reason, activeDesc, bufferType, generation) {
       const now = clock();
+      if (reason === 'protocol-visible' || reason === 'buffer-switch') {
+        sessionProven = null;
+      }
       if (reason === 'cell-overwritten' && activeDesc && hasFreshIntents(now)) {
         splitRevoked = {
           x: activeDesc.x,
@@ -635,11 +674,11 @@
               if (rowChanged) {
                 return { consumeThrough: start + len, kind: 'printable', caret, resetTrust: false };
               }
-            } else if (oldAnchorGone
+            } else if ((oldAnchorGone || !prevAnchor.trusted)
               && verifyColdStartPrintable(reader, caret, matched, preCells, postCells, preCaret)) {
               // Old anchor disappeared (e.g. prompt moved to a new line after
-              // Enter or Ctrl+U): fall back to fresh cold-start warmup instead
-              // of deadlocking on the stale coordinate.
+              // Enter or Ctrl+U), or an untrusted warmup cell was abandoned:
+              // fall back to fresh cold-start warmup instead of deadlocking.
               return { consumeThrough: start + len, kind: 'printable', caret, resetTrust: true };
             }
           } else if (verifyColdStartPrintable(reader, caret, matched, preCells, postCells, preCaret)) {
@@ -688,9 +727,11 @@
 
       // 4. Navigation match: strictly requires an actively TRUSTED anchor,
       //    a captured pre-parse baseline (fail closed if missing), unchanged
-      //    row text, disappearance of the old caret, and a newly positioned caret.
+      //    visible row text (treating unwritten '\u0000' and explicit ' ' as
+      //    blank-equivalent), disappearance of the old caret, and a newly
+      //    positioned caret.
       if (prevAnchor && prevAnchor.trusted === true && caret.style === prevAnchor.style
-        && preCells !== null && !rowChanged && oldAnchorGone) {
+        && preCells !== null && rowBlankEquivalentEqual(preCells, postCells) && oldAnchorGone) {
         const targetAppeared = !preCaret || preCaret.x !== caret.x || preCaret.y !== caret.y;
         if (targetAppeared && (!requireDefaultPlain || hasPlainLeftNeighbor(reader, row, caret.x))) {
           for (let i = 0; i < intents.length; i += 1) {
@@ -795,13 +836,20 @@
       baseline = null;
       splitRevoked = null;
       const isSplitResume = resumedFromSplit && !winner.resetTrust;
+      const sessionReattach = !prevAnchor && !winner.resetTrust
+        && winner.kind === 'printable'
+        && sessionProven !== null
+        && sessionProven.bufferType === bufferType
+        && sessionProven.style === winner.caret.style
+        && sessionProven.fg === (winner.caret.fg ?? null)
+        && sessionProven.bg === (winner.caret.bg ?? null);
       anchor = {
         x: winner.caret.x,
         y: winner.caret.y,
         style: winner.caret.style,
         bufferType,
         generation,
-        trusted: !winner.resetTrust && (isSplitResume || (prevAnchor !== null)),
+        trusted: !winner.resetTrust && (isSplitResume || sessionReattach || (prevAnchor !== null)),
       };
       return {
         chunkSeq: seq,
@@ -814,6 +862,8 @@
         style: winner.caret.style,
         restoreSgr: winner.caret.restoreSgr,
         source: 'post-parse',
+        causalPrintable: winner.kind === 'printable',
+        sessionReattach,
         resumedFromSplit: isSplitResume,
         revokedFrom: isSplitResume ? revokedFrom : null,
         resetTrust: winner.resetTrust === true,
@@ -836,6 +886,7 @@
         return {
           pendingIntents: intents.length,
           anchor: anchor ? { ...anchor } : null,
+          sessionProven: sessionProven ? { ...sessionProven } : null,
           cycleActive: cycle !== null,
         };
       },
@@ -849,6 +900,7 @@
     classifyCellCaretStyle,
     charWidth,
     MAX_DIRTY_ROWS,
+    MAX_INPUT_CLASSIFY_LEN,
     INTENT_TTL_MS,
   };
   root.createPostParseCaretRecognizer = createPostParseCaretRecognizer;

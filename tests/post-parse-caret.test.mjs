@@ -40,7 +40,9 @@ function createHarness(t, {
     isCursorInitialized: true,
   };
   const coreBrowserService = { isFocused: true };
-  const workCell = source._core.buffer.getNullCell();
+  // Use a dedicated CellData instance (matching production WebGL's private
+  // _workCell) instead of mutating xterm's shared internal _nullCell.
+  const workCell = new (source._core.buffer.getNullCell().constructor)();
   const gl = {
     SCISSOR_TEST: 0x0c11,
     enable() {},
@@ -895,4 +897,387 @@ test('active resetTrust relocation clears stale WebGL row & IME cleanly, and exp
   await h2.write('\x1b[10;4Hn\x1b[7m \x1b[27m');
   assert.equal(h2.adapter.snapshot().caretOwnership.active, true);
   assert.deepEqual(h2.adapter.snapshot().target, { x: 4, y: 9 });
+});
+
+test('classifyInputData fast-fails oversized non-bracketed paste without per-char allocation', () => {
+  const limit = postParseApi.MAX_INPUT_CLASSIFY_LEN;
+  assert.equal(limit, 256);
+  assert.deepEqual(postParseApi.classifyInputData('a'.repeat(limit + 1)), [{ kind: 'barrier' }]);
+  assert.deepEqual(postParseApi.classifyInputData('x'.repeat(100_000)), [{ kind: 'barrier' }]);
+  // Boundary: exact MAX_INPUT_CLASSIFY_LEN (256) still classifies normally.
+  const atLimit = postParseApi.classifyInputData('a'.repeat(limit));
+  assert.equal(atLimit.length, limit);
+  assert.equal(atLimit[0].kind, 'printable');
+  const maxPaste = postParseApi.classifyInputData('\x1b[200~' + '中'.repeat(32) + '\x1b[201~');
+  assert.equal(maxPaste.length, 32);
+  assert.equal(maxPaste[0].kind, 'printable');
+});
+
+test('nav onto / off the end-of-line caret cell keeps ownership (unwritten cell vs explicit space)', async t => {
+  // 1. ConPTY diff: Home with EL erases the EOL space (' ' -> '\u0000'), then End
+  //    paints reverse space onto that erased/unwritten cell ('\u0000' -> ' ').
+  const h = createHarness(t, { cols: 80, rows: 24 });
+  await h.write('\x1b[?25l\x1b[10;1H❯ \x1b[7m \x1b[27m');
+  h.adapter.noteInput('a');
+  await h.write('\x1b[10;3Ha\x1b[7m \x1b[27m');
+  h.advance(50);
+  h.adapter.noteInput('b');
+  await h.write('\x1b[10;4Hb\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true);
+  assert.deepEqual(h.adapter.snapshot().target, { x: 4, y: 9 });
+
+  // Press Home with EL erasing the trailing reverse-space cell back to '\u0000'.
+  h.advance(150);
+  h.render();
+  h.adapter.noteInput('\x1b[H');
+  await h.write('\x1b[10;3H\x1b[7ma\x1b[27mb\x1b[K');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true, 'Home with EL off end-of-line space must keep ownership');
+  assert.deepEqual(h.adapter.snapshot().target, { x: 2, y: 9 });
+
+  // Press End: paints reverse space onto col 4 which was erased to '\u0000' by EL.
+  h.advance(150);
+  h.render();
+  h.adapter.noteInput('\x1b[F');
+  await h.write('\x1b[10;3Hab\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true, 'End onto unwritten/erased EOL cell must keep ownership');
+  assert.deepEqual(h.adapter.snapshot().target, { x: 4, y: 9 });
+
+  // 2. Line-rewrite + EL: Left off end-of-line caret (' ' -> '\u0000') and Right back ('\u0000' -> ' ').
+  h.advance(150);
+  h.render();
+  h.adapter.noteInput('\x1b[D');
+  await h.write('\x1b[10;1H❯ a\x1b[7mb\x1b[27m\x1b[K');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true, 'Left with EL erasing EOL caret space must keep ownership');
+  assert.deepEqual(h.adapter.snapshot().target, { x: 3, y: 9 });
+
+  h.advance(150);
+  h.render();
+  h.adapter.noteInput('\x1b[C');
+  await h.write('\x1b[10;1H❯ ab\x1b[7m \x1b[27m\x1b[K');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true, 'Right onto erased EOL cell must keep ownership');
+  assert.deepEqual(h.adapter.snapshot().target, { x: 4, y: 9 });
+
+  // 3. Cross-row Down onto an unwritten EOL cell on row 10 ('\u0000' -> ' '), and Up back.
+  await h.write('\x1b[11;1H  z');
+  h.advance(150);
+  h.render();
+  h.adapter.noteInput('\x1b[B');
+  await h.write('\x1b[10;5H\x1b[K\x1b[11;4H\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true, 'Down onto unwritten EOL cell must keep ownership');
+  assert.deepEqual(h.adapter.snapshot().target, { x: 3, y: 10 });
+
+  h.advance(150);
+  h.render();
+  h.adapter.noteInput('\x1b[A');
+  await h.write('\x1b[11;4H\x1b[K\x1b[10;5H\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true, 'Up back onto erased EOL cell must keep ownership');
+  assert.deepEqual(h.adapter.snapshot().target, { x: 4, y: 9 });
+
+  // Non-blank text mutation during nav (e.g. history replacement on Up) must still fail closed.
+  h.advance(150);
+  h.render();
+  h.adapter.noteInput('\x1b[A');
+  await h.write('\x1b[10;1H❯ different\x1b[7m \x1b[27m\x1b[K');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'real text change during nav must fail closed');
+});
+
+test('cold-start printable warmup anchors IME at trustRun=1 while WebGL waits for step 2, and clears on barrier/overwrite/unit/rebind/?25h', async t => {
+  const h = createHarness(t, { cols: 80, rows: 24 });
+  let stockSyncCount = 0;
+  const textarea = { style: {} };
+  const fakeCore = {
+    coreService: h.coreService,
+    options: h.terminal.options,
+    textarea,
+    _renderService: { dimensions: { css: { cell: { width: 9, height: 20 } } } },
+    _compositionHelper: { isComposing: false, updateCompositionElements() {} },
+    _compositionView: { style: {}, getBoundingClientRect: () => ({ width: 40, height: 20 }) },
+    _syncTextArea() { stockSyncCount += 1; },
+  };
+  h.terminal._core._syncTextArea = () => fakeCore._syncTextArea();
+  assert.equal(imeAnchor.patchTerminal({ _core: fakeCore }, {
+    perceivedCaret: () => h.adapter.perceivedCaretCell(),
+  }), true);
+
+  // Cold-start prompt (hidden cursor, protocol parked at top-left).
+  await h.write('\x1b[?25l\x1b[10;1H❯ \x1b[7m \x1b[27m\x1b[1;1H');
+  assert.equal(h.adapter.perceivedCaretCell(), null);
+
+  // First Chinese word commit: WebGL stays inactive (trustRun=1), but IME anchors
+  // BOTH idle textarea and subsequent active composition view immediately!
+  h.advance(50);
+  h.adapter.noteInput('你好');
+  await h.write('\x1b[10;3H你好\x1b[7m \x1b[27m\x1b[1;1H');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'cold-start step 1 must keep WebGL inactive');
+  assert.equal(h.adapter.snapshot().caretOwnership.trustRun, 1);
+  assert.deepEqual(h.adapter.perceivedCaretCell(), { x: 6, y: 9, width: 1 }, 'causal printable warmup must anchor IME immediately');
+  assert.equal(textarea.style.left, `${6 * 9}px`);
+  assert.equal(textarea.style.top, `${9 * 20}px`);
+  fakeCore._compositionHelper.isComposing = true;
+  fakeCore._compositionHelper.updateCompositionElements(true);
+  assert.equal(fakeCore._compositionView.style.left, `${6 * 9}px`, 'word #2 composition view must anchor at warmup caret');
+  assert.equal(fakeCore._compositionView.style.top, `${9 * 20}px`);
+  fakeCore._compositionHelper.isComposing = false;
+
+  // Enter barrier clears warmup IME anchor immediately and re-syncs stock textarea.
+  const syncBeforeBarrier = stockSyncCount;
+  h.advance(50);
+  h.adapter.noteInput('\r');
+  assert.equal(h.adapter.perceivedCaretCell(), null, 'barrier must clear warmup IME anchor');
+  assert.ok(stockSyncCount > syncBeforeBarrier, 'barrier must trigger stock _syncTextArea fallback');
+
+  // Background cell overwrite clears warmup IME anchor cleanly.
+  await h.write('\x1b[10;1H❯ \x1b[K\x1b[7m \x1b[27m\x1b[1;1H');
+  h.advance(50);
+  h.adapter.noteInput('世界');
+  await h.write('\x1b[10;3H世界\x1b[7m \x1b[27m\x1b[1;1H');
+  assert.deepEqual(h.adapter.perceivedCaretCell(), { x: 6, y: 9, width: 1 });
+  const syncBeforeOverwrite = stockSyncCount;
+  h.advance(50);
+  await h.write('\x1b[10;1H\x1b[K'); // non-input output wipes row 9
+  assert.equal(h.adapter.perceivedCaretCell(), null, 'background overwrite must clear warmup IME anchor');
+  assert.ok(stockSyncCount > syncBeforeOverwrite, 'background overwrite must trigger stock _syncTextArea fallback');
+
+  // Non-matching pending intent (cold-start Arrow key) overwriting warmup cell resyncs idle textarea.
+  await h.write('\x1b[10;1H❯ \x1b[K\x1b[7m \x1b[27m\x1b[1;1H');
+  h.advance(50);
+  h.adapter.noteInput('你好');
+  await h.write('\x1b[10;3H你好\x1b[7m \x1b[27m\x1b[1;1H');
+  assert.deepEqual(h.adapter.perceivedCaretCell(), { x: 6, y: 9, width: 1 });
+  const syncBeforeNav = stockSyncCount;
+  h.advance(50);
+  h.adapter.noteInput('\x1b[D');
+  await h.write('\x1b[10;5H\x1b[7m好\x1b[27m \x1b[1;1H');
+  assert.equal(h.adapter.perceivedCaretCell(), null, 'overwritten warmup cell returns null immediately');
+  assert.ok(stockSyncCount > syncBeforeNav, 'overwritten warmup cell during non-matching intent must resync idle textarea');
+
+  // Sync-unit overwrite (unit()) without pending intents clears warmup IME anchor and syncs textarea.
+  await h.write('\x1b[10;1H❯ \x1b[K\x1b[7m \x1b[27m\x1b[1;1H');
+  h.advance(1300); // expire nav intent
+  h.adapter.noteInput('测');
+  await h.write('\x1b[10;3H测\x1b[7m \x1b[27m\x1b[1;1H');
+  assert.deepEqual(h.adapter.perceivedCaretCell(), { x: 4, y: 9, width: 1 });
+  const syncBeforeUnit = stockSyncCount;
+  h.advance(50);
+  await h.write('\x1b[?2026h\x1b[10;5H \x1b[?2026l\x1b[1;1H');
+  assert.equal(h.adapter.perceivedCaretCell(), null, 'sync-unit overwrite must clear warmup IME anchor');
+  assert.ok(stockSyncCount > syncBeforeUnit, 'sync-unit overwrite must resync idle textarea');
+
+  // rebindObserver() during cold-start warmup cleanly drops warmup IME anchor and stays in sync with trustRun=0.
+  await h.write('\x1b[10;1H❯ \x1b[K\x1b[7m \x1b[27m\x1b[1;1H');
+  h.advance(50);
+  h.adapter.noteInput('迁');
+  await h.write('\x1b[10;3H迁\x1b[7m \x1b[27m\x1b[1;1H');
+  assert.deepEqual(h.adapter.perceivedCaretCell(), { x: 4, y: 9, width: 1 });
+  const syncBeforeRebind = stockSyncCount;
+  h.adapter.softwareCaretPort.rebindObserver();
+  h.owner._inkObserver = null;
+  assert.equal(h.adapter.snapshot().caretOwnership.trustRun, 0);
+  assert.equal(h.adapter.perceivedCaretCell(), null, 'rebindObserver during warmup must drop warmup IME anchor');
+  assert.ok(stockSyncCount > syncBeforeRebind, 'rebindObserver during warmup must resync idle textarea');
+
+  // ?25h clears warmup IME anchor immediately.
+  await h.write('\x1b[10;1H❯ \x1b[K\x1b[7m \x1b[27m\x1b[1;1H');
+  h.advance(50);
+  h.adapter.noteInput('试');
+  await h.write('\x1b[10;3H试\x1b[7m \x1b[27m\x1b[1;1H');
+  assert.deepEqual(h.adapter.perceivedCaretCell(), { x: 4, y: 9, width: 1 });
+  h.advance(50);
+  await h.write('\x1b[?25h');
+  assert.equal(h.adapter.perceivedCaretCell(), null, '?25h must clear warmup IME anchor');
+
+  // Cold-start Backspace (non-printable warmup) must NOT anchor IME before step 2.
+  await h.write('\x1b[?25l\x1b[10;1H❯ ab\x1b[7m \x1b[27m\x1b[1;1H');
+  h.advance(50);
+  h.adapter.noteInput('\x7f');
+  await h.write('\x1b[10;4H\x1b[7m \x1b[27m \x1b[1;1H');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false);
+  assert.equal(h.adapter.snapshot().caretOwnership.trustRun, 1);
+  assert.equal(h.adapter.perceivedCaretCell(), null, 'non-printable cold-start warmup must not anchor IME');
+});
+
+test('session-proven 1-step recovery after Enter (scroll & non-scrolling short reply)/resize/ESC M; cleared on ?25h (incl. queued & pre-parse mismatch), alt-buffer, DECOM, session-reset, and style mismatch', async t => {
+  const h = createHarness(t, { cols: 80, rows: 24, reduced: false, cursorStyle: 'bar' });
+
+  async function writeParsedOnly(raw) {
+    const ink = h.context._inkFeed(h.owner, h.owner, null, raw);
+    await new Promise(resolve => h.source.write(raw, () => {
+      h.context._outputParsed(h.owner, ink)();
+      resolve();
+    }));
+  }
+
+  async function coldProveReverse(row = 10) {
+    await h.write(`\x1b[?25l\x1b[${row};1H❯ \x1b[K\x1b[7m \x1b[27m`);
+    h.advance(50);
+    h.adapter.noteInput('a');
+    await h.write(`\x1b[${row};3Ha\x1b[7m \x1b[27m`);
+    assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'cold-start key 1 must remain 2-step warmup');
+    h.advance(50);
+    h.adapter.noteInput('b');
+    await h.write(`\x1b[${row};4Hb\x1b[7m \x1b[27m`);
+    assert.equal(h.adapter.snapshot().caretOwnership.active, true, 'cold-start key 2 proves session');
+  }
+
+  // 1a. Cold start requires 2 steps; Enter + non-scrolling short reply WITHOUT intervening
+  //     renderRows() revokes immediately in parsed(), and short-distance (dy=2 <= jumpDistance=8)
+  //     reattach on keystroke 1 forces snapBeforeNextDraw=true (no flight across prompts)!
+  await coldProveReverse(10);
+  h.advance(50);
+  h.adapter.noteInput('\r');
+  await writeParsedOnly('\x1b[10;1H\x1b[K\x1b[12;1H❯ \x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'non-scrolling reply must revoke active post-parse caret in parsed() before rAF');
+  assert.equal(h.adapter.perceivedCaretCell(), null, 'revoked pre-Enter caret must not linger in perceivedCaretCell()');
+  // Even if noteInput arrives before renderRows(), rAF render must not misclassify dead cell as splitRevoked.
+  h.advance(50);
+  h.adapter.noteInput('c');
+  h.render();
+  await h.write('\x1b[12;3Hc\x1b[7m \x1b[27m');
+  const shortReattach = h.adapter.snapshot();
+  assert.equal(shortReattach.caretOwnership.active, true, 'non-scrolling reply re-engages on message #2 keystroke 1');
+  assert.deepEqual(shortReattach.target, { x: 3, y: 11 });
+  assert.equal(shortReattach.animationActive, false, 'short-distance (dy=2 <= 8) reattach must snap cleanly without flying');
+  // Keystroke 2 immediately glides smoothly!
+  h.advance(50);
+  h.adapter.noteInput('d');
+  await h.write('\x1b[12;4Hd\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().animationActive, true, 'message #2 keystroke 2 must glide smoothly');
+
+  // 1b. Same-row prompt reset without intervening renderRows() landing back on the exact old column (x=4).
+  h.advance(50);
+  h.adapter.noteInput('\r');
+  await writeParsedOnly('\x1b[12;1H❯ \x1b[K\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false);
+  h.advance(50);
+  h.adapter.noteInput('ef');
+  await h.write('\x1b[12;3Hef\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true, 'same-row reset re-engages on keystroke 1');
+  assert.deepEqual(h.adapter.snapshot().target, { x: 4, y: 11 });
+
+  // 1c. Enter + streaming scroll -> 1-step reattach on new row.
+  h.advance(50);
+  h.adapter.noteInput('\r');
+  await h.write('\x1b[24;1H' + 'reply line\r\n'.repeat(30));
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'scroll after Enter revokes active takeover');
+  await h.write('\x1b[22;1H❯ \x1b[K\x1b[7m \x1b[27m');
+  h.advance(50);
+  h.adapter.noteInput('f');
+  await h.write('\x1b[22;3Hf\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true, 'proven session re-engages after scroll on keystroke 1');
+  assert.deepEqual(h.adapter.snapshot().target, { x: 3, y: 21 });
+
+  // 1d. Partial scroll-region ESC M (reverseIndex, does not fire terminal.onScroll) revokes sw.active
+  //     in lockstep with postParse.anchor, so subsequent short-distance reattach snaps cleanly (no flight/double caret).
+  await h.write('\x1b[1;15r');
+  h.advance(50);
+  h.adapter.noteInput('g');
+  await writeParsedOnly('\x1b[1;1H\x1bM');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'ESC M partial scroll must revoke post-parse sw.active in lockstep');
+  await h.write('\x1b[r\x1b[22;1H\x1b[K\x1b[18;1H❯ \x1b[7m \x1b[27m');
+  h.advance(50);
+  h.adapter.noteInput('h');
+  await h.write('\x1b[18;3Hh\x1b[7m \x1b[27m');
+  const afterRi = h.adapter.snapshot();
+  assert.equal(afterRi.caretOwnership.active, true, 'ESC M preserves sessionProven for 1-step reattach');
+  assert.deepEqual(afterRi.target, { x: 3, y: 17 });
+  assert.equal(afterRi.animationActive, false, 'reattach after ESC M (dy=4 <= 8) must snap cleanly');
+
+  // 2. Resize revokes active takeover but preserves sessionProven -> 1-step recovery on next key.
+  h.source.resize(90, 26);
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false);
+  await h.write('\x1b[12;1H❯ \x1b[K\x1b[7m \x1b[27m');
+  h.advance(50);
+  h.adapter.noteInput('r');
+  await h.write('\x1b[12;3Hr\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true, 'resize must preserve sessionProven');
+
+  // 3. Style mismatch (proven with reverse, then truecolor caret appears) must NOT 1-step reattach.
+  h.advance(50);
+  h.adapter.noteInput('\r');
+  await h.write('\x1b[12;1H\x1b[K');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false);
+  const tcCaret = '\x1b[38;2;20;20;20;48;2;230;230;230m \x1b[0m';
+  await h.write('\x1b[14;1H❯ ' + tcCaret);
+  h.advance(50);
+  h.adapter.noteInput('t');
+  await h.write('\x1b[14;3Ht' + tcCaret);
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'style mismatch must fall back to 2-step warmup');
+  assert.equal(h.adapter.snapshot().caretOwnership.trustRun, 1);
+  await h.write('\x1b[14;1H\x1b[K');
+
+  // 4a. ?25h clears sessionProven -> next ?25l session requires 2 steps again.
+  await h.write('\x1b[?25h');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false);
+  await coldProveReverse();
+
+  // 4b. Queued ?25h followed immediately by ?25l (enqueued > watermark on chunk 1) MUST clear sessionProven!
+  const inkShow = h.context._inkFeed(h.owner, h.owner, null, '\x1b[?25h');
+  const inkHide = h.context._inkFeed(h.owner, h.owner, null, '\x1b[?25l\x1b[10;1H❯ \x1b[K\x1b[7m \x1b[27m');
+  await new Promise(resolve => {
+    h.source.write('\x1b[?25h', () => h.context._outputParsed(h.owner, inkShow)());
+    h.source.write('\x1b[?25l\x1b[10;1H❯ \x1b[K\x1b[7m \x1b[27m', () => {
+      h.context._outputParsed(h.owner, inkHide)();
+      resolve();
+    });
+  });
+  h.advance(50);
+  h.adapter.noteInput('v');
+  await h.write('\x1b[10;3Hv\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'queued ?25h followed by ?25l must clear sessionProven');
+  assert.equal(h.adapter.snapshot().caretOwnership.trustRun, 1);
+  h.advance(50);
+  h.adapter.noteInput('u');
+  await h.write('\x1b[10;4Hu\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true);
+
+  // 4c. Pre-parse candidate mismatch in the same chunk as ?25h MUST clear sessionProven!
+  await h.write('\x1b[10;1H\r\x1b[2C\x1b[1A\x1b[7m \x1b[27m\r\x1b[K\x1b[?25h');
+  await h.write('\x1b[?25l\x1b[10;1H❯ \x1b[K\x1b[7m \x1b[27m');
+  h.advance(50);
+  h.adapter.noteInput('k');
+  await h.write('\x1b[10;3Hk\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'pre-parse mismatch with ?25h must clear sessionProven');
+  assert.equal(h.adapter.snapshot().caretOwnership.trustRun, 1);
+  h.advance(50);
+  h.adapter.noteInput('l');
+  await h.write('\x1b[10;4Hl\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true);
+
+  // 5. Alternate buffer switch (?1049h / ?1049l) clears sessionProven (including single-chunk roundtrip).
+  await h.write('\x1b[?1049h\x1b[?25l\x1b[10;1H❯ \x1b[K\x1b[7m \x1b[27m');
+  h.advance(50);
+  h.adapter.noteInput('q');
+  await h.write('\x1b[10;3Hq\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'alt-buffer switch must clear sessionProven');
+  assert.equal(h.adapter.snapshot().caretOwnership.trustRun, 1);
+  await h.write('\x1b[?1049l');
+  await coldProveReverse();
+
+  // Single-chunk ?1049h ... ?1049l roundtrip revokes sw.active AND clears sessionProven.
+  await writeParsedOnly('\x1b[?1049hhi\x1b[?1049l');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'single-chunk alt-buffer roundtrip must revoke sw.active');
+  await coldProveReverse();
+
+  // 6. DECOM (?6h) clears sessionProven.
+  await h.write('\x1b[?6h');
+  await h.write('\x1b[?6l\x1b[10;1H❯ \x1b[K\x1b[7m \x1b[27m');
+  h.advance(50);
+  h.adapter.noteInput('w');
+  await h.write('\x1b[10;3Hw\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'DECOM must clear sessionProven');
+  assert.equal(h.adapter.snapshot().caretOwnership.trustRun, 1);
+  // Complete step 2 to re-prove session before testing session-reset.
+  h.advance(50);
+  h.adapter.noteInput('x');
+  await h.write('\x1b[10;4Hx\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, true);
+
+  // 7. session-reset clears sessionProven.
+  h.adapter.softwareCaretPort.invalidate('session-reset');
+  await h.write('\x1b[?25l\x1b[10;1H❯ \x1b[K\x1b[7m \x1b[27m');
+  h.advance(50);
+  h.adapter.noteInput('s');
+  await h.write('\x1b[10;3Hs\x1b[7m \x1b[27m');
+  assert.equal(h.adapter.snapshot().caretOwnership.active, false, 'session-reset must clear sessionProven');
+  assert.equal(h.adapter.snapshot().caretOwnership.trustRun, 1);
 });
