@@ -997,6 +997,7 @@ test('cold-start printable warmup anchors IME at trustRun=1 while WebGL waits fo
   h.terminal._core._syncTextArea = () => fakeCore._syncTextArea();
   assert.equal(imeAnchor.patchTerminal({ _core: fakeCore }, {
     perceivedCaret: () => h.adapter.perceivedCaretCell(),
+    hiddenSettleMs: 0,
   }), true);
 
   // Cold-start prompt (hidden cursor, protocol parked at top-left).
