@@ -90,6 +90,9 @@
     const renderer = addon?._renderer;
     const renderService = terminal?._core?._renderService;
     const Motion = options?.MotionClass || root.SmoothCursorMotion;
+    const createPostParseCaret = options?.createPostParseCaret
+      || root.createPostParseCaretRecognizer
+      || (typeof module !== 'undefined' && module.exports ? require('./post-parse-caret.js').createPostParseCaretRecognizer : null);
     const clock = typeof options?.now === 'function'
       ? options.now
       : function () { return root.performance?.now?.() ?? Date.now(); };
@@ -561,6 +564,60 @@
       active: false,
       lastRestoreRow: null,
     };
+    const postParse = typeof createPostParseCaret === 'function'
+      ? createPostParseCaret({ now: clock })
+      : null;
+
+    function postParseReader() {
+      const active = terminal.buffer?.active;
+      const coreBuffer = terminal._core?.buffer;
+      const lines = coreBuffer?.lines;
+      const workCell = renderer._workCell;
+      if (!active || !lines || typeof lines.get !== 'function' || !workCell || typeof workCell.getChars !== 'function') {
+        return null;
+      }
+      const cols = finite(terminal.cols, 0);
+      const rows = finite(terminal.rows, 0);
+      if (cols <= 0 || rows <= 0) return null;
+      const baseY = finite(active.baseY, coreBuffer?.ybase);
+      const viewportY = finite(active.viewportY, coreBuffer?.ydisp);
+      return {
+        cols,
+        rows,
+        bufferType: active.type || 'normal',
+        generation: sw.generation,
+        cursorX: Math.max(0, Math.min(cols - 1, finite(active.cursorX, 0))),
+        cursorY: baseY + finite(active.cursorY, 0) - viewportY,
+        isCursorHidden: () => renderer._coreService?.isCursorHidden === true,
+        isFocused: () => renderer._coreBrowserService?.isFocused === true,
+        isAtBottom: () => viewportY === baseY,
+        readCell(y, x) {
+          try {
+            const line = lines.get(viewportY + y);
+            if (!line || typeof line.loadCell !== 'function') return null;
+            line.loadCell(x, workCell);
+            return {
+              chars: workCell.getChars(),
+              width: workCell.getWidth(),
+              fg: workCell.fg,
+              bg: workCell.bg,
+            };
+          } catch (error) { return null; }
+        },
+        readRowCells(y) {
+          try {
+            const line = lines.get(viewportY + y);
+            if (!line || typeof line.loadCell !== 'function') return null;
+            const cells = new Array(cols);
+            for (let x = 0; x < cols; x += 1) {
+              line.loadCell(x, workCell);
+              cells[x] = workCell.getChars() || '\u0000';
+            }
+            return cells;
+          } catch (error) { return null; }
+        },
+      };
+    }
 
     // Protocol-cursor decision shared by readCursor and the ownership mirror.
     // Pure: callers that only need the decision must not revoke or clear.
@@ -649,10 +706,13 @@
 
     function revokeSoftware(reason) {
       const hadDescriptor = sw.active || sw.pending || sw.published;
+      const activeBefore = sw.active ? sw.published : null;
+      const prevBufferType = sw.bufferType;
       sw.active = false;
       sw.runStreak = 0;
       sw.pending = null;
       sw.published = null;
+      postParse?.noteRevoke?.(reason, activeBefore, prevBufferType, sw.generation);
       if (!hadDescriptor) return;
       snapBeforeNextDraw = true;
       instrumentation.softwareCaret = { active: false, reason };
@@ -725,9 +785,23 @@
           if (cell) {
             const hit = (info.wrote || []).some(w => w[0] === cell.y && w[1] === cell.x);
             if (hit) {
-              if (sw.active) revokeSoftware('cell-overwritten');
-              sw.runStreak = 0;
-              sw.pending = null;
+              // When a post-parse caret is updating in response to fresh user
+              // input inside a sync unit that pre-parse declined, let parsed()
+              // verify post-parse continuity instead of prematurely wiping
+              // warmup or trust before xterm parses the new caret cell.
+              if (!(cell.source === 'post-parse' && postParse?.hasPendingIntents?.())) {
+                if (sw.active) {
+                  revokeSoftware('cell-overwritten');
+                } else {
+                  postParse?.syncExternalAnchor(null);
+                  const isPostParse = sw.published?.source === 'post-parse';
+                  const hadWarmupIme = isPostParse && sw.published?.causalPrintable === true;
+                  if (isPostParse) sw.published = null;
+                  sw.runStreak = 0;
+                  sw.pending = null;
+                  if (hadWarmupIme) syncIdleTextarea();
+                }
+              }
             }
           }
         }
@@ -738,9 +812,24 @@
       chunkWrites(info) {
         if (disposed) return;
         noteChunkWrites(info);
+        if (postParse && info?.buffer) {
+          postParse.reset('buffer-switch');
+          if (sw.published?.source === 'post-parse') revokeSoftware('buffer-switch');
+          return;
+        }
+        if (postParse && info?.scroll && sw.published?.source === 'post-parse') {
+          revokeSoftware('invalidate:scroll');
+        }
+        if (postParse && renderer._coreService?.isCursorHidden === true && postParse.hasPendingIntents()) {
+          postParse.beforeChunkWrite(info, postParseReader());
+        } else if (postParse && info?.scroll) {
+          postParse.reset('scroll');
+        }
       },
       // xterm parsed through chunk `seq` (term.write callback): publish the
-      // pending candidate if its unit completed inside the parsed range.
+      // pending candidate if its unit completed inside the parsed range, or
+      // consult the post-parse input-correlated recognizer when no pre-parse
+      // grammar matched (ADR-0007).
       parsed(seq) {
         if (disposed) return;
         // Advance only through a chunk the live observer actually enqueued:
@@ -750,10 +839,22 @@
         // fields alive) — accepting it would push the watermark ahead of the
         // real parse front and break the checkpoint binding.
         if (typeof seq === 'number' && seq > sw.watermark && seq <= sw.enqueued) sw.watermark = seq;
+        if (postParse && renderer._coreService?.isCursorHidden !== true) {
+          postParse.onCursorVisible();
+          if (sw.published?.source === 'post-parse') {
+            revokeSoftware('protocol-visible');
+          }
+        }
         if (sw.enqueued > sw.watermark) return;
+        const wasWarmupIme = !sw.active
+          && sw.published?.source === 'post-parse'
+          && sw.published?.causalPrintable === true;
         let publishedChanged = false;
+        let hadPreParse = false;
         if (sw.pending && sw.pending.chunkSeq <= sw.watermark && sw.candidateGeneration === sw.generation) {
+          hadPreParse = true;
           if (!softwareCellMatches(sw.pending)) {
+            postParse?.clearCycle();
             revokeSoftware('candidate-cell-mismatch');
             return;
           }
@@ -765,8 +866,85 @@
             snapBeforeNextDraw = true; // source switch never flies from the protocol anchor
             instrumentation.softwareCaret = { active: true, since: clock() };
           }
+          if (renderer._coreService?.isCursorHidden === true) {
+            postParse?.syncExternalAnchor(sw.published, sw.bufferType, sw.generation, sw.active);
+          }
         }
-        if (sw.active && publishedChanged) syncIdleTextarea();
+        if (postParse) {
+          if (sw.published && sw.bufferType !== null && sw.bufferType !== terminal.buffer.active.type) {
+            postParse.reset('buffer-switch');
+            revokeSoftware('buffer-switch');
+            return;
+          }
+          if (hadPreParse) {
+            postParse.onPreParseHit();
+          } else if (renderer._coreService?.isCursorHidden !== true) {
+            // Visible protocol cursor was already cleared above; skip post-parse scans.
+          } else if (postParse.hasPendingIntents()) {
+            const reader = postParseReader();
+            const cand = postParse.onParsed({ seq: sw.watermark, hadPreParseCandidate: false, reader });
+            if (cand) {
+              const prevBufferType = sw.bufferType;
+              sw.bufferType = terminal.buffer.active.type;
+              if (softwareCellMatches(cand)) {
+                sw.candidateGeneration = sw.generation;
+                if (cand.resetTrust) {
+                  const wasActive = sw.active;
+                  sw.active = false;
+                  sw.runStreak = 1;
+                  if (wasActive) {
+                    snapBeforeNextDraw = true;
+                    instrumentation.softwareCaret = { active: false, reason: 'cell-overwritten' };
+                    clearSoftwareVisual();
+                    syncIdleTextarea();
+                    scheduleContinuation();
+                  }
+                } else if (cand.resumedFromSplit || cand.sessionReattach) {
+                  sw.runStreak = Math.max(2, sw.runStreak + 1);
+                  if (cand.sessionReattach) snapBeforeNextDraw = true;
+                } else {
+                  sw.runStreak += 1;
+                }
+                sw.published = cand;
+                publishedChanged = true;
+                if (sw.runStreak >= 2 && !sw.active) {
+                  sw.active = true;
+                  // Resume smoothly without snapping when completing a split
+                  // frame from the exact pre-split software caret coordinate.
+                  const seamlessSplitResume = cand.resumedFromSplit === true
+                    && lastTarget !== null && cand.revokedFrom !== null
+                    && lastTarget.x === cand.revokedFrom.x && lastTarget.y === cand.revokedFrom.y;
+                  snapBeforeNextDraw = !seamlessSplitResume;
+                  instrumentation.softwareCaret = { active: true, since: clock() };
+                }
+                postParse.syncExternalAnchor(sw.published, sw.bufferType, sw.generation, sw.active);
+              } else {
+                sw.bufferType = prevBufferType;
+                postParse.syncExternalAnchor(sw.published, sw.bufferType, sw.generation, sw.active);
+              }
+            } else if (!sw.active && sw.published?.source === 'post-parse'
+              && sw.published?.causalPrintable === true && !softwareCellMatches(sw.published)) {
+              // Warmup cell was overwritten while a non-matching intent is still
+              // fresh (e.g. cold-start Arrow key): resync idle textarea to stock
+              // without dropping anchor/runStreak so split-frame warmup survives.
+              syncIdleTextarea();
+            }
+          } else if (sw.published?.source === 'post-parse' && !softwareCellMatches(sw.published)) {
+            if (sw.active) {
+              revokeSoftware('cell-overwritten');
+            } else {
+              const hadWarmupIme = sw.published.causalPrintable === true;
+              sw.published = null;
+              sw.runStreak = 0;
+              postParse.syncExternalAnchor(null);
+              if (hadWarmupIme) syncIdleTextarea();
+            }
+          }
+        }
+        const warmupImeAnchor = !sw.active
+          && sw.published?.source === 'post-parse'
+          && sw.published?.causalPrintable === true;
+        if (publishedChanged && (sw.active || warmupImeAnchor || wasWarmupIme)) syncIdleTextarea();
         if (sw.active) scheduleContinuation();
       },
       invalidate(reason) {
@@ -781,6 +959,23 @@
         pendingChunkEcho = false;
         echoChunkEpoch += 1;
         echoInputQueue = [];
+        // Pre-parse observer coordinate losses (e.g. CSI X on ConPTY erase or
+        // CSI r in tmux) only invalidate the pre-parse VT coordinate model, not
+        // xterm's parsed buffer. Preserve pending post-parse intents and any
+        // already-active post-parse ownership while keeping pre-parse revocation.
+        // DECOM (?6h) and session/scroll/resize boundaries reset everything.
+        if (reason === 'observer:unmodeled-coordinate-change') {
+          postParse?.rebaseGeneration(sw.generation);
+          if (sw.published?.source === 'post-parse') {
+            sw.candidateGeneration = sw.generation;
+            sw.pending = null;
+          } else {
+            revokeSoftware('invalidate:' + reason);
+            postParse?.rebaseGeneration(sw.generation);
+          }
+          return;
+        }
+        postParse?.reset(reason);
         revokeSoftware('invalidate:' + (reason || 'unknown'));
         if (reason === 'session-reset') {
           sw.watermark = 0;
@@ -805,6 +1000,13 @@
         sw.watermark = 0;
         sw.pending = null;
         sw.runStreak = 0;
+        postParse?.clearCycle();
+        if (!sw.active && sw.published?.source === 'post-parse') {
+          const hadWarmupIme = sw.published.causalPrintable === true;
+          sw.published = null;
+          postParse?.syncExternalAnchor(null);
+          if (hadWarmupIme) syncIdleTextarea();
+        }
       },
     };
 
@@ -1080,7 +1282,12 @@
         const absoluteY = viewportY + y;
         const cellIntact = inRange && softwareCellMatches(sw.published);
         const bufferOk = sw.bufferType === null || sw.bufferType === active.type;
-        if (inRange && bufferOk && cellIntact) {
+        // Post-parse descriptors only own the caret while the protocol cursor
+        // remains hidden; if the app restores DECTCEM (?25h), hand ownership
+        // back to the native protocol cursor so no double caret can appear.
+        const protocolStillHidden = sw.published.source !== 'post-parse'
+          || renderer._coreService.isCursorHidden === true;
+        if (inRange && bufferOk && cellIntact && protocolStillHidden) {
           instrumentation.lastSoftwareCursor = { x: sw.published.x, y, char: sw.published.char, width: sw.published.width, focused, drawable: focused };
           return {
             x: sw.published.x,
@@ -1094,7 +1301,7 @@
             software: true,
           };
         }
-        revokeSoftware(!inRange ? 'out-of-range' : !bufferOk ? 'buffer-switch' : 'cell-overwritten');
+        revokeSoftware(!inRange ? 'out-of-range' : !bufferOk ? 'buffer-switch' : !protocolStillHidden ? 'protocol-visible' : 'cell-overwritten');
         // fall through to the protocol cursor
       }
       const active = terminal.buffer.active;
@@ -1459,6 +1666,12 @@
       // merged-input match consumes (see classifyMergedRunEcho).
       noteInput(data) {
         if (disposed || typeof data !== 'string') return;
+        const postInput = postParse?.noteInput(data);
+        if (postInput?.barrier && !sw.active && sw.published?.source === 'post-parse') {
+          sw.runStreak = 0;
+          sw.published = null;
+          syncIdleTextarea();
+        }
         let enqueued = 0;
         for (const segment of segmentInputEvent(data)) {
           if (segment.kind === 'barrier') {
@@ -1528,12 +1741,27 @@
       },
       // The viewport-relative 0-based cell the user currently perceives as
       // the caret: the trusted software descriptor when the adapter owns the
-      // cursor, else null (a visible protocol cursor is stock-anchored by
-      // xterm itself). Consumed by the IME caret anchor (ime-caret-anchor.js):
-      // agent TUIs hide the protocol cursor for whole sessions, so the IME
-      // candidate window must follow THIS position, not the hidden park.
+      // cursor, or a causally verified post-parse printable warmup cell while
+      // the protocol cursor is hidden at the bottom viewport (so IME anchors
+      // accurately on the first committed word before WebGL visual takeover
+      // engages on step 2), else null (a visible protocol cursor is stock-
+      // anchored by xterm itself). Consumed by the IME caret anchor
+      // (ime-caret-anchor.js): agent TUIs hide the protocol cursor for whole
+      // sessions, so the IME candidate window must follow THIS position, not
+      // the hidden park.
       perceivedCaretCell() {
-        if (disposed || !sw.active || !sw.published) return null;
+        if (disposed || !sw.published) return null;
+        if (!sw.active) {
+          if (sw.published.source !== 'post-parse'
+            || sw.published.causalPrintable !== true
+            || sw.candidateGeneration !== sw.generation
+            || renderer._coreService?.isCursorHidden !== true
+            || !softwareCellMatches(sw.published)) {
+            return null;
+          }
+          const active = terminal.buffer?.active;
+          if (active && active.viewportY !== active.baseY) return null;
+        }
         const x = sw.published.x;
         const y = sw.published.y;
         if (!(x >= 0 && x < terminal.cols && y >= 0 && y < terminal.rows)) return null;
@@ -1586,6 +1814,7 @@
             trustRun: sw.runStreak,
             reason: [
               'cell-overwritten', 'candidate-cell-mismatch', 'out-of-range', 'buffer-switch',
+              'protocol-visible',
               'invalidate:scroll', 'invalidate:resize', 'invalidate:session-reset',
               'invalidate:observer:resize', 'invalidate:observer:unmodeled-coordinate-change',
               'invalidate:observer:decom', 'decom',
@@ -1615,6 +1844,7 @@
       dispose() {
         if (disposed) return;
         disposed = true;
+        postParse?.reset('dispose');
         diagnostic.held = false;
         diagnostic.remaining = 0;
         renderer.renderRows = originalRenderRows;
